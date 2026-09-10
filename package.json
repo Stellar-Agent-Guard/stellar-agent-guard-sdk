@@ -1,0 +1,52 @@
+{
+  "name": "stellar-agent-guard-sdk",
+  "version": "0.1.0",
+  "description": "Integration bridge between AI agent frameworks and the live stellar-agent-guard-contracts deployment: pre-flight simulation interception, real transaction signing/submission, cost pre-checking, and event telemetry.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./interceptors": {
+      "types": "./dist/interceptors/index.d.ts",
+      "import": "./dist/interceptors/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SPEC.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:integration": "SAG_INTEGRATION=1 vitest run tests/integration",
+    "check": "npm run typecheck && npm run test && npm run build",
+    "prepublishOnly": "npm run check"
+  },
+  "keywords": [
+    "stellar",
+    "soroban",
+    "agent",
+    "guard",
+    "security",
+    "spend-limit",
+    "ai"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^13.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}
