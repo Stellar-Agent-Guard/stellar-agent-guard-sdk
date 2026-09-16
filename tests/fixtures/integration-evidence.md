@@ -48,7 +48,7 @@ trustline, or a fee error, so the suite asserts all four.
 ```
 [live] guard CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44
 [live] per-tx cap 1000, rolling window 150/60s, 1 allowlisted recipient(s)
-[allowed] tx 5e45d989bea859aae954c9a57e08909c1c90bdbfb909071f69709875b52f1bd2 at ledger 4674156
+[allowed] tx f8f5b3c51b85c8777c956d71330d015fcf72fa57548077d8b32969f8ba9c762e at ledger 4704849
   ✔ allows a transfer inside both caps, with a real on-chain hash (12192.988915ms)
 [blocked] per_tx_cap_exceeded (1001 > 1000)
   ✔ blocks a per-transaction-cap violation, pre-broadcast (8519.903622ms)
@@ -71,8 +71,8 @@ trustline, or a fee error, so the suite asserts all four.
 `transfer` of 50 from the guarded account to the allowlisted recipient, authorized
 by the agent key through `__check_auth`.
 
-- real transaction `5e45d989bea859aae954c9a57e08909c1c90bdbfb909071f69709875b52f1bd2`
-- landed in ledger `4674156`, re-read from the RPC and confirmed `SUCCESS`
+- real transaction `f8f5b3c51b85c8777c956d71330d015fcf72fa57548077d8b32969f8ba9c762e`
+- landed in ledger `4704849`, re-read from the RPC and confirmed `SUCCESS`
 - the guarded account's SAC balance decreased by exactly 50
 - the rolling window recorded exactly 50
 
