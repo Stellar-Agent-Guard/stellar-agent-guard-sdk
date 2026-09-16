@@ -1,0 +1,58 @@
+# The live testnet suite, on a schedule — deliberately NOT on pull requests.
+#
+# Policy (see CONTRIBUTING.md and the README):
+#   - The live suite does not run on every PR. A PR that touches the enforcement
+#     path must ship fresh evidence, which the required `ci` job checks as a file
+#     list (`scripts/check-enforcement-evidence.ts`).
+#   - This workflow re-runs the suite weekly, and on demand, to catch host/testnet
+#     drift — protocol upgrades, RPC changes — even when nobody is editing the
+#     enforcement code.
+#
+# SECRET SCOPING: `PHASE2_ENV_FILE` is referenced ONLY in this file, and this
+# workflow has ONLY `schedule` and `workflow_dispatch` triggers. It has no
+# `pull_request` or `pull_request_target` trigger, so a pull request — including a
+# forked one — can never reach a job that reads the secret. Keep it that way: if a
+# PR-triggered need for the live suite ever appears, do not add the trigger here;
+# record the run's output in the evidence file instead.
+name: live-suite
+
+on:
+  schedule:
+    # Weekly, Monday 06:17 UTC. Off the hour so it does not stack with the
+    # top-of-hour cron load every GitHub runner feels.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  live:
+    name: live-suite (testnet)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      # Materialise `.env.phase2` for the next step. The secret is scoped to this
+      # step only; the raw value is never echoed.
+      - name: require the testnet credential
+        env:
+          PHASE2_ENV_FILE: ${{ secrets.PHASE2_ENV_FILE }}
+        run: |
+          if [ -z "${PHASE2_ENV_FILE:-}" ]; then
+            echo "::error title=live suite not run::PHASE2_ENV_FILE is not set. This workflow is the only place that secret is used; add it to run the scheduled live suite."
+            exit 1
+          fi
+          printf '%s\n' "$PHASE2_ENV_FILE" > .env.phase2
+
+      - name: run the live testnet suite
+        run: npm run test:integration
