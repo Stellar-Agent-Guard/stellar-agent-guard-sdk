@@ -611,3 +611,5 @@ export function buildInitialEnvelope(params: {
 }
 
 export { SIG_EXPIRATION_LEDGERS, INCLUSION_FEE };
+
+// THROWAWAY red proof: deliberate enforcement-path change with no evidence
