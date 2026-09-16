@@ -48,16 +48,34 @@ git show --stat HEAD
 Do not merge through the ruleset bypass, and do not modify the ruleset to work around
 a required check that is legitimately blocked.
 
-CI reports **two** checks, deliberately:
+CI reports **one required check**, plus a scheduled workflow that is deliberately not
+part of it:
 
-- **`ci`** — required. Runs typecheck, lint and the unit tests. It touches no secret,
-  so nothing in it can silently mask a skip: every step either really runs or the job
+- **`ci`** — required, and the only check that gates a merge. Runs typecheck, lint, the
+  unit tests, and the **enforcement-path evidence gate**. It touches no secret, so
+  nothing in it can silently mask a skip: every step either really runs or the job
   fails.
-- **`integration-live (informational)`** — not required. Runs the live testnet suite
-  and reports `passed` / `failed` / `skipped` as its own check. It needs the
-  deployment's keys from the `PHASE2_ENV_FILE` secret; until that secret exists the
-  job is reported as **skipped**, never as a pass. A green `ci` does not imply the
-  live suite ran.
+- **`live-suite`** (`.github/workflows/live-suite.yml`) — **never run on a pull
+  request**. Runs the live testnet suite weekly (`schedule`) and on demand
+  (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` is referenced
+  only in that workflow, and it has no `pull_request` / `pull_request_target` trigger,
+  so a pull request — including a forked one — can never reach the secret.
+
+### The live testnet suite is not run on every PR
+
+It is:
+
+1. **required locally before any PR that touches the enforcement path** — `src/tx.ts`,
+   `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`. Run `npm run test:integration`,
+   then commit the fresh output to `tests/fixtures/integration-evidence.md` **in the same
+   PR**. The required `ci` job checks that the evidence file was touched; it cannot
+   verify the numbers (that needs the network), only that fresh evidence was supplied.
+   A PR that changes the path without it **fails `ci`**.
+2. **run automatically on a schedule**, so a protocol or RPC change is caught even when
+   nobody is editing the code.
+
+A green `ci` therefore means "the required checks ran", not "the live suite ran on this
+change". The committed evidence file is the record for the change itself.
 
 ## Branch lifecycle
 
@@ -115,3 +133,8 @@ npm run test:integration   # live testnet; needs .env.phase2
 maintainer-managed repository secrets. `.env.phase2` is gitignored — never commit it,
 and never embed keys in a workflow or work around a missing secret with an alternate
 name.
+
+`PHASE2_ENV_FILE` must stay referenced in **exactly one workflow** —
+`.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
+`workflow_dispatch`. Never add it to a workflow with a `pull_request` or
+`pull_request_target` trigger: that would expose it to a forked pull request.
