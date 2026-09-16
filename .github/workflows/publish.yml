@@ -1,8 +1,10 @@
 # Publish to npm when a version tag is pushed.
 #
-# This workflow is added and ready, but it has NOT been run: it needs the
-# `NPM_TOKEN` repository secret, which only a maintainer can add. Until that
-# secret exists the package is "publish-ready, not published" — see the README.
+# `stellar-agent-guard-sdk@0.1.0` is already published on the npm registry, so
+# this workflow is not a prerequisite for installing the SDK — it is the release
+# path for subsequent versions. The 0.1.0 release was not made through it (no
+# `publish` run and no `v*` tag exist); publishing uses the maintainer-managed
+# `NPM_TOKEN` repository secret.
 name: publish
 
 on:
