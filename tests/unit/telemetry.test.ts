@@ -11,6 +11,7 @@ import { describe, it } from "node:test";
 import { xdr } from "@stellar/stellar-sdk";
 import {
   describeGuardEvent,
+  guardEventId,
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
@@ -131,6 +132,7 @@ describe("telemetryFromDecision", () => {
 describe("describeGuardEvent", () => {
   it("labels a ledger event with its ledger number and outcome", () => {
     const text = describeGuardEvent({
+      id: `ledger:${"ab".repeat(32)}:event_auth_checked`,
       kind: "auth_checked",
       topic: "event_auth_checked",
       source: "ledger",
@@ -147,6 +149,7 @@ describe("describeGuardEvent", () => {
 
   it("labels a blocked decision as pre-broadcast, since it has no ledger", () => {
     const text = describeGuardEvent({
+      id: `diag:${"0".repeat(64)}`,
       kind: "auth_checked",
       topic: "event_auth_checked",
       source: "diagnostic",
@@ -159,6 +162,148 @@ describe("describeGuardEvent", () => {
     });
     assert.match(text, /pre-broadcast/);
     assert.match(text, /per_tx_cap_exceeded/);
+  });
+});
+
+/**
+ * Stable-id coverage (issue #33).
+ *
+ * A blocked decision is rolled back before broadcast, so it has no transaction
+ * to anchor on — the only way a telemetry consumer can tell two refusals apart,
+ * or recognise a re-parse as the same refusal, is the `id` the SDK derives.
+ * Both properties are pinned here: determinism across re-parses, and
+ * distinctness between two different blocks inside one simulation.
+ */
+describe("GuardEvent.id", () => {
+  const blocked = (reason: string) =>
+    diagnosticEvent(["event_auth_checked", "blocked", reason]);
+
+  it("gives every decoded diagnostic event a non-null synthetic id", () => {
+    const events = guardEventsFromDiagnostics([blocked("per_tx_cap_exceeded")], GUARD);
+    assert.equal(events.length, 1);
+    assert.ok(events[0]!.id.length > 0, "id must never be empty");
+    assert.match(events[0]!.id, /^diag:[0-9a-f]{64}$/);
+  });
+
+  it("is deterministic: the same diagnostic event re-parsed yields the same id", () => {
+    const batch = [blocked("per_tx_cap_exceeded"), blocked("recipient_not_allowed")];
+    const first = guardEventsFromDiagnostics(batch, GUARD);
+    const second = guardEventsFromDiagnostics(batch, GUARD);
+    assert.deepEqual(
+      first.map((event) => event.id),
+      second.map((event) => event.id),
+    );
+  });
+
+  it("keeps two distinct blocks in one simulation distinct, because their positions differ", () => {
+    // Same topic list, same data: only the position within the batch separates
+    // them, which is exactly the case a txHash-based id could not cover.
+    const events = guardEventsFromDiagnostics([blocked("per_tx_cap_exceeded"), blocked("per_tx_cap_exceeded")], GUARD);
+    assert.equal(events.length, 2);
+    assert.notEqual(events[0]!.id, events[1]!.id);
+  });
+
+  it("gives the same ledger transaction's several events distinct ids", () => {
+    // A heartbeat transaction commits both event_auth_checked and
+    // event_heartbeat (live capture in docs/event-schema.md), so the txHash
+    // alone is not an identity.
+    const txHash = "ab".repeat(32);
+    const decision = guardEventId({
+      source: "ledger",
+      topics: ["event_auth_checked", "allowed", ""],
+      data: {},
+      contractId: GUARD,
+      ledger: 4674314,
+      transactionHash: txHash,
+      simulationIndex: null,
+    });
+    const heartbeat = guardEventId({
+      source: "ledger",
+      topics: ["event_heartbeat"],
+      data: { at: 1789393232n },
+      contractId: GUARD,
+      ledger: 4674314,
+      transactionHash: txHash,
+      simulationIndex: null,
+    });
+    assert.notEqual(decision, heartbeat);
+    assert.equal(decision, `ledger:${txHash}:event_auth_checked`);
+    assert.equal(heartbeat, `ledger:${txHash}:event_heartbeat`);
+  });
+
+  it("anchors a committed event on its transaction hash, not on its page position", () => {
+    const first = guardEventId({
+      source: "ledger",
+      topics: ["event_auth_checked", "blocked", "per_tx_cap_exceeded"],
+      data: {},
+      contractId: GUARD,
+      ledger: 4674314,
+      transactionHash: "cd".repeat(32),
+      simulationIndex: null,
+    });
+    const second = guardEventId({
+      source: "ledger",
+      topics: ["event_auth_checked", "blocked", "per_tx_cap_exceeded"],
+      data: {},
+      contractId: GUARD,
+      ledger: 9999999,
+      transactionHash: "cd".repeat(32),
+      simulationIndex: null,
+    });
+    assert.equal(first, second, "re-polling the ledger must not renumber an event");
+  });
+
+  it("falls back to the ledger sequence when a committed event arrives without a hash", () => {
+    const id = guardEventId({
+      source: "ledger",
+      topics: ["event_heartbeat"],
+      data: null,
+      contractId: GUARD,
+      ledger: 4674314,
+      transactionHash: null,
+      simulationIndex: null,
+    });
+    assert.equal(id, "ledger:4674314:event_heartbeat");
+  });
+
+  it("separates the two streams even when the content is identical", () => {
+    const topics = ["event_auth_checked", "blocked", "per_tx_cap_exceeded"];
+    const committed = guardEventId({
+      source: "ledger",
+      topics,
+      data: {},
+      contractId: GUARD,
+      ledger: 4674314,
+      transactionHash: "ab".repeat(32),
+      simulationIndex: null,
+    });
+    const diagnostic = guardEventId({
+      source: "diagnostic",
+      topics,
+      data: {},
+      contractId: GUARD,
+      ledger: null,
+      transactionHash: null,
+      simulationIndex: 0,
+    });
+    assert.match(committed, /^ledger:/);
+    assert.match(diagnostic, /^diag:/);
+    assert.notEqual(committed, diagnostic);
+  });
+
+  it("does not let object key order in decoded data change the id", () => {
+    const base = {
+      source: "diagnostic" as const,
+      topics: ["event_heartbeat"],
+      contractId: GUARD,
+      ledger: null,
+      transactionHash: null,
+      simulationIndex: 0,
+    };
+    assert.equal(
+      guardEventId({ ...base, data: { at: 1789393232n, by: null } }),
+      guardEventId({ ...base, data: { by: null, at: 1789393232n } }),
+    );
   });
 });
 
