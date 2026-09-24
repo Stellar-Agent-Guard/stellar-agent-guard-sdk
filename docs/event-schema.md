@@ -120,6 +120,66 @@ enforced-simulation diagnostic events for blocked ones — because a refusal is
 never committed, and a listener that only tails the ledger would see a guard that
 appears to never block anything.
 
+## Event identity — `GuardEvent.id`
+
+Every `GuardEvent` the SDK decodes, on **both** streams, carries a non-null,
+stable `id`. The two streams need different schemes, because they fail identity
+in opposite ways: a committed event has a transaction to point at, while a
+blocked one was rolled back before broadcast and has nothing on-chain to point
+at.
+
+| Source | Format | Anchor |
+|---|---|---|
+| `ledger` | `ledger:<txHash>:<topic>` | the transaction that emitted it, plus its name topic |
+| `diagnostic` | `diag:<sha256-hex>` | the event's own content (see below) |
+
+**Committed events keep a txHash-based id.** A heartbeat transaction emits
+*two* guard events — `event_auth_checked` and `event_heartbeat`, as the live
+capture above shows — so `ledger:<txHash>` alone is not unique and the name
+topic disambiguates. The id deliberately does **not** include the event's
+position within a `getEvents` page: a page boundary (a different `limit`, a
+resume from a cursor) would otherwise renumber an event that has not changed.
+If an RPC response ever omits the hash, the ledger sequence anchors instead, so
+an id is always produced.
+
+**Diagnostic events are hashed**, from exactly this input, in this order:
+
+```
+"diagnostic" | <contractId> | <simulationIndex> | <topic>… | <stable-data>
+```
+
+- `contractId` — the guard, so two guards cannot share an id for the same event;
+- `simulationIndex` — the event's position within its diagnostic batch, which is
+  what keeps **two distinct blocks in one simulation distinct** after both have
+  been rolled back and neither has a transaction;
+- the decoded topic symbols, separator-escaped, so two different topic lists can
+  never flatten to the same string;
+- the decoded data, rendered canonically (object keys sorted, `bigint` and byte
+  arrays rendered explicitly) so re-encoding the same value always hashes the
+  same.
+
+### Collision notes
+
+- **Same event, re-parsed → same id.** The hash is a pure function of the inputs
+  above, so re-decoding the same diagnostic payload (a retried pre-flight, a
+  replayed simulation) produces the identical id. This is what lets a consumer
+  de-duplicate a refusal that was re-observed.
+- **Two separate simulations, identical event → same id.** If the same guard is
+  blocked for the same reason by two different attempts of the same call, both
+  events hash identically. That is intentional: the content is the same
+  decision. A consumer that needs per-attempt identity should combine `id` with
+  its own attempt counter rather than expecting a unique key per refusal.
+- **Within one batch, collisions are not a practical concern.** SHA-256 plus the
+  distinct batch positions make two events sharing an id a cryptographic accident
+  rather than a structural one.
+- **Cross-stream ids never collide**: the prefixes differ, and a diagnostic id is
+  hashed from the `diagnostic` stream name regardless of how the event was
+  observed.
+
+Part of #7 (stable ids + unified stream). This slice delivers the id field only;
+the unified stream and any persistence for the dashboard remain out of scope
+there.
+
 ## Follow-up for the contracts repo (maintainer)
 
 The contracts repo's own documentation is internally inconsistent on this topic
