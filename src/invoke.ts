@@ -18,12 +18,15 @@
 import { Account, Address, Keypair, Operation, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "./events.ts";
 import {
+  BroadcastError,
+  INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
   buildGuardAuthEntry,
   buildInitialEnvelope,
   describeSimulationResources,
   describeSubmissionFailure,
+  isMinimumFeeBroadcastFailure,
   isStaleLedgerResourceFailure,
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
@@ -38,7 +41,7 @@ export interface GuardAuthorization {
   agent: Keypair;
 }
 
-export type InvokeOutcome =
+export type PipelineOutcome =
   | { kind: "allowed"; submission: SubmissionResult }
   | {
       kind: "blocked";
@@ -55,8 +58,33 @@ export type InvokeOutcome =
        * Set when the failure is a stale-ledger resource declaration that a
        * re-simulation can fix. See `isStaleLedgerResourceFailure` in `tx.ts`.
        */
-      retryable?: "stale_ledger_resource_limit";
+      retryable?: "stale_ledger_resource_limit" | "min_fee" | undefined;
+      error?: BroadcastError | undefined;
+      lastFee?: bigint | undefined;
+      attempts?: number | undefined;
+      submission?: SubmissionResult | undefined;
     };
+
+export type InvokeOutcome = PipelineOutcome | BroadcastError;
+
+/** Configuration for bounded fee bumping when broadcast fails due to minimum fee. */
+export interface FeeBumpConfig {
+  /**
+   * Maximum total broadcast attempts permitted (initial attempt + retries).
+   * Default: 3 attempts.
+   */
+  maxAttempts?: number | undefined;
+  /**
+   * Multiplier applied to the inclusion fee on each fee-bump retry.
+   * Default: 2 (doubles the inclusion fee per attempt).
+   */
+  feeMultiplier?: number | undefined;
+  /**
+   * Initial inclusion fee in stroops to use on the first attempt.
+   * Default: 100 stroops (`INCLUSION_FEE`).
+   */
+  initialInclusionFee?: bigint | undefined;
+}
 
 export interface InvokeParams {
   server: rpc.Server;
@@ -65,11 +93,23 @@ export interface InvokeParams {
   call: ContractCall;
   networkPassphrase: string;
   /** Present when the call requires the smart account's own authorization. */
-  guardAuth?: GuardAuthorization | null;
+  guardAuth?: GuardAuthorization | null | undefined;
   /** Extra classic-account authorizers available to sign (e.g. an admin). */
-  accountSigners?: Keypair[];
+  accountSigners?: Keypair[] | undefined;
   /** Skip broadcast even if the enforced simulation passes (dry run). */
-  dryRun?: boolean;
+  dryRun?: boolean | undefined;
+  /**
+   * Optional configuration for fee-bump retry when broadcast hits min-fee.
+   * If omitted, defaults to 3 attempts with a 2x fee multiplier.
+   */
+  feeBump?: FeeBumpConfig | undefined;
+  /**
+   * Overall maximum retries across retryable classes. If specified, bounds the
+   * total attempts across all triggers.
+   */
+  maxRetries?: number | undefined;
+  /** Options controlling polling interval and attempts after submission. */
+  pollOptions?: { pollAttempts?: number; pollIntervalMs?: number } | undefined;
 }
 
 /**
@@ -166,32 +206,88 @@ function diagnosticEventsOf(response: unknown): unknown[] {
  * decide whether a block is an expected outcome (agents hitting a guardrail) or
  * a failure worth surfacing.
  *
- * One bounded retry is built in, for a failure mode that is real and measurable
- * rather than theoretical: if the enforced simulation prices the transaction
- * against a ledger snapshot that predates the write this SDK just made, the
- * declared byte-write budget can be short and core rejects the transaction
- * *after* inclusion with `scecExceededLimit`. See `isStaleLedgerResourceFailure`
- * for why retrying is safe. Every other failure — including a guard block — is
- * returned untouched, and the retry is reported in `retried` so it is never
- * silent.
+ * ## Bounded Retries
+ *
+ * Two specific, measurable network failure modes are handled with bounded retry:
+ *
+ * 1. **Stale ledger resource limits (`scecExceededLimit`)**: If simulation prices
+ *    gas against a ledger snapshot one write behind, the declared write budget
+ *    may fall short. Safe to re-simulate against the advanced ledger (one retry).
+ *
+ * 2. **Minimum-fee / tx too cheap (`tx_insufficient_fee`)**: If fee-market conditions
+ *    change between prepare-time and broadcast, core rejects the transaction.
+ *    The SDK re-prepares with an increased inclusion fee (multiplied by `feeMultiplier`),
+ *    **re-simulates**, **re-checks guard/policy**, and attempts broadcast again.
+ *    Every attempt runs full simulation and policy enforcement — a policy block
+ *    is never bypassed.
+ *
+ * Retries share a unified bounded budget (`maxAttempts`, default: 3). If fee bump
+ * retries are exhausted without success, a typed `BroadcastError` is returned
+ * containing the attempt count and last attempted fee.
  */
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
-  const first = await invokePipeline(params);
-  if (first.kind !== "error" || first.retryable !== "stale_ledger_resource_limit") {
-    return first;
-  }
-  if (params.dryRun) return first;
+  const configuredMax =
+    params.feeBump?.maxAttempts ??
+    (params.maxRetries !== undefined ? params.maxRetries + 1 : 3);
+  const maxAttempts = Math.max(1, configuredMax);
+  const feeMultiplier = params.feeBump?.feeMultiplier ?? 2;
+  let currentInclusionFee = params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE);
+  let attempt = 0;
+  let staleLedgerRetried = false;
 
-  const second = await invokePipeline(params);
-  // If the retry also fails, report the retry's outcome: it is the more recent
-  // and more informative of the two.
-  if (second.kind === "error") {
-    return {
-      ...second,
-      detail: `retried after a stale-ledger resource rejection; still failed\n${second.detail}`,
-    };
+  while (attempt < maxAttempts) {
+    attempt++;
+    const outcome = await invokePipeline(params, { inclusionFee: currentInclusionFee });
+
+    // Success, policy block, or dry-run -> return immediately!
+    if (outcome.kind !== "error" || params.dryRun) {
+      return outcome;
+    }
+
+    // Trigger class 1: stale ledger resource limit
+    if (outcome.retryable === "stale_ledger_resource_limit") {
+      if (!staleLedgerRetried && attempt < maxAttempts) {
+        staleLedgerRetried = true;
+        continue;
+      }
+      return {
+        ...outcome,
+        detail: `retried after a stale-ledger resource rejection; still failed\n${outcome.detail}`,
+      };
+    }
+
+    // Trigger class 2: minimum fee / tx too cheap
+    if (outcome.retryable === "min_fee") {
+      if (attempt < maxAttempts) {
+        // Increase fee and retry
+        const bumped = BigInt(Math.ceil(Number(currentInclusionFee) * feeMultiplier));
+        currentInclusionFee = bumped > currentInclusionFee ? bumped : currentInclusionFee + 100n;
+        continue;
+      }
+
+      // Retry budget exhausted -> return typed BroadcastError
+      const broadcastError = new BroadcastError({
+        attempts: attempt,
+        lastFee: outcome.lastFee ?? currentInclusionFee,
+        failure: outcome.submission?.failure ?? {
+          resultXdr: null,
+          resultCode: "result=txInsufficientFee",
+          message: outcome.detail,
+          diagnosticEvents: [],
+        },
+        detail: outcome.detail,
+      });
+      return broadcastError;
+    }
+
+    // Unrelated error (e.g. sequence, auth, contract trap) -> do not retry
+    return outcome;
   }
-  return second;
+
+  return {
+    kind: "error",
+    detail: `retry budget exhausted after ${attempt} attempts`,
+  };
 }
 
 /**
@@ -221,9 +317,15 @@ export type EnforcementOutcome =
   | { kind: "error"; detail: string };
 
 /** One attempt: simulate → sign → enforce → submit. No retry logic lives here. */
-async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
+async function invokePipeline(
+  params: InvokeParams,
+  options?: { inclusionFee?: bigint | undefined },
+): Promise<PipelineOutcome> {
   const { server } = params;
-  const enforced = await enforceCall(params);
+  const enforced = await enforceCall({
+    ...params,
+    ...(options?.inclusionFee !== undefined ? { fee: options.inclusionFee } : {}),
+  });
   if (enforced.kind !== "admissible") return enforced;
 
   if (params.dryRun) {
@@ -243,10 +345,18 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
     operation: enforced.operation,
     networkPassphrase: params.networkPassphrase,
     guard: params.guardAuth?.guard ?? null,
+    ...(options?.inclusionFee !== undefined ? { inclusionFee: options.inclusionFee } : {}),
   });
 
-  const submission = await submitAndPoll(server, assembled.transaction, [params.source]);
+  const submission = await submitAndPoll(
+    server,
+    assembled.transaction,
+    [params.source],
+    params.pollOptions,
+  );
   if (submission.failure) {
+    const isMinFee = isMinimumFeeBroadcastFailure(submission.failure);
+    const isStaleLedger = isStaleLedgerResourceFailure(submission.failure);
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
     // construction (sequence, fee, footprint) or a contract trap — never a
@@ -254,9 +364,10 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
     return {
       kind: "error",
       detail: `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`,
-      ...(isStaleLedgerResourceFailure(submission.failure)
-        ? { retryable: "stale_ledger_resource_limit" as const }
-        : {}),
+      ...(isStaleLedger ? { retryable: "stale_ledger_resource_limit" as const } : {}),
+      ...(isMinFee ? { retryable: "min_fee" as const } : {}),
+      lastFee: BigInt(assembled.transaction.fee),
+      submission,
     };
   }
   return { kind: "allowed", submission };
@@ -269,7 +380,9 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
  *
  * Nothing here mutates the ledger, which is what makes a refusal free.
  */
-export async function enforceCall(params: InvokeParams): Promise<EnforcementOutcome> {
+export async function enforceCall(
+  params: InvokeParams & { fee?: bigint | string | undefined },
+): Promise<EnforcementOutcome> {
   const { server, source, call, networkPassphrase } = params;
   const operation = Operation.invokeContractFunction({
     contract: call.contract,
@@ -293,6 +406,7 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     operation,
     networkPassphrase,
     guard: params.guardAuth?.guard ?? null,
+    ...(params.fee !== undefined ? { fee: params.fee } : {}),
   });
   const first = await server.simulateTransaction(probe);
   if (rpc.Api.isSimulationError(first)) {
@@ -404,6 +518,7 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     operation: signedOperation,
     networkPassphrase,
     guard: params.guardAuth?.guard ?? null,
+    ...(params.fee !== undefined ? { fee: params.fee } : {}),
   });
   const enforced = await server.simulateTransaction(enforcingTx);
   if (process.env["SAG_DEBUG_RESOURCES"] === "1") {
