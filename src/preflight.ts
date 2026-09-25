@@ -26,6 +26,7 @@
  */
 import { Keypair, rpc } from "@stellar/stellar-sdk";
 import { enforceCall } from "./invoke.ts";
+import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { ContractCall } from "./tx.ts";
 
@@ -54,6 +55,8 @@ export type PreFlightDecision =
       estimatedResourceFee: bigint;
       /** Number of ledger keys the call is priced to touch. */
       footprintKeys: number;
+      /** Resource limits and footprint counts from the same simulation. */
+      resourceBreakdown?: ResourceBreakdown;
     }
   | {
       allowed: false;
@@ -119,17 +122,21 @@ export class PreFlightInterceptor {
       };
     }
 
+    const resourceBreakdown = resourceBreakdownFromSimulation(outcome.simulation);
     const data = outcome.simulation.transactionData as unknown as
       | { getReadOnly?: () => unknown[]; getReadWrite?: () => unknown[] }
       | undefined;
     const footprintKeys =
-      (data?.getReadOnly?.().length ?? 0) + (data?.getReadWrite?.().length ?? 0);
+      resourceBreakdown?.storageEntries ??
+      (data?.getReadOnly?.().length ?? 0) +
+        (data?.getReadWrite?.().length ?? 0);
 
     return {
       allowed: true,
       kind: "admissible",
       estimatedResourceFee: BigInt(outcome.simulation.minResourceFee ?? 0),
       footprintKeys,
+      ...(resourceBreakdown ? { resourceBreakdown } : {}),
     };
   }
 

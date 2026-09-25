@@ -1,0 +1,21 @@
+{
+  "transactionData": {
+    "ext": { "v": 0 },
+    "resources": {
+      "footprint": {
+        "read_only": [
+          { "type": "contractData", "key": "policy" },
+          { "type": "contractData", "key": "status" }
+        ],
+        "read_write": [
+          { "type": "contractData", "key": "window" }
+        ]
+      },
+      "instructions": 184320,
+      "disk_read_bytes": 12288,
+      "write_bytes": 2048
+    },
+    "resourceFee": "98765"
+  },
+  "minResourceFee": "98765"
+}

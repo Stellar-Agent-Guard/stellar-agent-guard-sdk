@@ -159,3 +159,27 @@ transfers returned 6 of 6 allowed with no waits.
 This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
+
+## Resource-breakdown validation (2026-09-25)
+
+The cost enhancement is covered without network access in
+`tests/unit/cost.test.ts` using the committed recorded payload fixture
+`tests/fixtures/simulation-resource-payload.json`. The tests verify the actual
+stellar-sdk resource shape (`instructions`, `diskReadBytes`, `writeBytes`, and
+footprint arrays), the parsed `SorobanDataBuilder` shape, the raw base64 shape,
+incomplete-payload handling, and propagation through `CostPreChecker`.
+
+Local checks completed successfully:
+
+```text
+npm run typecheck
+npm run lint
+npm test                 # 80 passing unit tests
+npm run build
+```
+
+A fresh live-testnet run was not claimed for this change: `.env.phase2` is absent
+from this checkout, and the available runtime is Node 22 while the package
+requires Node 24 for the documented live workflow. The recorded fixture and
+mocked cost tests are reproducible without credentials; a maintainer can rerun
+the live suite with the repository's documented testnet credentials before merge.

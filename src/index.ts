@@ -74,9 +74,11 @@ export {
   exceedsCeiling,
   feeBreakdown,
   precheckCost,
+  resourceBreakdownFromSimulation,
   type CostDecision,
   type CostPreCheckConfig,
   type FeeBreakdown,
+  type ResourceBreakdown,
 } from "./cost.ts";
 
 export {

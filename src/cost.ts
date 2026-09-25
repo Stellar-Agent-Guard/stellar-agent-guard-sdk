@@ -34,9 +34,135 @@
  * answer would tell a caller their call was too expensive when the truth is that
  * it was never allowed.
  */
+import { SorobanDataBuilder } from "@stellar/stellar-sdk";
 import { INCLUSION_FEE } from "./tx.ts";
 import type { PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
+
+/**
+ * Resource limits and footprint sizes declared by a Soroban simulation.
+ *
+ * The names mirror `SorobanResources` in stellar-sdk v17: `instructions`,
+ * `diskReadBytes`, and `writeBytes` are the actual resource fields. The SDK
+ * simulation payload does not contain a `memBytes` field, so this type does
+ * not invent one. `readOnlyEntries` and `readWriteEntries` are counts derived
+ * from the payload's footprint arrays; `storageEntries` is their sum.
+ */
+export interface ResourceBreakdown {
+  /** `SorobanResources.instructions` — CPU instruction budget. */
+  instructions: number;
+  /** `SorobanResources.diskReadBytes` — ledger bytes read from disk. */
+  diskReadBytes: number;
+  /** `SorobanResources.writeBytes` — ledger bytes written. */
+  writeBytes: number;
+  /** Number of read-only ledger keys in the simulation footprint. */
+  readOnlyEntries: number;
+  /** Number of read-write ledger keys in the simulation footprint. */
+  readWriteEntries: number;
+  /** Total number of ledger keys in the simulation footprint. */
+  storageEntries: number;
+}
+
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function firstDefined(value: Record<string, unknown>, ...keys: string[]): unknown {
+  for (const key of keys) {
+    if (value[key] !== undefined) return value[key];
+  }
+  return undefined;
+}
+
+function resourceCount(value: unknown): number | undefined {
+  if (typeof value === "bigint") {
+    return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : undefined;
+  }
+  if (typeof value === "string" && value.trim() === "") return undefined;
+  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isSafeInteger(number) && number >= 0 ? number : undefined;
+}
+
+function footprintCounts(value: unknown):
+  | { readOnlyEntries: number; readWriteEntries: number; storageEntries: number }
+  | undefined {
+  const footprint = recordOf(value);
+  const readOnly = footprint
+    ? firstDefined(footprint, "readOnly", "read_only")
+    : undefined;
+  const readWrite = footprint
+    ? firstDefined(footprint, "readWrite", "read_write")
+    : undefined;
+  if (!Array.isArray(readOnly) || !Array.isArray(readWrite)) return undefined;
+  const readOnlyEntries = readOnly.length;
+  const readWriteEntries = readWrite.length;
+  return {
+    readOnlyEntries,
+    readWriteEntries,
+    storageEntries: readOnlyEntries + readWriteEntries,
+  };
+}
+
+/**
+ * Parse the resource block from a stellar-sdk simulation response.
+ *
+ * The public SDK parser normally gives callers a `SorobanDataBuilder`; the
+ * structural fallbacks also accept its built XDR value and the wire-shaped
+ * object used by recorded RPC fixtures. Missing or malformed fields return
+ * `undefined` as a whole, never a partially fabricated zero-filled breakdown.
+ */
+export function resourceBreakdownFromSimulation(simulation: unknown): ResourceBreakdown | undefined {
+  const response = recordOf(simulation);
+  const transactionData = response?.transactionData ?? simulation;
+  let transaction: Record<string, unknown> | undefined;
+  if (typeof transactionData === "string") {
+    if (transactionData.trim() === "") return undefined;
+    try {
+      transaction = recordOf(new SorobanDataBuilder(transactionData).build());
+    } catch {
+      return undefined;
+    }
+  } else {
+    transaction = recordOf(transactionData);
+  }
+  if (!transaction) return undefined;
+
+  let built: unknown = transaction;
+  if (typeof transaction.build === "function") {
+    try {
+      built = (transaction.build as () => unknown)();
+    } catch {
+      return undefined;
+    }
+  }
+
+  const builtRecord = recordOf(built);
+  if (!builtRecord) return undefined;
+  const resources = recordOf(builtRecord.resources) ?? builtRecord;
+  const instructions = resourceCount(resources.instructions);
+  const diskReadBytes = resourceCount(
+    firstDefined(resources, "diskReadBytes", "disk_read_bytes"),
+  );
+  const writeBytes = resourceCount(firstDefined(resources, "writeBytes", "write_bytes"));
+  const footprint = footprintCounts(resources.footprint);
+  if (
+    instructions === undefined ||
+    diskReadBytes === undefined ||
+    writeBytes === undefined ||
+    footprint === undefined
+  ) {
+    return undefined;
+  }
+
+  return { instructions, diskReadBytes, writeBytes, ...footprint };
+}
+
+/** Optional resource details carried by a pre-flight admissible decision. */
+interface CostResultBreakdown {
+  /** Present only when the simulation exposed a complete resource block. */
+  breakdown?: ResourceBreakdown;
+}
 
 export interface CostPreCheckConfig {
   /**
@@ -72,14 +198,14 @@ export type CostDecision =
       footprintKeys: number;
       /** The ceiling this was judged against, or `null` when none was given. */
       feeCeilingStroops: bigint | null;
-    } & FeeBreakdown)
+    } & FeeBreakdown & CostResultBreakdown)
   | ({
       kind: "over_budget";
       /** Not allowed to proceed *at this price* — the guard itself may allow it. */
       allowed: false;
       footprintKeys: number;
       feeCeilingStroops: bigint;
-    } & FeeBreakdown)
+    } & FeeBreakdown & CostResultBreakdown)
   | {
       kind: "blocked";
       /** The guard refused. This is not a cost problem. */
@@ -91,7 +217,7 @@ export type CostDecision =
       resourceFeeStroops: bigint;
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
-    }
+    } & CostResultBreakdown
   | {
       kind: "undetermined";
       /** Enforcement could not reach a decision; treated as not-allowed. */
@@ -100,7 +226,7 @@ export type CostDecision =
       resourceFeeStroops: bigint;
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
-    };
+    } & CostResultBreakdown;
 
 /**
  * Split a simulation's resource fee into the two components a caller is charged.
@@ -201,6 +327,7 @@ export class CostPreChecker {
         ...fees,
         footprintKeys: decision.footprintKeys,
         feeCeilingStroops: ceiling as bigint,
+        ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
       };
     }
     return {
@@ -209,6 +336,7 @@ export class CostPreChecker {
       ...fees,
       footprintKeys: decision.footprintKeys,
       feeCeilingStroops: ceiling,
+      ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
     };
   }
 }
