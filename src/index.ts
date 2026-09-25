@@ -37,6 +37,7 @@ export {
   isDeadManFrozen,
   policyToScVal,
   type CheckResult,
+  type GuardPolicy,
   type GuardStatus,
   type PolicyConfig,
   type ProtocolRule,
@@ -76,7 +77,9 @@ export {
   precheckCost,
   type CostDecision,
   type CostPreCheckConfig,
+  type CostPreCheckResult,
   type FeeBreakdown,
+  type PolicyContext,
 } from "./cost.ts";
 
 export {
