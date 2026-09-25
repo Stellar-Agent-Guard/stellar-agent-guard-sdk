@@ -51,13 +51,21 @@ export {
 } from "./events.ts";
 
 export {
+  DEFAULT_INVOKE_RETRY_OPTIONS,
   enforceCall,
+  INVOKE_ERROR_CAUSES,
+  InvokeRetryError,
   invoke,
   topicSymbols,
   type EnforcementOutcome,
   type GuardAuthorization,
+  type InvokeErrorCause,
+  type InvokeErrorOutcome,
+  type InvokeOptions,
   type InvokeOutcome,
   type InvokeParams,
+  type InvokePollOptions,
+  type InvokeRetryOptions,
 } from "./invoke.ts";
 
 export {

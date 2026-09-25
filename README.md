@@ -39,7 +39,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 
 - **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal.
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
-- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded retry for stale ledger resource limits (`scecExceededLimit`).
+- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
 - **Framework adapters**:
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
@@ -131,7 +131,37 @@ const validate = createGuardValidator({
 - `CostPreChecker`
   - `constructor(options: CostPreCheckerOptions)`
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
+- `invoke(params: InvokeParams): Promise<InvokeOutcome>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
+
+### `invoke()` retry policy
+
+`invoke()` retries only a post-broadcast stale-ledger resource rejection (the host's `scecExceededLimit` / insufficient resource-declaration family). The first attempt is immediate. After a retryable failure, the SDK waits for a **full-jitter exponential backoff** delay and starts the complete pipeline again: it fetches a fresh account sequence, runs the discovery simulation, signs authorization entries, runs the enforced guard simulation, and only then rebuilds and broadcasts the transaction. A failed simulation, invalid input, policy block, or other non-retryable result fails fast without a retry sleep.
+
+```ts
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  retry: {
+    maxAttempts: 3,       // total attempts, including the first
+    baseDelayMs: 100,     // first full-jitter window
+    maxDelayMs: 2_000,    // cap for later full-jitter windows
+  },
+});
+```
+
+| Option | Default | Meaning |
+| --- | ---: | --- |
+| `retry.maxAttempts` | `3` | Total attempts, including the initial attempt. |
+| `retry.baseDelayMs` | `100` | First retry's full-jitter window. |
+| `retry.maxDelayMs` | `2_000` | Upper bound for the exponentially growing full-jitter window. |
+| `retry.random` | `Math.random` | RNG injection point; each sample is multiplied by the current exponential window. |
+| `retry.sleep` | `setTimeout` | Async sleep injection point for deterministic tests or custom schedulers. |
+| `retry.jitter` | — | Alias for `retry.random`. |
+| `retry.initialDelayMs` | — | Compatibility alias for `retry.baseDelayMs`. |
+
+If all attempts fail with the same retryable cause, `invoke()` returns an `InvokeRetryError` outcome. It extends `Error`, has `kind: "error"`, and exposes `attempts`, `lastCause`, `cause`, `detail`, and the final `lastOutcome` for diagnostics; callers can inspect it with `instanceof` and choose whether to surface or rethrow it.
 
 ### Telemetry & Helpers
 

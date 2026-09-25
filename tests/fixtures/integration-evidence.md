@@ -149,13 +149,43 @@ Waiting for the ledger to advance past the previous write fixed 6 of 6 runs,
 confirming the cause: the enforced simulation priced the transaction against a
 ledger snapshot that predated the write the SDK had just made.
 
-The SDK fix is a single bounded retry, gated on this specific failure
-(`isStaleLedgerResourceFailure`). It is safe because a transaction rejected for
-exceeding a resource limit applies nothing, and inclusion proves the ledger has
-since advanced. It is deliberately *not* applied to `Auth` failures — those are
-the guard refusing, and retrying a block would be wrong. Re-running the same six
-transfers returned 6 of 6 allowed with no waits.
+At the time of this recorded run, the SDK fix was a single bounded retry, gated
+on this specific failure (`isStaleLedgerResourceFailure`). It is safe because a
+transaction rejected for exceeding a resource limit applies nothing, and
+inclusion proves the ledger has since advanced. It is deliberately *not* applied
+to `Auth` failures — those are the guard refusing, and retrying a block would be
+wrong. Re-running the same six transfers returned 6 of 6 allowed with no waits.
+The retry-hardening change in this branch preserves that safety boundary while
+making the retry budget and backoff explicit.
 
 This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
+
+## Retry-hardening validation (2026-09-25)
+
+The retry change is covered by `tests/unit/invoke.test.ts` with a mocked RPC while
+still exercising the real transaction builder and signing path. The suite verifies:
+
+- three total attempts are bounded and exhaustion returns `InvokeRetryError` with
+  `attempts = 3` and `lastCause = stale_ledger_resource_limit`;
+- full jitter produces distinct injected-RNG delays (`25ms`, then `150ms`) with
+  the documented exponential window and cap;
+- every attempt performs both probe and enforced simulations (`6` simulation
+  calls for `3` attempts); and
+- an `invalid_input`/undetermined result returns without a retry sleep or
+  broadcast.
+
+Local checks completed successfully:
+
+```text
+npm run typecheck
+npm run lint
+npm test                 # 80 passing unit tests
+```
+
+A fresh live-testnet run was not claimed for this change: this checkout has no
+`.env.phase2` credentials, and the available runtime is Node 22 while the package
+requires Node 24 for the integration workflow. The retry-specific mocked-RPC
+coverage above is reproducible without secrets; a maintainer can rerun the live
+suite with the repository's documented testnet credentials before merge.
