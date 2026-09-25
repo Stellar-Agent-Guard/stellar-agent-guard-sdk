@@ -1,23 +1,23 @@
 /**
- * ElizaOS adapter — built on \Action.validate\.
+ * ElizaOS adapter â€” built on `Action.validate`.
  *
- * \Action.validate\ is already a pre-execution gate: the runtime calls it with
- * the same \(runtime, message, state, options)\ triple the handler receives and
+ * `Action.validate` is already a pre-execution gate: the runtime calls it with
+ * the same `(runtime, message, state, options)` triple the handler receives and
  * admits the action to the eligible set only when it returns truthy. Composing
- * the guard into \alidate\ therefore stops the handler from ever running — see
- * \docs/integration-hooks.md\ A 2 for the source-pinned signatures and the three
+ * the guard into `validate` therefore stops the handler from ever running â€” see
+ * `docs/integration-hooks.md` Â§2 for the source-pinned signatures and the three
  * call sites that enforce it.
  *
- * Wrapping \handler\ instead would be weaker: by the time a handler runs, the
+ * Wrapping `handler` instead would be weaker: by the time a handler runs, the
  * runtime has already committed to executing the action, and an error thrown
  * there is a failure rather than a refusal.
  *
- * Written structurally, so \@elizaos/core\ is not a dependency of this SDK.
+ * Written structurally, so `@elizaos/core` is not a dependency of this SDK.
  */
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
 
-/** The subset of ElizaOS's \Validator\ signature this adapter implements. */
+/** The subset of ElizaOS's `Validator` signature this adapter implements. */
 export type ElizaValidator = (
   runtime: unknown,
   message: unknown,
@@ -33,7 +33,7 @@ export type GuardedElizaValidator = ElizaValidator & {
   clearVerdictCache: () => void;
 };
 
-/** The subset of the \Action\ interface this adapter reads. */
+/** The subset of the `Action` interface this adapter reads. */
 export interface ElizaActionLike {
   name: string;
   validate: ElizaValidator;
@@ -43,23 +43,22 @@ export interface ElizaGuardOptions {
   interceptor: PreFlightInterceptor;
   /**
    * Turn the action's intent into the guarded contract call it would make, or
-   * \
-ull\ when this action moves no funds.
+   * `null` when this action moves no funds.
    */
   toContractCall: (message: unknown, state: unknown) => ContractCall | null;
   /** The action's own validation, composed in front of the guard's. */
   baseValidate?: ElizaValidator;
-  /** Observe every decision — the place to wire telemetry. */
+  /** Observe every decision â€” the place to wire telemetry. */
   onDecision?: (decision: PreFlightDecision) => void;
   /**
-   * Called with the refusal, because a \alse\ verdict is silent by design: the
+   * Called with the refusal, because a `false` verdict is silent by design: the
    * runtime simply drops the action. Without this, a blocked action leaves no
    * trace anywhere.
    */
   onBlocked?: (decision: PreFlightDecision & { allowed: false }) => void;
   /**
    * ElizaOS may invoke the validator multiple times for the same action during
-   * one decision cycle (revalidation after state tweaks) — each call re-simulates.
+   * one decision cycle (revalidation after state tweaks) â€” each call re-simulates.
    * Turn this on to cache verdicts per action shape.
    * Default: false.
    */
@@ -75,11 +74,11 @@ function canonicalizeCall(call: ContractCall): string {
 }
 
 /**
- * Build a \alidate\ that returns \	rue\ only when the action is both valid and
+ * Build a `validate` that returns `true` only when the action is both valid and
  * permitted by the guard.
  *
  * Fails closed: a refusal and an undetermined enforcement run both return
- * \alse\, so the action never executes either way.
+ * `false`, so the action never executes either way.
  */
 export function createGuardValidator(options: ElizaGuardOptions): GuardedElizaValidator {
   const cache = new Map<string, boolean>();
@@ -128,12 +127,12 @@ export function createGuardValidator(options: ElizaGuardOptions): GuardedElizaVa
 }
 
 /**
- * Wrap an existing action, returning a copy whose \alidate\ composes the guard.
+ * Wrap an existing action, returning a copy whose `validate` composes the guard.
  *
- * The returned \alidate\ is deliberately typed as the full \ElizaValidator\, not
+ * The returned `validate` is deliberately typed as the full `ElizaValidator`, not
  * as the wrapped action's own (possibly narrower) signature. An action authored
- * with \alidate: async () => boolean\ is assignable to \ElizaValidator\ — extra
- * parameters are allowed to be ignored — but the *wrapped* validator genuinely
+ * with `validate: async () => boolean` is assignable to `ElizaValidator` â€” extra
+ * parameters are allowed to be ignored â€” but the *wrapped* validator genuinely
  * accepts all four arguments and forwards them to the base, so reporting the
  * narrower type would both misdescribe it and prevent a caller from invoking the
  * action the way the runtime does.
