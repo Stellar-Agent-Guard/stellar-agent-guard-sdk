@@ -72,6 +72,8 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
     assert.equal(toolEntered, false, "the tool body ran despite a guard refusal");
     assert.ok("status" in result && result.status === "error");
     assert.match(String((result as { content: string }).content), /recipient_not_allowed/);
+    assert.match(String((result as { content: string }).content), /Remediation \(operator\): recipient not in policy allowlist/);
+    assert.match(String((result as { content: string }).content), /do not retry [—-] escalate to operator/);
     console.log(`[langchain] refused without entering the tool: ${(result as { content: string }).content.split("\n")[0]}`);
   });
 
