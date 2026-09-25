@@ -30,36 +30,6 @@ before(async () => {
     agent: config.keys.agent,
     source: config.keys.agent,
   });
-  it("caches verdicts for identical actions when cacheVerdicts is true", async () => {
-    let checkCalls = 0;
-    const mockInterceptor = {
-      check: async () => {
-        checkCalls++;
-        return { allowed: true, kind: "admissible", estimatedResourceFee: 100n, footprintKeys: 1 };
-      },
-    } as unknown as PreFlightInterceptor;
-
-    const validate = createGuardValidator({
-      interceptor: mockInterceptor,
-      toContractCall: (_message, state) => toContractCall((state ?? {}) as { to?: unknown; amount?: unknown }),
-      cacheVerdicts: true,
-    });
-
-    const state1 = { to: config.keys.recipient.publicKey(), amount: "5" };
-    await validate({}, {}, state1);
-    assert.equal(checkCalls, 1);
-
-    await validate({}, {}, state1);
-    assert.equal(checkCalls, 1);
-
-    const state2 = { to: config.keys.recipient.publicKey(), amount: "10" };
-    await validate({}, {}, state2);
-    assert.equal(checkCalls, 2);
-
-    validate.clearVerdictCache();
-    await validate({}, {}, state1);
-    assert.equal(checkCalls, 3);
-  });
 });
 
 
@@ -143,36 +113,6 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
       async () => ({ content: "sunny" }),
     );
     assert.deepEqual(result, { content: "sunny" });
-  });
-  it("caches verdicts for identical actions when cacheVerdicts is true", async () => {
-    let checkCalls = 0;
-    const mockInterceptor = {
-      check: async () => {
-        checkCalls++;
-        return { allowed: true, kind: "admissible", estimatedResourceFee: 100n, footprintKeys: 1 };
-      },
-    } as unknown as PreFlightInterceptor;
-
-    const validate = createGuardValidator({
-      interceptor: mockInterceptor,
-      toContractCall: (_message, state) => toContractCall((state ?? {}) as { to?: unknown; amount?: unknown }),
-      cacheVerdicts: true,
-    });
-
-    const state1 = { to: config.keys.recipient.publicKey(), amount: "5" };
-    await validate({}, {}, state1);
-    assert.equal(checkCalls, 1);
-
-    await validate({}, {}, state1);
-    assert.equal(checkCalls, 1);
-
-    const state2 = { to: config.keys.recipient.publicKey(), amount: "10" };
-    await validate({}, {}, state2);
-    assert.equal(checkCalls, 2);
-
-    validate.clearVerdictCache();
-    await validate({}, {}, state1);
-    assert.equal(checkCalls, 3);
   });
 });
 
@@ -268,6 +208,28 @@ describe("ElizaOS Action.validate adapter against the live guard", () => {
     validate.clearVerdictCache();
     await validate({}, {}, state1);
     assert.equal(checkCalls, 3);
+  });
+
+  it("re-simulates every time by default when cacheVerdicts is false", async () => {
+    let checkCalls = 0;
+    const mockInterceptor = {
+      check: async () => {
+        checkCalls++;
+        return { allowed: true, kind: "admissible", estimatedResourceFee: 100n, footprintKeys: 1 };
+      },
+    } as unknown as PreFlightInterceptor;
+
+    const validate = createGuardValidator({
+      interceptor: mockInterceptor,
+      toContractCall: (_message, state) => toContractCall((state ?? {}) as { to?: unknown; amount?: unknown }),
+    });
+
+    const state = { to: config.keys.recipient.publicKey(), amount: "5" };
+    await validate({}, {}, state);
+    assert.equal(checkCalls, 1);
+
+    await validate({}, {}, state);
+    assert.equal(checkCalls, 2);
   });
 });
 
