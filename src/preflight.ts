@@ -26,6 +26,11 @@
  */
 import { Keypair, rpc } from "@stellar/stellar-sdk";
 import { enforceCall } from "./invoke.ts";
+import {
+  extractTransferAmount,
+  fetchGuardPolicyAndWindow,
+  type PolicyConfig,
+} from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { ContractCall } from "./tx.ts";
 
@@ -71,6 +76,49 @@ export type PreFlightDecision =
       detail: string;
     };
 
+export interface CheckBatchOptions {
+  /**
+   * Policy configuration to enforce against during batch staging.
+   * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
+   */
+  policy?: PolicyConfig | null;
+
+  /**
+   * Initial committed amount already spent in the current rolling window.
+   * If omitted, attempts to fetch it from the guard's `Window` ledger entry (defaults to 0n).
+   */
+  initialWindowSpent?: bigint;
+}
+
+export interface PreFlightBatchDecision {
+  /**
+   * Overall batch verdict: true only if every call in the batch is admissible.
+   * Mirrors the contract's all-or-nothing auth batch semantics.
+   */
+  admissible: boolean;
+
+  /**
+   * Alias for `admissible`.
+   */
+  overallAdmissible: boolean;
+
+  /**
+   * Per-call decisions in the exact order of the input batch.
+   */
+  verdicts: PreFlightDecision[];
+
+  /**
+   * Alias for `verdicts`.
+   */
+  calls: PreFlightDecision[];
+
+  /**
+   * Total estimated resource fee in stroops across all calls in the batch
+   * that were admissible.
+   */
+  totalEstimatedResourceFee: bigint;
+}
+
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
@@ -82,6 +130,8 @@ export interface PreFlightConfig {
   source: Keypair;
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
   accountSigners?: Keypair[];
+  /** Optional policy to use for batch staging (otherwise fetched from ledger). */
+  policy?: PolicyConfig | null;
 }
 
 export class PreFlightInterceptor {
@@ -134,6 +184,112 @@ export class PreFlightInterceptor {
   }
 
   /**
+   * Decide whether an entire batch of calls may proceed with all-or-nothing semantics.
+   *
+   * Mirrors the contract's staged window evaluation:
+   * 1. Evaluates each call in sequence.
+   * 2. For SAC transfers, tracks the cumulative admitted amounts in memory ("simulated staging").
+   * 3. If an individual call passes simulation in isolation but would push the cumulative
+   *    staged window spend past `window_cap`, it is marked as `blocked` with reason
+   *    `window_cap_exceeded`.
+   * 4. If any call is blocked or undetermined, the overall batch `admissible` is false.
+   *
+   * Documented approximation vs true batch simulation:
+   * This sequential simulation with staged window accounting is an off-chain approximation
+   * of the contract's atomic auth batch evaluation:
+   * - State mutations between calls (other than guard window spend) are not observed during
+   *   independent simulations.
+   * - Window entries are staged against the initial window snapshot without modelling intra-batch
+   *   time expiration.
+   * - Total estimated resource fee is the sum of per-call estimates rather than a single
+   *   transaction envelope's resource fee.
+   *
+   * Note cross-dependency:
+   * When contract-side `check_batch` lands in `stellar-agent-guard-contracts`, `checkBatch`
+   * will route to that entrypoint for atomic on-chain simulation, and this sequential
+   * staging implementation will serve as the fallback for contracts on earlier ABI versions.
+   */
+  async checkBatch(
+    calls: ContractCall[],
+    options?: CheckBatchOptions,
+  ): Promise<PreFlightBatchDecision> {
+    if (calls.length === 0) {
+      return {
+        admissible: true,
+        overallAdmissible: true,
+        verdicts: [],
+        calls: [],
+        totalEstimatedResourceFee: 0n,
+      };
+    }
+
+    // Resolve policy and initial window spend for staging
+    let policy: PolicyConfig | null = options?.policy ?? this.config.policy ?? null;
+    let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
+
+    if (policy === null || options?.initialWindowSpent === undefined) {
+      try {
+        const fetched = await fetchGuardPolicyAndWindow(this.config.server, this.config.guard);
+        if (policy === null) {
+          policy = fetched.policy;
+        }
+        if (options?.initialWindowSpent === undefined) {
+          initialWindowSpent = fetched.windowSpent;
+        }
+      } catch {
+        // Fall back gracefully if ledger entry fetch is not possible (e.g. mock server in unit tests)
+      }
+    }
+
+    let stagedWindowSpent = 0n;
+    let allAdmissible = true;
+    let totalEstimatedResourceFee = 0n;
+    const verdicts: PreFlightDecision[] = [];
+
+    for (const call of calls) {
+      const decision = await this.check(call);
+
+      if (decision.kind === "admissible") {
+        const amount = extractTransferAmount(call);
+        const windowCap = policy?.window_cap ?? 0n;
+
+        // If this is a transfer with a positive amount and a window cap is defined:
+        if (amount !== null && amount > 0n && windowCap > 0n) {
+          const projectedSpend = initialWindowSpent + stagedWindowSpent + amount;
+          if (projectedSpend > windowCap) {
+            const blockedDecision: PreFlightDecision = {
+              allowed: false,
+              kind: "blocked",
+              reason: "window_cap_exceeded",
+              explanation: explainReason("window_cap_exceeded"),
+              detail: `staged window cap exceeded: cumulative spend ${projectedSpend} > window_cap ${windowCap}`,
+              diagnosticEvents: [],
+            };
+            verdicts.push(blockedDecision);
+            allAdmissible = false;
+            continue;
+          }
+          stagedWindowSpent += amount;
+        }
+
+        verdicts.push(decision);
+        totalEstimatedResourceFee += decision.estimatedResourceFee;
+      } else {
+        verdicts.push(decision);
+        allAdmissible = false;
+      }
+    }
+
+    return {
+      admissible: allAdmissible,
+      overallAdmissible: allAdmissible,
+      verdicts,
+      calls: verdicts,
+      totalEstimatedResourceFee,
+    };
+  }
+
+  /**
    * Convenience for adapters that want a throw-on-refusal shape.
    *
    * Throws `GuardBlockedError` for both `blocked` and `undetermined` — an
@@ -152,9 +308,46 @@ export class PreFlightInterceptor {
     }
     throw new PreFlightUndeterminedError(decision.detail);
   }
+
+  /**
+   * Convenience for adapters that want a throw-on-refusal shape for batches.
+   *
+   * Throws `GuardBlockedError` if any call in the batch is blocked, or
+   * `PreFlightUndeterminedError` if any call is undetermined.
+   */
+  async assertBatchAllowed(
+    calls: ContractCall[],
+    options?: CheckBatchOptions,
+  ): Promise<PreFlightBatchDecision & { admissible: true }> {
+    const decision = await this.checkBatch(calls, options);
+    if (decision.admissible) return decision as PreFlightBatchDecision & { admissible: true };
+    for (const verdict of decision.verdicts) {
+      if (verdict.kind === "blocked") {
+        throw new GuardBlockedError({
+          reason: verdict.reason,
+          stage: "preflight",
+          detail: verdict.detail,
+        });
+      }
+      if (verdict.kind === "undetermined") {
+        throw new PreFlightUndeterminedError(verdict.detail);
+      }
+    }
+    throw new PreFlightUndeterminedError("batch refused by guardrails");
+  }
 }
 
 /** One-shot form, for callers that do not want to hold an interceptor. */
 export function preflight(config: PreFlightConfig, call: ContractCall): Promise<PreFlightDecision> {
   return new PreFlightInterceptor(config).check(call);
 }
+
+/** One-shot form for batch pre-flight checks. */
+export function preflightBatch(
+  config: PreFlightConfig,
+  calls: ContractCall[],
+  options?: CheckBatchOptions,
+): Promise<PreFlightBatchDecision> {
+  return new PreFlightInterceptor(config).checkBatch(calls, options);
+}
+

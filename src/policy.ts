@@ -13,7 +13,8 @@
  * caps are `i128` and silently narrowing them to `number` would lose precision
  * on exactly the values a spend guard exists to compare.
  */
-import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import type { ContractCall } from "./tx.ts";
 
 export interface ProtocolRule {
   contract: string;
@@ -157,3 +158,95 @@ export function describePolicy(policy: PolicyConfig | null): string {
   ];
   return parts.join(", ");
 }
+
+/**
+ * Extract the token transfer amount from a SAC contract call.
+ *
+ * Full recipient/amount enforcement is native to SAC token transfers (`transfer`
+ * and `transfer_from`). For `transfer(from, to, amount)`, the amount is the 3rd
+ * argument (index 2). For `transfer_from(spender, from, to, amount)`, the amount
+ * is the 4th argument (index 3).
+ *
+ * Returns null if the call is not a recognized SAC transfer or if the amount
+ * argument cannot be decoded into a BigInt.
+ */
+export function extractTransferAmount(call: ContractCall): bigint | null {
+  const arg =
+    call.fn === "transfer" ? call.args?.[2] : call.fn === "transfer_from" ? call.args?.[3] : undefined;
+  if (arg === undefined) return null;
+  if (typeof arg === "bigint") return arg;
+  if (typeof arg === "number") return BigInt(arg);
+  try {
+    const native = scValToNative(arg);
+    return typeof native === "bigint" ? native : BigInt(native as number | string);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one of a contract's persistent storage entries from ledger state via RPC.
+ */
+export async function readPersistentEntry(
+  server: rpc.Server,
+  contractId: string,
+  dataKeyName: string,
+): Promise<{ value: unknown; lastModifiedLedgerSeq: number | null } | null> {
+  const key = xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(contractId).toScAddress(),
+      key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(dataKeyName)]),
+      durability: xdr.ContractDataDurability.persistent,
+    }),
+  );
+  const response = await server.getLedgerEntries(key);
+  const entry = response.entries?.[0] as unknown as {
+    val?: { contractData?: () => { val?: () => xdr.ScVal } | { val?: xdr.ScVal } } | { contractData?: { val?: xdr.ScVal } };
+    lastModifiedLedgerSeq?: number;
+  };
+  let scval: xdr.ScVal | undefined;
+  if (entry?.val) {
+    const contractData =
+      typeof (entry.val as { contractData?: unknown }).contractData === "function"
+        ? (entry.val as { contractData: () => { val?: unknown } }).contractData()
+        : (entry.val as { contractData?: { val?: unknown } }).contractData;
+    if (contractData) {
+      scval =
+        typeof contractData.val === "function"
+          ? (contractData.val() as xdr.ScVal)
+          : (contractData.val as xdr.ScVal);
+    }
+  }
+  if (!scval) return null;
+  return {
+    value: scValToNative(scval) as unknown,
+    lastModifiedLedgerSeq: entry.lastModifiedLedgerSeq ?? null,
+  };
+}
+
+/**
+ * Read the live policy and committed window spent from ledger state via RPC.
+ */
+export async function fetchGuardPolicyAndWindow(
+  server: rpc.Server,
+  guard: string,
+): Promise<{ policy: PolicyConfig | null; windowSpent: bigint }> {
+  const [policyEntry, windowEntry] = await Promise.all([
+    readPersistentEntry(server, guard, "Policy"),
+    readPersistentEntry(server, guard, "Window"),
+  ]);
+
+  let policy: PolicyConfig | null = null;
+  if (policyEntry?.value && typeof policyEntry.value === "object") {
+    policy = policyEntry.value as PolicyConfig;
+  }
+
+  let windowSpent = 0n;
+  if (windowEntry?.value && typeof windowEntry.value === "object") {
+    const windowObj = windowEntry.value as { total?: bigint | number };
+    windowSpent = BigInt(windowObj.total ?? 0);
+  }
+
+  return { policy, windowSpent };
+}
+
