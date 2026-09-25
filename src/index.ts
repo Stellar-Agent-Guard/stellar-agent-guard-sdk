@@ -55,6 +55,7 @@ export {
   invoke,
   topicSymbols,
   type EnforcementOutcome,
+  type FeeBumpConfig,
   type GuardAuthorization,
   type InvokeOutcome,
   type InvokeParams,
@@ -91,7 +92,9 @@ export {
 } from "./telemetry.ts";
 
 export {
+  BroadcastError,
   GUARD_STORAGE_KEYS,
+  isMinimumFeeBroadcastFailure,
   isStaleLedgerResourceFailure,
   type ContractCall,
   type SubmissionResult,

@@ -253,6 +253,8 @@ export interface AssembleResult {
   /** Resource fee actually charged for the assembled transaction. */
   resourceFee: bigint;
   footprintKeys: number;
+  /** Inclusion fee declared for the assembled transaction. */
+  inclusionFee?: bigint | undefined;
 }
 
 /**
@@ -272,7 +274,8 @@ export function assembleFromSimulation(params: {
   operation: xdr.Operation;
   networkPassphrase: string;
   guard: string | null;
-  extraResourceFee?: bigint;
+  extraResourceFee?: bigint | undefined;
+  inclusionFee?: bigint | string | undefined;
 }): AssembleResult {
   const { simulation, source, operation, networkPassphrase, guard } = params;
   // v17 hands back a builder already; older shapes hand back the data itself.
@@ -308,10 +311,12 @@ export function assembleFromSimulation(params: {
   const extra = params.extraResourceFee ?? 0n;
   data.setResourceFee(minResourceFee + extra);
 
+  const inclusionFee = (params.inclusionFee ?? INCLUSION_FEE).toString();
+
   // `TransactionBuilder` folds the resource fee declared in `sorobanData` into
   // the transaction fee on build(), so `fee` here is the inclusion fee only.
   const transaction = new TransactionBuilder(source, {
-    fee: INCLUSION_FEE,
+    fee: inclusionFee,
     networkPassphrase,
     sorobanData: data.build(),
   })
@@ -319,7 +324,7 @@ export function assembleFromSimulation(params: {
     .setTimeout(0)
     .build();
 
-  return { transaction, resourceFee: minResourceFee + extra, footprintKeys };
+  return { transaction, resourceFee: minResourceFee + extra, footprintKeys, inclusionFee: BigInt(inclusionFee) };
 }
 
 /**
@@ -440,6 +445,8 @@ export function describeTransactionResult(result: unknown): string | null {
     | undefined;
   if (arm?.type) return `invokeHostFunctionResult=${arm.type}`;
   if (plain?.result?.type) return `result=${plain.result.type}`;
+  const directType = (result as { result?: { type?: string } })?.result?.type;
+  if (typeof directType === "string") return `result=${directType}`;
   return null;
 }
 
@@ -502,6 +509,63 @@ export function isStaleLedgerResourceFailure(
   return /scecExceededLimit|exceeds amount specified|insufficient[_ ]refundable[_ ]fee/i.test(
     haystack,
   );
+}
+
+/**
+ * Was this post-broadcast rejection caused by a transaction fee below the network minimum?
+ *
+ * Simulation prices fees at prepare-time, but a fee-market change (e.g. surge
+ * pricing or minimum inclusion fee floor increase) between transaction preparation
+ * and broadcast causes core to reject the transaction with `tx_insufficient_fee` /
+ * "tx too cheap" / min-fee errors.
+ */
+export function isMinimumFeeBroadcastFailure(
+  failure: NonNullable<SubmissionResult["failure"]>,
+): boolean {
+  if (
+    failure.resultCode === "result=txInsufficientFee" ||
+    failure.resultCode === "txInsufficientFee" ||
+    failure.resultCode === "tx_insufficient_fee"
+  ) {
+    return true;
+  }
+  const haystack = [failure.resultCode ?? "", failure.message].join("\n");
+  return /tx_?insufficient_?fee|tx too cheap|tx_too_cheap|min(?:imum)?[ _-]fee/i.test(
+    haystack,
+  );
+}
+
+/**
+ * Thrown or returned when transaction submission fails and retry attempts are exhausted.
+ * Specifically used when transaction fee bumping cannot satisfy the network's minimum fee.
+ */
+export class BroadcastError extends Error {
+  readonly kind = "error" as const;
+  readonly attempts: number;
+  readonly lastFee: bigint;
+  readonly failure: NonNullable<SubmissionResult["failure"]>;
+  readonly detail: string;
+
+  constructor(params: {
+    attempts: number;
+    lastFee: bigint;
+    failure: NonNullable<SubmissionResult["failure"]>;
+    detail?: string;
+  }) {
+    const detail = params.detail ?? params.failure.message;
+    super(
+      `stellar-agent-guard broadcast failed: minimum fee not met after ${params.attempts} attempt(s) (last fee: ${params.lastFee} stroops)\n${detail}`,
+    );
+    this.name = "BroadcastError";
+    this.attempts = params.attempts;
+    this.lastFee = params.lastFee;
+    this.failure = params.failure;
+    this.detail = detail;
+  }
+
+  get error(): BroadcastError {
+    return this;
+  }
 }
 
 /** Full, copy-pasteable rendering of a failed submission, for evidence. */
@@ -593,9 +657,10 @@ export function buildInitialEnvelope(params: {
   operation: xdr.Operation;
   networkPassphrase: string;
   guard: string | null;
+  fee?: bigint | string | undefined;
 }): Transaction {
   const builder = new TransactionBuilder(params.source, {
-    fee: INCLUSION_FEE,
+    fee: (params.fee ?? INCLUSION_FEE).toString(),
     networkPassphrase: params.networkPassphrase,
     ...(params.guard
       ? {

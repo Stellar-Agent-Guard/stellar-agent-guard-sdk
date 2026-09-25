@@ -39,7 +39,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 
 - **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal.
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
-- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded retry for stale ledger resource limits (`scecExceededLimit`).
+- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded retry for stale ledger resource limits (`scecExceededLimit`) and minimum-fee rejections (`tx_insufficient_fee`).
 - **Framework adapters**:
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
