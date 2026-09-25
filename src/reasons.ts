@@ -9,6 +9,8 @@
  * code therefore share one vocabulary, which is why this table is duplicated
  * rather than inferred.
  */
+import { GuardError } from "./errors.ts";
+
 export const GUARD_REASON_CODES = {
   unauthorized: 1,
   already_initialized: 2,
@@ -80,7 +82,7 @@ export function explainReason(reason: number | string): string {
  * pre-broadcast interceptions — the whole point of the pre-flight path is that
  * a blocked action costs nothing, because no transaction was submitted.
  */
-export class GuardBlockedError extends Error {
+export class GuardBlockedError extends GuardError {
   readonly reason: string;
   readonly code: number | undefined;
   readonly explanation: string;

@@ -120,6 +120,153 @@ const validate = createGuardValidator({
 });
 ```
 
+### Policy encode/decode round trip
+
+`decodePolicy` is the canonical read-side counterpart to `policyToScVal`. It returns
+`bigint` for every integer field, keeps `ProtocolRule.fns: null` distinct from an empty
+array, normalizes Stellar addresses, and rejects missing, duplicate, unknown, unsorted, or
+wrongly typed fields with a path-bearing `PolicyDecodeError`.
+
+```ts
+import {
+  decodePolicy,
+  policyToScVal,
+  type PolicyConfig,
+} from "stellar-agent-guard-sdk";
+
+const policy: PolicyConfig = {
+  per_tx_cap: 1_000n,
+  window_secs: 60n,
+  window_cap: 150n,
+  assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
+  protocols: [
+    {
+      contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      fns: ["transfer"],
+    },
+  ],
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  allow_any_recipient: false,
+  active_from: 0n,
+  active_until: 0n,
+  paused: false,
+  dms_grace_secs: 0n,
+};
+
+const encoded = policyToScVal(policy);
+const decoded = decodePolicy(encoded); // exactly equal to policy
+```
+
+The decoder accepts the direct `ScVal::Map` returned by the deployed `policy()` read and
+also the one-element `Vec` representation used by some RPC/host surfaces for
+`Some(PolicyConfig)`. `ScVal::Void` means no policy is installed and therefore throws
+rather than fabricating a default-deny config. Canonical u64/i128 variants are range
+checked exactly; base-10 `ScVal::String` integers are accepted as a deliberate
+compatibility path for stringly-typed RPC/telemetry payloads and normalized to `bigint`.
+
+### Debug a blocked transfer with `invoke({ dryRun: true })`
+
+Dry run executes the real probe, authorization signing, and enforced-simulation path,
+then returns the verdict, diagnostics, network-derived fees, and per-stage timings. It
+stops before final transaction assembly and cannot call `sendTransaction`, so its result
+has no transaction hash or submission object.
+
+```ts
+import { invoke } from "stellar-agent-guard-sdk";
+
+const debug = await invoke({
+  server,
+  source,
+  call: blockedTransferCall,
+  networkPassphrase,
+  guardAuth: { guard, agent },
+  dryRun: true,
+});
+
+if (debug.kind === "dry_run") {
+  console.log({
+    admissible: debug.admissible,
+    verdict: debug.verdict,
+    reason: debug.reason,
+    fees: debug.fees,
+  });
+  console.table(debug.steps);
+}
+```
+
+A blocked or undetermined dry run reports an explicit all-zero **charged** fee breakdown;
+an admissible dry run reports the simulation's resource fee plus the SDK's 100-stroop
+inclusion floor. Missing, negative, malformed, unsafe-number, or out-of-u64-range fee
+payloads are `ContractResponseError` failures and remain undetermined—never free.
+`steps[].ok` describes whether a stage completed, not whether policy approved the call;
+the separate `verdict` field is the policy answer.
+
+### Troubleshooting agent authentication
+
+`verifyAgentSignature` lets an agent runtime check that a signature belongs to the key it
+believes is registered before entering an agent loop. The helper is verify-only: it never
+accepts, signs with, stores, or derives a private key. Other SDK APIs continue to accept
+caller-created `Keypair` objects for transaction/authorization signing as before.
+
+```ts
+import { verifyAgentSignature } from "stellar-agent-guard-sdk";
+
+function signerMatches(
+  registeredPublicKey: string | Uint8Array,
+  hostSignaturePayload: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  return verifyAgentSignature(
+    registeredPublicKey,
+    hostSignaturePayload,
+    signature,
+  );
+}
+```
+
+`hostSignaturePayload` must be the exact 32-byte host digest covered by the signature;
+the helper verifies those bytes without re-hashing and is not SEP-53 message signing. A
+successful result proves only the key/payload/signature relationship—it does not validate
+network ID, invocation, nonce, expiration ledger, or transaction freshness.
+
+### Typed errors and 0.1.x migration
+
+All SDK-owned errors now share a `GuardError` base. `invoke()` remains result-oriented:
+inspect `outcome.error` with `instanceof` when `outcome.kind === "error"`.
+
+```ts
+import {
+  BroadcastError,
+  GuardError,
+  SigningError,
+  SimulationError,
+} from "stellar-agent-guard-sdk";
+
+if (outcome.kind === "error") {
+  if (outcome.error instanceof SigningError) {
+    console.error("agent signer is wrong or unavailable");
+  } else if (outcome.error instanceof SimulationError) {
+    console.error("enforcement could not be determined");
+  } else if (outcome.error instanceof BroadcastError) {
+    console.error("submission failed", outcome.error.transactionHash);
+  } else if (outcome.error instanceof GuardError) {
+    console.error(outcome.error.message);
+  }
+}
+```
+
+If ledger state changes after enforced simulation and the included transaction is then
+refused by the guard, `invoke()` still returns `kind: "blocked"` with the contract reason
+and diagnostics. That charged outcome additionally carries `transactionHash` and
+`charged: true`; it is not flattened into a technical `BroadcastError`.
+
+`GuardBlockedError` keeps its published name, message, fields, and `instanceof` behavior
+and now extends `GuardError`; `PreFlightUndeterminedError` extends `SimulationError`.
+The hierarchy, `decodePolicy`, and `verifyAgentSignature` are additive to 0.1.x callers.
+The one intentional behavior change is for callers already using `dryRun: true`: the old
+success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
+documented above. Non-dry-run callers keep their existing outcome shapes.
+
 ## API Reference
 
 ### Interception & Execution
@@ -138,8 +285,13 @@ const validate = createGuardValidator({
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)`
   - `watch(signal?: AbortSignal): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events.
-- `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
-- `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
+- `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct.
+- `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
+- `policyFromScVal(scVal)` — Alias for callers using the issue's original function name.
+- `invoke(options)` / `invoke({ ...options, dryRun: true })` — Broadcasts an admissible result, or returns the full pre-broadcast dry-run trace.
+- `verifyAgentSignature(publicKey, payload, signature): boolean` — Verify-only Ed25519 check against a strkey or raw 32-byte key.
+- `GuardError`, `SimulationError`, `SigningError`, `BroadcastError`, `PolicyDecodeError`, and `ContractResponseError` — Typed failure hierarchy.
+- `decodeCheckResult(raw): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]`
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.

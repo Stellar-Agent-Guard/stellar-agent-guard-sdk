@@ -159,3 +159,75 @@ transfers returned 6 of 6 allowed with no waits.
 This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
+
+## 2026-09-25 — policy decoder, typed failures, dry run, and auth verification
+
+This section records the validation for SDK issues #22, #23, #26, and #30. The
+commit sequence follows this repository's one-file-per-commit-and-push rule.
+
+### Public on-chain read actually executed
+
+A read-only `simulateTransaction` call was sent to Stellar testnet for the deployed
+Phase-1 contract's `policy()` function. It used the public Phase-1 admin account as
+the read source and submitted no transaction.
+
+| | |
+| --- | --- |
+| Guard | `CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7` |
+| RPC | `https://soroban-testnet.stellar.org` |
+| Return variant | `scvMap` |
+| Raw ScVal size | 460 bytes |
+| Raw ScVal SHA-256 | `e2a77a730409ff0e11ddfa327edab872cb9baca93158dfd58e726db616aa8d93` |
+| Simulation resource fee | 114056267 stroops |
+
+The unmodified base64 retval, provenance, expected Phase-1 values, byte length, and
+hash are committed in `tests/fixtures/phase1-policy-scval.json`. The unit suite parses
+that XDR with `xdr.ScVal.fromXDR`, verifies its size/hash, and decodes it to the Phase-1
+fixture policy. This is a captured network read, not a value generated solely by the
+SDK encoder.
+
+### Node 24 local gates
+
+Successful on Node `v24.21.0`:
+
+```text
+npm run typecheck   # pass
+npm run lint        # pass
+npm test            # 112 tests, 112 pass, 0 fail
+npm run build       # pass; public declarations include every new export
+npm pack --dry-run  # pass; 51 package files, no private fixture or env file
+```
+
+The 112-test suite includes, without network or secrets:
+
+- policy encode/decode round trips for default, populated Vec, `fns: null`,
+  `fns: []`, populated `fns`, i128 bounds, u64 max, and string-number normalization;
+- strict rejection of missing/duplicate/unknown/unsorted fields, i128/u64 confusion,
+  non-address values, and missing policy;
+- admissible and blocked dry runs with exact five-stage traces, diagnostics, fees, and
+  zero `sendTransaction` / `getTransaction` calls at the mocked RPC boundary;
+- a guard-auth-bearing enforced simulation whose second transaction contains the real
+  64-byte agent signature at the guard authorization entry;
+- missing, negative, malformed, unsafe-number, and out-of-range fee rejection in dry run,
+  preflight, and cost pre-check paths (all fail closed rather than pricing at zero);
+- typed probe, signing, malformed-auth, post-inclusion guard-block, and broadcast failures
+  with `instanceof`, charged/hash, diagnostic, and cause assertions; and
+- valid, wrong-key, mutated-payload, non-32-byte-payload, truncated, empty, oversized,
+  malformed-key, and SEP-53-mismatch signature checks; plus
+- public-root imports proving the complete `GuardError` subclass hierarchy.
+
+### Live enforcement-suite limitation — not claimed as passing
+
+`npm run test:integration` was attempted on Node `v24.21.0` and could not begin its
+scenarios because this checkout has no `.env.phase2` credential file. Node reported
+`ENOENT: no such file or directory, open '.env.phase2'`; 0 integration tests passed and
+19 child tests were cancelled. This is an environment limitation, not a passing live
+result, and no fresh Phase-2 dry-run transcript is claimed here.
+
+A new live integration scenario is committed in
+`tests/integration/enforcement.test.ts`. It calls `invoke({ dryRun: true })` for an
+over-cap transfer, requires the `per_tx_cap_exceeded` blocked verdict and five ordered
+stages, asserts there is no submission/hash, and re-reads both balance and rolling
+window to prove no state moved. A maintainer/CI runner holding the documented
+`.env.phase2` credentials must run it before merge to complete the live evidence that
+this local environment cannot produce.

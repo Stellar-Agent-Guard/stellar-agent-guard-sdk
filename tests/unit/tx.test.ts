@@ -11,8 +11,14 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { SorobanDataBuilder } from "@stellar/stellar-sdk";
-import { describeSimulationResources, isStaleLedgerResourceFailure } from "../../src/tx.ts";
+import { Keypair, SorobanDataBuilder } from "@stellar/stellar-sdk";
+import { ContractResponseError } from "../../src/errors.ts";
+import {
+  describeSimulationResources,
+  isStaleLedgerResourceFailure,
+  parseSimulationResourceFee,
+  verifyAgentSignature,
+} from "../../src/tx.ts";
 
 /** The real failure payload from the live testnet run, trimmed. */
 const staleLedgerFailure = {
@@ -49,6 +55,29 @@ const guardBlockFailure = {
     },
   ],
 };
+
+describe("parseSimulationResourceFee", () => {
+  it("accepts exact non-negative u64 values across SDK representations", () => {
+    assert.equal(parseSimulationResourceFee("0"), 0n);
+    assert.equal(parseSimulationResourceFee("42"), 42n);
+    assert.equal(parseSimulationResourceFee(42), 42n);
+    assert.equal(parseSimulationResourceFee(42n), 42n);
+    assert.equal(parseSimulationResourceFee((2n ** 64n - 1n).toString()), 2n ** 64n - 1n);
+  });
+
+  it("rejects missing, malformed, negative, unsafe, and out-of-range fees", () => {
+    for (const value of [undefined, null, "", "not-a-fee", "1.5", Number.MAX_SAFE_INTEGER + 1, -1, -1n, "-1", 2n ** 64n]) {
+      assert.throws(
+        () => parseSimulationResourceFee(value),
+        (error: unknown) => {
+          assert.ok(error instanceof ContractResponseError);
+          assert.equal(error.field, "minResourceFee");
+          return true;
+        },
+      );
+    }
+  });
+});
 
 describe("isStaleLedgerResourceFailure", () => {
   it("recognises the real scecExceededLimit rejection", () => {
@@ -93,6 +122,55 @@ describe("isStaleLedgerResourceFailure", () => {
       }),
       false,
     );
+  });
+});
+
+describe("verifyAgentSignature", () => {
+  const payload = Buffer.alloc(32, 7);
+  const agent = Keypair.random();
+  const signature = agent.sign(payload);
+
+  it("accepts the exact payload/signature pair for strkey and raw public keys", () => {
+    assert.equal(verifyAgentSignature(agent.publicKey(), payload, signature), true);
+    assert.equal(verifyAgentSignature(agent.rawPublicKey(), payload, signature), true);
+  });
+
+  it("rejects a signature made by a different registered key", () => {
+    assert.equal(verifyAgentSignature(Keypair.random().publicKey(), payload, signature), false);
+  });
+
+  it("rejects a one-bit payload mutation without rehashing the payload", () => {
+    const mutated = Buffer.from(payload);
+    mutated[0] = mutated[0]! ^ 1;
+    assert.equal(verifyAgentSignature(agent.publicKey(), mutated, signature), false);
+  });
+
+  it("rejects payloads that are not the 32-byte host auth digest", () => {
+    for (const size of [0, 1, 31, 33, 64]) {
+      const signature = agent.sign(Buffer.alloc(size, 9));
+      assert.equal(
+        verifyAgentSignature(agent.publicKey(), Buffer.alloc(size, 9), signature),
+        false,
+      );
+    }
+  });
+
+  it("returns false for empty, truncated, and oversized signatures", () => {
+    assert.equal(verifyAgentSignature(agent.publicKey(), payload, new Uint8Array()), false);
+    assert.equal(verifyAgentSignature(agent.publicKey(), payload, signature.subarray(0, 63)), false);
+    const oversized = Buffer.alloc(65);
+    oversized.set(signature);
+    assert.equal(verifyAgentSignature(agent.publicKey(), payload, oversized), false);
+  });
+
+  it("returns false for malformed or wrong-length raw public keys", () => {
+    assert.equal(verifyAgentSignature("not-a-stellar-key", payload, signature), false);
+    assert.equal(verifyAgentSignature(new Uint8Array(31), payload, signature), false);
+  });
+
+  it("does not accept a SEP-53 message signature for a raw host digest", () => {
+    const messageSignature = agent.signMessage("diagnostic only");
+    assert.equal(verifyAgentSignature(agent.publicKey(), payload, messageSignature), false);
   });
 });
 

@@ -16,6 +16,14 @@
  * which is the property the pre-flight interceptor is built to expose.
  */
 import { Account, Address, Keypair, Operation, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { feeBreakdown, type FeeBreakdown } from "./cost.ts";
+import {
+  BroadcastError,
+  ContractResponseError,
+  GuardError,
+  SigningError,
+  SimulationError,
+} from "./errors.ts";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "./events.ts";
 import {
   SIG_EXPIRATION_LEDGERS,
@@ -25,6 +33,7 @@ import {
   describeSimulationResources,
   describeSubmissionFailure,
   isStaleLedgerResourceFailure,
+  parseSimulationResourceFee,
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
   submitAndPoll,
@@ -38,7 +47,38 @@ export interface GuardAuthorization {
   agent: Keypair;
 }
 
+export type InvokeDryRunVerdict = "admissible" | "blocked" | "undetermined";
+
+/** One completed stage in a dry run. `ok` describes the stage, not policy approval. */
+export interface InvokePipelineStep {
+  name: "probe" | "sign" | "simulate" | "verdict" | "fees";
+  durationMs: number;
+  ok: boolean;
+}
+
+/**
+ * Full pre-broadcast result from `invoke({ dryRun: true })`.
+ *
+ * There is intentionally no submission/hash field: dry-run execution cannot
+ * enter assembly or `sendTransaction`, so exposing a transaction hash would be
+ * false evidence. `fees` is the network estimate when admissible and an
+ * explicit zero breakdown when no admissible execution was priced.
+ */
+export interface InvokeDryRunResult {
+  kind: "dry_run";
+  admissible: boolean;
+  verdict: InvokeDryRunVerdict;
+  reason: string | null;
+  detail: string | null;
+  /** Typed failure for an undetermined verdict; null for admissible/blocked. */
+  error: GuardError | null;
+  fees: FeeBreakdown;
+  diagnostics: unknown[];
+  steps: InvokePipelineStep[];
+}
+
 export type InvokeOutcome =
+  | InvokeDryRunResult
   | { kind: "allowed"; submission: SubmissionResult }
   | {
       kind: "blocked";
@@ -47,10 +87,17 @@ export type InvokeOutcome =
       detail: string;
       /** Diagnostic events emitted by the contract during enforced simulation. */
       diagnosticEvents: unknown[];
+      /** Present only when policy/account state changed and blocked after inclusion. */
+      transactionHash?: string;
+      /** True only for a post-broadcast refusal; absent for free preflight blocks. */
+      charged?: boolean;
     }
   | {
       kind: "error";
       detail: string;
+      /** Machine-readable failure; branch on this with `instanceof`. */
+      error: GuardError;
+      diagnosticEvents: unknown[];
       /**
        * Set when the failure is a stale-ledger resource declaration that a
        * re-simulation can fix. See `isStaleLedgerResourceFailure` in `tx.ts`.
@@ -68,7 +115,10 @@ export interface InvokeParams {
   guardAuth?: GuardAuthorization | null;
   /** Extra classic-account authorizers available to sign (e.g. an admin). */
   accountSigners?: Keypair[];
-  /** Skip broadcast even if the enforced simulation passes (dry run). */
+  /**
+   * Run probe → sign → enforced simulation → verdict → fee pricing, then stop.
+   * No transaction is assembled or sent, even when the call is admissible.
+   */
   dryRun?: boolean;
 }
 
@@ -160,6 +210,55 @@ function diagnosticEventsOf(response: unknown): unknown[] {
   return [];
 }
 
+function requiredAuthorizationEntries(
+  response: unknown,
+): xdr.SorobanAuthorizationEntry[] {
+  const result = (response as { result?: unknown }).result;
+  if (result !== undefined && (result === null || typeof result !== "object")) {
+    throw new ContractResponseError("simulation result is not an object", {
+      field: "result",
+    });
+  }
+  const auth = (result as { auth?: unknown } | undefined)?.auth;
+  if (auth === undefined) return [];
+  if (!Array.isArray(auth)) {
+    throw new ContractResponseError("simulation result.auth is not an array", {
+      field: "result.auth",
+    });
+  }
+  return auth.map((entry, index) => {
+    const credentials = (entry as { credentials?: unknown } | null)?.credentials;
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      credentials === null ||
+      typeof credentials !== "object" ||
+      typeof (credentials as { type?: unknown }).type !== "string"
+    ) {
+      throw new ContractResponseError(
+        `simulation result.auth[${index}] has no credential payload`,
+        { field: `result.auth[${index}].credentials` },
+      );
+    }
+    return entry as xdr.SorobanAuthorizationEntry;
+  });
+}
+
+type InvokeStepObserver = (step: InvokePipelineStep) => void;
+
+function recordStep(
+  observer: InvokeStepObserver | undefined,
+  name: InvokePipelineStep["name"],
+  startedAt: number,
+  ok: boolean,
+): void {
+  observer?.({
+    name,
+    durationMs: Math.max(0, Date.now() - startedAt),
+    ok,
+  });
+}
+
 /**
  * Run one contract call through simulate → sign → enforce, submitting only on a
  * pass. Returns a discriminated result rather than throwing, so callers can
@@ -172,15 +271,21 @@ function diagnosticEventsOf(response: unknown): unknown[] {
  * declared byte-write budget can be short and core rejects the transaction
  * *after* inclusion with `scecExceededLimit`. See `isStaleLedgerResourceFailure`
  * for why retrying is safe. Every other failure — including a guard block — is
- * returned untouched, and the retry is reported in `retried` so it is never
- * silent.
+ * returned untouched, and a retryable failure is marked with `retryable` so it
+ * is never silent.
  */
+export function invoke(params: InvokeParams & { dryRun: true }): Promise<InvokeDryRunResult>;
+export function invoke(
+  params: InvokeParams & { dryRun?: false },
+): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
+export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+  if (params.dryRun) return invokeDryRun(params);
+
   const first = await invokePipeline(params);
   if (first.kind !== "error" || first.retryable !== "stale_ledger_resource_limit") {
     return first;
   }
-  if (params.dryRun) return first;
 
   const second = await invokePipeline(params);
   // If the retry also fails, report the retry's outcome: it is the more recent
@@ -192,6 +297,74 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
     };
   }
   return second;
+}
+
+async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
+  const steps: InvokePipelineStep[] = [];
+  const enforced = await enforceCallWithTrace(params, (step) => steps.push(step));
+  const verdictStartedAt = Date.now();
+
+  let verdict: InvokeDryRunVerdict =
+    enforced.kind === "admissible" ? "admissible" : enforced.kind === "blocked" ? "blocked" : "undetermined";
+  const reason: string | null = enforced.kind === "blocked" ? enforced.reason : null;
+  let detail: string | null =
+    enforced.kind === "error" || enforced.kind === "blocked" ? enforced.detail : null;
+  let error: GuardError | null = enforced.kind === "error" ? enforced.error : null;
+  const diagnostics: unknown[] =
+    enforced.kind === "blocked" || enforced.kind === "error"
+      ? enforced.diagnosticEvents
+      : diagnosticEventsOf(enforced.simulation);
+  let resourceFee = 0n;
+  let feesOk = true;
+
+  if (enforced.kind === "admissible") {
+    try {
+      resourceFee = parseSimulationResourceFee(enforced.simulation.minResourceFee);
+    } catch (cause) {
+      verdict = "undetermined";
+      detail = `enforced simulation succeeded but returned an invalid resource fee: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`;
+      error =
+        cause instanceof GuardError
+          ? cause
+          : new SimulationError("enforced simulation returned an invalid resource fee", {
+              stage: "simulate",
+              cause,
+            });
+      feesOk = false;
+    }
+  }
+  const verdictDurationMs = Math.max(0, Date.now() - verdictStartedAt);
+
+  const feesStartedAt = Date.now();
+  const fees: FeeBreakdown =
+    verdict === "admissible"
+      ? feeBreakdown(resourceFee)
+      : {
+          resourceFeeStroops: 0n,
+          inclusionFeeStroops: 0n,
+          totalFeeStroops: 0n,
+        };
+  const feesDurationMs = Math.max(0, Date.now() - feesStartedAt);
+  // Observer is intentionally installed only for enforceCall; append the local
+  // verdict/fee stages here so all five stages are in one ordered trace.
+  steps.push(
+    { name: "verdict", durationMs: verdictDurationMs, ok: enforced.kind !== "error" },
+    { name: "fees", durationMs: feesDurationMs, ok: feesOk },
+  );
+
+  return {
+    kind: "dry_run",
+    admissible: verdict === "admissible",
+    verdict,
+    reason,
+    detail,
+    error,
+    fees,
+    diagnostics,
+    steps,
+  };
 }
 
 /**
@@ -218,7 +391,12 @@ export type EnforcementOutcome =
       detail: string;
       diagnosticEvents: unknown[];
     }
-  | { kind: "error"; detail: string };
+  | {
+      kind: "error";
+      detail: string;
+      error: GuardError;
+      diagnosticEvents: unknown[];
+    };
 
 /** One attempt: simulate → sign → enforce → submit. No retry logic lives here. */
 async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
@@ -226,34 +404,67 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
   const enforced = await enforceCall(params);
   if (enforced.kind !== "admissible") return enforced;
 
-  if (params.dryRun) {
+  // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
+  let assembled: ReturnType<typeof assembleFromSimulation>;
+  try {
+    assembled = assembleFromSimulation({
+      simulation: enforced.simulation,
+      // A fresh `Account` per build: `TransactionBuilder` advances the sequence of
+      // the instance it is handed, so sharing one across builds silently produces
+      // `tx_bad_seq`.
+      source: new Account(params.source.publicKey(), enforced.nextSeq),
+      operation: enforced.operation,
+      networkPassphrase: params.networkPassphrase,
+      guard: params.guardAuth?.guard ?? null,
+    });
+  } catch (cause) {
+    const detail = `transaction assembly failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return {
       kind: "error",
-      detail: "dry run: enforced simulation passed; submission skipped as requested",
+      detail,
+      error: new SimulationError("could not assemble transaction from enforced simulation", {
+        stage: "simulate",
+        cause,
+      }),
+      diagnosticEvents: [],
     };
   }
 
-  // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
-  const assembled = assembleFromSimulation({
-    simulation: enforced.simulation,
-    // A fresh `Account` per build: `TransactionBuilder` advances the sequence of
-    // the instance it is handed, so sharing one across builds silently produces
-    // `tx_bad_seq`.
-    source: new Account(params.source.publicKey(), enforced.nextSeq),
-    operation: enforced.operation,
-    networkPassphrase: params.networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-  });
-
-  const submission = await submitAndPoll(server, assembled.transaction, [params.source]);
+  let submission: SubmissionResult;
+  try {
+    submission = await submitAndPoll(server, assembled.transaction, [params.source]);
+  } catch (error) {
+    const typed =
+      error instanceof GuardError ? error : new BroadcastError(String(error), { cause: error });
+    return {
+      kind: "error",
+      detail: typed.message,
+      error: typed,
+      diagnosticEvents: [],
+    };
+  }
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
     // construction (sequence, fee, footprint) or a contract trap — never a
     // guardrail doing its job.
+    const detail = `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`;
+    const reason = reasonFromDiagnosticEvents(submission.failure.diagnosticEvents);
+    if (reason !== null) {
+      return {
+        kind: "blocked",
+        reason,
+        detail,
+        diagnosticEvents: submission.failure.diagnosticEvents,
+        transactionHash: submission.hash,
+        charged: true,
+      };
+    }
     return {
       kind: "error",
-      detail: `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`,
+      detail,
+      error: new BroadcastError(detail, { transactionHash: submission.hash }),
+      diagnosticEvents: submission.failure.diagnosticEvents,
       ...(isStaleLedgerResourceFailure(submission.failure)
         ? { retryable: "stale_ledger_resource_limit" as const }
         : {}),
@@ -269,32 +480,59 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
  *
  * Nothing here mutates the ledger, which is what makes a refusal free.
  */
-export async function enforceCall(params: InvokeParams): Promise<EnforcementOutcome> {
+export function enforceCall(params: InvokeParams): Promise<EnforcementOutcome> {
+  return enforceCallWithTrace(params);
+}
+
+async function enforceCallWithTrace(
+  params: InvokeParams,
+  onStep?: InvokeStepObserver,
+): Promise<EnforcementOutcome> {
   const { server, source, call, networkPassphrase } = params;
-  const operation = Operation.invokeContractFunction({
-    contract: call.contract,
-    function: call.fn,
-    args: call.args,
-  });
+  const probeStartedAt = Date.now();
+  let operation: xdr.Operation;
+  let expiration: number;
+  let nextSeq: string;
+  let freshAccount: () => Account;
+  let first: rpc.Api.SimulateTransactionResponse;
 
-  const sourceAccount = await server.getAccount(source.publicKey());
-  const latest = await server.getLatestLedger();
-  const expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
-  // `TransactionBuilder` advances the sequence of the `Account` it is handed,
-  // so every build in this function gets its own instance built from the same
-  // base sequence. Sharing one would silently build the second transaction on
-  // sequence N+2 and the network would reject it with `tx_bad_seq`.
-  const nextSeq = sourceAccount.sequenceNumber();
-  const freshAccount = () => new Account(source.publicKey(), nextSeq);
+  try {
+    operation = Operation.invokeContractFunction({
+      contract: call.contract,
+      function: call.fn,
+      args: call.args,
+    });
+    const sourceAccount = await server.getAccount(source.publicKey());
+    const latest = await server.getLatestLedger();
+    expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
+    // `TransactionBuilder` advances the sequence of the `Account` it is handed,
+    // so every build in this function gets its own instance built from the same
+    // base sequence. Sharing one would silently build the second transaction on
+    // sequence N+2 and the network would reject it with `tx_bad_seq`.
+    nextSeq = sourceAccount.sequenceNumber();
+    freshAccount = () => new Account(source.publicKey(), nextSeq);
 
-  // ── Step 1: discover required authorizations ──────────────────────────
-  const probe = buildInitialEnvelope({
-    source: freshAccount(),
-    operation,
-    networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-  });
-  const first = await server.simulateTransaction(probe);
+    // ── Step 1: discover required authorizations ──────────────────────────
+    const probe = buildInitialEnvelope({
+      source: freshAccount(),
+      operation,
+      networkPassphrase,
+      guard: params.guardAuth?.guard ?? null,
+    });
+    first = await server.simulateTransaction(probe);
+  } catch (error) {
+    recordStep(onStep, "probe", probeStartedAt, false);
+    return {
+      kind: "error",
+      detail: `probe failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: new SimulationError("authorization probe failed", {
+        stage: "probe",
+        cause: error,
+      }),
+      diagnosticEvents: [],
+    };
+  }
+
   if (rpc.Api.isSimulationError(first)) {
     // The discovery simulation runs in recording mode, so it can fail for
     // reasons that have nothing to do with policy (a contract trap, a missing
@@ -302,18 +540,45 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     // than pretending the guard made a decision.
     const error = first as rpc.Api.SimulateTransactionErrorResponse;
     const events = diagnosticEventsOf(error);
+    const detail = [
+      typeof error.error === "string" ? error.error : JSON.stringify(error.error),
+      ...summarizeDiagnosticEvents(events),
+    ].join("\n  ");
+    recordStep(onStep, "probe", probeStartedAt, false);
     return {
       kind: "error",
-      detail: [
-        typeof error.error === "string" ? error.error : JSON.stringify(error.error),
-        ...summarizeDiagnosticEvents(events),
-      ].join("\n  "),
+      detail,
+      error: new SimulationError("authorization probe simulation failed", {
+        stage: "probe",
+        diagnosticEvents: events,
+      }),
+      diagnosticEvents: events,
     };
   }
+  recordStep(onStep, "probe", probeStartedAt, true);
   const success = first as rpc.Api.SimulateTransactionSuccessResponse;
-  const requiredAuth: xdr.SorobanAuthorizationEntry[] = success.result?.auth ?? [];
 
   // ── Step 2: sign every authorization the call requires ────────────────
+  const signStartedAt = Date.now();
+  let requiredAuth: xdr.SorobanAuthorizationEntry[];
+  try {
+    requiredAuth = requiredAuthorizationEntries(success);
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    recordStep(onStep, "sign", signStartedAt, false);
+    return {
+      kind: "error",
+      detail,
+      error:
+        cause instanceof ContractResponseError
+          ? cause
+          : new SimulationError("could not read required authorization entries", {
+              stage: "probe",
+              cause,
+            }),
+      diagnosticEvents: [],
+    };
+  }
   const signedAuth: xdr.SorobanAuthorizationEntry[] = [];
   for (const entry of requiredAuth) {
     const creds = entry.credentials;
@@ -333,79 +598,166 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     ) {
       // ADDRESS_WITH_DELEGATES (CAP-71 delegation) is out of v1 scope; the
       // contract's SPEC records the same boundary.
+      const detail = `unsupported credential type in required authorization: ${creds.type}`;
+      recordStep(onStep, "sign", signStartedAt, false);
       return {
         kind: "error",
-        detail: `unsupported credential type in required authorization: ${creds.type}`,
+        detail,
+        error: new SigningError(detail),
+        diagnosticEvents: [],
       };
     }
     const addressCredentials = addressCredentialsOf(creds);
     if (!addressCredentials) {
+      const detail = `credential kind has no address payload: ${creds.type}`;
+      recordStep(onStep, "sign", signStartedAt, false);
       return {
         kind: "error",
-        detail: `credential kind has no address payload: ${creds.type}`,
+        detail,
+        error: new SigningError(detail),
+        diagnosticEvents: [],
       };
     }
     // Works for both account (G…) and contract (C…) authorizers; the guard's
     // address is a contract, which is exactly why the agent key — not the
     // transaction source — has to produce this signature.
-    const address = Address.fromScAddress(addressCredentials.address).toString();
+    let address: string;
+    try {
+      address = Address.fromScAddress(addressCredentials.address).toString();
+    } catch (cause) {
+      const detail = `required authorization has an invalid address payload: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`;
+      recordStep(onStep, "sign", signStartedAt, false);
+      return {
+        kind: "error",
+        detail,
+        error: new SigningError(detail, { cause }),
+        diagnosticEvents: [],
+      };
+    }
 
     if (params.guardAuth && address === params.guardAuth.guard) {
       // The smart account authorizes: sign with the registered agent key over
       // the guard's own preimage (fresh nonce per transaction).
-      signedAuth.push(
-        buildGuardAuthEntry({
-          guard: params.guardAuth.guard,
-          call,
-          agent: params.guardAuth.agent,
-          // The transaction's own sequence number doubles as the nonce: unique
-          // per transaction and never reused, so the host can never see a
-          // replay for this guard address.
-          nonce: BigInt(nextSeq),
-          signatureExpirationLedger: expiration,
-          networkPassphrase,
-          // Answer in the same credential kind the host asked for: the signed
-          // preimage differs between legacy ADDRESS and ADDRESS_V2, so using
-          // the wrong one produces a signature the account cannot verify.
-          credentialType: creds.type,
-        }),
-      );
+      try {
+        signedAuth.push(
+          buildGuardAuthEntry({
+            guard: params.guardAuth.guard,
+            call,
+            agent: params.guardAuth.agent,
+            // The transaction's own sequence number doubles as the nonce: unique
+            // per transaction and never reused, so the host can never see a
+            // replay for this guard address.
+            nonce: BigInt(nextSeq),
+            signatureExpirationLedger: expiration,
+            networkPassphrase,
+            // Answer in the same credential kind the host asked for: the signed
+            // preimage differs between legacy ADDRESS and ADDRESS_V2, so using
+            // the wrong one produces a signature the account cannot verify.
+            credentialType: creds.type,
+          }),
+        );
+      } catch (error) {
+        const detail = `could not sign guard authorization for ${address}: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        recordStep(onStep, "sign", signStartedAt, false);
+        return {
+          kind: "error",
+          detail,
+          error: new SigningError(detail, { address, cause: error }),
+          diagnosticEvents: [],
+        };
+      }
       continue;
     }
 
     const signer = (params.accountSigners ?? []).find((kp) => kp.publicKey() === address);
     if (!signer) {
+      const detail =
+        `call requires authorization from ${address}, but no matching key was provided ` +
+        `(supplied: ${(params.accountSigners ?? []).map((kp) => kp.publicKey()).join(", ") || "none"})`;
+      recordStep(onStep, "sign", signStartedAt, false);
       return {
         kind: "error",
-        detail:
-          `call requires authorization from ${address}, but no matching key was provided ` +
-          `(supplied: ${(params.accountSigners ?? []).map((kp) => kp.publicKey()).join(", ") || "none"})`,
+        detail,
+        error: new SigningError(detail, { address }),
+        diagnosticEvents: [],
       };
     }
-    signedAuth.push(
-      await signAccountAuthEntry({
-        entry,
-        signer,
-        signatureExpirationLedger: expiration,
-        networkPassphrase,
-      }),
-    );
+    try {
+      signedAuth.push(
+        await signAccountAuthEntry({
+          entry,
+          signer,
+          signatureExpirationLedger: expiration,
+          networkPassphrase,
+        }),
+      );
+    } catch (error) {
+      const detail = `could not sign authorization for ${address}: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
+      recordStep(onStep, "sign", signStartedAt, false);
+      return {
+        kind: "error",
+        detail,
+        error: new SigningError(detail, { address, cause: error }),
+        diagnosticEvents: [],
+      };
+    }
   }
+  recordStep(onStep, "sign", signStartedAt, true);
 
   // ── Step 3: enforced simulation — this is where policy is applied ─────
-  const signedOperation = Operation.invokeContractFunction({
-    contract: call.contract,
-    function: call.fn,
-    args: call.args,
-    auth: signedAuth,
-  });
-  const enforcingTx = buildInitialEnvelope({
-    source: freshAccount(),
-    operation: signedOperation,
-    networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-  });
-  const enforced = await server.simulateTransaction(enforcingTx);
+  const simulateStartedAt = Date.now();
+  let signedOperation: xdr.Operation;
+  let enforcingTx: ReturnType<typeof buildInitialEnvelope>;
+  try {
+    signedOperation = Operation.invokeContractFunction({
+      contract: call.contract,
+      function: call.fn,
+      args: call.args,
+      auth: signedAuth,
+    });
+    enforcingTx = buildInitialEnvelope({
+      source: freshAccount(),
+      operation: signedOperation,
+      networkPassphrase,
+      guard: params.guardAuth?.guard ?? null,
+    });
+  } catch (cause) {
+    recordStep(onStep, "simulate", simulateStartedAt, false);
+    return {
+      kind: "error",
+      detail: `could not build enforced simulation: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+      error: new SimulationError("could not build enforced simulation", {
+        stage: "simulate",
+        cause,
+      }),
+      diagnosticEvents: [],
+    };
+  }
+  let enforced: rpc.Api.SimulateTransactionResponse;
+  try {
+    enforced = await server.simulateTransaction(enforcingTx);
+  } catch (error) {
+    recordStep(onStep, "simulate", simulateStartedAt, false);
+    return {
+      kind: "error",
+      detail: `enforced simulation request failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      error: new SimulationError("enforced simulation request failed", {
+        stage: "simulate",
+        cause: error,
+      }),
+      diagnosticEvents: [],
+    };
+  }
   if (process.env["SAG_DEBUG_RESOURCES"] === "1") {
     console.log(`[debug] enforced simulation:\n${describeSimulationResources(enforced, params.guardAuth?.guard ?? null)}`);
   }
@@ -422,14 +774,22 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     // — a contract trap, an absent trustline, a host misuse — is an error, not
     // a block, and must not be reported as the guard refusing anything.
     if (reason === null) {
+      const detail = [
+        typeof error.error === "string" ? error.error : JSON.stringify(error.error),
+        ...summarizeDiagnosticEvents(events),
+      ].join("\n  ");
+      recordStep(onStep, "simulate", simulateStartedAt, false);
       return {
         kind: "error",
-        detail: [
-          typeof error.error === "string" ? error.error : JSON.stringify(error.error),
-          ...summarizeDiagnosticEvents(events),
-        ].join("\n  "),
+        detail,
+        error: new SimulationError("enforced simulation failed without a guard verdict", {
+          stage: "simulate",
+          diagnosticEvents: events,
+        }),
+        diagnosticEvents: events,
       };
     }
+    recordStep(onStep, "simulate", simulateStartedAt, true);
     return {
       kind: "blocked",
       reason,
@@ -438,6 +798,7 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     };
   }
 
+  recordStep(onStep, "simulate", simulateStartedAt, true);
   return {
     kind: "admissible",
     simulation: enforced as rpc.Api.SimulateTransactionSuccessResponse,

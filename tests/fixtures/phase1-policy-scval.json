@@ -1,0 +1,29 @@
+{
+  "description": "Raw retval ScVal from a read-only simulation of policy() on the deployed Phase-1 fixture contract.",
+  "capturedOn": "2026-09-25",
+  "network": "Test SDF Network ; September 2015",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "guard": "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+  "policyInstallTransaction": "1ddad388f914e267b282855ddc8e5478fabfb8542e7798e4402447e5341e3f9a",
+  "scvalType": "scvMap",
+  "scvalBase64": "AAAAEQAAAAEAAAALAAAADwAAAAthY3RpdmVfZnJvbQAAAAAFAAAAAAAAAAAAAAAPAAAADGFjdGl2ZV91bnRpbAAAAAUAAAAAAAAAAAAAAA8AAAATYWxsb3dfYW55X3JlY2lwaWVudAAAAAAAAAAAAAAAAA8AAAAGYXNzZXRzAAAAAAAQAAAAAQAAAAEAAAASAAAAAVcFpAb+mcvCKWQPJWEFqeA/rbNroH0aLBMDZklhkuZpAAAADwAAAA5kbXNfZ3JhY2Vfc2VjcwAAAAAABQAAAAAAAAA8AAAADwAAAAZwYXVzZWQAAAAAAAAAAAAAAAAADwAAAApwZXJfdHhfY2FwAAAAAAAKAAAAAAAAAAAAAAAAAAAD6AAAAA8AAAAJcHJvdG9jb2xzAAAAAAAAEAAAAAEAAAAAAAAADwAAAApyZWNpcGllbnRzAAAAAAAQAAAAAQAAAAEAAAASAAAAAAAAAADphZalXVEquZ0quqmEHOerCH2hjErFtWpaJKXry0mVSgAAAA8AAAAKd2luZG93X2NhcAAAAAAACgAAAAAAAAAAAAAAAAAAAJYAAAAPAAAAC3dpbmRvd19zZWNzAAAAAAUAAAAAAAAAPA==",
+  "scvalByteLength": 460,
+  "scvalSha256": "e2a77a730409ff0e11ddfa327edab872cb9baca93158dfd58e726db616aa8d93",
+  "expected": {
+    "per_tx_cap": "1000",
+    "window_secs": "60",
+    "window_cap": "150",
+    "assets": [
+      "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"
+    ],
+    "protocols": [],
+    "recipients": [
+      "GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"
+    ],
+    "allow_any_recipient": false,
+    "active_from": "0",
+    "active_until": "0",
+    "paused": false,
+    "dms_grace_secs": "60"
+  }
+}

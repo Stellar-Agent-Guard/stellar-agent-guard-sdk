@@ -20,9 +20,9 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { rpc } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "../../src/events.ts";
-import { topicSymbols } from "../../src/invoke.ts";
+import { invoke, topicSymbols } from "../../src/invoke.ts";
 import { GUARD_REASON_CODES } from "../../src/reasons.ts";
 import {
   TESTNET_PASSPHRASE,
@@ -141,6 +141,51 @@ describe("live enforcement: SAC transfer", () => {
     // A refusal must move nothing: not funds, not window accounting.
     assert.equal(await guardTokenBalance(server, config), before);
     assert.equal((await readWindowTotal(server, config)).total, windowBefore.total);
+  });
+
+  it("returns a blocked dry-run trace without broadcasting", async () => {
+    await installPolicy(server, config);
+    const balanceBefore = await guardTokenBalance(server, config);
+    const windowBefore = (await readWindowTotal(server, config)).total;
+    const overCap = config.policy.per_tx_cap + 1n;
+
+    const outcome = await invoke({
+      server,
+      source: config.keys.agent,
+      call: {
+        contract: config.token,
+        fn: "transfer",
+        args: [
+          new Address(config.guard).toScVal(),
+          new Address(config.keys.recipient.publicKey()).toScVal(),
+          nativeToScVal(overCap, { type: "i128" }),
+        ],
+      },
+      networkPassphrase: TESTNET_PASSPHRASE,
+      guardAuth: { guard: config.guard, agent: config.keys.agent },
+      dryRun: true,
+    });
+
+    assert.equal(outcome.kind, "dry_run");
+    assert.equal(outcome.admissible, false);
+    assert.equal(outcome.verdict, "blocked");
+    assert.equal(outcome.reason, "per_tx_cap_exceeded");
+    assert.deepEqual(outcome.fees, {
+      resourceFeeStroops: 0n,
+      inclusionFeeStroops: 0n,
+      totalFeeStroops: 0n,
+    });
+    assert.deepEqual(
+      outcome.steps.map((step) => step.name),
+      ["probe", "sign", "simulate", "verdict", "fees"],
+    );
+    assert.ok(!("submission" in outcome), "a dry run must never carry a submission");
+    assert.ok(!("txHash" in outcome), "a dry run must never fabricate a transaction hash");
+    assert.equal(await guardTokenBalance(server, config), balanceBefore);
+    assert.equal((await readWindowTotal(server, config)).total, windowBefore);
+    console.log(
+      `[dry-run] blocked: ${outcome.reason}; ${outcome.steps.length} stages; nothing broadcast`,
+    );
   });
 
   it("blocks a rolling-window-cap violation that only accumulation can explain", async () => {
