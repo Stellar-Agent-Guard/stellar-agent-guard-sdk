@@ -117,6 +117,9 @@ const validate = createGuardValidator({
     method: "transfer",
     args: [message.content.from, message.content.to, message.content.amount],
   }),
+  // Opt-in to memoize identical verdicts during a single decision tick.
+  // Requires calling validate.clearVerdictCache() when state/action mutates.
+  cacheVerdicts: true,
 });
 ```
 
