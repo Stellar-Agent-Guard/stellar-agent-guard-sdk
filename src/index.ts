@@ -92,6 +92,7 @@ export {
 
 export {
   GUARD_STORAGE_KEYS,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   type ContractCall,
   type SubmissionResult,

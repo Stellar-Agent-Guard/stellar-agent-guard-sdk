@@ -24,6 +24,7 @@ import {
   buildInitialEnvelope,
   describeSimulationResources,
   describeSubmissionFailure,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
@@ -52,10 +53,10 @@ export type InvokeOutcome =
       kind: "error";
       detail: string;
       /**
-       * Set when the failure is a stale-ledger resource declaration that a
-       * re-simulation can fix. See `isStaleLedgerResourceFailure` in `tx.ts`.
+       * Set when a fresh simulation and submission can fix the failure. Both
+       * values use the same one-retry policy in `invoke`.
        */
-      retryable?: "stale_ledger_resource_limit";
+      retryable?: "stale_ledger_resource_limit" | "sequence_number_collision";
     };
 
 export interface InvokeParams {
@@ -166,32 +167,116 @@ function diagnosticEventsOf(response: unknown): unknown[] {
  * decide whether a block is an expected outcome (agents hitting a guardrail) or
  * a failure worth surfacing.
  *
- * One bounded retry is built in, for a failure mode that is real and measurable
- * rather than theoretical: if the enforced simulation prices the transaction
- * against a ledger snapshot that predates the write this SDK just made, the
- * declared byte-write budget can be short and core rejects the transaction
- * *after* inclusion with `scecExceededLimit`. See `isStaleLedgerResourceFailure`
- * for why retrying is safe. Every other failure — including a guard block — is
- * returned untouched, and the retry is reported in `retried` so it is never
- * silent.
+ * One bounded retry is built in for submission failures that a fresh account
+ * snapshot can fix: stale-ledger resource declarations and sequence-number
+ * collisions. Both are classified in `tx.ts` and share the retry policy below;
+ * every other failure — including a guard block — is returned untouched.
  */
-export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
-  const first = await invokePipeline(params);
-  if (first.kind !== "error" || first.retryable !== "stale_ledger_resource_limit") {
-    return first;
-  }
-  if (params.dryRun) return first;
+type RetryableInvokeFailure =
+  | "stale_ledger_resource_limit"
+  | "sequence_number_collision";
 
-  const second = await invokePipeline(params);
-  // If the retry also fails, report the retry's outcome: it is the more recent
-  // and more informative of the two.
-  if (second.kind === "error") {
-    return {
-      ...second,
-      detail: `retried after a stale-ledger resource rejection; still failed\n${second.detail}`,
-    };
+type AccountState = {
+  queue: Promise<void>;
+  lastReservedSequence?: bigint;
+};
+
+const accountStates = new WeakMap<object, Map<string, AccountState>>();
+
+function accountStateFor(server: rpc.Server, publicKey: string): AccountState {
+  let states = accountStates.get(server);
+  if (!states) {
+    states = new Map<string, AccountState>();
+    accountStates.set(server, states);
   }
-  return second;
+  let state = states.get(publicKey);
+  if (!state) {
+    state = { queue: Promise.resolve() };
+    states.set(publicKey, state);
+  }
+  return state;
+}
+
+/**
+ * Serialize invoke() for one source account, including its submission.
+ *
+ * The queue is scoped to the RPC server object as well as the account key: the
+ * same account can have an unrelated sequence on a different network/server.
+ * A rejected task releases the queue in `finally`, so one failed transaction
+ * cannot strand all later calls.
+ */
+async function withAccountQueue<T>(
+  server: rpc.Server,
+  publicKey: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const state = accountStateFor(server, publicKey);
+  const previous = state.queue;
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.queue = current;
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (state.queue === current) state.queue = Promise.resolve();
+  }
+}
+
+/**
+ * Reserve a sequence number for an account.
+ *
+ * The RPC snapshot can remain one transaction behind immediately after a
+ * successful broadcast (and test doubles commonly do). Remember the last
+ * reservation and advance past it when the next fetch is not newer. This also
+ * makes the reservation safe when `enforceCall` is used directly, while the
+ * invoke queue still guarantees fetch → build → submit ordering.
+ */
+function reserveNextSequence(
+  server: rpc.Server,
+  publicKey: string,
+  fetchedSequence: string,
+): string {
+  const state = accountStateFor(server, publicKey);
+  const fetched = BigInt(fetchedSequence);
+  const next =
+    state.lastReservedSequence !== undefined && state.lastReservedSequence >= fetched
+      ? state.lastReservedSequence + 1n
+      : fetched;
+  state.lastReservedSequence = next;
+  return next.toString();
+}
+
+/** The shared bounded retry policy for submission-time failures. */
+const MAX_SUBMISSION_RETRIES = 1;
+
+function retryDescription(retryable: RetryableInvokeFailure): string {
+  return retryable === "stale_ledger_resource_limit"
+    ? "a stale-ledger resource rejection"
+    : "a sequence-number collision";
+}
+
+export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+  return withAccountQueue(params.server, params.source.publicKey(), async () => {
+    let outcome = await invokePipeline(params);
+    if (outcome.kind !== "error" || params.dryRun) return outcome;
+    const firstRetryable: RetryableInvokeFailure | undefined = outcome.retryable;
+    if (firstRetryable === undefined) return outcome;
+
+    for (let attempt = 0; attempt < MAX_SUBMISSION_RETRIES; attempt++) {
+      const previousRetryable = firstRetryable;
+      outcome = await invokePipeline(params);
+      if (outcome.kind !== "error") return outcome;
+      outcome = {
+        ...outcome,
+        detail: `retried after ${retryDescription(previousRetryable)}; still failed\n${outcome.detail}`,
+      };
+    }
+    return outcome;
+  });
 }
 
 /**
@@ -256,7 +341,9 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
       detail: `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`,
       ...(isStaleLedgerResourceFailure(submission.failure)
         ? { retryable: "stale_ledger_resource_limit" as const }
-        : {}),
+        : isSequenceNumberFailure(submission.failure)
+          ? { retryable: "sequence_number_collision" as const }
+          : {}),
     };
   }
   return { kind: "allowed", submission };
@@ -282,9 +369,9 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
   const expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
   // `TransactionBuilder` advances the sequence of the `Account` it is handed,
   // so every build in this function gets its own instance built from the same
-  // base sequence. Sharing one would silently build the second transaction on
-  // sequence N+2 and the network would reject it with `tx_bad_seq`.
-  const nextSeq = sourceAccount.sequenceNumber();
+  // base sequence. The per-account reservation also advances past an RPC
+  // snapshot that has not yet observed the preceding submission.
+  const nextSeq = reserveNextSequence(server, source.publicKey(), sourceAccount.sequenceNumber());
   const freshAccount = () => new Account(source.publicKey(), nextSeq);
 
   // ── Step 1: discover required authorizations ──────────────────────────

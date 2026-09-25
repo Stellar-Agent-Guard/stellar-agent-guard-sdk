@@ -504,6 +504,26 @@ export function isStaleLedgerResourceFailure(
   );
 }
 
+/**
+ * Was a submission rejected because the source account sequence was stale?
+ *
+ * `tx_bad_seq` is the canonical code, but RPC error payloads are not perfectly
+ * consistent across SDK and server versions. Keep the matching deliberately
+ * narrow so ordinary transaction failures are never retried with a new sequence.
+ */
+export function isSequenceNumberFailure(
+  failure: NonNullable<SubmissionResult["failure"]>,
+): boolean {
+  const haystack = [
+    failure.message,
+    failure.resultCode ?? "",
+    ...failure.diagnosticEvents.map((event) => JSON.stringify(event)),
+  ].join("\n");
+  return /tx_bad_seq|bad[_ ]seq|sequence (?:number )?(?:is )?(?:too (?:low|high|small|large)|mismatch|does not match|already (?:been )?(?:used|spent))/i.test(
+    haystack,
+  );
+}
+
 /** Full, copy-pasteable rendering of a failed submission, for evidence. */
 export function describeSubmissionFailure(failure: NonNullable<SubmissionResult["failure"]>): string {
   const lines = [`resultCode: ${failure.resultCode ?? "unknown"}`, `message: ${failure.message}`];

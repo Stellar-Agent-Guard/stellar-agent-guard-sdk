@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SorobanDataBuilder } from "@stellar/stellar-sdk";
-import { describeSimulationResources, isStaleLedgerResourceFailure } from "../../src/tx.ts";
+import { describeSimulationResources, isSequenceNumberFailure, isStaleLedgerResourceFailure } from "../../src/tx.ts";
 
 /** The real failure payload from the live testnet run, trimmed. */
 const staleLedgerFailure = {
@@ -49,6 +49,44 @@ const guardBlockFailure = {
     },
   ],
 };
+
+describe("isSequenceNumberFailure", () => {
+  it("recognises tx_bad_seq from the RPC error result", () => {
+    assert.equal(
+      isSequenceNumberFailure({
+        resultXdr: null,
+        resultCode: null,
+        message: JSON.stringify({ code: "tx_bad_seq" }),
+        diagnosticEvents: [],
+      }),
+      true,
+    );
+  });
+
+  it("recognises a prose sequence mismatch", () => {
+    assert.equal(
+      isSequenceNumberFailure({
+        resultXdr: null,
+        resultCode: null,
+        message: "transaction sequence number is too low",
+        diagnosticEvents: [],
+      }),
+      true,
+    );
+  });
+
+  it("does not classify an unrelated submission failure as a sequence error", () => {
+    assert.equal(
+      isSequenceNumberFailure({
+        resultXdr: null,
+        resultCode: "tx_insufficient_fee",
+        message: "insufficient fee",
+        diagnosticEvents: [],
+      }),
+      false,
+    );
+  });
+});
 
 describe("isStaleLedgerResourceFailure", () => {
   it("recognises the real scecExceededLimit rejection", () => {
