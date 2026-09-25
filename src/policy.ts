@@ -35,6 +35,9 @@ export interface PolicyConfig {
   dms_grace_secs: bigint;
 }
 
+/** Type alias for PolicyConfig matching contract documentation and external vocabulary. */
+export type GuardPolicy = PolicyConfig;
+
 export interface GuardStatus {
   has_policy: boolean;
   admin_frozen: boolean;

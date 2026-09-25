@@ -91,6 +91,37 @@ if (decision.kind === "admissible") {
 }
 ```
 
+### Cost Pre-Checking with Policy Context
+
+```ts
+import { CostPreChecker } from "stellar-agent-guard-sdk";
+
+const checker = new CostPreChecker({
+  interceptor,
+  maxFeeStroops: 50_000n,
+  policySource: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44", // opt-in policy source
+});
+
+const result = await checker.check({
+  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  fn: "transfer",
+  args: [/* from, to, amount */],
+});
+
+console.log("Cost verdict:", result.kind); // within_budget | over_budget | blocked | undetermined
+console.log("Policy context:", result.policyContext);
+```
+
+#### Policy Context Semantics
+
+When an opt-in `policySource` (contract address or `GuardPolicy`/`PolicyConfig`) is configured in options, `CostPreCheckResult` exposes additive `policyContext`:
+
+- `perTxCapOk`: Whether the transaction fits within the policy's per-transaction cap (`true` if within cap, `false` if `per_tx_cap_exceeded`, or `null` if not determinable).
+- `windowRemainingEstimate`: Estimated remaining budget in the current rolling window. **Always `null` when the contract does not expose sufficient window state.**
+  > `null` means "not available / cannot be determined from the current contract state", not "zero remaining budget". The SDK never fabricates a zero budget.
+- `reason`: The contract's policy block reason (e.g. `"window_cap_exceeded"` or `"per_tx_cap_exceeded"`), or `null` when allowed.
+- When no policy source is configured in options, `policyContext` is `null` (no policy call is made).
+
 ### Framework Middleware (LangChain & ElizaOS)
 
 ```ts
@@ -129,8 +160,8 @@ const validate = createGuardValidator({
   - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
 - `CostPreChecker`
-  - `constructor(options: CostPreCheckerOptions)`
-  - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
+  - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
+  - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
 
 ### Telemetry & Helpers
