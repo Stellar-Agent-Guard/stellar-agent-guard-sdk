@@ -127,12 +127,83 @@ function dataOf(raw: unknown): unknown {
   return body?.v0?.data ?? body?.value?.v0?.data;
 }
 
+/**
+ * Durable storage for a `watch()` cursor, so a restarted listener resumes where
+ * the previous one stopped instead of silently re-reading history or skipping a
+ * gap.
+ *
+ * The interface is intentionally two methods wide: `load()` for the cursor the
+ * previous process persisted, `save()` for the cursor each poll produces. A
+ * caller wires it to anything that outlives the process — a file, Redis,
+ * SQLite, a database row — by implementing these two calls over that store:
+ *
+ * ```ts
+ * import { readFile, writeFile } from "node:fs/promises";
+ *
+ * const fileCursorStore: CursorStore = {
+ *   async load() {
+ *     try {
+ *       return await readFile("guard-cursor.txt", "utf8");
+ *     } catch {
+ *       return null; // first run: nothing persisted yet
+ *     }
+ *   },
+ *   async save(cursor) {
+ *     await writeFile("guard-cursor.txt", cursor, "utf8");
+ *   },
+ * };
+ * ```
+ *
+ * Delivery is **at-least-once**: events committed between the last `save()` and
+ * the crash are re-fetched and re-emitted on resume (and `save()` runs before
+ * the page is yielded, so a consumer that dies *after* processing but *before*
+ * the next save can also see a page twice within one process). Deduplicate by a
+ * stable event identity — for ledger events the `(ledger, transactionHash)`
+ * pair is the available fallback until a dedicated stable id ships — and never
+ * assume a cursor in the store has already been fully drained.
+ */
+export interface CursorStore {
+  /**
+   * Return the cursor to resume from, or `null` when nothing has been
+   * persisted yet (first run). Consulted once, when `watch()` starts.
+   */
+  load(): Promise<string | null>;
+  /** Persist the cursor advanced by one poll. Called once per poll. */
+  save(cursor: string): Promise<void>;
+}
+
+/**
+ * The default `CursorStore`: process memory.
+ *
+ * It keeps `watch()`'s existing behaviour when no `cursorStore` is configured —
+ * the cursor lives exactly as long as the listener instance, so a restart starts
+ * from the default position again. It is *not* durable; passing nothing and
+ * expecting resume-after-restart is the bug this interface exists to prevent.
+ */
+export class InMemoryCursorStore implements CursorStore {
+  private cursor: string | null = null;
+
+  async load(): Promise<string | null> {
+    return this.cursor;
+  }
+
+  async save(cursor: string): Promise<void> {
+    this.cursor = cursor;
+  }
+}
+
 export interface GuardTelemetryConfig {
   server: rpc.Server;
   /** The guard contract to follow. */
   guard: string;
   /** RPC URL, only used for error messages. */
   rpcUrl?: string;
+  /**
+   * Where `watch()` persists its cursor. Default: `InMemoryCursorStore`, i.e.
+   * no resume across process restarts. Pass a store backed by something that
+   * outlives the process (file, Redis, …) for durable resume.
+   */
+  cursorStore?: CursorStore;
 }
 
 export interface PollResult {
@@ -144,9 +215,17 @@ export interface PollResult {
 
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
+  /** Never null: the constructor substitutes the in-memory default. */
+  private readonly cursorStore: CursorStore;
 
   constructor(config: GuardTelemetryConfig) {
     this.config = config;
+    this.cursorStore = config.cursorStore ?? new InMemoryCursorStore();
+  }
+
+  /** The store this listener persists its cursor to. Exposed for inspection. */
+  get activeCursorStore(): CursorStore {
+    return this.cursorStore;
   }
 
   /**
@@ -206,10 +285,19 @@ export class GuardTelemetryListener {
     let cursor: string | undefined;
     let startLedger = params.startLedger;
 
+    // An explicit `startLedger` is the caller pinning a position; only when it
+    // is absent does the persisted cursor get a say. A stored cursor then wins
+    // over the default head position, because resume-after-restart is exactly
+    // the case where "the default" re-reads history or skips a gap.
     if (startLedger === undefined) {
-      const latest = await this.config.server.getLatestLedger();
-      startLedger = Math.max(1, latest.sequence - 1);
-      cursor = undefined;
+      const stored = await this.cursorStore.load();
+      if (stored !== null) {
+        cursor = stored;
+      } else {
+        const latest = await this.config.server.getLatestLedger();
+        startLedger = Math.max(1, latest.sequence - 1);
+        cursor = undefined;
+      }
     }
 
     while (!params.signal?.aborted) {
@@ -222,6 +310,10 @@ export class GuardTelemetryListener {
       // Once a cursor is held, the ledger range must not be sent again — the RPC
       // rejects a request that mixes the two modes.
       startLedger = undefined;
+      // Persist before yielding: a consumer that stops after this page (crash,
+      // abort, throw) resumes from this page's cursor and at worst re-processes
+      // it — at-least-once — rather than losing everything after it.
+      await this.cursorStore.save(page.cursor);
       if (page.events.length > 0) yield page.events;
       if (params.signal?.aborted) return;
       await new Promise((resolve) => setTimeout(resolve, interval));
