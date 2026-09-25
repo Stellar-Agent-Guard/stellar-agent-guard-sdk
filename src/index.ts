@@ -81,10 +81,12 @@ export {
 
 export {
   GuardTelemetryListener,
+  InMemoryCursorStore,
   describeGuardEvent,
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
+  type CursorStore,
   type GuardEvent,
   type GuardEventKind,
   type GuardTelemetryConfig,
