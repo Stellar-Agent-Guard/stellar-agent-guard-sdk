@@ -43,7 +43,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 - **Framework adapters**:
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
-- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes. With a `cursorStore` (file, Redis, any two-method adapter), a restarted monitor resumes from its saved cursor instead of re-reading history or skipping a gap — delivery is at-least-once, dedupe by event identity.
 
 ## Quick Start
 
@@ -136,8 +136,8 @@ const validate = createGuardValidator({
 ### Telemetry & Helpers
 
 - `GuardTelemetryListener`
-  - `constructor(options: GuardTelemetryListenerOptions)`
-  - `watch(signal?: AbortSignal): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events.
+  - `constructor(options: GuardTelemetryListenerOptions)` — pass `cursorStore` (`{ load(): Promise<string | null>, save(cursor): Promise<void> }`, default in-memory) so `watch()` resumes where a previous process left off.
+  - `watch(params?): AsyncIterable<GuardEvent[]>` — Tails on-chain and uncommitted events, persisting the cursor once per poll. At-least-once delivery; dedupe by event identity.
 - `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
 - `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
