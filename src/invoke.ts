@@ -38,6 +38,70 @@ export interface GuardAuthorization {
   agent: Keypair;
 }
 
+/**
+ * Machine-readable causes attached to non-policy `invoke()` failures.
+ *
+ * `undetermined` deliberately covers errors for which the guard did not make a
+ * decision (a bad input, an RPC/host failure, or an unsupported auth shape).
+ * It is the same fail-closed category used by pre-flight decisions; it must not
+ * be confused with `blocked`, which means the guard actually refused the call.
+ */
+export const INVOKE_ERROR_CAUSES = {
+  undetermined: "undetermined",
+  staleLedgerResourceLimit: "stale_ledger_resource_limit",
+} as const;
+
+export type InvokeErrorCause =
+  (typeof INVOKE_ERROR_CAUSES)[keyof typeof INVOKE_ERROR_CAUSES];
+
+/** The error arm returned by one invocation attempt. */
+export interface InvokeErrorOutcome {
+  kind: "error";
+  detail: string;
+  /** Coarse cause; absent for a dry run because no failure was classified. */
+  cause?: InvokeErrorCause;
+  /**
+   * Set when the failure is a stale-ledger resource declaration that a
+   * re-simulation can fix. See `isStaleLedgerResourceFailure` in `tx.ts`.
+   */
+  retryable?: "stale_ledger_resource_limit";
+}
+
+/**
+ * Raised/returned when the bounded stale-ledger retry budget is exhausted.
+ *
+ * `invoke()` returns this object as its `kind: "error"` outcome rather than
+ * throwing, preserving the result-oriented API. It is still a real `Error`, so
+ * callers can use `instanceof`, retain it for diagnostics, or rethrow it.
+ */
+export class InvokeRetryError extends Error {
+  readonly kind = "error" as const;
+  readonly attempts: number;
+  override readonly cause: InvokeErrorCause;
+  readonly lastCause: InvokeErrorCause;
+  readonly detail: string;
+  readonly lastOutcome: InvokeErrorOutcome;
+  /** An exhausted attempt is no longer itself retryable. */
+  readonly retryable?: undefined;
+
+  constructor(params: { attempts: number; lastOutcome: InvokeErrorOutcome }) {
+    const lastCause =
+      params.lastOutcome.retryable === "stale_ledger_resource_limit"
+        ? INVOKE_ERROR_CAUSES.staleLedgerResourceLimit
+        : (params.lastOutcome.cause ?? INVOKE_ERROR_CAUSES.undetermined);
+    super(
+      `stellar-agent-guard invoke retry budget exhausted after ${params.attempts} attempt(s) ` +
+        `(last cause: ${lastCause})\n${params.lastOutcome.detail}`,
+    );
+    this.name = "InvokeRetryError";
+    this.attempts = params.attempts;
+    this.cause = lastCause;
+    this.lastCause = lastCause;
+    this.detail = params.lastOutcome.detail;
+    this.lastOutcome = params.lastOutcome;
+  }
+}
+
 export type InvokeOutcome =
   | { kind: "allowed"; submission: SubmissionResult }
   | {
@@ -48,15 +112,42 @@ export type InvokeOutcome =
       /** Diagnostic events emitted by the contract during enforced simulation. */
       diagnosticEvents: unknown[];
     }
-  | {
-      kind: "error";
-      detail: string;
-      /**
-       * Set when the failure is a stale-ledger resource declaration that a
-       * re-simulation can fix. See `isStaleLedgerResourceFailure` in `tx.ts`.
-       */
-      retryable?: "stale_ledger_resource_limit";
-    };
+  | InvokeErrorOutcome
+  | InvokeRetryError;
+
+/** Defaults for the bounded stale-ledger retry policy. */
+export const DEFAULT_INVOKE_RETRY_OPTIONS = {
+  /** Total attempts, including the first attempt. */
+  maxAttempts: 3,
+  /** Upper bound used for the first full-jitter delay. */
+  baseDelayMs: 100,
+  /** Upper bound for every later full-jitter delay. */
+  maxDelayMs: 2_000,
+} as const;
+
+export interface InvokeRetryOptions {
+  /** Total attempts, including the first attempt. Default: 3. */
+  maxAttempts?: number;
+  /** Base full-jitter window in milliseconds. Default: 100. */
+  baseDelayMs?: number;
+  /** Maximum full-jitter window in milliseconds. Default: 2,000. */
+  maxDelayMs?: number;
+  /** RNG used for full jitter; it must return a value in [0, 1). */
+  random?: () => number;
+  /** Alias for `random`, useful when describing the jitter strategy. */
+  jitter?: () => number;
+  /** Sleep implementation, injectable for deterministic tests/custom clocks. */
+  sleep?: (delayMs: number) => Promise<void>;
+  /** Compatibility alias for `baseDelayMs`. */
+  initialDelayMs?: number;
+}
+
+export interface InvokePollOptions {
+  /** Number of ledger-status polls after a pending broadcast. */
+  pollAttempts?: number;
+  /** Delay between ledger-status polls. */
+  pollIntervalMs?: number;
+}
 
 export interface InvokeParams {
   server: rpc.Server;
@@ -70,7 +161,14 @@ export interface InvokeParams {
   accountSigners?: Keypair[];
   /** Skip broadcast even if the enforced simulation passes (dry run). */
   dryRun?: boolean;
+  /** Configure bounded full-jitter retries for stale ledger resource limits. */
+  retry?: InvokeRetryOptions;
+  /** Configure post-broadcast ledger-status polling. */
+  pollOptions?: InvokePollOptions;
 }
+
+/** Alias matching the terminology used by the README API reference. */
+export type InvokeOptions = InvokeParams;
 
 /**
  * Topic symbols of a contract event, tolerating the several shapes RPC and the
@@ -160,38 +258,95 @@ function diagnosticEventsOf(response: unknown): unknown[] {
   return [];
 }
 
+interface ResolvedRetryOptions {
+  maxAttempts: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+  random: () => number;
+  sleep: (delayMs: number) => Promise<void>;
+}
+
+function defaultSleep(delayMs: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, delayMs));
+}
+
+function resolveRetryOptions(options: InvokeRetryOptions | undefined): ResolvedRetryOptions {
+  const maxAttempts = options?.maxAttempts ?? DEFAULT_INVOKE_RETRY_OPTIONS.maxAttempts;
+  const baseDelayMs =
+    options?.baseDelayMs ??
+    options?.initialDelayMs ??
+    DEFAULT_INVOKE_RETRY_OPTIONS.baseDelayMs;
+  const maxDelayMs = options?.maxDelayMs ?? DEFAULT_INVOKE_RETRY_OPTIONS.maxDelayMs;
+
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+    throw new RangeError(`retry.maxAttempts must be an integer >= 1 (received ${maxAttempts})`);
+  }
+  if (!Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
+    throw new RangeError(`retry.baseDelayMs must be finite and >= 0 (received ${baseDelayMs})`);
+  }
+  if (!Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+    throw new RangeError(`retry.maxDelayMs must be finite and >= 0 (received ${maxDelayMs})`);
+  }
+
+  return {
+    maxAttempts,
+    baseDelayMs,
+    maxDelayMs,
+    random: options?.random ?? options?.jitter ?? Math.random,
+    sleep: options?.sleep ?? defaultSleep,
+  };
+}
+
+/**
+ * Full-jitter delay for the retry after `attempt` has failed.
+ *
+ * The exponential value is only the window: multiplying it by an independent
+ * random sample spreads agents that observed the same ledger pressure instead
+ * of releasing them in a synchronized thundering herd.
+ */
+function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number {
+  const window = Math.min(
+    options.maxDelayMs,
+    options.baseDelayMs * 2 ** Math.max(0, attempt - 1),
+  );
+  const sample = options.random();
+  // A custom RNG should return [0, 1), but clamp a bad edge value rather than
+  // allowing a production retry policy to be disabled by an out-of-range sample.
+  const normalized = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1) : 0;
+  return Math.floor(window * normalized);
+}
+
 /**
  * Run one contract call through simulate → sign → enforce, submitting only on a
  * pass. Returns a discriminated result rather than throwing, so callers can
  * decide whether a block is an expected outcome (agents hitting a guardrail) or
  * a failure worth surfacing.
  *
- * One bounded retry is built in, for a failure mode that is real and measurable
- * rather than theoretical: if the enforced simulation prices the transaction
- * against a ledger snapshot that predates the write this SDK just made, the
- * declared byte-write budget can be short and core rejects the transaction
- * *after* inclusion with `scecExceededLimit`. See `isStaleLedgerResourceFailure`
- * for why retrying is safe. Every other failure — including a guard block — is
- * returned untouched, and the retry is reported in `retried` so it is never
- * silent.
+ * Stale ledger resource failures are retried with bounded full-jitter backoff.
+ * Every attempt starts a fresh invocation pipeline, including discovery and
+ * enforced simulation, so the resource declaration is always priced against
+ * current ledger state. Non-retryable outcomes return immediately and never
+ * sleep. When the budget is exhausted, the returned `InvokeRetryError` carries
+ * the attempt count and the last retry cause.
  */
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
-  const first = await invokePipeline(params);
-  if (first.kind !== "error" || first.retryable !== "stale_ledger_resource_limit") {
-    return first;
-  }
-  if (params.dryRun) return first;
+  const retry = resolveRetryOptions(params.retry);
+  let attempts = 0;
 
-  const second = await invokePipeline(params);
-  // If the retry also fails, report the retry's outcome: it is the more recent
-  // and more informative of the two.
-  if (second.kind === "error") {
-    return {
-      ...second,
-      detail: `retried after a stale-ledger resource rejection; still failed\n${second.detail}`,
-    };
+  while (true) {
+    attempts += 1;
+    const outcome = await invokePipeline(params);
+
+    if (outcome.kind !== "error" || outcome.retryable !== "stale_ledger_resource_limit") {
+      return outcome;
+    }
+    if (params.dryRun) return outcome;
+    if (attempts >= retry.maxAttempts) {
+      return new InvokeRetryError({ attempts, lastOutcome: outcome });
+    }
+
+    await retry.sleep(fullJitterDelay(attempts, retry));
   }
-  return second;
 }
 
 /**
@@ -224,6 +379,12 @@ export type EnforcementOutcome =
 async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
   const { server } = params;
   const enforced = await enforceCall(params);
+  if (enforced.kind === "error") {
+    return {
+      ...enforced,
+      cause: INVOKE_ERROR_CAUSES.undetermined,
+    };
+  }
   if (enforced.kind !== "admissible") return enforced;
 
   if (params.dryRun) {
@@ -245,18 +406,25 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
     guard: params.guardAuth?.guard ?? null,
   });
 
-  const submission = await submitAndPoll(server, assembled.transaction, [params.source]);
+  const submission = await submitAndPoll(
+    server,
+    assembled.transaction,
+    [params.source],
+    params.pollOptions,
+  );
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
     // construction (sequence, fee, footprint) or a contract trap — never a
     // guardrail doing its job.
+    const staleLedger = isStaleLedgerResourceFailure(submission.failure);
     return {
       kind: "error",
       detail: `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`,
-      ...(isStaleLedgerResourceFailure(submission.failure)
-        ? { retryable: "stale_ledger_resource_limit" as const }
-        : {}),
+      cause: staleLedger
+        ? INVOKE_ERROR_CAUSES.staleLedgerResourceLimit
+        : INVOKE_ERROR_CAUSES.undetermined,
+      ...(staleLedger ? { retryable: "stale_ledger_resource_limit" as const } : {}),
     };
   }
   return { kind: "allowed", submission };
