@@ -103,12 +103,25 @@ import {
 const middleware = createLangChainGuardMiddleware({
   interceptor,
   toContractCall: (request) => ({
-    contractId: request.args.token,
-    method: "transfer",
-    args: [request.args.from, request.args.to, request.args.amount],
+    contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+    fn: "transfer",
+    args: [/* from, to, amount */],
   }),
 });
+```
 
+When a tool call violates spending policy, `wrapToolCall` halts before the tool body runs and returns a structured, model-readable `ToolMessage` (`status: "error"`):
+
+```text
+stellar-agent-guard blocked 'send_payment': recipient_not_allowed — The transfer recipient is not in the policy's recipients allowlist.
+Remediation (operator): recipient not in policy allowlist — operator must add it via dashboard
+Guidance: halted by spending policy; do not retry — escalate to operator.
+No transaction was submitted, so nothing was spent and no fee was paid.
+```
+
+**Anti-Prompt-Injection Posture:** To prevent policy evasion, model guidance strictly directs the agent to halt (`"do not retry — escalate to operator"`). The message never suggests cycling recipients, splitting transfers, or varying parameters; remediation is scoped strictly to the human operator via the dashboard.
+
+```ts
 // ElizaOS: validate action before execution
 const validate = createGuardValidator({
   interceptor,
