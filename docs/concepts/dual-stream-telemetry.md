@@ -39,5 +39,5 @@ Delivery is then **at-least-once**: events committed between the last `save()`
 and the crash are re-fetched and re-emitted after the restart. Deduplicate by a
 stable event identity — for committed events the `(ledger, transactionHash)`
 pair is the fallback; a dedicated stable id (needed for diagnostic events,
-which carry neither) is tracked separately. Full details, including a file
+which carry neither) is tracked in #33. Full details, including a file
 store example: [GuardTelemetryListener API](../api/telemetry-listener.md).
