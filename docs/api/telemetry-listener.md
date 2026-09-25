@@ -102,5 +102,5 @@ verbatim, do not parse it.
 **Dedupe guidance:** consumers must deduplicate by a stable event identity.
 For committed ledger events the `(ledger, transactionHash)` pair is the
 available fallback today; a dedicated stable id (covering diagnostic events,
-which carry neither) is tracked in the stable-id issue. Never assume a cursor
-in the store has already been fully drained.
+which carry neither) is tracked in #33. Never assume a cursor in the store has
+already been fully drained.
