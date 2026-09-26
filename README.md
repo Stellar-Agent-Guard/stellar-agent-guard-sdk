@@ -222,7 +222,7 @@ formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 - `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
 - `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
-- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]`
+- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
 - `isDeadManFrozen(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): boolean`
 - `deadManRemaining(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): number | null`
@@ -286,6 +286,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 ## Honest limitations
 
 - **Enforcement boundary for arbitrary calls**: Full amount/recipient limits are native to SAC token transfers. Arbitrary Soroban contract calls are enforced via protocol/function allowlists, active window, pause, and dead-man switches; per-call amount limits are not available generically from host auth contexts (tracked as v2).
+- **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 

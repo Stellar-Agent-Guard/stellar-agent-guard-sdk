@@ -160,6 +160,29 @@ This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
 
+## Addendum — 2026-09-24 (maintenance PR: #33, #29, #46)
+
+This PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`,
+`src/policy.ts`, `src/preflight.ts`), so per `CONTRIBUTING.md` it is recorded
+here. **It is not accompanied by a fresh live-testnet run**: the contributor
+environment has no funded Phase 2 testnet credentials, so the live suite was
+not re-executed. What that means for review, stated plainly:
+
+- **The enforcement *behaviour* on-chain is unchanged by this diff.** The four
+  files were touched only as follows: `src/tx.ts` extracts an `AgentSigner`
+  interface for digest signing (the single-`Keypair` path is identical);
+  `src/invoke.ts`/`src/preflight.ts` widen a config *type* (`AgentSigner |
+  Keypair`) and `await` the now-async entry builder; `src/policy.ts` documents
+  and guards the `LastHeartbeat = 0` ("never") case in the dead-man helpers.
+  The authorization preimage, nonce policy, credential types, policy encoding,
+  footprint assembly and block classification are all untouched, so the five
+  scenarios above must still hold — but that is an argument, not a measurement.
+- **A maintainer with `.env.phase2` should run `npm run test:integration` against
+  this branch before merge** and replace this addendum with the fresh run
+  output, per the rule the gate exists to enforce. The CI gate only verifies
+  that this file was touched; it cannot verify the numbers, and this addendum
+  does not pretend otherwise.
+
 ## Pre-flight Input Validation Verification
 
 Pre-flight interceptor input validation checks execute prior to RPC simulation dispatch:
