@@ -28,6 +28,8 @@ import {
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
   submitAndPoll,
+  type AdminSigner,
+  type AgentSigner,
   type ContractCall,
   type SubmissionResult,
 } from "./tx.ts";
@@ -35,7 +37,7 @@ import {
 /** How the guard's authorization is produced for a call that needs it. */
 export interface GuardAuthorization {
   guard: string;
-  agent: Keypair;
+  agent: Keypair | AgentSigner;
 }
 
 export type InvokeOutcome =
@@ -61,15 +63,17 @@ export type InvokeOutcome =
 export interface InvokeParams {
   server: rpc.Server;
   /** Classic account that pays the fee and supplies the sequence number. */
-  source: Keypair;
+  source: Keypair | AdminSigner;
   call: ContractCall;
   networkPassphrase: string;
   /** Present when the call requires the smart account's own authorization. */
-  guardAuth?: GuardAuthorization | null;
+  guardAuth?: GuardAuthorization | null | undefined;
   /** Extra classic-account authorizers available to sign (e.g. an admin). */
-  accountSigners?: Keypair[];
+  accountSigners?: Array<Keypair | AdminSigner> | undefined;
   /** Skip broadcast even if the enforced simulation passes (dry run). */
-  dryRun?: boolean;
+  dryRun?: boolean | undefined;
+  pollAttempts?: number | undefined;
+  pollIntervalMs?: number | undefined;
 }
 
 /**
@@ -234,18 +238,22 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
   }
 
   // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
+  const sourcePubKey = await params.source.publicKey();
   const assembled = assembleFromSimulation({
     simulation: enforced.simulation,
     // A fresh `Account` per build: `TransactionBuilder` advances the sequence of
     // the instance it is handed, so sharing one across builds silently produces
     // `tx_bad_seq`.
-    source: new Account(params.source.publicKey(), enforced.nextSeq),
+    source: new Account(sourcePubKey, enforced.nextSeq),
     operation: enforced.operation,
     networkPassphrase: params.networkPassphrase,
     guard: params.guardAuth?.guard ?? null,
   });
 
-  const submission = await submitAndPoll(server, assembled.transaction, [params.source]);
+  const submission = await submitAndPoll(server, assembled.transaction, [params.source], {
+    ...(params.pollAttempts !== undefined ? { pollAttempts: params.pollAttempts } : {}),
+    ...(params.pollIntervalMs !== undefined ? { pollIntervalMs: params.pollIntervalMs } : {}),
+  });
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
@@ -277,7 +285,8 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     args: call.args,
   });
 
-  const sourceAccount = await server.getAccount(source.publicKey());
+  const sourcePubKey = await source.publicKey();
+  const sourceAccount = await server.getAccount(sourcePubKey);
   const latest = await server.getLatestLedger();
   const expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
   // `TransactionBuilder` advances the sequence of the `Account` it is handed,
@@ -285,7 +294,7 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
   // base sequence. Sharing one would silently build the second transaction on
   // sequence N+2 and the network would reject it with `tx_bad_seq`.
   const nextSeq = sourceAccount.sequenceNumber();
-  const freshAccount = () => new Account(source.publicKey(), nextSeq);
+  const freshAccount = () => new Account(sourcePubKey, nextSeq);
 
   // ── Step 1: discover required authorizations ──────────────────────────
   const probe = buildInitialEnvelope({
@@ -315,6 +324,13 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
 
   // ── Step 2: sign every authorization the call requires ────────────────
   const signedAuth: xdr.SorobanAuthorizationEntry[] = [];
+  const resolvedSigners = await Promise.all(
+    (params.accountSigners ?? []).map(async (s) => ({
+      signer: s,
+      publicKey: await s.publicKey(),
+    })),
+  );
+
   for (const entry of requiredAuth) {
     const creds = entry.credentials;
     if (creds.type === "sorobanCredentialsSourceAccount") {
@@ -373,19 +389,19 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
       continue;
     }
 
-    const signer = (params.accountSigners ?? []).find((kp) => kp.publicKey() === address);
-    if (!signer) {
+    const matching = resolvedSigners.find((s) => s.publicKey === address);
+    if (!matching) {
       return {
         kind: "error",
         detail:
           `call requires authorization from ${address}, but no matching key was provided ` +
-          `(supplied: ${(params.accountSigners ?? []).map((kp) => kp.publicKey()).join(", ") || "none"})`,
+          `(supplied: ${resolvedSigners.map((s) => s.publicKey).join(", ") || "none"})`,
       };
     }
     signedAuth.push(
       await signAccountAuthEntry({
         entry,
-        signer,
+        signer: matching.signer,
         signatureExpirationLedger: expiration,
         networkPassphrase,
       }),
