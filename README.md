@@ -188,24 +188,28 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
 
-### Admin Operations & Operator Helpers
+#### Fee units: stroops and XLM
 
-Typed functions for dashboard and operator administration of the smart account:
+`CostPreChecker` reports fees as exact integer stroops — the raw value is the
+source of truth, and it is what a `maxFeeStroops` ceiling is compared against.
+`formatFee()` renders the same number in XLM, the unit operators think in, using
+**integer math only** (XLM has 7 decimal places; float rounding on
+money-adjacent output in a security tool is not acceptable) and with no trailing
+zeros:
 
-- `submitSetPolicy(params: SetPolicyParams): Promise<InvokeOutcome>` — Constructs, simulates, and submits `set_policy` to the guard contract with an admin signer. Reuses canonical `policyToScVal` encoding.
-- `submitFreeze(params: AdminOpParams): Promise<InvokeOutcome>` — Emergency panic-button freeze halting all spend operations.
-- `submitUnfreeze(params: AdminOpParams): Promise<InvokeOutcome>` — Unfreezes account, resetting freeze state and re-arming the dead-man switch heartbeat clock.
-- `submitRotateAgentKey(params: RotateAgentKeyParams): Promise<InvokeOutcome>` — Re-binds registered agent Ed25519 public key.
-- `buildSetPolicyCall(guard: string, policy: PolicyConfig): ContractCall`
-- `buildFreezeCall(guard: string): ContractCall`
-- `buildUnfreezeCall(guard: string): ContractCall`
-- `buildRotateAgentKeyCall(guard: string, newAgent: string | Uint8Array | Keypair): ContractCall`
-- `agentPubkeyToScVal(newAgent: string | Uint8Array | Keypair): xdr.ScVal`
-- Signer interfaces: `AdminSigner` (classic transaction/Freighter signer flow) and `AgentSigner` (custom account auth signer flow).
-- *Dashboard Companion Note:* Hand-rolled admin transaction construction in `stellar-agent-guard-dashboard` is migrated to consume these typed SDK helpers ([companion issue](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues)).
+```ts
+import { formatFee } from "stellar-agent-guard-sdk";
+
+cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
+formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+
+formatFee(1n);             // "0.0000001" — one stroop
+formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
+```
 
 ### Telemetry & Helpers
 
+- [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryConfig)`
   - `poll(params?: { startLedger?: number; cursor?: string; limit?: number }): Promise<PollResult>`
