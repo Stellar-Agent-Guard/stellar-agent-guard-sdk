@@ -37,6 +37,7 @@
     "test:integration": "node --test --test-concurrency=1 tests/integration/*.test.ts",
     "inspect": "node scripts/inspect-deployment.ts",
     "deploy:phase2": "node scripts/deploy-phase2-instance.ts",
+    "sync:fixtures": "node --import tsx scripts/sync-contract-fixtures.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

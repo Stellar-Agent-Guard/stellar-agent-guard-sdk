@@ -27,6 +27,7 @@ export {
   explainReason,
   reasonName,
   reasonNameFromCode,
+  type GuardBlockedErrorParams,
   type GuardReasonName,
 } from "./reasons.ts";
 

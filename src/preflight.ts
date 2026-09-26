@@ -440,10 +440,13 @@ export class PreFlightInterceptor {
     const decision = await this.check(call);
     if (decision.allowed) return decision;
     if (decision.kind === "blocked") {
+      const rawEvent = decision.diagnosticEvents?.[0];
       throw new GuardBlockedError({
         reason: decision.reason,
         stage: "preflight",
         detail: decision.detail,
+        call,
+        rawEvent,
       });
     }
     throw new PreFlightUndeterminedError(decision.detail);

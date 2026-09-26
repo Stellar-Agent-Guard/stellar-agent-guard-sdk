@@ -110,6 +110,68 @@ describe("GuardBlockedError", () => {
     assert.equal(error.charged, true);
     assert.equal(error.name, "GuardBlockedError");
   });
+
+  it("carries offending call and raw diagnostic event when provided", () => {
+    const dummyCall = {
+      contract: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      fn: "transfer",
+      args: [],
+    };
+    const dummyEvent = { topics: ["event_auth_checked", "blocked", "paused"] };
+
+    const error = new GuardBlockedError({
+      reason: "paused",
+      stage: "preflight",
+      detail: "simulation refused",
+      call: dummyCall,
+      rawEvent: dummyEvent,
+    });
+
+    assert.equal(error.reason, "paused");
+    assert.equal(error.code, 13);
+    assert.equal(error.stage, "preflight");
+    assert.equal(error.charged, false);
+    assert.equal(error.detail, "simulation refused");
+    assert.deepEqual(error.call, dummyCall);
+    assert.deepEqual(error.rawEvent, dummyEvent);
+    assert.match(error.message, /paused/);
+    assert.match(error.message, /CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44/);
+    assert.ok(error instanceof Error);
+    assert.ok(error instanceof GuardBlockedError);
+  });
+
+  it("serializes to a structured, logging-friendly JSON object via toJSON()", () => {
+    const dummyCall = {
+      contract: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      fn: "transfer",
+      args: [],
+    };
+    const dummyEvent = { type: "diagnostic", topics: ["event_auth_checked"] };
+
+    const error = new GuardBlockedError({
+      reason: "per_tx_cap_exceeded",
+      stage: "preflight",
+      detail: "limit exceeded",
+      call: dummyCall,
+      rawEvent: dummyEvent,
+    });
+
+    const json = error.toJSON();
+    assert.equal(json["name"], "GuardBlockedError");
+    assert.equal(json["reason"], "per_tx_cap_exceeded");
+    assert.equal(json["code"], 22);
+    assert.equal(json["stage"], "preflight");
+    assert.equal(json["charged"], false);
+    assert.equal(json["detail"], "limit exceeded");
+    assert.deepEqual(json["call"], {
+      contract: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      fn: "transfer",
+      argsCount: 0,
+    });
+    assert.deepEqual(json["rawEvent"], dummyEvent);
+    assert.equal(typeof json["message"], "string");
+    assert.equal(typeof json["explanation"], "string");
+  });
 });
 
 describe("account-state reasons", () => {
