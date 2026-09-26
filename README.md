@@ -194,6 +194,25 @@ const validate = createGuardValidator({
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
 
+#### Fee units: stroops and XLM
+
+`CostPreChecker` reports fees as exact integer stroops — the raw value is the
+source of truth, and it is what a `maxFeeStroops` ceiling is compared against.
+`formatFee()` renders the same number in XLM, the unit operators think in, using
+**integer math only** (XLM has 7 decimal places; float rounding on
+money-adjacent output in a security tool is not acceptable) and with no trailing
+zeros:
+
+```ts
+import { formatFee } from "stellar-agent-guard-sdk";
+
+cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
+formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+
+formatFee(1n);             // "0.0000001" — one stroop
+formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
+```
+
 ### Telemetry & Helpers
 
 - `GuardTelemetryListener`
