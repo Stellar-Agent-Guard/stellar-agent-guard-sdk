@@ -106,6 +106,34 @@ export function guardStorageLedgerKeys(guard: string): xdr.LedgerKey[] {
   return keys;
 }
 
+export type GuardCredentialType =
+  | "sorobanCredentialsAddress"
+  | "sorobanCredentialsAddressV2";
+
+export interface AdminSigner {
+  /** Return public key (G...) of the admin */
+  publicKey(): string | Promise<string>;
+  /**
+   * Sign a transaction envelope.
+   * Accepts a Transaction and returns a signed Transaction or base64 XDR string.
+   */
+  signTransaction?(
+    transaction: Transaction,
+    options?: { networkPassphrase?: string },
+  ): Promise<Transaction | string> | Transaction | string;
+  /** Direct authorization entry signing hook */
+  signAuthEntry?(
+    entry: xdr.SorobanAuthorizationEntry,
+    options: { signatureExpirationLedger: number; networkPassphrase: string },
+  ): Promise<xdr.SorobanAuthorizationEntry>;
+}
+
+export interface AgentSigner {
+  publicKey(): string | Promise<string>;
+  /** Ed25519 raw 64-byte signature over auth preimage digest */
+  sign(data: Buffer | Uint8Array): Buffer | Uint8Array | Promise<Buffer | Uint8Array>;
+}
+
 /**
  * Build and sign the guard's authorization entry for one call.
  *
@@ -113,27 +141,10 @@ export function guardStorageLedgerKeys(guard: string): xdr.LedgerKey[] {
  * so the returned entry is only valid for that nonce — build a fresh entry per
  * submission rather than reusing one.
  */
-/**
- * Credential kinds the host may demand for this account.
- *
- * Which one arrives is not the caller's choice — the RPC reports what the call
- * requires, and it differs by call shape: an SAC `transfer` authorized by the
- * account comes back as legacy `sorobanCredentialsAddress`, while a self-call
- * such as `heartbeat` comes back as `sorobanCredentialsAddressV2` (CAP-71),
- * whose signed payload additionally binds the account address.
- *
- * The contract itself is indifferent: `__check_auth` verifies the Ed25519
- * signature against whatever digest the host presents, so the SDK's job is to
- * build the preimage that matches the credential type it is answering.
- */
-export type GuardCredentialType =
-  | "sorobanCredentialsAddress"
-  | "sorobanCredentialsAddressV2";
-
 export function buildGuardAuthEntry(params: {
   guard: string;
   call: ContractCall;
-  agent: Keypair;
+  agent: Keypair | AgentSigner;
   nonce: bigint;
   signatureExpirationLedger: number;
   networkPassphrase: string;
@@ -178,7 +189,10 @@ export function buildGuardAuthEntry(params: {
         );
 
   const digest = createHash("sha256").update(preimage.toXDR()).digest();
-  const signature = agent.sign(digest);
+  const signatureRaw = agent.sign(digest);
+  const signature = signatureRaw instanceof Promise
+    ? (() => { throw new Error("async agent.sign is not supported synchronously in buildGuardAuthEntry"); })()
+    : Buffer.from(signatureRaw);
 
   const addressCredentials = new xdr.SorobanAddressCredentials({
     address: guardAddress,
@@ -198,22 +212,31 @@ export function buildGuardAuthEntry(params: {
 
 /**
  * Sign a classic-account authorization entry (used for admin calls such as
- * `initialize` / `set_policy`, where the authorizer is a normal keypair rather
- * than the smart account).
+ * `initialize` / `set_policy`, where the authorizer is a normal keypair or
+ * an AdminSigner rather than the smart account).
  */
 export async function signAccountAuthEntry(params: {
   entry: xdr.SorobanAuthorizationEntry;
-  signer: Keypair;
+  signer: Keypair | AdminSigner;
   signatureExpirationLedger: number;
   networkPassphrase: string;
 }): Promise<xdr.SorobanAuthorizationEntry> {
-  const { authorizeEntry } = await import("@stellar/stellar-sdk");
-  return authorizeEntry(
-    params.entry,
-    params.signer,
-    params.signatureExpirationLedger,
-    params.networkPassphrase,
-  );
+  const { entry, signer, signatureExpirationLedger, networkPassphrase } = params;
+  if ("signAuthEntry" in signer && typeof signer.signAuthEntry === "function") {
+    return signer.signAuthEntry(entry, { signatureExpirationLedger, networkPassphrase });
+  }
+  if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+    const { authorizeEntry } = await import("@stellar/stellar-sdk");
+    return authorizeEntry(
+      entry,
+      signer as Keypair,
+      signatureExpirationLedger,
+      networkPassphrase,
+    );
+  }
+  // For classic transaction signers (e.g. Freighter) without a separate auth-entry signer,
+  // return entry to be authorized via the envelope signature.
+  return entry;
 }
 
 export interface SimulationOutcome {
@@ -518,10 +541,23 @@ export function describeSubmissionFailure(failure: NonNullable<SubmissionResult[
 export async function submitAndPoll(
   server: rpc.Server,
   transaction: Transaction,
-  signers: Keypair[],
+  signers: Array<Keypair | AdminSigner>,
   options: { pollAttempts?: number; pollIntervalMs?: number } = {},
 ): Promise<SubmissionResult> {
-  transaction.sign(...signers);
+  for (const signer of signers) {
+    if ("signTransaction" in signer && typeof signer.signTransaction === "function") {
+      const signed = await signer.signTransaction(transaction, {
+        networkPassphrase: transaction.networkPassphrase,
+      });
+      if (typeof signed === "string") {
+        transaction = new Transaction(signed, transaction.networkPassphrase);
+      } else {
+        transaction = signed;
+      }
+    } else if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+      transaction.sign(signer as Keypair);
+    }
+  }
 
   const sent = await server.sendTransaction(transaction);
   if (sent.status === "ERROR") {

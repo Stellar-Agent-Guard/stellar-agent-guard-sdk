@@ -151,34 +151,28 @@ reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
 
-### Framework Middleware (LangChain & ElizaOS)
+### Telemetry Polling Jitter & Fleet Tuning
+
+When deploying fleets of hundreds or thousands of autonomous agents derived from identical templates or scheduled loops, fixed poll intervals (e.g. exactly every 5s) cause all instances to poll RPC nodes in lockstep phase. This creates synchronized traffic spikes (thundering herds) against public Soroban RPC endpoints, triggering aggressive HTTP 429 rate limits and cascade backpressure errors.
+
+`GuardTelemetryListener.watch()` defaults to `jitter: 'full'`, which uniformly randomizes each poll delay in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2` (a 20% variance window). This breaks lockstep fleet synchronization while keeping polling responsive and bounded. Deterministic fixed interval cadence can be restored when needed by specifying `jitter: 'none'`.
 
 ```ts
-import {
-  createLangChainGuardMiddleware,
-  createGuardValidator,
-} from "stellar-agent-guard-sdk";
-
-// LangChain: intercept agent tool calls
-const middleware = createLangChainGuardMiddleware({
-  interceptor,
-  toContractCall: (request) => ({
-    contractId: request.args.token,
-    method: "transfer",
-    args: [request.args.from, request.args.to, request.args.amount],
-  }),
-});
-
-// ElizaOS: validate action before execution
-const validate = createGuardValidator({
-  interceptor,
-  toContractCall: (message) => ({
-    contractId: message.content.token,
-    method: "transfer",
-    args: [message.content.from, message.content.to, message.content.amount],
-  }),
-});
+// Follow event telemetry with full jitter (default)
+for await (const events of listener.watch({
+  pollIntervalMs: 5_000,
+  jitter: "full", // uniformly distributed in [4000ms, 5000ms]
+})) {
+  console.log(`Received ${events.length} guard event(s)`);
+}
 ```
+
+### Framework Middleware (LangChain & ElizaOS)
+
+Plug-and-play middleware intercepts agent actions before tools are executed:
+
+- **LangChain**: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
+- **ElizaOS**: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
 
 ## API Reference
 
@@ -194,18 +188,36 @@ const validate = createGuardValidator({
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
 
+### Admin Operations & Operator Helpers
+
+Typed functions for dashboard and operator administration of the smart account:
+
+- `submitSetPolicy(params: SetPolicyParams): Promise<InvokeOutcome>` — Constructs, simulates, and submits `set_policy` to the guard contract with an admin signer. Reuses canonical `policyToScVal` encoding.
+- `submitFreeze(params: AdminOpParams): Promise<InvokeOutcome>` — Emergency panic-button freeze halting all spend operations.
+- `submitUnfreeze(params: AdminOpParams): Promise<InvokeOutcome>` — Unfreezes account, resetting freeze state and re-arming the dead-man switch heartbeat clock.
+- `submitRotateAgentKey(params: RotateAgentKeyParams): Promise<InvokeOutcome>` — Re-binds registered agent Ed25519 public key.
+- `buildSetPolicyCall(guard: string, policy: PolicyConfig): ContractCall`
+- `buildFreezeCall(guard: string): ContractCall`
+- `buildUnfreezeCall(guard: string): ContractCall`
+- `buildRotateAgentKeyCall(guard: string, newAgent: string | Uint8Array | Keypair): ContractCall`
+- `agentPubkeyToScVal(newAgent: string | Uint8Array | Keypair): xdr.ScVal`
+- Signer interfaces: `AdminSigner` (classic transaction/Freighter signer flow) and `AgentSigner` (custom account auth signer flow).
+- *Dashboard Companion Note:* Hand-rolled admin transaction construction in `stellar-agent-guard-dashboard` is migrated to consume these typed SDK helpers ([companion issue](https://github.com/aigbagbobila/stellar-agent-guard-dashboard/issues)).
+
 ### Telemetry & Helpers
 
 - `GuardTelemetryListener`
-  - `constructor(options: GuardTelemetryListenerOptions)`
-  - `watch(signal?: AbortSignal): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events.
-- `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
-- `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
-- `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
-- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]`
+  - `constructor(options: GuardTelemetryConfig)`
+  - `poll(params?: { startLedger?: number; cursor?: string; limit?: number }): Promise<PollResult>`
+  - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEvent[]>` — Tails on-chain and uncommitted events with configurable `jitter: 'full' | 'none'`.
+- `computePollDelay(intervalMs: number, jitter?: TelemetryJitter, rng?: () => number): number` — Uniform randomized delay calculator for telemetry polling.
+- `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Canonical policy encoder into Soroban sorted ScVal struct.
+- `decodeCheckResult(resultVal: unknown): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
+- `decodeAuthDecision(topics: string[], source?: GuardEventSource): GuardAuthDecision | null`
+- `guardEventsFromDiagnostics(events: readonly unknown[], guard?: string): GuardEvent[]`
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
-- `isDeadManFrozen(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): boolean`
-- `deadManRemaining(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): number | null`
+- `isDeadManFrozen(status: GuardStatus): boolean`
+- `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 
 ## Architecture
 

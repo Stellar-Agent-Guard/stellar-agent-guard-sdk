@@ -189,3 +189,36 @@ absent from this checkout, and the available runtime is Node 22 while the
 package requires Node 24 for the documented live workflow. The cache tests are
 fully mocked and reproducible without credentials; a maintainer can rerun the
 live suite with the repository's documented testnet credentials before merge.
+
+## Admin Ops Helpers & Key Management Evidence (2026-09-26)
+
+Typed admin submission helpers (`submitSetPolicy`, `submitFreeze`, `submitUnfreeze`, `submitRotateAgentKey`) were verified with unit tests covering simulation, auth entry resolution, and classic transaction submission hooks across both `Keypair` and custom `AdminSigner` (e.g. Freighter) interfaces.
+
+- **Reused Encoder Invariant**: `submitSetPolicy` delegates directly to canonical `policyToScVal` with zero duplicated serialization logic.
+- **Live Evidence Alignment**:
+  - `setPolicy`: on-chain deployment record transaction hash `e5eeb56cd92e04ef16076a2fbc48cf51811fbb44c8f91df8852b6c5f1e2242a3` (ledger `4673663`).
+  - `initialize`: on-chain deployment record transaction hash `e9f606dc641b0bf04a58bb1ca1e7f4fed2cf5f19e9c366d1c788b617b7aa3194` (ledger `4673645`).
+  - `freeze` / `unfreeze`: live account-state refusal behavior proven in Scenario 5 with state toggling.
+
+## Telemetry Polling Jitter Verification (2026-09-26)
+
+Telemetry polling intervals randomize delay uniformly in `[interval*(1-j), interval]` ($j = 0.2$) when `jitter: 'full'` (the default). Unit tests in `tests/unit/telemetry.test.ts` verify:
+- Uniform distribution bounds across ticks.
+- Deterministic fixed cadence when `jitter: 'none'`.
+- Generator sleep delay injection across polling cycles.
+
+## Framework Adapter Examples Verification (2026-09-26)
+
+Runnable framework adapter examples for LangChain and ElizaOS are established in `examples/langchain.ts` and `examples/elizaos.ts` with complete walkthrough documentation in `docs/examples/langchain.md` and `docs/examples/elizaos.md`.
+- Both examples are continuously compiled in CI via `tsconfig.json` (`"examples/**/*.ts"`).
+- End-to-end execution of both allowed and blocked tool runs is verified in `tests/unit/examples.test.ts`.
+
+Local checks for all enhancements:
+
+```text
+npm run typecheck
+npm run lint
+npm test                 # 142 passing unit tests (all suites green)
+npm run build
+```
+

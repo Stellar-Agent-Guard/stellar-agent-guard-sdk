@@ -158,6 +158,48 @@ export interface PollResult {
   latestLedger: number;
 }
 
+export type TelemetryJitter = "none" | "full";
+
+export const DEFAULT_JITTER_FRACTION = 0.2;
+
+/**
+ * Compute the sleep delay for telemetry polling with optional uniform jitter.
+ *
+ * When `jitter` is `'full'` (the good-citizen default), delays are uniformly
+ * distributed in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2`. This
+ * prevents fleet-level thundering herds against public RPCs when multiple agents
+ * start at the same time.
+ */
+export function computePollDelay(
+  intervalMs: number,
+  jitter: TelemetryJitter = "full",
+  rng: () => number = Math.random,
+  jitterFraction: number = DEFAULT_JITTER_FRACTION,
+): number {
+  if (jitter === "none") return intervalMs;
+  const j = Math.max(0, Math.min(1, jitterFraction));
+  const factor = 1 - j + rng() * j;
+  return Math.round(intervalMs * factor);
+}
+
+export interface GuardTelemetryWatchParams {
+  startLedger?: number;
+  pollIntervalMs?: number;
+  limit?: number;
+  signal?: AbortSignal;
+  /**
+   * Jitter mode for poll interval delays.
+   * - `'full'` (default): uniformly randomizes each delay in `[interval*(1-j), interval]` (j=0.2)
+   *   to avoid synchronized polling thundering herds across agent fleets.
+   * - `'none'`: exact fixed interval cadence.
+   */
+  jitter?: TelemetryJitter;
+  /** Optional RNG injector for deterministic unit testing (defaults to Math.random). */
+  rng?: () => number;
+  /** Optional sleep handler for testing without wall-clock delays. */
+  sleep?: (ms: number) => Promise<void>;
+}
+
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
 
@@ -216,9 +258,12 @@ export class GuardTelemetryListener {
    * internally so no event is delivered twice.
    */
   async *watch(
-    params: { startLedger?: number; pollIntervalMs?: number; limit?: number; signal?: AbortSignal } = {},
+    params: GuardTelemetryWatchParams = {},
   ): AsyncGenerator<GuardEvent[], void, undefined> {
     const interval = params.pollIntervalMs ?? 5_000;
+    const jitter = params.jitter ?? "full";
+    const rng = params.rng ?? Math.random;
+    const sleep = params.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     let cursor: string | undefined;
     let startLedger = params.startLedger;
 
@@ -240,7 +285,8 @@ export class GuardTelemetryListener {
       startLedger = undefined;
       if (page.events.length > 0) yield page.events;
       if (params.signal?.aborted) return;
-      await new Promise((resolve) => setTimeout(resolve, interval));
+      const delay = computePollDelay(interval, jitter, rng);
+      await sleep(delay);
     }
   }
 }

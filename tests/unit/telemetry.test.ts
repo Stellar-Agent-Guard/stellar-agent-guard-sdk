@@ -10,6 +10,9 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { xdr } from "@stellar/stellar-sdk";
 import {
+  DEFAULT_JITTER_FRACTION,
+  GuardTelemetryListener,
+  computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventsFromDiagnostics,
@@ -207,3 +210,89 @@ describe("isAllowedDecision", () => {
     assert.equal(isAllowedDecision(null), false);
   });
 });
+
+describe("telemetry polling jitter", () => {
+  it("defaults to full jitter with documented fraction (0.2)", () => {
+    assert.equal(DEFAULT_JITTER_FRACTION, 0.2);
+    // RNG = 0 => delay = interval * (1 - 0.2) = 4000
+    const minDelay = computePollDelay(5_000, "full", () => 0);
+    assert.equal(minDelay, 4_000);
+
+    // RNG = 1 => delay = interval * 1.0 = 5000
+    const maxDelay = computePollDelay(5_000, "full", () => 1);
+    assert.equal(maxDelay, 5_000);
+
+    // RNG = 0.5 => delay = interval * 0.9 = 4500
+    const midDelay = computePollDelay(5_000, "full", () => 0.5);
+    assert.equal(midDelay, 4_500);
+  });
+
+  it("produces deterministic fixed interval when jitter is none", () => {
+    const d1 = computePollDelay(5_000, "none", () => 0);
+    const d2 = computePollDelay(5_000, "none", () => 0.5);
+    const d3 = computePollDelay(5_000, "none", () => 1);
+    assert.equal(d1, 5_000);
+    assert.equal(d2, 5_000);
+    assert.equal(d3, 5_000);
+  });
+
+  it("delays fall within expected range and differ across ticks", () => {
+    const sequence = [0.1, 0.9, 0.4, 0.7, 0.0, 1.0];
+    let idx = 0;
+    const rng = () => sequence[idx++ % sequence.length]!;
+
+    const delays = Array.from({ length: 6 }, () => computePollDelay(5_000, "full", rng));
+    for (const d of delays) {
+      assert.ok(d >= 4_000 && d <= 5_000, `Delay ${d} outside [4000, 5000]`);
+    }
+    // Verify variance across ticks
+    assert.notEqual(delays[0], delays[1]);
+    assert.notEqual(delays[1], delays[2]);
+    assert.equal(delays[4], 4_000);
+    assert.equal(delays[5], 5_000);
+  });
+
+  it("watch() applies jittered delays between polling ticks", async () => {
+    const delaysRecorded: number[] = [];
+    const fakeServer = {
+      getLatestLedger: async () => ({ sequence: 100 }),
+      getEvents: async () => ({
+        events: [],
+        cursor: "cursor_1",
+        latestLedger: 100,
+      }),
+    };
+
+    const listener = new GuardTelemetryListener({
+      server: fakeServer as never,
+      guard: GUARD,
+    });
+
+    const controller = new AbortController();
+    const rngSequence = [0.0, 0.5, 1.0];
+    let rngCall = 0;
+
+    let tick = 0;
+    const watcher = listener.watch({
+      pollIntervalMs: 5_000,
+      jitter: "full",
+      rng: () => rngSequence[rngCall++ % rngSequence.length]!,
+      sleep: async (ms) => {
+        delaysRecorded.push(ms);
+        tick++;
+        if (tick >= 3) {
+          controller.abort();
+        }
+      },
+      signal: controller.signal,
+    });
+
+    // Run the generator
+    for await (const _events of watcher) {
+      // no events yielded since fake response is empty
+    }
+
+    assert.deepEqual(delaysRecorded, [4_000, 4_500, 5_000]);
+  });
+});
+
