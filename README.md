@@ -37,7 +37,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 
 ## What it does
 
-- **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal.
+- **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal; an opt-in short-lived cache can reduce repeated simulation RPC calls within the current ledger.
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
 - **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded retry for stale ledger resource limits (`scecExceededLimit`).
 - **Framework adapters**:
@@ -52,6 +52,19 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 ```bash
 npm install stellar-agent-guard-sdk
 ```
+
+> **Module Format & Environment Note:**
+> `stellar-agent-guard-sdk` is published strictly as **pure ESM** (`"type": "module"`) targeting **Node.js >= 24.0.0** (declared in `engines`).
+>
+> If your project or toolchain runs in CommonJS (e.g. legacy LangChain setups, Jest configs, or `.cjs` scripts), load the SDK using the dynamic `await import()` pattern:
+>
+> ```javascript
+> // CommonJS (.cjs or package without "type": "module")
+> async function run() {
+>   const { PreFlightInterceptor, CostPreChecker } = await import("stellar-agent-guard-sdk");
+>   // use interceptor, cost pre-checker, etc.
+> }
+> ```
 
 *(Or build locally from source with Node 24+)*
 
@@ -77,8 +90,8 @@ const interceptor = new PreFlightInterceptor({
 });
 
 const decision = await interceptor.check({
-  contractId: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
-  method: "transfer",
+  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  fn: "transfer",
   args: [/* from, to, amount */],
 });
 
@@ -90,6 +103,53 @@ if (decision.kind === "admissible") {
   console.log("Undetermined (fails closed)");
 }
 ```
+
+#### Throw vs. Verdict Contract
+
+Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
+
+- **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
+- **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
+- Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+
+### Optional simulation-result cache
+
+`PreFlightInterceptor` always performs a fresh simulation by default. For agent
+loops that repeatedly check the same call, caching can be enabled explicitly:
+
+```ts
+const interceptor = new PreFlightInterceptor({
+  server,
+  networkPassphrase,
+  guard,
+  agent,
+  source,
+  cache: {
+    ttlLedgers: 1, // maximum one approximate five-second ledger window
+    policyRevision: () => readPolicyRevision(),
+  },
+});
+
+const first = await interceptor.check(call);
+const second = await interceptor.check(call); // may reuse the first verdict
+interceptor.invalidate();                       // clear all entries
+interceptor.invalidate(call);                  // clear one call's entries
+```
+
+The cache is **disabled unless `cache` is supplied**. It stores only actual
+`admissible` and `blocked` decisions; transient `undetermined` results are not
+cached. A cache key includes the contract, function, canonical XDR argument
+fingerprint, interceptor identity, and the supplied policy revision. The cache
+is discarded when the observed ledger advances, when the TTL expires, or when
+`invalidate()` is called. `ttlMs` and `ttlLedgers` are both capped at one
+approximate ledger-close interval; if both are supplied, `ttlMs` takes
+precedence.
+
+A **cached verdict can be staler than one admitted transfer**. The rolling spend
+window can change after a simulation while a cached result is still being
+reused, so callers that cannot tolerate that tradeoff should leave caching off,
+use a shorter TTL, provide a policy revision, and invalidate after policy or
+account-state changes.
 
 ### Framework Middleware (LangChain & ElizaOS)
 
@@ -125,23 +185,44 @@ const validate = createGuardValidator({
 ### Interception & Execution
 
 - `PreFlightInterceptor`
-  - `constructor(options: PreFlightInterceptorOptions)`
+  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
   - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
+  - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
   - `constructor(options: CostPreCheckerOptions)`
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
 
+#### Fee units: stroops and XLM
+
+`CostPreChecker` reports fees as exact integer stroops — the raw value is the
+source of truth, and it is what a `maxFeeStroops` ceiling is compared against.
+`formatFee()` renders the same number in XLM, the unit operators think in, using
+**integer math only** (XLM has 7 decimal places; float rounding on
+money-adjacent output in a security tool is not acceptable) and with no trailing
+zeros:
+
+```ts
+import { formatFee } from "stellar-agent-guard-sdk";
+
+cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
+formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+
+formatFee(1n);             // "0.0000001" — one stroop
+formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
+```
+
 ### Telemetry & Helpers
 
+- [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)` — pass `cursorStore` (`{ load(): Promise<string | null>, save(cursor): Promise<void> }`, default in-memory) so `watch()` resumes where a previous process left off.
   - `watch(params?): AsyncIterable<GuardEvent[]>` — Tails on-chain and uncommitted events, persisting the cursor once per poll. At-least-once delivery; dedupe by event identity.
 - `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
 - `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
-- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]`
+- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
 - `isDeadManFrozen(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): boolean`
 - `deadManRemaining(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): number | null`
@@ -205,6 +286,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 ## Honest limitations
 
 - **Enforcement boundary for arbitrary calls**: Full amount/recipient limits are native to SAC token transfers. Arbitrary Soroban contract calls are enforced via protocol/function allowlists, active window, pause, and dead-man switches; per-call amount limits are not available generically from host auth contexts (tracked as v2).
+- **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 

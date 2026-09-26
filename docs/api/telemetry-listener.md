@@ -20,87 +20,16 @@ constructor(options: GuardTelemetryListenerOptions)
 
 ### `watch(params?): AsyncIterable<GuardEvent[]>`
 
-Yields pages of decoded guard events (`event_auth_checked`, `event_heartbeat`,
-`event_policy_set`, …) until `params.signal` is aborted. Parameters:
-`{ startLedger?, pollIntervalMs?, limit?, signal? }`.
+Yields pages of decoded guard events (`event_auth_checked`, `event_policy_updated`, etc.).
 
-### `poll(params?): Promise<PollResult>`
+## Event identity
 
-One page of committed guard events, from an explicit `startLedger`/`cursor` or
-the current head. `watch()` is a poll loop over this.
+Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 
-## Cursor persistence (`cursorStore`)
+- `ledger:<txHash>:<topic>` for a committed event;
+- `diag:<sha256>` for a diagnostic (blocked) event, which has no transaction to
+  anchor on because it was rolled back before broadcast.
 
-A guard monitor that restarts — an agent runtime redeploy, a crash — re-reads
-from the default cursor unless its position survives the restart: it either
-**re-emits history** or **skips the gap**, silently. `cursorStore` fixes that by
-letting the cursor outlive the process:
-
-```ts
-interface CursorStore {
-  /** The cursor to resume from, or `null` on first run. Consulted once, at start. */
-  load(): Promise<string | null>;
-  /** Persist the cursor advanced by one poll. Called once per poll. */
-  save(cursor: string): Promise<void>;
-}
-```
-
-- `load()` is consulted once, when `watch()` starts. A stored cursor wins over
-  the default head position — resume-after-restart is exactly the case where
-  "the default" is wrong.
-- `save()` is called once per poll, **before** the page is yielded, so a
-  consumer that stops after a page (crash, abort, throw) resumes from that
-  page's cursor.
-- An explicit `startLedger` passed to `watch()` pins the start and is not
-  second-guessed by the store.
-- The default store is in-memory: no `cursorStore` means today's behaviour
-  (no resume across restarts).
-
-### Durable wiring
-
-The interface is two methods wide on purpose — wire it to anything that
-outlives the process. File:
-
-```ts
-import { readFile, writeFile } from "node:fs/promises";
-import { GuardTelemetryListener, type CursorStore } from "stellar-agent-guard-sdk";
-
-const fileCursorStore: CursorStore = {
-  async load() {
-    try {
-      return await readFile("guard-cursor.txt", "utf8");
-    } catch {
-      return null; // first run: nothing persisted yet
-    }
-  },
-  async save(cursor) {
-    await writeFile("guard-cursor.txt", cursor, "utf8");
-  },
-};
-
-const listener = new GuardTelemetryListener({
-  server,
-  guard: GUARD_CONTRACT_ID,
-  cursorStore: fileCursorStore,
-});
-```
-
-Redis is the same shape (`GET`/`SET` on one key), as is a single-row database
-table. Whatever the backend, the cursor is one opaque string — store it
-verbatim, do not parse it.
-
-### Delivery contract: at-least-once
-
-`watch()` with a `cursorStore` delivers **at-least-once**, not exactly-once:
-
-- Events committed between the last `save()` and a crash are re-fetched and
-  re-emitted on resume.
-- Because `save()` runs before the page is yielded, a consumer that dies after
-  processing but before the next save can see that page again within one
-  process too.
-
-**Dedupe guidance:** consumers must deduplicate by a stable event identity.
-For committed ledger events the `(ledger, transactionHash)` pair is the
-available fallback today; a dedicated stable id (covering diagnostic events,
-which carry neither) is tracked in #33. Never assume a cursor in the store has
-already been fully drained.
+The same event re-parsed yields the same id; two different blocks within one
+simulation yield different ids. Format and collision notes:
+[`docs/event-schema.md`](../event-schema.md#event-identity--guardeventid).

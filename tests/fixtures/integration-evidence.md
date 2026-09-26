@@ -159,3 +159,104 @@ transfers returned 6 of 6 allowed with no waits.
 This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
+
+## Addendum — 2026-09-24 (maintenance PR: #33, #29, #46)
+
+This PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`,
+`src/policy.ts`, `src/preflight.ts`), so per `CONTRIBUTING.md` it is recorded
+here. **It is not accompanied by a fresh live-testnet run**: the contributor
+environment has no funded Phase 2 testnet credentials, so the live suite was
+not re-executed. What that means for review, stated plainly:
+
+- **The enforcement *behaviour* on-chain is unchanged by this diff.** The four
+  files were touched only as follows: `src/tx.ts` extracts an `AgentSigner`
+  interface for digest signing (the single-`Keypair` path is identical);
+  `src/invoke.ts`/`src/preflight.ts` widen a config *type* (`AgentSigner |
+  Keypair`) and `await` the now-async entry builder; `src/policy.ts` documents
+  and guards the `LastHeartbeat = 0` ("never") case in the dead-man helpers.
+  The authorization preimage, nonce policy, credential types, policy encoding,
+  footprint assembly and block classification are all untouched, so the five
+  scenarios above must still hold — but that is an argument, not a measurement.
+- **A maintainer with `.env.phase2` should run `npm run test:integration` against
+  this branch before merge** and replace this addendum with the fresh run
+  output, per the rule the gate exists to enforce. The CI gate only verifies
+  that this file was touched; it cannot verify the numbers, and this addendum
+  does not pretend otherwise.
+
+## Pre-flight Input Validation Verification
+
+Pre-flight interceptor input validation checks execute prior to RPC simulation dispatch:
+- Programmatic validation (`validateContractCall`) synchronously rejects invalid StrKey addresses, invalid symbols, non-array arguments, and non-i128 amounts with typed `InvalidInputError`.
+- Valid calls continue through the enforcement pipeline and retain parity with on-chain policy enforcement outcomes.
+
+## Pre-flight cache validation (2026-09-25)
+
+The opt-in cache behavior is covered without network access in
+`tests/unit/preflight.test.ts` using a mocked RPC and the real
+probe/enforced-simulation path. The tests verify default opt-out, cache hits,
+ledger-based configuration, TTL expiry, full and call-specific invalidation,
+ledger advance invalidation, policy-revision invalidation, argument-sensitive
+keys, and non-caching of transient undetermined results.
+
+Local checks completed successfully:
+
+```text
+npm run typecheck
+npm run lint
+npm test                 # 89 passing unit tests
+npm run build
+```
+
+A fresh live-testnet run was not claimed for this change: `.env.phase2` is
+absent from this checkout, and the available runtime is Node 22 while the
+package requires Node 24 for the documented live workflow. The cache tests are
+fully mocked and reproducible without credentials; a maintainer can rerun the
+live suite with the repository's documented testnet credentials before merge.
+
+## Paired pre-flight fidelity: verdict vs on-chain outcome, delay = 0 (2026-09-26)
+
+`tests/integration/enforcement.test.ts` now carries a paired test: the *same*
+transfer is sent through `PreFlightInterceptor.check()` and then, with no delay
+in between, through the full `invoke()` pipeline, and the two results are
+compared. Both paths call the same `enforceCall()`, so the comparison is two
+independent observations of one state — a verdict, and the outcome it predicted.
+
+**Allow case.** Pre-flight reports `admissible`, `invoke()` reports `allowed`,
+and the transaction is then re-read from the RPC and asserted `SUCCESS`, with the
+guarded account's balance down by exactly the transfer amount and the rolling
+window recording it. The evidence is a transaction hash, not a claim.
+
+**Block case.** Pre-flight reports `blocked, per_tx_cap_exceeded` for an
+over-cap transfer, and the immediately following `invoke()` attempt reports the
+*identical* reason symbol. The reason is additionally decoded from the
+`event_auth_checked` diagnostic carried by each refusal, so the paired assertion
+is between two decisions the contract itself made.
+
+Why the block case stops at the enforced-simulation refusal rather than forcing a
+broadcast: the block happens in enforced simulation, before broadcast, so no
+transaction exists to look up — that is the pre-flight guarantee, and demanding a
+hash for it would be demanding fabricated evidence (see "What counts as evidence
+for a block" above). Broadcasting past that gate would require hand-assembling an
+envelope that bypasses this SDK's enforcement, a path the SDK deliberately does
+not provide, and it would add nothing the contract has not already stated: the
+reason asserted here comes from `__check_auth`'s own diagnostic event. This is
+the honest variant the issue permits, and the reason for choosing it.
+
+**Not run live in this checkout.** `.env.phase2` is absent, so
+`npm run test:integration` cannot execute here, and no fresh transaction hash is
+claimed for this section — unlike the scenario run above, which was recorded from
+a real run. What did run locally, on Node 25:
+
+```text
+npm run typecheck
+npm run lint
+npm test                 # 131 passing unit tests
+npm run build
+npm run test:smoke
+```
+
+The paired test compiles and type-checks against the same harness the live
+scenarios use. A maintainer with `.env.phase2` can reproduce it with
+`npm run test:integration` before merge; it needs no new credentials, no new
+deployment, and no policy change beyond the `installPolicy()` call every scenario
+already makes.
