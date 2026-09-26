@@ -488,10 +488,10 @@ export async function enforceCall(
         // The smart account authorizes: sign with the registered agent key over
         // the guard's own preimage (fresh nonce per transaction).
         signedAuth.push(
-          buildGuardAuthEntry({
+          await buildGuardAuthEntry({
             guard: params.guardAuth.guard,
             call,
-            agent: params.guardAuth.agent,
+            signer: params.guardAuth.agent,
             // The transaction's own sequence number doubles as the nonce: unique
             // per transaction and never reused, so the host can never see a
             // replay for this guard address.
@@ -515,14 +515,9 @@ export async function enforceCall(
         );
       }
       signedAuth.push(
-        await buildGuardAuthEntry({
-          guard: params.guardAuth.guard,
-          call,
-          signer: params.guardAuth.agent,
-          // The transaction's own sequence number doubles as the nonce: unique
-          // per transaction and never reused, so the host can never see a
-          // replay for this guard address.
-          nonce: BigInt(nextSeq),
+        await signAccountAuthEntry({
+          entry,
+          signer,
           signatureExpirationLedger: expiration,
           networkPassphrase,
         }),

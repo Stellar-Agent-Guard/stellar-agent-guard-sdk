@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { enforceCall } from "./invoke.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
+import type { InvokeStepEvent } from "./invoke.ts";
 import { toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
 
