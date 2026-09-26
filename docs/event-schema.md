@@ -4,6 +4,65 @@ Phase 2.2 exists because the contract's event schema had only ever been read fro
 documentation. This document records what the chain actually emits, captured from
 the live Phase 2 instance, and reconciles it with the contracts repo's source.
 
+## Compatibility contract: what a consumer may rely on
+
+This document is the SDK's de-facto API contract for anything that parses guard
+events outside this package — the dashboard's telemetry feed, an indexer, an
+alerting rule. Every field in the reference table below carries one of four
+stability tiers, and the tier is a promise about **minor releases of
+`stellar-agent-guard-sdk`**. It is not a promise about the deployed contract,
+which only moves when it is redeployed, and it is not a promise about the RPC,
+which the SDK does not control.
+
+| Tier | May change in a minor release | May not change |
+| --- | --- | --- |
+| **Stable** | Nothing without a documented breaking change and a migration note | The field's name, presence, type, and meaning |
+| **Append-only** | New symbols or variants may appear | An existing symbol being re-spelled, re-meaning, or reused for a different case |
+| **Best-effort** | Anything — the value is supplied by the host or the RPC, not by the SDK | (nothing: always keep a fallback) |
+| **Internal** | Anything, without a release note | (nothing: not part of the surface; may be renamed or removed) |
+
+Three rules follow from the tiers, and all three are already how this SDK
+behaves:
+
+1. **Tolerate unknown values of every append-only field.** Switch on them with a
+   default. The listener applies the same rule one level down: an event whose
+   name topic it does not recognise is dropped rather than guessed at
+   (`interpret()` in `src/telemetry.ts` returns `null` for an unknown topic), so
+   a new contract event does not surface to consumers until this SDK learns it.
+2. **`null` is a real value on stream-dependent fields.** `ledger`,
+   `ledgerClosedAt` and `transactionHash` are always `null` on the diagnostic
+   stream, because a refusal never becomes a transaction — that is the
+   pre-broadcast guarantee, not a missing value.
+3. **Decode through the SDK, not by hand.** Raw topic lists arrive as XDR or as
+   host-shaped objects and are Best-effort; the decoded `GuardEvent` is what the
+   tiers below describe.
+
+### Field reference
+
+| Field | Produced by | Stability | Notes |
+| --- | --- | --- | --- |
+| `topic` (= topics[0]) | contract | **Stable** | Pinned to the chain-confirmed symbol (`event_auth_checked`, …), not to the SPEC's spelling — see the cross-check below. |
+| topics[1] — decision result | contract | **Stable** | Closed set `allowed` \| `blocked`. |
+| topics[2] — reason symbol | contract | **Append-only** | Empty symbol on an allowed decision; `decodeAuthDecision` normalises it to `null`. New reasons may be added; existing symbols keep their meaning. |
+| `kind` | SDK | **Append-only** | New event kinds may appear. Unknown name topics never reach a consumer (rule 1). |
+| `decision.result` | SDK (from topics[1]) | **Stable** | |
+| `decision.reason` | SDK (from topics[2]) | **Append-only** | `string \| null`. Never re-spelled for the same condition. |
+| `decision.source` | SDK | **Stable** | Closed set `ledger` \| `diagnostic`. |
+| `source` | SDK | **Stable** | Same closed set as `decision.source`. |
+| `contractId` | stream | **Best-effort** | May be `null`; the diagnostic stream only carries the contract the SDK was pointed at. |
+| `ledger` | stream | **Best-effort** | `null` on the diagnostic stream; present only for committed events. |
+| `ledgerClosedAt` | stream | **Best-effort** | Host-formatted timestamp; `null` on the diagnostic stream. |
+| `transactionHash` | stream | **Best-effort** | Always `null` on the diagnostic stream — a refusal has no transaction. |
+| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Semantics are stable; the decoded JS rendering is for display. |
+| `data.by` (admin events) | contract payload | **Stable** | The acting admin address, for `event_initialized` / `event_frozen` / `event_unfrozen` / `event_policy_set` / `event_policy_revoked`. |
+| `data` — any other key | contract / host | **Best-effort** | Not under SDK control; ignore rather than infer. |
+| Raw topic list (undecoded XDR / `ScVal` objects) | RPC | **Best-effort** | Host-shaped. Decode with `topicSymbols()` / `decodeAuthDecision()`. |
+| `contractEventsXdr` grouping | RPC | **Best-effort** | An array of *groups*, one per contract — reading it as a flat list silently loses events (see "The capture"). |
+| `GUARD_EVENT_TOPICS` values | contract | **Stable** | The name-topic vocabulary. |
+| `GUARD_REASON_CODES` numbers | contract | **Append-only** | Numeric codes are never renumbered and never reused; removed variants keep their number. |
+| `describeGuardEvent()` text | SDK | **Internal** | A log line, not a format. Parse `GuardEvent`, not this string. |
+| `poll()` `cursor` / `latestLedger` | RPC | **Best-effort** | Pagination is host-defined; treat as opaque. |
+
 ## How it was captured
 
 `scripts/capture-event.ts` drives two real calls on the live Phase 2 instance
@@ -161,9 +220,6 @@ an id is always produced.
 ### Collision notes
 
 - **Same event, re-parsed → same id.** The hash is a pure function of the inputs
-  above, so re-decoding the same diagnostic payload (a retried pre-flight, a
-  replayed simulation) produces the identical id. This is what lets a consumer
-  de-duplicate a refusal that was re-observed.
 - **Two separate simulations, identical event → same id.** If the same guard is
   blocked for the same reason by two different attempts of the same call, both
   events hash identically. That is intentional: the content is the same
@@ -179,6 +235,45 @@ an id is always produced.
 Part of #7 (stable ids + unified stream). This slice delivers the id field only;
 the unified stream and any persistence for the dashboard remain out of scope
 there.
+
+## Cross-check: do the classifications match the code?
+
+A stability table is only worth something if it describes what the code actually
+does. This is the audit pass that produced the rows above, with what was checked
+and what was found:
+
+1. **Symbol drift found — one case, on the topic name.** `SPEC.md` §9 and
+   `tests/fixtures/README.md` line 86 of the contracts repo name the decision
+   event `auth_checked`; the chain emits **`event_auth_checked`**. The SDK's
+   practice is to pin the *chain* spelling and deliberately reject the SPEC's
+   (`decodeAuthDecision` matches `topics[0] === "event_auth_checked"` and
+   returns `null` otherwise, so the un-prefixed spelling is never silently
+   accepted). The table therefore classifies the chain symbol as Stable and
+   treats the SPEC as the defect — reconciliation of that doc is tracked above as
+   a follow-up for the contracts repo, and the same stale spelling survives in
+   one code comment in `src/reasons.ts` (corrected in this change).
+2. **No reason symbol has changed for the same numeric code.** Verified against
+   `GUARD_REASON_CODES` in `src/reasons.ts`: the map is one code to one symbol,
+   with no aliases and no normalisation of spellings anywhere in the decode path
+   (`decodeAuthDecision` and `topicSymbols` compare exact strings, so a re-spelled
+   symbol would surface as an unclassified event rather than as a quiet hit).
+   The gaps in the numbering — there is no 6–9 and no 15–19 — are absent entries,
+   i.e. numbers are vacated rather than reassigned, which is what "append-only"
+   in the table is asserting.
+3. **One SDK-level normalisation, documented rather than hidden.** On an allowed
+   decision the contract emits the empty symbol `""` as topics[2];
+   `decodeAuthDecision` maps it to `null`. That is an SDK guarantee (callers see
+   `string | null`), not a contract change, and it is why `decision.reason` is
+   typed that way in the table.
+4. **Stream-dependent nulls are real, not bugs.** `diagnosticsToEvents()` sets
+   `ledger`, `ledgerClosedAt` and `transactionHash` to `null` for every
+   diagnostic event, because a refused call has no ledger and no transaction.
+   The table classifies them Best-effort so a consumer never treats the absence
+   as an error.
+5. **Unknown topics are dropped, not guessed.** `interpret()` returns `null`
+   when `topics[0]` is not in `KNOWN_TOPICS`, so a contract that starts emitting
+   a new event produces *no* consumer-visible event until the SDK learns the
+   symbol. This is the behaviour rule 1 above asks consumers to mirror.
 
 ## Follow-up for the contracts repo (maintainer)
 
