@@ -120,10 +120,6 @@ export function guardStorageLedgerKeys(guard: string): xdr.LedgerKey[] {
   return keys;
 }
 
-export type GuardCredentialType =
-  | "sorobanCredentialsAddress"
-  | "sorobanCredentialsAddressV2";
-
 export interface AdminSigner {
   /** Return public key (G...) of the admin */
   publicKey(): string | Promise<string>;
@@ -140,12 +136,6 @@ export interface AdminSigner {
     entry: xdr.SorobanAuthorizationEntry,
     options: { signatureExpirationLedger: number; networkPassphrase: string },
   ): Promise<xdr.SorobanAuthorizationEntry>;
-}
-
-export interface AgentSigner {
-  publicKey(): string | Promise<string>;
-  /** Ed25519 raw 64-byte signature over auth preimage digest */
-  sign(data: Buffer | Uint8Array): Buffer | Uint8Array | Promise<Buffer | Uint8Array>;
 }
 
 /**
@@ -626,7 +616,7 @@ export async function submitAndPoll(
   server: rpc.Server,
   transaction: Transaction,
   signers: Array<Keypair | AdminSigner>,
-  options: { pollAttempts?: number; pollIntervalMs?: number } = {},
+  options: { pollAttempts?: number | undefined; pollIntervalMs?: number | undefined } = {},
 ): Promise<SubmissionResult> {
   for (const signer of signers) {
     if ("signTransaction" in signer && typeof signer.signTransaction === "function") {

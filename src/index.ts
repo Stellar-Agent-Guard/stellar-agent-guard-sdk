@@ -127,6 +127,7 @@ export {
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
+  type AdminSigner,
   type AgentSigner,
   type ContractCall,
   type GuardCredentialType,

@@ -29,6 +29,7 @@ import {
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
   submitAndPoll,
+  type AdminSigner,
   type AgentSigner,
   type ContractCall,
   type SubmissionResult,
@@ -77,7 +78,9 @@ export interface InvokeParams {
   /** Extra classic-account authorizers available to sign (e.g. an admin). */
   accountSigners?: Array<Keypair | AdminSigner> | undefined;
   /** Skip broadcast even if the enforced simulation passes (dry run). */
-  dryRun?: boolean;
+  dryRun?: boolean | undefined;
+  pollAttempts?: number | undefined;
+  pollIntervalMs?: number | undefined;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -86,7 +89,7 @@ export interface InvokeParams {
    * itself never logs and takes no logger dependency; what a consumer does
    * with the events is entirely the consumer's business.
    */
-  onStep?: (step: InvokeStepEvent) => void;
+  onStep?: ((step: InvokeStepEvent) => void) | undefined;
 }
 
 /**
@@ -367,7 +370,11 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
   const submission = await withStepTiming(
     params.onStep,
     { name: "broadcast", attempt },
-    () => submitAndPoll(server, assembled.transaction, [params.source]),
+    () =>
+      submitAndPoll(server, assembled.transaction, [params.source], {
+        pollAttempts: params.pollAttempts,
+        pollIntervalMs: params.pollIntervalMs,
+      }),
     (result) => result.failure !== null,
   );
   if (submission.failure) {
@@ -509,11 +516,19 @@ export async function enforceCall(
         continue;
       }
 
-      const signer = (params.accountSigners ?? []).find((kp) => kp.publicKey() === address);
+      let signer: Keypair | AdminSigner | undefined;
+      const suppliedPubkeys: string[] = [];
+      for (const s of params.accountSigners ?? []) {
+        const pubkey = await s.publicKey();
+        suppliedPubkeys.push(pubkey);
+        if (pubkey === address) {
+          signer = s;
+        }
+      }
       if (!signer) {
         throw new SigningStageError(
           `call requires authorization from ${address}, but no matching key was provided ` +
-            `(supplied: ${(params.accountSigners ?? []).map((kp) => kp.publicKey()).join(", ") || "none"})`,
+            `(supplied: ${suppliedPubkeys.join(", ") || "none"})`,
         );
       }
       signedAuth.push(
