@@ -76,9 +76,11 @@ export {
 
 export {
   CostPreChecker,
+  STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
   feeBreakdown,
+  formatFee,
   precheckCost,
   type CostDecision,
   type CostPreCheckConfig,

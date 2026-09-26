@@ -5,7 +5,7 @@
  * `stellar-agent-guard-contracts/src/types.rs` exactly — both the numeric
  * enum value (as returned in a `CheckResult::Blocked(Symbol)` payload from
  * `check`) and the stable snake_case symbol the contract publishes as an event
- * topic (`auth_checked` → `blocked, <reason>`). Off-chain code and on-chain
+ * topic (`event_auth_checked` → `blocked, <reason>`). Off-chain code and on-chain
  * code therefore share one vocabulary, which is why this table is duplicated
  * rather than inferred.
  */
