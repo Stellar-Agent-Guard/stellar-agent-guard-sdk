@@ -218,7 +218,7 @@ formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 - [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)` — pass `cursorStore` (`{ load(): Promise<string | null>, save(cursor): Promise<void> }`, default in-memory) so `watch()` resumes where a previous process left off.
-  - `watch(params?): AsyncIterable<GuardEvent[]>` — Tails on-chain and uncommitted events, persisting the cursor once per poll. At-least-once delivery; dedupe by event identity.
+  - `watch(params?): AsyncIterable<GuardEvent[]>` — Tails on-chain and uncommitted events, persisting the cursor once per poll. At-least-once delivery; dedupe by the event's stable `id`.
 - `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
 - `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
