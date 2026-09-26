@@ -103,6 +103,7 @@ export {
 
 export {
   GUARD_STORAGE_KEYS,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
