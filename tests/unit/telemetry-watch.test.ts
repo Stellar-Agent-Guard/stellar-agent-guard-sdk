@@ -49,9 +49,12 @@ function rawLedgerEvent(ledger: number) {
   };
 }
 
-/** What `poll()` should decode that raw event into. */
+/** What `poll()` should decode that raw event into, stable id included. */
 function decodedEvent(ledger: number): GuardEvent {
   return {
+    // Format from `guardEventId`: `ledger:<txHash>:<topic>` — the raw event
+    // below carries txHash `tx-<ledger>`, so the decoded id is derivable here.
+    id: `ledger:tx-${ledger}:event_heartbeat`,
     kind: "heartbeat",
     topic: "event_heartbeat",
     source: "ledger",
@@ -145,6 +148,11 @@ describe("watch(signal) cursor persistence", () => {
     const pages = await take(listener, 1);
 
     assert.deepEqual(pages, [[decodedEvent(501)]], "the resumed page's events are decoded and delivered");
+    assert.equal(
+      pages[0]?.[0]?.id,
+      "ledger:tx-501:event_heartbeat",
+      "each delivered event carries its stable id, so resume consumers can dedupe",
+    );
     assert.equal(rec.loadCount(), 1, "load is consulted once, when watch starts");
     assert.equal(requests[0]?.cursor, "cursor-42", "the first poll resumes from the stored cursor");
     assert.equal(requests[0]?.startLedger, undefined, "a cursor poll must not also send a ledger range");
