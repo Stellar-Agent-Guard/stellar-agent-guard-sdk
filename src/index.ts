@@ -88,12 +88,14 @@ export {
 
 export {
   GuardTelemetryListener,
+  InMemoryCursorStore,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
+  type CursorStore,
   type GuardEvent,
   type GuardEventContext,
   type GuardEventIdentityInput,
