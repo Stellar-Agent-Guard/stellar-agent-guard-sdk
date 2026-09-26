@@ -17,6 +17,7 @@
  */
 import { Account, Address, Keypair, Operation, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "./events.ts";
+import type { TraceStepName, TraceStepStatus } from "./trace.ts";
 import {
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
@@ -77,6 +78,116 @@ export interface InvokeParams {
   accountSigners?: Keypair[];
   /** Skip broadcast even if the enforced simulation passes (dry run). */
   dryRun?: boolean;
+  /**
+   * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
+   * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
+   * including every attempt of the built-in stale-ledger retry. Omitting it
+   * leaves `invoke()` exactly as it was before this hook existed — the SDK
+   * itself never logs and takes no logger dependency; what a consumer does
+   * with the events is entirely the consumer's business.
+   */
+  onStep?: (step: InvokeStepEvent) => void;
+}
+
+/**
+ * One pipeline-stage attempt, as reported to `onStep`.
+ *
+ * `name` comes from the shared trace vocabulary (`TraceStepName`), the same
+ * names a dry-run trace uses, so the two can never drift apart. `attempt` is
+ * the retry index, 0-based, and is always present: `0` for the first (and
+ * usually only) pass over the pipeline, `1` for the built-in stale-ledger
+ * re-run — so a consumer never has to special-case its absence.
+ */
+export interface InvokeStepEvent {
+  name: TraceStepName;
+  status: TraceStepStatus;
+  /**
+   * Elapsed wall-clock time of *this* stage attempt, in milliseconds. On
+   * `start` it is always `0` — nothing has been timed yet.
+   */
+  durationMs: number;
+  /** 0-based retry index: `0` normally, `1` on the stale-ledger re-run. */
+  attempt: number;
+}
+
+/**
+ * Emit one step event to the caller's `onStep` callback.
+ *
+ * The callback is the caller's, and this SDK stays logger-agnostic — there is
+ * deliberately no logger dependency to fall back on — so a throwing callback
+ * is swallowed and the pipeline carries on: observability must never decide
+ * whether a transaction runs. Two cases matter. A callback throw on the happy
+ * path must not turn a successful stage into a failed one. And when the stage
+ * itself failed, the original error must survive untouched: swallowing here
+ * means the callback's error simply vanishes, and `invoke()` rethrows the real
+ * pipeline error — never a callback error wearing its clothes.
+ */
+function emitStep(
+  hook: ((step: InvokeStepEvent) => void) | undefined,
+  event: InvokeStepEvent,
+): void {
+  if (!hook) return;
+  try {
+    hook(event);
+  } catch {
+    /* logger-agnostic policy: a broken consumer must not break the pipeline */
+  }
+}
+
+/**
+ * Time one stage attempt, emitting `start` before it runs and `ok` or `fail`
+ * with the attempt's own elapsed time after it settles. `ok` means the stage
+ * passed; `fail` covers both a thrown error and — via the optional `failed`
+ * classifier — a response the pipeline treats as that stage failing (a
+ * simulation-error response, a submission that never made it into a ledger).
+ * Returns the stage's value and rethrows its error untouched; the `fail`
+ * callback throwing only loses the callback's error, never the stage's. With
+ * no hook, the stage runs directly — no timers, no events, no work added to
+ * the default path.
+ */
+async function withStepTiming<T>(
+  hook: ((step: InvokeStepEvent) => void) | undefined,
+  params: { name: TraceStepName; attempt: number },
+  run: () => Promise<T>,
+  failed?: (value: T) => boolean,
+): Promise<T> {
+  if (!hook) return run();
+  emitStep(hook, { name: params.name, status: "start", durationMs: 0, attempt: params.attempt });
+  const startedAt = performance.now();
+  try {
+    const value = await run();
+    emitStep(hook, {
+      name: params.name,
+      status: failed?.(value) ? "fail" : "ok",
+      durationMs: performance.now() - startedAt,
+      attempt: params.attempt,
+    });
+    return value;
+  } catch (error) {
+    emitStep(hook, {
+      name: params.name,
+      status: "fail",
+      durationMs: performance.now() - startedAt,
+      attempt: params.attempt,
+    });
+    throw error;
+  }
+}
+
+/**
+ * Internal signal that the signing stage refused an authorization shape.
+ * Carries the exact detail text the pipeline has always reported; `enforceCall`
+ * converts it back to an `error` outcome so a shape refusal stays a result,
+ * while still giving the `sign` stage a real `fail` event on the way through.
+ */
+class SigningStageError extends Error {
+  readonly detail: string;
+
+  constructor(detail: string) {
+    super(detail);
+    this.name = "SigningStageError";
+    this.detail = detail;
+  }
 }
 
 /**
@@ -183,13 +294,13 @@ function diagnosticEventsOf(response: unknown): unknown[] {
  * silent.
  */
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
-  const first = await invokePipeline(params);
+  const first = await invokePipeline(params, 0);
   if (first.kind !== "error" || first.retryable !== "stale_ledger_resource_limit") {
     return first;
   }
   if (params.dryRun) return first;
 
-  const second = await invokePipeline(params);
+  const second = await invokePipeline(params, 1);
   // If the retry also fails, report the retry's outcome: it is the more recent
   // and more informative of the two.
   if (second.kind === "error") {
@@ -228,9 +339,9 @@ export type EnforcementOutcome =
   | { kind: "error"; detail: string };
 
 /** One attempt: simulate → sign → enforce → submit. No retry logic lives here. */
-async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
+async function invokePipeline(params: InvokeParams, attempt: number): Promise<InvokeOutcome> {
   const { server } = params;
-  const enforced = await enforceCall(params);
+  const enforced = await enforceCall(params, attempt);
   if (enforced.kind !== "admissible") return enforced;
 
   if (params.dryRun) {
@@ -252,7 +363,12 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
     guard: params.guardAuth?.guard ?? null,
   });
 
-  const submission = await submitAndPoll(server, assembled.transaction, [params.source]);
+  const submission = await withStepTiming(
+    params.onStep,
+    { name: "broadcast", attempt },
+    () => submitAndPoll(server, assembled.transaction, [params.source]),
+    (result) => result.failure !== null,
+  );
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
@@ -276,7 +392,10 @@ async function invokePipeline(params: InvokeParams): Promise<InvokeOutcome> {
  *
  * Nothing here mutates the ledger, which is what makes a refusal free.
  */
-export async function enforceCall(params: InvokeParams): Promise<EnforcementOutcome> {
+export async function enforceCall(
+  params: InvokeParams,
+  attempt: number = 0,
+): Promise<EnforcementOutcome> {
   const { server, source, call, networkPassphrase } = params;
   const operation = Operation.invokeContractFunction({
     contract: call.contract,
@@ -301,7 +420,12 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     networkPassphrase,
     guard: params.guardAuth?.guard ?? null,
   });
-  const first = await server.simulateTransaction(probe);
+  const first = await withStepTiming(
+    params.onStep,
+    { name: "probe", attempt },
+    () => server.simulateTransaction(probe),
+    (response) => rpc.Api.isSimulationError(response),
+  );
   if (rpc.Api.isSimulationError(first)) {
     // The discovery simulation runs in recording mode, so it can fail for
     // reasons that have nothing to do with policy (a contract trap, a missing
@@ -321,82 +445,95 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
   const requiredAuth: xdr.SorobanAuthorizationEntry[] = success.result?.auth ?? [];
 
   // ── Step 2: sign every authorization the call requires ────────────────
-  const signedAuth: xdr.SorobanAuthorizationEntry[] = [];
-  for (const entry of requiredAuth) {
-    const creds = entry.credentials;
-    if (creds.type === "sorobanCredentialsSourceAccount") {
-      // Nothing to sign: the transaction source's authorization is carried by
-      // the envelope signature. The entry itself is NOT droppable, though — an
-      // operation whose auth list is empty is treated as a recording-mode
-      // request by the RPC (so `__check_auth` never runs and policy is never
-      // enforced), and core then rejects the submitted transaction because no
-      // authorization was actually provided.
-      signedAuth.push(entry);
-      continue;
-    }
-    if (
-      creds.type !== "sorobanCredentialsAddress" &&
-      creds.type !== "sorobanCredentialsAddressV2"
-    ) {
-      // ADDRESS_WITH_DELEGATES (CAP-71 delegation) is out of v1 scope; the
-      // contract's SPEC records the same boundary.
-      return {
-        kind: "error",
-        detail: `unsupported credential type in required authorization: ${creds.type}`,
-      };
-    }
-    const addressCredentials = addressCredentialsOf(creds);
-    if (!addressCredentials) {
-      return {
-        kind: "error",
-        detail: `credential kind has no address payload: ${creds.type}`,
-      };
-    }
-    // Works for both account (G…) and contract (C…) authorizers; the guard's
-    // address is a contract, which is exactly why the agent key — not the
-    // transaction source — has to produce this signature.
-    const address = Address.fromScAddress(addressCredentials.address).toString();
+  // One `sign` stage per attempt, spanning every entry the discovery probe
+  // reported: a caller tracing the pipeline cares that signing happened and
+  // how long it took, not how the loop over entries is shaped inside. A shape
+  // this SDK cannot sign raises the internal `SigningStageError` so the stage
+  // reports a real `fail`; `enforceCall` converts it straight back into the
+  // error outcome the pipeline has always returned, detail text unchanged.
+  const signRequiredAuth = async (): Promise<xdr.SorobanAuthorizationEntry[]> => {
+    const signedAuth: xdr.SorobanAuthorizationEntry[] = [];
+    for (const entry of requiredAuth) {
+      const creds = entry.credentials;
+      if (creds.type === "sorobanCredentialsSourceAccount") {
+        // Nothing to sign: the transaction source's authorization is carried by
+        // the envelope signature. The entry itself is NOT droppable, though — an
+        // operation whose auth list is empty is treated as a recording-mode
+        // request by the RPC (so `__check_auth` never runs and policy is never
+        // enforced), and core then rejects the submitted transaction because no
+        // authorization was actually provided.
+        signedAuth.push(entry);
+        continue;
+      }
+      if (
+        creds.type !== "sorobanCredentialsAddress" &&
+        creds.type !== "sorobanCredentialsAddressV2"
+      ) {
+        // ADDRESS_WITH_DELEGATES (CAP-71 delegation) is out of v1 scope; the
+        // contract's SPEC records the same boundary.
+        throw new SigningStageError(
+          `unsupported credential type in required authorization: ${creds.type}`,
+        );
+      }
+      const addressCredentials = addressCredentialsOf(creds);
+      if (!addressCredentials) {
+        throw new SigningStageError(`credential kind has no address payload: ${creds.type}`);
+      }
+      // Works for both account (G…) and contract (C…) authorizers; the guard's
+      // address is a contract, which is exactly why the agent key — not the
+      // transaction source — has to produce this signature.
+      const address = Address.fromScAddress(addressCredentials.address).toString();
 
-    if (params.guardAuth && address === params.guardAuth.guard) {
-      // The smart account authorizes: sign with the registered agent key over
-      // the guard's own preimage (fresh nonce per transaction).
+      if (params.guardAuth && address === params.guardAuth.guard) {
+        // The smart account authorizes: sign with the registered agent key over
+        // the guard's own preimage (fresh nonce per transaction).
+        signedAuth.push(
+          await buildGuardAuthEntry({
+            guard: params.guardAuth.guard,
+            call,
+            signer: params.guardAuth.agent,
+            // The transaction's own sequence number doubles as the nonce: unique
+            // per transaction and never reused, so the host can never see a
+            // replay for this guard address.
+            nonce: BigInt(nextSeq),
+            signatureExpirationLedger: expiration,
+            networkPassphrase,
+            // Answer in the same credential kind the host asked for: the signed
+            // preimage differs between legacy ADDRESS and ADDRESS_V2, so using
+            // the wrong one produces a signature the account cannot verify.
+            credentialType: creds.type,
+          }),
+        );
+        continue;
+      }
+
+      const signer = (params.accountSigners ?? []).find((kp) => kp.publicKey() === address);
+      if (!signer) {
+        throw new SigningStageError(
+          `call requires authorization from ${address}, but no matching key was provided ` +
+            `(supplied: ${(params.accountSigners ?? []).map((kp) => kp.publicKey()).join(", ") || "none"})`,
+        );
+      }
       signedAuth.push(
-        await buildGuardAuthEntry({
-          guard: params.guardAuth.guard,
-          call,
-          signer: params.guardAuth.agent,
-          // The transaction's own sequence number doubles as the nonce: unique
-          // per transaction and never reused, so the host can never see a
-          // replay for this guard address.
-          nonce: BigInt(nextSeq),
+        await signAccountAuthEntry({
+          entry,
+          signer,
           signatureExpirationLedger: expiration,
           networkPassphrase,
-          // Answer in the same credential kind the host asked for: the signed
-          // preimage differs between legacy ADDRESS and ADDRESS_V2, so using
-          // the wrong one produces a signature the account cannot verify.
-          credentialType: creds.type,
         }),
       );
-      continue;
     }
+    return signedAuth;
+  };
 
-    const signer = (params.accountSigners ?? []).find((kp) => kp.publicKey() === address);
-    if (!signer) {
-      return {
-        kind: "error",
-        detail:
-          `call requires authorization from ${address}, but no matching key was provided ` +
-          `(supplied: ${(params.accountSigners ?? []).map((kp) => kp.publicKey()).join(", ") || "none"})`,
-      };
-    }
-    signedAuth.push(
-      await signAccountAuthEntry({
-        entry,
-        signer,
-        signatureExpirationLedger: expiration,
-        networkPassphrase,
-      }),
-    );
+  let signedAuth: xdr.SorobanAuthorizationEntry[];
+  try {
+    signedAuth = await withStepTiming(params.onStep, { name: "sign", attempt }, signRequiredAuth);
+  } catch (error) {
+    // A signing-stage shape refusal is a result, not an exception: keep
+    // reporting it exactly as the pipeline always has, word for word.
+    if (error instanceof SigningStageError) return { kind: "error", detail: error.detail };
+    throw error;
   }
 
   // ── Step 3: enforced simulation — this is where policy is applied ─────
@@ -412,7 +549,12 @@ export async function enforceCall(params: InvokeParams): Promise<EnforcementOutc
     networkPassphrase,
     guard: params.guardAuth?.guard ?? null,
   });
-  const enforced = await server.simulateTransaction(enforcingTx);
+  const enforced = await withStepTiming(
+    params.onStep,
+    { name: "simulate", attempt },
+    () => server.simulateTransaction(enforcingTx),
+    (response) => rpc.Api.isSimulationError(response),
+  );
   if (process.env["SAG_DEBUG_RESOURCES"] === "1") {
     console.log(`[debug] enforced simulation:\n${describeSimulationResources(enforced, params.guardAuth?.guard ?? null)}`);
   }

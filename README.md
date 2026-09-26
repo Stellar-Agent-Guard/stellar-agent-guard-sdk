@@ -151,6 +151,57 @@ reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
 
+### Pipeline step observability (`onStep`)
+
+`invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
+exactly as before — the hook is pure observability and the SDK itself never
+logs anything (and takes no logger dependency; what you do with the events is
+up to you):
+
+```ts
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  guardAuth,
+  onStep(step) {
+    // consumer decides how to display/log the event
+    console.log(`[${step.attempt}] ${step.name} ${step.status} in ${step.durationMs}ms`);
+  },
+});
+```
+
+Event shape (`InvokeStepEvent`):
+
+| Field | Meaning |
+|---|---|
+| `name` | Pipeline stage: `probe` → `sign` → `simulate` → `broadcast` (the shared `TRACE_STEP_NAMES` vocabulary). |
+| `status` | `start` (emitted immediately before the stage runs), then `ok` or `fail`. |
+| `durationMs` | Elapsed time of **this stage attempt** in milliseconds — not the total `invoke()` duration. Always `0` on `start`. |
+| `attempt` | 0-based retry index. `0` for the first pass; `1` on the built-in stale-ledger re-run. Always present. |
+
+The callback is optional, receives every stage attempt (a retried invoke emits
+a full `probe → sign → simulate → broadcast` sequence per attempt, each tagged
+with its `attempt` index), and **callback exceptions are isolated**: a throwing
+`onStep` never breaks the pipeline, never turns a successful invoke into a
+failure, and never masks the original pipeline error — callback errors are
+swallowed silently, since the SDK is logger-agnostic and has no sink to report
+them to. Step names come from the same shared vocabulary the dry-run trace
+uses (`TRACE_STEP_NAMES`), so consumers of either see identical stage names.
+
+The LangChain adapter exposes the same capability:
+
+```ts
+const middleware = createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall: (request) => (/* ... */),
+  onStep(step) {
+    // enforcement-stage events (probe → sign → simulate; never broadcast)
+  },
+});
+```
+
 ### Framework Middleware (LangChain & ElizaOS)
 
 ```ts
@@ -192,7 +243,7 @@ const validate = createGuardValidator({
 - `CostPreChecker`
   - `constructor(options: CostPreCheckerOptions)`
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 
 #### Fee units: stroops and XLM
 

@@ -58,7 +58,14 @@ export {
   type GuardAuthorization,
   type InvokeOutcome,
   type InvokeParams,
+  type InvokeStepEvent,
 } from "./invoke.ts";
+
+export {
+  TRACE_STEP_NAMES,
+  type TraceStepName,
+  type TraceStepStatus,
+} from "./trace.ts";
 
 export {
   InvalidInputError,
@@ -68,6 +75,7 @@ export {
   validateContractCall,
   type PolicyRevision,
   type PreFlightCacheOptions,
+  type PreFlightCheckOptions,
   type PreFlightConfig,
   type PreFlightDecision,
   type PreFlightInterceptorOptions,
