@@ -151,7 +151,58 @@ reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
 
-### Telemetry Polling Jitter & Fleet Tuning
+### Pipeline step observability (`onStep`)
+
+`invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
+exactly as before — the hook is pure observability and the SDK itself never
+logs anything (and takes no logger dependency; what you do with the events is
+up to you):
+
+```ts
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  guardAuth,
+  onStep(step) {
+    // consumer decides how to display/log the event
+    console.log(`[${step.attempt}] ${step.name} ${step.status} in ${step.durationMs}ms`);
+  },
+});
+```
+
+Event shape (`InvokeStepEvent`):
+
+| Field | Meaning |
+|---|---|
+| `name` | Pipeline stage: `probe` → `sign` → `simulate` → `broadcast` (the shared `TRACE_STEP_NAMES` vocabulary). |
+| `status` | `start` (emitted immediately before the stage runs), then `ok` or `fail`. |
+| `durationMs` | Elapsed time of **this stage attempt** in milliseconds — not the total `invoke()` duration. Always `0` on `start`. |
+| `attempt` | 0-based retry index. `0` for the first pass; `1` on the built-in stale-ledger re-run. Always present. |
+
+The callback is optional, receives every stage attempt (a retried invoke emits
+a full `probe → sign → simulate → broadcast` sequence per attempt, each tagged
+with its `attempt` index), and **callback exceptions are isolated**: a throwing
+`onStep` never breaks the pipeline, never turns a successful invoke into a
+failure, and never masks the original pipeline error — callback errors are
+swallowed silently, since the SDK is logger-agnostic and has no sink to report
+them to. Step names come from the same shared vocabulary the dry-run trace
+uses (`TRACE_STEP_NAMES`), so consumers of either see identical stage names.
+
+The LangChain adapter exposes the same capability:
+
+```ts
+const middleware = createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall: (request) => (/* ... */),
+  onStep(step) {
+    // enforcement-stage events (probe → sign → simulate; never broadcast)
+  },
+});
+```
+
+### Framework Middleware (LangChain & ElizaOS)
 
 When deploying fleets of hundreds or thousands of autonomous agents derived from identical templates or scheduled loops, fixed poll intervals (e.g. exactly every 5s) cause all instances to poll RPC nodes in lockstep phase. This creates synchronized traffic spikes (thundering herds) against public Soroban RPC endpoints, triggering aggressive HTTP 429 rate limits and cascade backpressure errors.
 
@@ -186,7 +237,7 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
 - `CostPreChecker`
   - `constructor(options: CostPreCheckerOptions)`
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 
 #### Fee units: stroops and XLM
 
@@ -211,14 +262,12 @@ formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 
 - [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
-  - `constructor(options: GuardTelemetryConfig)`
-  - `poll(params?: { startLedger?: number; cursor?: string; limit?: number }): Promise<PollResult>`
-  - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEvent[]>` — Tails on-chain and uncommitted events with configurable `jitter: 'full' | 'none'`.
-- `computePollDelay(intervalMs: number, jitter?: TelemetryJitter, rng?: () => number): number` — Uniform randomized delay calculator for telemetry polling.
-- `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Canonical policy encoder into Soroban sorted ScVal struct.
-- `decodeCheckResult(resultVal: unknown): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
-- `decodeAuthDecision(topics: string[], source?: GuardEventSource): GuardAuthDecision | null`
-- `guardEventsFromDiagnostics(events: readonly unknown[], guard?: string): GuardEvent[]`
+  - `constructor(options: GuardTelemetryListenerOptions)`
+  - `watch(signal?: AbortSignal): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events.
+- `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
+- `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
+- `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
+- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
@@ -282,6 +331,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 ## Honest limitations
 
 - **Enforcement boundary for arbitrary calls**: Full amount/recipient limits are native to SAC token transfers. Arbitrary Soroban contract calls are enforced via protocol/function allowlists, active window, pause, and dead-man switches; per-call amount limits are not available generically from host auth contexts (tracked as v2).
+- **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 

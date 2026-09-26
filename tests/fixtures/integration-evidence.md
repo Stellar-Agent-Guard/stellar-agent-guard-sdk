@@ -160,6 +160,29 @@ This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
 
+## Addendum — 2026-09-24 (maintenance PR: #33, #29, #46)
+
+This PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`,
+`src/policy.ts`, `src/preflight.ts`), so per `CONTRIBUTING.md` it is recorded
+here. **It is not accompanied by a fresh live-testnet run**: the contributor
+environment has no funded Phase 2 testnet credentials, so the live suite was
+not re-executed. What that means for review, stated plainly:
+
+- **The enforcement *behaviour* on-chain is unchanged by this diff.** The four
+  files were touched only as follows: `src/tx.ts` extracts an `AgentSigner`
+  interface for digest signing (the single-`Keypair` path is identical);
+  `src/invoke.ts`/`src/preflight.ts` widen a config *type* (`AgentSigner |
+  Keypair`) and `await` the now-async entry builder; `src/policy.ts` documents
+  and guards the `LastHeartbeat = 0` ("never") case in the dead-man helpers.
+  The authorization preimage, nonce policy, credential types, policy encoding,
+  footprint assembly and block classification are all untouched, so the five
+  scenarios above must still hold — but that is an argument, not a measurement.
+- **A maintainer with `.env.phase2` should run `npm run test:integration` against
+  this branch before merge** and replace this addendum with the fresh run
+  output, per the rule the gate exists to enforce. The CI gate only verifies
+  that this file was touched; it cannot verify the numbers, and this addendum
+  does not pretend otherwise.
+
 ## Pre-flight Input Validation Verification
 
 Pre-flight interceptor input validation checks execute prior to RPC simulation dispatch:
@@ -237,3 +260,59 @@ scenarios use. A maintainer with `.env.phase2` can reproduce it with
 `npm run test:integration` before merge; it needs no new credentials, no new
 deployment, and no policy change beyond the `installPolicy()` call every scenario
 already makes.
+
+## Addendum — 2026-09-26 (PR: structured pipeline step timing for observability hooks)
+
+Recorded because this PR touches the enforcement path (`src/invoke.ts`,
+`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this checkout, so `npm run test:integration` cannot execute here. As with
+the addenda above, this is stated rather than glossed, and the CI gate verifies
+only that this file was touched — not the numbers.
+
+### What the PR changes on the enforcement path
+
+The diff is observability plumbing only. It adds an optional `onStep` hook to
+`invoke()`/`enforceCall()`, an `InvokeStepEvent` shape (name, status, durationMs,
+attempt) over the existing `TraceStepName` vocabulary, and a `withStepTiming`
+wrapper around the pipeline's existing stages: `probe` (discovery simulation),
+`sign` (all entries, one stage per attempt), `simulate` (enforced simulation) and
+`broadcast`. The stale-ledger retry threads an `attempt` index (0/1) through
+those events. A throwing callback is swallowed; with no hook supplied, each
+stage runs directly — no timers, no events, no added work.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification and every outcome value and detail
+string. The one behavioural nuance is internal only: signing-shape refusals are
+raised as an internal `SigningStageError` so the `sign` stage emits a real `fail`
+event, and `enforceCall` converts it straight back into the same `error` outcome
+text the pipeline has always returned. The enforcement *decisions* the five
+scenarios above assert on are produced by the contract during enforced
+simulation, which this diff does not touch.
+
+### What did run locally (Node 24.21.0, matching the package's engine)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 171 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 44 exports resolve via the ESM export map
+```
+
+The unit suite includes `tests/unit/invoke.test.ts`, which drives the real
+pipeline against a mocked RPC and asserts the enforcement outcomes this file's
+live scenarios exercise — allowed, blocked (with the contract's reason decoded
+from `event_auth_checked` diagnostics), error, and the stale-ledger retry's
+two-attempt event stream — plus `PreFlightInterceptor` validation and cache
+behavior in `tests/unit/preflight.test.ts`. Those cover the classification and
+plumbing this PR touched, but they are mocks: they cannot substitute for the
+live run, and this addendum does not claim otherwise.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.

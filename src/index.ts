@@ -58,7 +58,14 @@ export {
   type GuardAuthorization,
   type InvokeOutcome,
   type InvokeParams,
+  type InvokeStepEvent,
 } from "./invoke.ts";
+
+export {
+  TRACE_STEP_NAMES,
+  type TraceStepName,
+  type TraceStepStatus,
+} from "./trace.ts";
 
 export {
   InvalidInputError,
@@ -68,6 +75,7 @@ export {
   validateContractCall,
   type PolicyRevision,
   type PreFlightCacheOptions,
+  type PreFlightCheckOptions,
   type PreFlightConfig,
   type PreFlightDecision,
   type PreFlightInterceptorOptions,
@@ -92,10 +100,13 @@ export {
   computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
+  guardEventId,
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
   type GuardEvent,
+  type GuardEventContext,
+  type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardTelemetryConfig,
   type GuardTelemetryWatchParams,
@@ -114,13 +125,9 @@ export {
   describeSubmissionFailure,
   describeTransactionResult,
   isStaleLedgerResourceFailure,
-  signAccountAuthEntry,
-  simulateSigned,
-  submitAndPoll,
-  summarizeDiagnosticEvents,
-  type AdminSigner,
+  keypairAgentSigner,
+  toAgentSigner,
   type AgentSigner,
-  type AssembleResult,
   type ContractCall,
   type GuardCredentialType,
   type SimulationOutcome,
