@@ -28,8 +28,8 @@ import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { enforceCall } from "./invoke.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
-import type { InvokeStepEvent } from "./invoke.ts";
-import type { ContractCall } from "./tx.ts";
+import { toAgentSigner } from "./tx.ts";
+import type { AgentSigner, ContractCall } from "./tx.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -229,8 +229,12 @@ export interface PreFlightConfig {
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
   guard: string;
-  /** The key registered as the account's agent, used to sign the auth entry. */
-  agent: Keypair;
+  /**
+   * The key registered as the account's agent, used to sign the auth entry: an
+   * `AgentSigner` for any signing setup, or a plain Ed25519 `Keypair` for the
+   * single-key default.
+   */
+  agent: AgentSigner | Keypair;
   /** Classic account that pays fees and supplies the sequence number. */
   source: Keypair;
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
@@ -287,7 +291,7 @@ function configFingerprint(config: PreFlightConfig): string {
   hashPart(hash, config.networkPassphrase);
   hashPart(hash, config.guard);
   hashPart(hash, config.source.publicKey());
-  hashPart(hash, config.agent.publicKey());
+  hashPart(hash, toAgentSigner(config.agent).publicKey);
   for (const signer of (config.accountSigners ?? []).map((keypair) => keypair.publicKey()).sort()) {
     hashPart(hash, signer);
   }

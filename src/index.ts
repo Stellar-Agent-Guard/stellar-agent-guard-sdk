@@ -83,9 +83,11 @@ export {
 
 export {
   CostPreChecker,
+  STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
   feeBreakdown,
+  formatFee,
   precheckCost,
   type CostDecision,
   type CostPreCheckConfig,
@@ -96,10 +98,13 @@ export {
   GuardTelemetryListener,
   describeGuardEvent,
   diagnosticsToEvents,
+  guardEventId,
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
   type GuardEvent,
+  type GuardEventContext,
+  type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardTelemetryConfig,
 } from "./telemetry.ts";
@@ -107,6 +112,9 @@ export {
 export {
   GUARD_STORAGE_KEYS,
   isStaleLedgerResourceFailure,
+  keypairAgentSigner,
+  toAgentSigner,
+  type AgentSigner,
   type ContractCall,
   type SubmissionResult,
 } from "./tx.ts";

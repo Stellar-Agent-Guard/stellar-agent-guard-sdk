@@ -29,6 +29,7 @@ import {
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
   submitAndPoll,
+  type AgentSigner,
   type ContractCall,
   type SubmissionResult,
 } from "./tx.ts";
@@ -36,7 +37,13 @@ import {
 /** How the guard's authorization is produced for a call that needs it. */
 export interface GuardAuthorization {
   guard: string;
-  agent: Keypair;
+  /**
+   * The account's registered agent signer: an `AgentSigner` for any signing
+   * setup, or a plain Ed25519 `Keypair` for the single-key default. The
+   * multi-key shape (contracts v2) arrives behind the same interface — see
+   * `docs/concepts/multi-key-agent-signing.md`.
+   */
+  agent: AgentSigner | Keypair;
 }
 
 export type InvokeOutcome =
@@ -508,9 +515,14 @@ export async function enforceCall(
         );
       }
       signedAuth.push(
-        await signAccountAuthEntry({
-          entry,
-          signer,
+        await buildGuardAuthEntry({
+          guard: params.guardAuth.guard,
+          call,
+          signer: params.guardAuth.agent,
+          // The transaction's own sequence number doubles as the nonce: unique
+          // per transaction and never reused, so the host can never see a
+          // replay for this guard address.
+          nonce: BigInt(nextSeq),
           signatureExpirationLedger: expiration,
           networkPassphrase,
         }),

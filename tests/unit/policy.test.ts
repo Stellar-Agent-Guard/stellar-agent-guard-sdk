@@ -158,6 +158,101 @@ describe("dead-man switch helpers", () => {
   it("reports null when there is no policy to read a grace window from", () => {
     assert.equal(deadManRemaining(status(), null), null);
   });
+
+  // Issue #46: `LastHeartbeat = 0` is the storage key's documented "0 = never"
+  // default (SPEC §3), and SPEC §5 rule #2 requires `LastHeartbeat != 0` before
+  // the dead-man derivation applies. A never-heartbeated account is therefore
+  // NOT frozen by silence — it is spendable if otherwise allowed. Treating 0 as
+  // epoch-0 would report a healthy fresh account as frozen since 1970.
+  describe("last_heartbeat = 0 (never heartbeated)", () => {
+    const neverHeartbeated = (overrides: Partial<GuardStatus> = {}): GuardStatus =>
+      status({ last_heartbeat: 0n, ...overrides });
+
+    it("reports a never-heartbeated account as not dead-man-frozen, even with grace set", () => {
+      assert.equal(isDeadManFrozen(neverHeartbeated()), false);
+      assert.equal(
+        isDeadManFrozen(neverHeartbeated({ heartbeat_expired: false })),
+        false,
+        "a fresh account with an armed grace window is not frozen by silence",
+      );
+    });
+
+    it("resolves a contradictory heartbeat_expired flag toward contract truth", () => {
+      // No contract obeying rule #2 can set this state; if one ever does (or a
+      // hand-built status carries it), the helper reports what the contract
+      // could truthfully enforce rather than a freeze it could not have applied.
+      assert.equal(isDeadManFrozen(neverHeartbeated({ heartbeat_expired: true })), false);
+    });
+
+    it("still reports an admin freeze as an admin freeze", () => {
+      // The dead-man derivation is out of the picture; the admin freeze is a
+      // separate condition (SPEC §5, "Manual freeze") and is not masked by the
+      // never-guard, which only gates the dead-man classification.
+      const adminFrozen = neverHeartbeated({ admin_frozen: true, heartbeat_expired: true });
+      assert.equal(isDeadManFrozen(adminFrozen), false, "admin_frozen is a separate condition");
+    });
+
+    it("reports null remaining time — never is not expired", () => {
+      assert.equal(deadManRemaining(neverHeartbeated(), samplePolicy({ dms_grace_secs: 100n })), null);
+    });
+
+    it("reports null remaining time even when the switch is armed and unexpired flags disagree", () => {
+      assert.equal(
+        deadManRemaining(
+          neverHeartbeated({ heartbeat_expired: true }),
+          samplePolicy({ dms_grace_secs: 100n }),
+        ),
+        null,
+        "there is no countdown in force for an account that has never heartbeated",
+      );
+    });
+  });
+
+  // Boundary parity with the contract's freeze derivation (SPEC §5): frozen the
+  // moment the grace has fully elapsed, i.e. `now >= last_heartbeat + grace`,
+  // counted in whole unix seconds. Pinned at 79%/80%/101% of the grace elapsed:
+  // strictly inside grace reads positive; at the boundary and beyond it does not
+  // read positive. (A future contract-side `dms_health` percentage would reuse
+  // this same boundary; if it lands, these are the tests that must stay in step.)
+  describe("grace boundary (79% / 80% / 101% elapsed)", () => {
+    const grace = 100n;
+    const policy = samplePolicy({ dms_grace_secs: grace });
+    const at = (percentElapsed: bigint): GuardStatus =>
+      status({ last_heartbeat: 1000n, now: 1000n + (grace * percentElapsed) / 100n });
+
+    it("reads positive remaining at 79% elapsed", () => {
+      const remaining = deadManRemaining(at(79n), policy);
+      assert.equal(remaining, 21n);
+      assert.ok(remaining! > 0n);
+    });
+
+    it("reads positive remaining at 80% elapsed", () => {
+      assert.equal(deadManRemaining(at(80n), policy), 20n);
+    });
+
+    it("reads negative remaining at 101% elapsed", () => {
+      const remaining = deadManRemaining(at(101n), policy);
+      assert.equal(remaining, -1n);
+      assert.ok(remaining! <= 0n, "the grace has fully elapsed by 101%");
+    });
+
+    it("marks exactly 100% elapsed as the freeze boundary, not inside grace", () => {
+      // "frozen the moment the grace elapses" (SPEC §5): remaining 0 is the
+      // boundary itself and is not positive.
+      assert.equal(deadManRemaining(at(100n), policy), 0n);
+      assert.ok((deadManRemaining(at(100n), policy) ?? 0n) <= 0n);
+    });
+
+    it("keeps the boundary independent of the heartbeat_expired flag", () => {
+      // The remaining-time arithmetic is derived from last_heartbeat + grace -
+      // now; the flag describes what the contract has decided, and the two stay
+      // consistent here because the same derivation produced both.
+      assert.equal(
+        deadManRemaining(status({ last_heartbeat: 1000n, now: 1101n }), policy),
+        deadManRemaining(status({ last_heartbeat: 1000n, now: 1101n, heartbeat_expired: true }), policy),
+      );
+    });
+  });
 });
 
 describe("describePolicy", () => {
