@@ -61,18 +61,25 @@ export {
 } from "./invoke.ts";
 
 export {
+  InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
   preflight,
+  validateContractCall,
+  type PolicyRevision,
+  type PreFlightCacheOptions,
   type PreFlightConfig,
   type PreFlightDecision,
+  type PreFlightInterceptorOptions,
 } from "./preflight.ts";
 
 export {
   CostPreChecker,
+  STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
   feeBreakdown,
+  formatFee,
   precheckCost,
   type CostDecision,
   type CostPreCheckConfig,
@@ -82,6 +89,7 @@ export {
 export {
   GuardTelemetryListener,
   describeGuardEvent,
+  diagnosticsToEvents,
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
