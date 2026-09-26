@@ -17,12 +17,20 @@
  *
  * Requires `.env.phase2` (see `scripts/deploy-phase2-instance.ts`). Run with:
  *   npm run test:integration
+ *
+ * The last describe block is the *paired* fidelity test: the same transfer goes
+ * through `PreFlightInterceptor.check()` and then immediately through the full
+ * `invoke()` pipeline, and the two verdicts are compared. The point is not that
+ * each path works (the tests above cover that separately) but that they agree —
+ * a pre-flight verdict is a prediction of an outcome, and this asserts the
+ * prediction against the thing it predicted, back-to-back with no delay.
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
-import { rpc } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "../../src/events.ts";
 import { topicSymbols } from "../../src/invoke.ts";
+import { PreFlightInterceptor } from "../../src/preflight.ts";
 import { GUARD_REASON_CODES } from "../../src/reasons.ts";
 import {
   TESTNET_PASSPHRASE,
@@ -39,6 +47,25 @@ import {
 
 let config: Phase2Config;
 let server: rpc.Server;
+let interceptor: PreFlightInterceptor;
+
+/** Positional args for a SAC `transfer` out of the guarded account. */
+function transferCall(to: string, amount: bigint) {
+  return {
+    contract: config.token,
+    fn: "transfer",
+    args: [
+      new Address(config.guard).toScVal(),
+      new Address(to).toScVal(),
+      nativeToScVal(amount, { type: "i128" }),
+    ],
+  };
+}
+
+/** JSON that tolerates BigInt, for assertion messages that include a fee. */
+function serialize(value: unknown): string {
+  return JSON.stringify(value, (_key, item) => (typeof item === "bigint" ? `${item}n` : item));
+}
 
 /** A blocked action has no submission — that is the pre-broadcast guarantee. */
 type BlockedOutcome = { kind: "blocked"; reason: string; detail?: string; diagnosticEvents: unknown[] };
@@ -86,6 +113,16 @@ function assertBlocked(
 before(async () => {
   config = await loadPhase2Config();
   server = new rpc.Server(config.rpcUrl);
+
+  // Deliberately no `cache` option: this suite pairs a verdict with the outcome
+  // it predicts, and a cached verdict would be answering for an earlier ledger.
+  interceptor = new PreFlightInterceptor({
+    server,
+    networkPassphrase: TESTNET_PASSPHRASE,
+    guard: config.guard,
+    agent: config.keys.agent,
+    source: config.keys.agent,
+  });
 
   // Assert preconditions upfront (code exists, policy active, agent funded, token funded)
   const preconditions = await assertPreconditions(server, config);
@@ -207,6 +244,105 @@ describe("live enforcement: SAC transfer", () => {
     assert.equal(status.has_policy, true, "the policy was not restored after the paused test");
     const restored = await readPolicy(server, config);
     assert.equal(restored?.paused, false, "the policy is still paused");
+  });
+});
+
+describe("live pre-flight fidelity: verdict vs on-chain outcome (delay = 0)", () => {
+  it("allow case: admissible pre-flight, then the same transfer lands and is ledger-verified", async () => {
+    await installPolicy(server, config); // clean window, so the verdict is about this transfer alone
+    const balanceBefore = await guardTokenBalance(server, config);
+    const amount = 50n;
+    const call = transferCall(config.keys.recipient.publicKey(), amount);
+
+    // The prediction.
+    const verdict = await interceptor.check(call);
+    assert.equal(verdict.allowed, true, `pre-flight refused: ${serialize(verdict)}`);
+    if (!verdict.allowed) return;
+    assert.equal(verdict.kind, "admissible");
+    assert.ok(verdict.estimatedResourceFee > 0n, "expected a real resource fee estimate");
+
+    // The thing it predicted, immediately after: no delay, no wait between the
+    // two calls. `invoke()` re-runs enforcement from scratch (the same
+    // `enforceCall()` `check()` called), so this compares two independent
+    // observations of one unchanging state rather than a verdict and its echo.
+    const outcome = await transfer(server, config, amount, config.keys.recipient.publicKey());
+    assert.equal(outcome.kind, "allowed", serialize(outcome));
+    if (outcome.kind !== "allowed") return;
+    const submission = outcome.submission;
+    assert.match(submission.hash, /^[0-9a-f]{64}$/, "expected a real transaction hash");
+
+    // Ledger-verified, not taken on the submission's word.
+    const tx = await server.getTransaction(submission.hash);
+    assert.equal(tx.status, "SUCCESS", `transaction ${submission.hash}: ${serialize(tx)}`);
+    assert.equal(await guardTokenBalance(server, config), balanceBefore - amount);
+    assert.equal(
+      (await readWindowTotal(server, config)).total,
+      amount,
+      "the rolling window did not record the spend",
+    );
+
+    console.log(
+      `[paired/allow] pre-flight admissible → tx ${submission.hash} SUCCESS at ledger ${submission.ledger}` +
+        `, balance ${balanceBefore} → ${balanceBefore - amount}`,
+    );
+  });
+
+  it("block case: blocked pre-flight, then the same transfer is refused for the same reason", async () => {
+    await installPolicy(server, config);
+    const balanceBefore = await guardTokenBalance(server, config);
+    const windowBefore = await readWindowTotal(server, config);
+    const overCap = config.policy.per_tx_cap + 1n;
+    const call = transferCall(config.keys.recipient.publicKey(), overCap);
+
+    const verdict = await interceptor.check(call);
+    assert.equal(
+      verdict.allowed,
+      false,
+      `pre-flight unexpectedly allowed ${overCap}: ${serialize(verdict)}`,
+    );
+    if (verdict.allowed) return;
+    assert.equal(verdict.kind, "blocked");
+    assert.equal(verdict.reason, "per_tx_cap_exceeded");
+
+    // The contract, not the SDK, has to be the thing that ruled: decode the
+    // decision carried by the pre-flight refusal itself.
+    const preflightDecisions = verdict.diagnosticEvents
+      .map((event) => decodeAuthDecision(topicSymbols(event), "diagnostic"))
+      .filter((decision) => decision !== null);
+    assert.ok(
+      preflightDecisions.length > 0,
+      "the pre-flight refusal carries no event_auth_checked decision",
+    );
+    assert.equal(preflightDecisions[0]?.reason, verdict.reason);
+
+    // The full pipeline for the identical call, immediately afterwards. It
+    // reaches the same enforced re-simulation — `invoke()` calls the very same
+    // `enforceCall()` — and is refused there.
+    //
+    // Why the evidence stops at refusal rather than at a broadcast attempt: the
+    // block happens during enforced simulation, *before* broadcast, so by
+    // construction there is no transaction hash to look up (`assertBlocked`
+    // below asserts that no submission exists). Broadcasting past that gate
+    // would require hand-assembling an envelope that bypasses this SDK's own
+    // enforcement — a code path the SDK deliberately does not offer — and would
+    // prove nothing the contract has not already stated, since the reason
+    // asserted here comes from `__check_auth`'s own `event_auth_checked`
+    // diagnostic event, not from SDK-side logic. This is the honest variant the
+    // issue allows for, and the reason for picking it.
+    const outcome = await transfer(server, config, overCap, config.keys.recipient.publicKey());
+    const blocked = assertBlocked(outcome, verdict.reason as keyof typeof GUARD_REASON_CODES);
+
+    // The pairing itself: both paths report the identical contract reason.
+    assert.equal(blocked.reason, verdict.reason, "pre-flight and invoke disagreed on the reason");
+
+    // A refusal must move nothing.
+    assert.equal(await guardTokenBalance(server, config), balanceBefore);
+    assert.equal((await readWindowTotal(server, config)).total, windowBefore.total);
+
+    console.log(
+      `[paired/block] pre-flight blocked(${verdict.reason}) → invoke blocked(${blocked.reason}), ` +
+        `no broadcast, balance and window unchanged`,
+    );
   });
 });
 
