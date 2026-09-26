@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { enforceCall } from "./invoke.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
+import type { InvokeStepEvent } from "./invoke.ts";
 import type { ContractCall } from "./tx.ts";
 
 /**
@@ -194,6 +195,18 @@ export type PreFlightDecision =
 
 /** A caller-supplied policy revision token used as part of the cache key. */
 export type PolicyRevision = string | number | bigint | boolean | null | undefined;
+
+/**
+ * Per-call options for `check()`.
+ *
+ * `onStep` receives the enforcement pipeline's stage attempts (probe → sign →
+ * simulate; `check()` never broadcasts), using the same `InvokeStepEvent`
+ * shape and shared trace vocabulary as `invoke()`'s `onStep`. Entirely
+ * optional — omitting it changes nothing about the check.
+ */
+export interface PreFlightCheckOptions {
+  onStep?: (step: InvokeStepEvent) => void;
+}
 
 export interface PreFlightCacheOptions {
   /**
@@ -367,8 +380,12 @@ export class PreFlightInterceptor {
   /**
    * Decide whether `call` may proceed. Never broadcasts, never mutates, never
    * throws for a refusal — a block is a normal, expected result.
+   *
+   * Accepts per-call `options` (e.g. `onStep` observability) without any
+   * effect on the verdict itself; existing single-argument callers are
+   * unaffected.
    */
-  async check(call: ContractCall): Promise<PreFlightDecision> {
+  async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
 
     const context = await this.cacheContext(call);
@@ -389,6 +406,7 @@ export class PreFlightInterceptor {
       networkPassphrase: this.config.networkPassphrase,
       guardAuth: { guard: this.config.guard, agent: this.config.agent },
       ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+      ...(options?.onStep ? { onStep: options.onStep } : {}),
     });
 
     let decision: PreFlightDecision;
