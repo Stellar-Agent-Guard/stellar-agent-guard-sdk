@@ -149,12 +149,14 @@ Waiting for the ledger to advance past the previous write fixed 6 of 6 runs,
 confirming the cause: the enforced simulation priced the transaction against a
 ledger snapshot that predated the write the SDK had just made.
 
-The SDK fix is a single bounded retry, gated on this specific failure
-(`isStaleLedgerResourceFailure`). It is safe because a transaction rejected for
-exceeding a resource limit applies nothing, and inclusion proves the ledger has
-since advanced. It is deliberately *not* applied to `Auth` failures — those are
-the guard refusing, and retrying a block would be wrong. Re-running the same six
-transfers returned 6 of 6 allowed with no waits.
+At the time of this recorded run, the SDK fix was a single bounded retry, gated
+on this specific failure (`isStaleLedgerResourceFailure`). It is safe because a
+transaction rejected for exceeding a resource limit applies nothing, and
+inclusion proves the ledger has since advanced. It is deliberately *not* applied
+to `Auth` failures — those are the guard refusing, and retrying a block would be
+wrong. Re-running the same six transfers returned 6 of 6 allowed with no waits.
+The retry-hardening change in this branch preserves that safety boundary while
+making the retry budget and backoff explicit.
 
 This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
