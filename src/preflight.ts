@@ -199,6 +199,56 @@ export type PreFlightDecision =
       detail: string;
     };
 
+/**
+ * Options for a batched pre-flight check.
+ *
+ * Both fields exist so a caller can run the batch check against values it
+ * already knows, without an extra ledger read. Omit them and the interceptor
+ * fetches the live policy and committed window spend from the guard's storage.
+ */
+export interface CheckBatchOptions {
+  /**
+   * Policy configuration to enforce against during batch staging.
+   * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
+   */
+  policy?: PolicyConfig | null;
+
+  /**
+   * Initial committed amount already spent in the current rolling window.
+   * If omitted, attempts to fetch it from the guard's `Window` ledger entry (defaults to 0n).
+   */
+  initialWindowSpent?: bigint;
+}
+
+export interface PreFlightBatchDecision {
+  /**
+   * Overall batch verdict: true only if every call in the batch is admissible.
+   * Mirrors the contract's all-or-nothing auth batch semantics.
+   */
+  admissible: boolean;
+
+  /**
+   * Alias for `admissible`.
+   */
+  overallAdmissible: boolean;
+
+  /**
+   * Per-call decisions in the exact order of the input batch.
+   */
+  verdicts: PreFlightDecision[];
+
+  /**
+   * Alias for `verdicts`.
+   */
+  calls: PreFlightDecision[];
+
+  /**
+   * Total estimated resource fee in stroops across all calls in the batch
+   * that were admissible.
+   */
+  totalEstimatedResourceFee: bigint;
+}
+
 /** A caller-supplied policy revision token used as part of the cache key. */
 export type PolicyRevision = string | number | bigint | boolean | null | undefined;
 
@@ -245,6 +295,8 @@ export interface PreFlightConfig {
   source: Keypair;
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
   accountSigners?: Keypair[];
+  /** Optional policy to use for batch staging (otherwise fetched from ledger). */
+  policy?: PolicyConfig | null;
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
