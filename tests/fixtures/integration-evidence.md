@@ -260,3 +260,111 @@ scenarios use. A maintainer with `.env.phase2` can reproduce it with
 `npm run test:integration` before merge; it needs no new credentials, no new
 deployment, and no policy change beyond the `installPolicy()` call every scenario
 already makes.
+
+## Addendum — 2026-09-26 (PR: structured pipeline step timing for observability hooks)
+
+Recorded because this PR touches the enforcement path (`src/invoke.ts`,
+`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this checkout, so `npm run test:integration` cannot execute here. As with
+the addenda above, this is stated rather than glossed, and the CI gate verifies
+only that this file was touched — not the numbers.
+
+### What the PR changes on the enforcement path
+
+The diff is observability plumbing only. It adds an optional `onStep` hook to
+`invoke()`/`enforceCall()`, an `InvokeStepEvent` shape (name, status, durationMs,
+attempt) over the existing `TraceStepName` vocabulary, and a `withStepTiming`
+wrapper around the pipeline's existing stages: `probe` (discovery simulation),
+`sign` (all entries, one stage per attempt), `simulate` (enforced simulation) and
+`broadcast`. The stale-ledger retry threads an `attempt` index (0/1) through
+those events. A throwing callback is swallowed; with no hook supplied, each
+stage runs directly — no timers, no events, no added work.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification and every outcome value and detail
+string. The one behavioural nuance is internal only: signing-shape refusals are
+raised as an internal `SigningStageError` so the `sign` stage emits a real `fail`
+event, and `enforceCall` converts it straight back into the same `error` outcome
+text the pipeline has always returned. The enforcement *decisions* the five
+scenarios above assert on are produced by the contract during enforced
+simulation, which this diff does not touch.
+
+### What did run locally (Node 24.21.0, matching the package's engine)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 171 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 44 exports resolve via the ESM export map
+```
+
+The unit suite includes `tests/unit/invoke.test.ts`, which drives the real
+pipeline against a mocked RPC and asserts the enforcement outcomes this file's
+live scenarios exercise — allowed, blocked (with the contract's reason decoded
+from `event_auth_checked` diagnostics), error, and the stale-ledger retry's
+two-attempt event stream — plus `PreFlightInterceptor` validation and cache
+behavior in `tests/unit/preflight.test.ts`. Those cover the classification and
+plumbing this PR touched, but they are mocks: they cannot substitute for the
+live run, and this addendum does not claim otherwise.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.
+
+## Addendum — 2026-09-26 (PR #182: Admin operations, SDK jitter, adapter examples, AgentSigner type fixes)
+
+Recorded because this PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`)
+and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
+this checkout, so `npm run test:integration` cannot execute here. The on-chain
+enforcement behaviour is unchanged by this diff.
+
+### Summary of changes to the enforcement path
+
+- `src/tx.ts`: Deduplicated `GuardCredentialType` and unified `AgentSigner` to the clean `readonly publicKey: string` / `signDigest` definition; updated `submitAndPoll` options parameter types for compatibility with `exactOptionalPropertyTypes`.
+- `src/invoke.ts`: Imported `AdminSigner`, added `pollAttempts` and `pollIntervalMs` to `InvokeParams` and forwarded them to `submitAndPoll`, and updated `enforceCall` to `await` `publicKey()` across `accountSigners` so asynchronous custom admin signers (e.g., Freighter) match correctly.
+
+### What did run locally
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 191 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 64 exports resolve via the ESM export map
+```
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
+
+## Addendum — 2026-09-26 (PR #184: GuardBlockedError decision payload and differential fixture test table #63, #70)
+
+Recorded because this PR touches the enforcement path (`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from this checkout, so `npm run test:integration` cannot execute here. The on-chain enforcement behaviour is unchanged by this diff.
+
+### Summary of changes to the enforcement path
+
+- `src/preflight.ts`: Updated `assertAllowed()` in `PreFlightInterceptor` to pass the offending `call` and `rawEvent` (the contract's first diagnostic event) into `GuardBlockedError` when rejecting blocked invocations.
+- `src/reasons.ts`: Extended `GuardBlockedErrorOptions` and `GuardBlockedError` to carry `call?: ContractCall` and `rawEvent?: DiagnosticEvent`, along with a structured `toJSON()` serialization method for observability and logging.
+- `scripts/sync-contract-fixtures.ts` & `tests/fixtures/contract-fixtures.json`: Added differential fixture tables and synchronization tooling asserting parity between contract diagnostics and SDK preflight reasoning.
+
+### What did run locally (Node 24)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 215 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 64 exports resolve via the ESM export map
+```
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output if needed.
+
+

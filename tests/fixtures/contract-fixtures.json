@@ -1,0 +1,352 @@
+{
+  "_provenance": {
+    "sourceRepo": "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+    "sourceCommit": "d067a174733abeb93f1d065bbed5c6d267042b5d",
+    "sourceFile": "src/types.rs",
+    "refreshCommand": "npm run sync:fixtures",
+    "updatedAt": "2026-09-26T14:00:00.000Z",
+    "description": "Golden JSON fixtures for every auth_checked outcome and reason symbol emitted by the smart account contract."
+  },
+  "entries": [
+    {
+      "name": "allowed",
+      "result": "allowed",
+      "reason": "",
+      "code": null,
+      "stream": "ledger",
+      "topics": [
+        "event_auth_checked",
+        "allowed",
+        ""
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdhbGxvd2VkAA==",
+        "AAAADwAAAAA="
+      ]
+    },
+    {
+      "name": "blocked_unauthorized",
+      "result": "blocked",
+      "reason": "unauthorized",
+      "code": 1,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "unauthorized"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAAAx1bmF1dGhvcml6ZWQ="
+      ]
+    },
+    {
+      "name": "blocked_already_initialized",
+      "result": "blocked",
+      "reason": "already_initialized",
+      "code": 2,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "already_initialized"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABNhbHJlYWR5X2luaXRpYWxpemVkAA=="
+      ]
+    },
+    {
+      "name": "blocked_not_initialized",
+      "result": "blocked",
+      "reason": "not_initialized",
+      "code": 3,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "not_initialized"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAAA9ub3RfaW5pdGlhbGl6ZWQA"
+      ]
+    },
+    {
+      "name": "blocked_invalid_config",
+      "result": "blocked",
+      "reason": "invalid_config",
+      "code": 4,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "invalid_config"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAAA5pbnZhbGlkX2NvbmZpZwAA"
+      ]
+    },
+    {
+      "name": "blocked_invalid_amount",
+      "result": "blocked",
+      "reason": "invalid_amount",
+      "code": 5,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "invalid_amount"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAAA5pbnZhbGlkX2Ftb3VudAAA"
+      ]
+    },
+    {
+      "name": "blocked_admin_frozen",
+      "result": "blocked",
+      "reason": "admin_frozen",
+      "code": 10,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "admin_frozen"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAAAxhZG1pbl9mcm96ZW4="
+      ]
+    },
+    {
+      "name": "blocked_heartbeat_expired",
+      "result": "blocked",
+      "reason": "heartbeat_expired",
+      "code": 11,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "heartbeat_expired"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABFoZWFydGJlYXRfZXhwaXJlZAAAAA=="
+      ]
+    },
+    {
+      "name": "blocked_no_policy",
+      "result": "blocked",
+      "reason": "no_policy",
+      "code": 12,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "no_policy"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAAAlub19wb2xpY3kAAAA="
+      ]
+    },
+    {
+      "name": "blocked_paused",
+      "result": "blocked",
+      "reason": "paused",
+      "code": 13,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "paused"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAAAZwYXVzZWQAAA=="
+      ]
+    },
+    {
+      "name": "blocked_outside_active_window",
+      "result": "blocked",
+      "reason": "outside_active_window",
+      "code": 14,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "outside_active_window"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABVvdXRzaWRlX2FjdGl2ZV93aW5kb3cAAAA="
+      ]
+    },
+    {
+      "name": "blocked_asset_not_allowed",
+      "result": "blocked",
+      "reason": "asset_not_allowed",
+      "code": 20,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "asset_not_allowed"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABFhc3NldF9ub3RfYWxsb3dlZAAAAA=="
+      ]
+    },
+    {
+      "name": "blocked_recipient_not_allowed",
+      "result": "blocked",
+      "reason": "recipient_not_allowed",
+      "code": 21,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "recipient_not_allowed"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABVyZWNpcGllbnRfbm90X2FsbG93ZWQAAAA="
+      ]
+    },
+    {
+      "name": "blocked_per_tx_cap_exceeded",
+      "result": "blocked",
+      "reason": "per_tx_cap_exceeded",
+      "code": 22,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "per_tx_cap_exceeded"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABNwZXJfdHhfY2FwX2V4Y2VlZGVkAA=="
+      ]
+    },
+    {
+      "name": "blocked_window_cap_exceeded",
+      "result": "blocked",
+      "reason": "window_cap_exceeded",
+      "code": 23,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "window_cap_exceeded"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABN3aW5kb3dfY2FwX2V4Y2VlZGVkAA=="
+      ]
+    },
+    {
+      "name": "blocked_protocol_not_allowed",
+      "result": "blocked",
+      "reason": "protocol_not_allowed",
+      "code": 24,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "protocol_not_allowed"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABRwcm90b2NvbF9ub3RfYWxsb3dlZA=="
+      ]
+    },
+    {
+      "name": "blocked_function_not_allowed",
+      "result": "blocked",
+      "reason": "function_not_allowed",
+      "code": 25,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "function_not_allowed"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABRmdW5jdGlvbl9ub3RfYWxsb3dlZA=="
+      ]
+    },
+    {
+      "name": "blocked_unknown_contract",
+      "result": "blocked",
+      "reason": "unknown_contract",
+      "code": 26,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "unknown_contract"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABB1bmtub3duX2NvbnRyYWN0"
+      ]
+    },
+    {
+      "name": "blocked_self_function_not_allowed",
+      "result": "blocked",
+      "reason": "self_function_not_allowed",
+      "code": 27,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "self_function_not_allowed"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABlzZWxmX2Z1bmN0aW9uX25vdF9hbGxvd2VkAAAA"
+      ]
+    },
+    {
+      "name": "blocked_create_contract_not_allowed",
+      "result": "blocked",
+      "reason": "create_contract_not_allowed",
+      "code": 28,
+      "stream": "diagnostic",
+      "topics": [
+        "event_auth_checked",
+        "blocked",
+        "create_contract_not_allowed"
+      ],
+      "topicsXdr": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdibG9ja2VkAA==",
+        "AAAADwAAABtjcmVhdGVfY29udHJhY3Rfbm90X2FsbG93ZWQA"
+      ]
+    }
+  ]
+}

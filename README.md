@@ -151,34 +151,79 @@ reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
 
-### Framework Middleware (LangChain & ElizaOS)
+### Pipeline step observability (`onStep`)
+
+`invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
+exactly as before — the hook is pure observability and the SDK itself never
+logs anything (and takes no logger dependency; what you do with the events is
+up to you):
 
 ```ts
-import {
-  createLangChainGuardMiddleware,
-  createGuardValidator,
-} from "stellar-agent-guard-sdk";
-
-// LangChain: intercept agent tool calls
-const middleware = createLangChainGuardMiddleware({
-  interceptor,
-  toContractCall: (request) => ({
-    contractId: request.args.token,
-    method: "transfer",
-    args: [request.args.from, request.args.to, request.args.amount],
-  }),
-});
-
-// ElizaOS: validate action before execution
-const validate = createGuardValidator({
-  interceptor,
-  toContractCall: (message) => ({
-    contractId: message.content.token,
-    method: "transfer",
-    args: [message.content.from, message.content.to, message.content.amount],
-  }),
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  guardAuth,
+  onStep(step) {
+    // consumer decides how to display/log the event
+    console.log(`[${step.attempt}] ${step.name} ${step.status} in ${step.durationMs}ms`);
+  },
 });
 ```
+
+Event shape (`InvokeStepEvent`):
+
+| Field | Meaning |
+|---|---|
+| `name` | Pipeline stage: `probe` → `sign` → `simulate` → `broadcast` (the shared `TRACE_STEP_NAMES` vocabulary). |
+| `status` | `start` (emitted immediately before the stage runs), then `ok` or `fail`. |
+| `durationMs` | Elapsed time of **this stage attempt** in milliseconds — not the total `invoke()` duration. Always `0` on `start`. |
+| `attempt` | 0-based retry index. `0` for the first pass; `1` on the built-in stale-ledger re-run. Always present. |
+
+The callback is optional, receives every stage attempt (a retried invoke emits
+a full `probe → sign → simulate → broadcast` sequence per attempt, each tagged
+with its `attempt` index), and **callback exceptions are isolated**: a throwing
+`onStep` never breaks the pipeline, never turns a successful invoke into a
+failure, and never masks the original pipeline error — callback errors are
+swallowed silently, since the SDK is logger-agnostic and has no sink to report
+them to. Step names come from the same shared vocabulary the dry-run trace
+uses (`TRACE_STEP_NAMES`), so consumers of either see identical stage names.
+
+The LangChain adapter exposes the same capability:
+
+```ts
+const middleware = createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall: (request) => (/* ... */),
+  onStep(step) {
+    // enforcement-stage events (probe → sign → simulate; never broadcast)
+  },
+});
+```
+
+### Framework Middleware (LangChain & ElizaOS)
+
+When deploying fleets of hundreds or thousands of autonomous agents derived from identical templates or scheduled loops, fixed poll intervals (e.g. exactly every 5s) cause all instances to poll RPC nodes in lockstep phase. This creates synchronized traffic spikes (thundering herds) against public Soroban RPC endpoints, triggering aggressive HTTP 429 rate limits and cascade backpressure errors.
+
+`GuardTelemetryListener.watch()` defaults to `jitter: 'full'`, which uniformly randomizes each poll delay in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2` (a 20% variance window). This breaks lockstep fleet synchronization while keeping polling responsive and bounded. Deterministic fixed interval cadence can be restored when needed by specifying `jitter: 'none'`.
+
+```ts
+// Follow event telemetry with full jitter (default)
+for await (const events of listener.watch({
+  pollIntervalMs: 5_000,
+  jitter: "full", // uniformly distributed in [4000ms, 5000ms]
+})) {
+  console.log(`Received ${events.length} guard event(s)`);
+}
+```
+
+### Framework Middleware (LangChain & ElizaOS)
+
+Plug-and-play middleware intercepts agent actions before tools are executed:
+
+- **LangChain**: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
+- **ElizaOS**: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
 
 ## API Reference
 
@@ -192,7 +237,7 @@ const validate = createGuardValidator({
 - `CostPreChecker`
   - `constructor(options: CostPreCheckerOptions)`
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 
 #### Fee units: stroops and XLM
 
@@ -224,8 +269,8 @@ formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
-- `isDeadManFrozen(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): boolean`
-- `deadManRemaining(status: AccountStatus | null, policy: GuardPolicy | null, nowSecs?: number): number | null`
+- `isDeadManFrozen(status: GuardStatus): boolean`
+- `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 
 ## Architecture
 
