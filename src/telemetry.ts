@@ -301,6 +301,43 @@ export interface PollResult {
   /** Cursor to resume from, as returned by the RPC. */
   cursor: string;
   latestLedger: number;
+  /**
+   * Oldest ledger the RPC still retains, from the same response
+   * (`Api.RetentionState.oldestLedger`).
+   *
+   * `null` when the host did not report it. Gap detection is skipped in that
+   * case rather than guessed at: a proof needs the boundary.
+   */
+  oldestLedger: number | null;
+}
+
+/**
+ * Why event coverage is known to have broken.
+ *
+ * Only one reason is produced today, and it is deliberately the *provable* one:
+ * the RPC's own retention window moved past the listener, so the missing ledgers
+ * can no longer be retrieved from it. See `docs/event-schema.md` for the rule.
+ */
+export type GuardTelemetryGapReason = "history_pruned";
+
+/**
+ * A provable gap in event coverage: a ledger range whose events are gone.
+ *
+ * `fromLedger..toLedger` (inclusive) is unrecoverable from the RPC that reported
+ * it. The listener never fabricates events for the range — it announces the hole
+ * and keeps streaming real events, because a silent gap in a security monitor is
+ * worse than an announced one.
+ */
+export interface GuardTelemetryGap {
+  /** First ledger that can no longer be retrieved (inclusive). */
+  fromLedger: number;
+  /** Last ledger that can no longer be retrieved (inclusive). */
+  toLedger: number;
+  reason: GuardTelemetryGapReason;
+  /** `oldestLedger` of the response that detected the gap. */
+  retainedFromLedger: number;
+  /** `latestLedger` of that same response. */
+  retainedToLedger: number;
 }
 
 export type TelemetryJitter = "none" | "full";
@@ -343,6 +380,28 @@ export interface GuardTelemetryWatchParams {
   rng?: () => number;
   /** Optional sleep handler for testing without wall-clock delays. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Resume from a previously stored RPC cursor instead of a ledger range.
+   * Cursors are opaque, so pair this with `resumeLedger` — the last ledger the
+   * stored cursor had already consumed — to make a gap that opened while the
+   * listener was offline detectable.
+   */
+  cursor?: string;
+  /**
+   * The ledger a supplied `cursor` points at. Without it the resume point cannot
+   * be reconstructed from the cursor, so no gap can be proven and none is
+   * reported (an announced unknown is not better than a silent guess).
+   */
+  resumeLedger?: number;
+  /**
+   * Called when coverage provably broke: the RPC's retention window now starts
+   * after the earliest ledger the listener still needed.
+   *
+   * Fires at most once per discontinuity — never once per poll — and is never
+   * called with a fabricated event. A throwing callback is isolated (it cannot
+   * break the watch loop), matching `invoke()`'s `onStep` contract.
+   */
+  onGap?: (gap: GuardTelemetryGap) => void;
 }
 
 export class GuardTelemetryListener {
@@ -397,13 +456,25 @@ export class GuardTelemetryListener {
       );
       if (decoded) events.push(decoded);
     }
-    return { events, cursor: response.cursor, latestLedger: response.latestLedger };
+    return {
+      events,
+      cursor: response.cursor,
+      latestLedger: response.latestLedger,
+      // Best-effort: a host that omits the retention boundary gets no gap
+      // detection, rather than a boundary invented from `latestLedger`.
+      oldestLedger: typeof response.oldestLedger === "number" ? response.oldestLedger : null,
+    };
   }
 
   /**
-   * Follow the guard from `startLedger` (default: one page back) until aborted.
-   * Yields batches so a caller controls backpressure; the cursor is advanced
-   * internally so no event is delivered twice.
+   * Follow the guard from `startLedger` (default: one page back) or from a
+   * stored `cursor` until aborted. Yields batches so a caller controls
+   * backpressure; the cursor is advanced internally so no event is delivered
+   * twice.
+   *
+   * When `onGap` is supplied, the listener also checks each response's retention
+   * window and reports a provable hole (see `GuardTelemetryGap`) instead of
+   * silently skipping it. Omitting `onGap` changes nothing about the stream.
    */
   async *watch(
     params: GuardTelemetryWatchParams = {},
@@ -412,13 +483,22 @@ export class GuardTelemetryListener {
     const jitter = params.jitter ?? "full";
     const rng = params.rng ?? Math.random;
     const sleep = params.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-    let cursor: string | undefined;
+    let cursor = params.cursor;
     let startLedger = params.startLedger;
 
-    if (startLedger === undefined) {
-      const latest = await this.config.server.getLatestLedger();
-      startLedger = Math.max(1, latest.sequence - 1);
-      cursor = undefined;
+    // `expectedFrom` is the earliest ledger the listener has not yet confirmed
+    // coverage through: `startLedger` for a fresh range request, or the ledger
+    // *after* a resumed cursor. `null` means "cannot be known", in which case gap
+    // detection is skipped rather than guessed at.
+    let expectedFrom: number | null;
+    if (cursor !== undefined) {
+      expectedFrom = params.resumeLedger === undefined ? null : params.resumeLedger + 1;
+    } else {
+      if (startLedger === undefined) {
+        const latest = await this.config.server.getLatestLedger();
+        startLedger = Math.max(1, latest.sequence - 1);
+      }
+      expectedFrom = startLedger;
     }
 
     while (!params.signal?.aborted) {
@@ -431,7 +511,50 @@ export class GuardTelemetryListener {
       // Once a cursor is held, the ledger range must not be sent again — the RPC
       // rejects a request that mixes the two modes.
       startLedger = undefined;
+
+      // ── Gap detection ────────────────────────────────────────────────────
+      // The retention window is reported on every response, so the rule is
+      // exact rather than heuristic: coverage is broken precisely when the
+      // earliest ledger the listener still needs is older than the oldest ledger
+      // the RPC retains. Event *density* plays no part — an empty page inside the
+      // window is silence, not loss — so a sparse but fully-retained history
+      // cannot raise a false notice. No events are fabricated for the hole.
+      if (
+        params.onGap &&
+        expectedFrom !== null &&
+        page.oldestLedger !== null &&
+        expectedFrom < page.oldestLedger
+      ) {
+        const gap: GuardTelemetryGap = {
+          fromLedger: expectedFrom,
+          toLedger: page.oldestLedger - 1,
+          reason: "history_pruned",
+          retainedFromLedger: page.oldestLedger,
+          retainedToLedger: page.latestLedger,
+        };
+        try {
+          params.onGap(gap);
+        } catch {
+          // A consumer's alerting failure must not stop the stream: the notice
+          // is advisory, and swallowing it mirrors `onStep`'s isolation.
+        }
+      }
+
       if (page.events.length > 0) yield page.events;
+
+      // Advance confirmed coverage. A page that reached the RPC's head confirms
+      // everything up to `latestLedger`; a full page (a partial window, more to
+      // come) confirms only through its last event, leaving the boundary check
+      // active for the next poll.
+      const ledgers = page.events
+        .map((event) => event.ledger)
+        .filter((ledger): ledger is number => ledger !== null);
+      const fullPage = params.limit !== undefined && page.events.length >= params.limit;
+      expectedFrom =
+        fullPage && ledgers.length > 0
+          ? Math.max(...ledgers) + 1
+          : page.latestLedger + 1;
+
       if (params.signal?.aborted) return;
       const delay = computePollDelay(interval, jitter, rng);
       await sleep(delay);
