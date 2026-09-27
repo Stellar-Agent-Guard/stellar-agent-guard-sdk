@@ -440,6 +440,7 @@ describe("watch with failedTx (cursor interaction)", () => {
 describe("describeGuardEvent for failed_tx", () => {
   it("renders the failed transaction's hash prefix, not 'pre-broadcast'", () => {
     const text = describeGuardEvent({
+      id: `diag:${"0".repeat(64)}`,
       kind: "auth_checked",
       topic: "event_auth_checked",
       source: "diagnostic",

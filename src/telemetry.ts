@@ -32,7 +32,7 @@
  * `docs/event-schema.md` and implemented by `guardEventId` below.
  */
 import { createHash } from "node:crypto";
-import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { Address, rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, type GuardAuthDecision } from "./events.ts";
 import { topicSymbols } from "./invoke.ts";
 
@@ -336,7 +336,7 @@ export function guardEventsFromFailedTransaction(
   guard?: string,
 ): GuardEvent[] {
   const out: GuardEvent[] = [];
-  for (const raw of tx.diagnosticEventsXdr ?? []) {
+  for (const [index, raw] of (tx.diagnosticEventsXdr ?? []).entries()) {
     const bare = (raw as { event?: unknown }).event ?? raw;
     const topics = topicSymbols(bare);
     if (topics.length === 0) continue;
@@ -347,6 +347,9 @@ export function guardEventsFromFailedTransaction(
       ledger: tx.ledger,
       ledgerClosedAt: null,
       transactionHash: tx.txHash,
+      // Position within this transaction's diagnostic batch, so two identical
+      // events in one failed transaction cannot share a content-derived id.
+      simulationIndex: index,
     });
     if (decoded) out.push(decoded);
   }
@@ -362,6 +365,121 @@ function dataOf(raw: unknown): unknown {
     | { v0?: { data?: unknown }; value?: { v0?: { data?: unknown } } }
     | undefined;
   return body?.v0?.data ?? body?.value?.v0?.data;
+}
+
+/**
+ * Read `name` off an XDR value, whose arms this SDK build exposes as either
+ * methods (`arm()`) or plain properties (`arm`) depending on how the object
+ * was decoded. Returns undefined when absent, or when the accessor throws
+ * (xdrgen accessors throw on an unset optional field).
+ */
+function readField(obj: unknown, name: string): unknown {
+  if (obj === null || obj === undefined || typeof obj !== "object") return undefined;
+  const member = (obj as Record<string, unknown>)[name];
+  if (typeof member !== "function") return member;
+  try {
+    return (member as () => unknown).call(obj);
+  } catch {
+    return undefined;
+  }
+}
+
+/** First defined value among the field-name variants an XDR arm may use. */
+function readAny(obj: unknown, names: string[]): unknown {
+  for (const name of names) {
+    const value = readField(obj, name);
+    if (value !== undefined && value !== null) return value;
+  }
+  return undefined;
+}
+
+/** The operations of a (possibly fee-bump-wrapped) transaction envelope. */
+function envelopeOperations(envelope: unknown): unknown[] {
+  let unwrapped = envelope as Record<string, unknown> | undefined;
+  if (!unwrapped || typeof unwrapped !== "object") return [];
+  // A fee-bump envelope wraps the real one one level down (`feeBump.tx`).
+  const feeBump = readAny(unwrapped, ["feeBump", "fee_bump"]);
+  if (feeBump) unwrapped = readAny(feeBump, ["tx"]) as Record<string, unknown>;
+  const arm = readAny(unwrapped, ["v1", "v0"]);
+  const ops = readAny(arm, ["operations"]);
+  return Array.isArray(ops) ? ops : [];
+}
+
+/**
+ * Normalise the runtime shapes of a contract-emitter field into the contract's
+ * strkey, or null when the field does not identify a contract.
+ *
+ * Three shapes reach here, the same ones `scripts/capture-event.ts` documents:
+ * an `ScAddress` (simulation and envelope fields), a bare `ContractId` (ledger
+ * and failed-transaction diagnostics — its `toString()` is the raw 32-byte
+ * hex, *not* a strkey), or a pre-decoded strkey string.
+ */
+function contractStrkey(value: unknown): string | null {
+  if (typeof value === "string") {
+    return value.length === 56 && value.startsWith("C") ? value : null;
+  }
+  if (value === null || value === undefined || typeof value !== "object") return null;
+  try {
+    if (value instanceof xdr.ScAddress) {
+      // `instanceof` narrows to the shared base class, while the SDK's
+      // `fromScAddress` takes the arm union — same object at runtime.
+      return Address.fromScAddress(value as xdr.ScAddress).toString();
+    }
+    // A bare `ContractId` carries its 32 bytes as `value`; `StrKey.encodeContract`
+    // is the only strkey-preserving conversion for it.
+    const raw = (value as { value?: unknown }).value;
+    if (raw instanceof Uint8Array && raw.length === 32) {
+      return StrKey.encodeContract(Buffer.from(raw));
+    }
+    // Union payloads in this SDK build flatten to their wrapped value; a
+    // contract address's payload string is already the strkey.
+    const json = (value as { toJSON?: () => unknown }).toJSON?.();
+    if (typeof json === "string" && json.length === 56 && json.startsWith("C")) {
+      return json;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * True when a raw diagnostic event was emitted by the guard contract.
+ *
+ * The emitter field moves across response types — `getEvents` decodes it to an
+ * `ScAddress`, while `getTransaction`/`getTransactions` diagnostics carry a
+ * bare `ContractId` — and `contractStrkey` normalises both. An event with no
+ * usable emitter, or one from another contract, is simply not the guard's; a
+ * malformed event is never a reason to fail a poll.
+ */
+export function emittedByGuard(raw: unknown, guard: string): boolean {
+  const bare = readField(raw, "event") ?? raw;
+  return contractStrkey(readField(bare, "contractId")) === guard;
+}
+
+/**
+ * True when any operation in the envelope invokes the guard contract directly
+ * (an `invokeHostFunction` op whose invoked contract is the guard).
+ *
+ * `pollFailedTransactions` uses this to remember a guard transaction whose
+ * diagnostics produced nothing decodable — the transaction still involved the
+ * guard, so a re-read of its page must not rescan it. Accessors are read
+ * defensively across the SDK's union shapes; a malformed envelope is simply
+ * "does not invoke the guard".
+ */
+export function envelopeInvokesGuard(envelope: unknown, guard: string): boolean {
+  for (const op of envelopeOperations(envelope)) {
+    const body = readField(op, "body");
+    const hostFnOp = readAny(body, ["invokeHostFunctionOp", "invoke_host_function"]);
+    const invoke = readAny(readAny(hostFnOp, ["hostFunction", "host_function"]), [
+      "invokeContract",
+      "invoke_contract",
+    ]);
+    if (invoke && contractStrkey(readAny(invoke, ["contractAddress", "contract_address"])) === guard) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export interface GuardTelemetryConfig {
@@ -389,6 +507,26 @@ export interface PollResult {
   cursor: string;
   latestLedger: number;
 }
+
+/**
+ * One page of the failed-transaction scan. Shape-matched to `PollResult` but
+ * without `latestLedger`: the scan's only cursor obligation is to round-trip
+ * the value the caller handed back, and the two streams' cursors are never
+ * exchanged (see `pollFailedTransactions`).
+ */
+export interface FailedTxPollResult {
+  events: GuardEvent[];
+  /** Cursor to resume the failed-transaction scan from. */
+  cursor: string;
+}
+
+/**
+ * Cap on failed-transaction hashes tracked for per-process dedup, trimmed
+ * oldest-first past the cap (`docs/event-schema.md`, "Deduplication"). A page
+ * only ever re-reads one page back after an error, so the cap just has to
+ * cover what a retention window can still resurface.
+ */
+const MAX_TRACKED_FAILED_TX = 1_000;
 
 export type TelemetryJitter = "none" | "full";
 
@@ -472,7 +610,7 @@ export class GuardTelemetryListener {
    */
   private decodeFailedTransaction(tx: rpc.Api.TransactionInfo): GuardEvent[] {
     const out: GuardEvent[] = [];
-    for (const raw of tx.diagnosticEventsXdr ?? []) {
+    for (const [index, raw] of (tx.diagnosticEventsXdr ?? []).entries()) {
       try {
         const bare = (raw as { event?: unknown }).event ?? raw;
         const topics = topicSymbols(bare);
@@ -485,6 +623,9 @@ export class GuardTelemetryListener {
           ledger: tx.ledger,
           ledgerClosedAt: null,
           transactionHash: tx.txHash,
+          // Position within this transaction's diagnostic batch, so two identical
+          // events in one failed transaction cannot share a content-derived id.
+          simulationIndex: index,
         });
         if (decoded) out.push(decoded);
       } catch {
