@@ -430,16 +430,20 @@ export class PreFlightInterceptor {
         diagnosticEvents: outcome.diagnosticEvents,
       };
     } else {
+      const resourceBreakdown = resourceBreakdownFromSimulation(outcome.simulation);
       const data = outcome.simulation.transactionData as unknown as
         | { getReadOnly?: () => unknown[]; getReadWrite?: () => unknown[] }
         | undefined;
       const footprintKeys =
-        (data?.getReadOnly?.().length ?? 0) + (data?.getReadWrite?.().length ?? 0);
+        resourceBreakdown?.storageEntries ??
+        (data?.getReadOnly?.().length ?? 0) +
+          (data?.getReadWrite?.().length ?? 0);
       decision = {
         allowed: true,
         kind: "admissible",
         estimatedResourceFee: BigInt(outcome.simulation.minResourceFee ?? 0),
         footprintKeys,
+        ...(resourceBreakdown ? { resourceBreakdown } : {}),
       };
     }
 

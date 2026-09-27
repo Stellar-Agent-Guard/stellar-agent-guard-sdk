@@ -367,4 +367,51 @@ npm run test:smoke                       # 64 exports resolve via the ESM export
 
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output if needed.
 
+## Addendum — 2026-09-27 (PR #177: simulation resource breakdown on `CostPreChecker`)
+
+Recorded because this PR touches the enforcement path (`src/preflight.ts`) and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
+this checkout, so `npm run test:integration` cannot execute here.
+
+### Summary of changes to the enforcement path
+
+- `src/preflight.ts`: an admissible decision now carries an optional
+  `resourceBreakdown`, parsed from the *same* enforced simulation that already
+  produced `estimatedResourceFee`. `footprintKeys` prefers
+  `breakdown.storageEntries` when the payload exposes a complete resource block and
+  otherwise falls back to the existing `getReadOnly()`/`getReadWrite()` count, so
+  the reported key count is unchanged wherever the parse does not succeed.
+- `src/cost.ts`: adds `ResourceBreakdown` and `resourceBreakdownFromSimulation()`,
+  which reads the actual `SorobanResources` fields (`instructions`,
+  `diskReadBytes`, `writeBytes`) and the footprint array lengths. A missing or
+  malformed field yields `undefined` for the whole breakdown — no zero-filling. The
+  parsed value is surfaced on priced `within_budget`/`over_budget` results as
+  `breakdown`.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification, and every existing outcome value. The
+breakdown is read *out of* the simulation the guard already runs; it does not add
+an RPC call, does not alter what is signed, and cannot change a verdict.
+
+### What did run locally (Node 24.16.0)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 241 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 66 exports resolve via the ESM export map
+```
+
+The new coverage is `tests/unit/cost.test.ts` against the committed recorded
+payload fixture `tests/fixtures/simulation-resource-payload.json`: the wire-shape
+`SorobanResources` object, the parsed `SorobanDataBuilder` value, the raw base64
+form, incomplete-payload handling (whole result `undefined`), and propagation
+through `CostPreChecker`. No network, no credentials.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
+
 
