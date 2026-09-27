@@ -61,17 +61,50 @@ async function readEnvFile(path = ".env.phase2"): Promise<Record<string, string>
   return out;
 }
 
+/**
+ * Every key the live suite reads from `.env.phase2`.
+ *
+ * Kept in one list so the failure path can name *all* missing keys in a single
+ * message. Failing one key per run — fix, re-run, discover the next — turns a
+ * five-minute setup into five round trips, and the fix is one array.
+ */
+export const REQUIRED_PHASE2_KEYS = [
+  "PHASE2_GUARD",
+  "PHASE2_TOKEN",
+  "PHASE2_ADMIN_SECRET",
+  "PHASE2_AGENT_SECRET",
+  "PHASE2_RECIPIENT_SECRET",
+  "PHASE2_OUTSIDER_SECRET",
+] as const;
+
+/** Safe-to-commit template listing every key, with no values. */
+export const ENV_EXAMPLE_FILE = ".env.phase2.example";
+
+/** What produces a populated `.env.phase2`, including the keys the suite does not read. */
+export const DEPLOY_COMMAND = "npm run deploy:phase2";
+
+/**
+ * The fail-fast message for an incomplete `.env.phase2`: every missing key at
+ * once, plus the two ways to produce a complete file. Exported so it can be
+ * asserted verbatim rather than pattern-matched loosely.
+ */
+export function missingPhase2KeysMessage(missing: readonly string[]): string {
+  return [
+    `.env.phase2 is incomplete: ${missing.length} required key(s) are missing:`,
+    ...missing.map((key) => `  - ${key}`),
+    "",
+    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} .env.phase2`,
+    `Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  ${DEPLOY_COMMAND}`,
+  ].join("\n");
+}
+
 export async function loadPhase2Config(): Promise<Phase2Config> {
   const env = await readEnvFile();
-  const need = (key: string): string => {
-    const value = env[key];
-    if (!value) {
-      throw new Error(
-        `${key} missing from .env.phase2 — run scripts/deploy-phase2-instance.ts first`,
-      );
-    }
-    return value;
-  };
+  const missing = REQUIRED_PHASE2_KEYS.filter((key) => !env[key]);
+  if (missing.length > 0) {
+    throw new Error(missingPhase2KeysMessage(missing));
+  }
+  const need = (key: (typeof REQUIRED_PHASE2_KEYS)[number]): string => env[key]!;
 
   const guard = need("PHASE2_GUARD");
   const token = need("PHASE2_TOKEN");

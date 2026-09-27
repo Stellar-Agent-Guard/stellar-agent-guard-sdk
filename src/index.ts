@@ -96,8 +96,10 @@ export {
   feeBreakdown,
   formatFee,
   precheckCost,
+  precheckCostWithDecision,
   type CostDecision,
   type CostPreCheckConfig,
+  type CostWithDecision,
   type FeeBreakdown,
 } from "./cost.ts";
 
@@ -116,6 +118,8 @@ export {
   type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardTelemetryConfig,
+  type GuardTelemetryGap,
+  type GuardTelemetryGapReason,
   type GuardTelemetryWatchParams,
   type PollResult,
   type TelemetryJitter,

@@ -38,6 +38,7 @@
     "inspect": "node scripts/inspect-deployment.ts",
     "deploy:phase2": "node scripts/deploy-phase2-instance.ts",
     "sync:fixtures": "node --import tsx scripts/sync-contract-fixtures.ts",
+    "capture:rpc-fixtures": "node --import tsx scripts/capture-rpc-fixtures.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {

@@ -75,6 +75,41 @@ npm ci
 npm run build
 ```
 
+### Live testnet suite (`.env.phase2`)
+
+The unit suite needs no credentials. The **live** suite (`npm run test:integration`)
+runs real transactions against the deployed Phase 2 testnet instance and reads
+its signing keys from a gitignored `.env.phase2`. Start from the committed
+template, which documents every key and what each one unlocks without carrying a
+value:
+
+```bash
+cp .env.phase2.example .env.phase2   # then fill in the values
+npm run deploy:phase2                # or provision a fresh instance and write it for you
+npm run test:integration
+```
+
+`tests/integration/harness.ts` validates the file up front. When it is
+incomplete it fails once with **every** missing key named — not one key per run,
+which would make setup a guessing game of five round trips:
+
+```
+.env.phase2 is incomplete: 3 required key(s) are missing:
+  - PHASE2_ADMIN_SECRET
+  - PHASE2_RECIPIENT_SECRET
+  - PHASE2_OUTSIDER_SECRET
+
+Copy the documented template and fill it in:  cp .env.phase2.example .env.phase2
+Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  npm run deploy:phase2
+```
+
+The required keys are `PHASE2_GUARD`, `PHASE2_TOKEN`, `PHASE2_ADMIN_SECRET`,
+`PHASE2_AGENT_SECRET`, `PHASE2_RECIPIENT_SECRET` and
+`PHASE2_OUTSIDER_SECRET`, plus optionally `PHASE2_RPC_URL`;
+`PHASE2_ISSUER_SECRET` is additionally required to (re)deploy. `.env.phase2` is
+gitignored (as are all `.env.*` values files — only `*.example` templates are
+committable); never commit the filled-in copy.
+
 ### Pre-flight Policy Interception
 
 ```ts
@@ -237,6 +272,7 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
 - `CostPreChecker`
   - `constructor(options: CostPreCheckerOptions)`
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
+  - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 
 #### Fee units: stroops and XLM
@@ -257,6 +293,34 @@ formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
 formatFee(1n);             // "0.0000001" — one stroop
 formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 ```
+
+#### One simulation per check: prefer `checkWithCost`
+
+`PreFlightInterceptor.check()` answers *may this proceed?* and
+`CostPreChecker.check()` answers *what will it cost?* — but calling both runs the
+enforced simulation **twice**, against two ledger snapshots. The extra RPC is the
+lesser problem: the fee reported for a call can then differ from the fee implied
+by the verdict that was actually enforced, so the price no longer corresponds to
+the approved decision.
+
+`CostPreChecker.checkWithCost()` returns both from a **single** simulation:
+
+```ts
+const { decision, cost } = await costChecker.checkWithCost(call);
+
+if (decision.kind === "blocked") {
+  console.log("refused:", decision.reason);        // nothing was charged
+} else if (cost.kind === "over_budget") {
+  console.log("too expensive:", formatFee(cost.totalFeeStroops), "XLM");
+} else if (decision.allowed) {
+  console.log("approved at", formatFee(cost.totalFeeStroops), "XLM");
+}
+```
+
+Prefer this over calling `interceptor.check(call)` and `costChecker.check(call)`
+in sequence. That two-call pattern still works and its types are unchanged, but
+it carries the fee-drift caveat above. `precheckCostWithDecision()` is the
+one-shot form.
 
 ### Telemetry & Helpers
 
