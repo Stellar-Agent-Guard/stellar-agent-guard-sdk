@@ -16,6 +16,7 @@ import {
   exceedsCeiling,
   feeBreakdown,
   formatFee,
+  precheckCostWithDecision,
 } from "../../src/cost.ts";
 import { INCLUSION_FEE } from "../../src/tx.ts";
 import type { PreFlightDecision } from "../../src/preflight.ts";
@@ -235,5 +236,90 @@ describe("formatFee", () => {
         (fraction === "" ? 0n : BigInt(fraction.padEnd(7, "0")));
       assert.equal(rendered.startsWith("-") ? -back : back, stroops, `round-trip of ${stroops}`);
     }
+  });
+});
+
+/**
+ * `checkWithCost` (issue #87): one simulation, both answers.
+ *
+ * The property worth pinning is the *count* of simulations, because that is the
+ * whole point of the API: `interceptor.check()` followed by
+ * `costChecker.check()` simulates the same call twice against two ledger
+ * snapshots, and the reported fee can then disagree with the enforced verdict.
+ */
+describe("CostPreChecker.checkWithCost", () => {
+  it("runs exactly one simulation for the combined verdict and cost", async () => {
+    let simulations = 0;
+    const interceptor = {
+      check: async (_call: ContractCall): Promise<PreFlightDecision> => {
+        simulations += 1;
+        return admissible(2_000n, 4);
+      },
+    };
+    const checker = new CostPreChecker({ interceptor });
+    const { decision, cost } = await checker.checkWithCost(CALL);
+
+    assert.equal(simulations, 1, "one enforced simulation, not two");
+    assert.equal(decision.kind, "admissible");
+    assert.equal(cost.kind, "within_budget");
+    assert.equal(cost.resourceFeeStroops, 2_000n);
+    assert.equal(cost.totalFeeStroops, 2_000n + BigInt(INCLUSION_FEE));
+    assert.equal(cost.footprintKeys, 4);
+  });
+
+  it("returns the interceptor's verdict itself, not a re-derived copy", async () => {
+    const verdict = admissible(1n, 1);
+    const checker = new CostPreChecker({ interceptor: { check: async () => verdict } });
+    const { decision } = await checker.checkWithCost(CALL);
+    assert.equal(decision, verdict);
+  });
+
+  it("keeps a refusal uncosted while still returning the verdict", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor({
+        allowed: false,
+        kind: "blocked",
+        reason: "paused",
+        explanation: "account paused",
+        detail: "simulation failed",
+        diagnosticEvents: [],
+      }),
+      maxFeeStroops: 1n, // a ceiling that would reject any price
+    });
+    const { decision, cost } = await checker.checkWithCost(CALL);
+    assert.equal(decision.kind, "blocked");
+    assert.equal(cost.kind, "blocked");
+    assert.equal(cost.totalFeeStroops, 0n);
+  });
+
+  it("implements check() on top of the one-simulation path", async () => {
+    let simulations = 0;
+    const interceptor = {
+      check: async (): Promise<PreFlightDecision> => {
+        simulations += 1;
+        return admissible(5_000n, 2);
+      },
+    };
+    const checker = new CostPreChecker({ interceptor, maxFeeStroops: 10_000n });
+    const combined = await checker.checkWithCost(CALL);
+    const plain = await checker.check(CALL);
+    assert.equal(simulations, 2, "one simulation per call, never two for one call");
+    assert.deepEqual(plain, combined.cost);
+  });
+});
+
+describe("precheckCostWithDecision", () => {
+  it("decides and prices from one simulation in the one-shot form", async () => {
+    let simulations = 0;
+    const interceptor = {
+      check: async (): Promise<PreFlightDecision> => {
+        simulations += 1;
+        return admissible(2_000n);
+      },
+    };
+    const { decision, cost } = await precheckCostWithDecision({ interceptor }, CALL);
+    assert.equal(simulations, 1);
+    assert.equal(decision.kind, "admissible");
+    assert.equal(cost.kind, "within_budget");
   });
 });
