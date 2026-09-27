@@ -199,6 +199,7 @@ const validate = createGuardValidator({
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)`
   - `watch(signal?: AbortSignal): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events.
+  - `failedTx: true` option — additionally surfaces diagnostics from transactions that were broadcast, included, and then failed on-chain (`stream: "failed_tx"`), via an independent `getTransactions` scan. See `docs/event-schema.md` for semantics and cursor interaction.
 - `policyToScVal(policy: GuardPolicy): xdr.ScVal` — Encodes policy into Soroban sorted ScVal struct.
 - `decodeCheckResult(resultVal: xdr.ScVal): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`

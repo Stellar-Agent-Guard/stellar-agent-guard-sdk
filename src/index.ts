@@ -89,10 +89,14 @@ export {
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventsFromDiagnostics,
+  guardEventsFromFailedTransaction,
   isAllowedDecision,
   telemetryFromDecision,
+  type FailedTxPollResult,
   type GuardEvent,
   type GuardEventKind,
+  type GuardEventSource,
+  type GuardEventStream,
   type GuardTelemetryConfig,
 } from "./telemetry.ts";
 
