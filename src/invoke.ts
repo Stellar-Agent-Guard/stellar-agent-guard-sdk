@@ -170,6 +170,8 @@ export interface InvokeParams {
   accountSigners?: Array<Keypair | AdminSigner> | undefined;
   /** Skip broadcast even if the enforced simulation passes (dry run). */
   dryRun?: boolean | undefined;
+  /** Configure bounded full-jitter retries for stale ledger resource limits. */
+  retry?: InvokeRetryOptions | undefined;
   pollAttempts?: number | undefined;
   pollIntervalMs?: number | undefined;
   /**
@@ -447,20 +449,23 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
  * the attempt count and the last retry cause.
  */
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
-  const first = await invokePipeline(params, 0);
-  if (first.kind !== "error" || first.retryable !== "stale_ledger_resource_limit") {
-    return first;
-  }
-  if (params.dryRun) return first;
+  const retry = resolveRetryOptions(params.retry);
+  let attempts = 0;
 
-  const second = await invokePipeline(params, 1);
-  // If the retry also fails, report the retry's outcome: it is the more recent
-  // and more informative of the two.
-  if (second.kind === "error") {
-    return {
-      ...second,
-      detail: `retried after a stale-ledger resource rejection; still failed\n${second.detail}`,
-    };
+  while (true) {
+    attempts += 1;
+    // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
+    const outcome = await invokePipeline(params, attempts - 1);
+
+    if (outcome.kind !== "error" || outcome.retryable !== "stale_ledger_resource_limit") {
+      return outcome;
+    }
+    if (params.dryRun) return outcome;
+    if (attempts >= retry.maxAttempts) {
+      return new InvokeRetryError({ attempts, lastOutcome: outcome });
+    }
+
+    await retry.sleep(fullJitterDelay(attempts, retry));
   }
 }
 
@@ -494,6 +499,15 @@ export type EnforcementOutcome =
 async function invokePipeline(params: InvokeParams, attempt: number): Promise<InvokeOutcome> {
   const { server } = params;
   const enforced = await enforceCall(params, attempt);
+  if (enforced.kind === "error") {
+    // The guard never made a decision, so this is `undetermined` and not
+    // `blocked`. Classify it here, at the point the failure is produced, so
+    // every consumer sees a cause without having to re-derive it.
+    return {
+      ...enforced,
+      cause: INVOKE_ERROR_CAUSES.undetermined,
+    };
+  }
   if (enforced.kind !== "admissible") return enforced;
 
   if (params.dryRun) {
