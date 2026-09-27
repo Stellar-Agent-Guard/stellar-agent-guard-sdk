@@ -11,9 +11,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   CostPreChecker,
+  STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
   feeBreakdown,
+  formatFee,
 } from "../../src/cost.ts";
 import { INCLUSION_FEE } from "../../src/tx.ts";
 import type { PreFlightDecision } from "../../src/preflight.ts";
@@ -147,5 +149,91 @@ describe("describeCostDecision", () => {
     });
     assert.match(text, /recipient_not_allowed/);
     assert.match(text, /0 stroops charged/);
+  });
+});
+
+describe("formatFee", () => {
+  it("pins XLM's 7-decimal definition as an exact integer", () => {
+    assert.equal(STROOPS_PER_XLM, 10_000_000n);
+  });
+
+  it("renders the exact edge values the money rule is about", () => {
+    // 0, 1 stroop, and 10^7-1: the three inputs where any off-by-one in the
+    // divisor or the padding shows up immediately.
+    assert.equal(formatFee(0n), "0");
+    assert.equal(formatFee(1n), "0.0000001");
+    assert.equal(formatFee(9_999_999n), "0.9999999");
+    assert.equal(formatFee(10_000_000n), "1");
+    assert.equal(formatFee(10_000_001n), "1.0000001");
+  });
+
+  it("drops trailing fractional zeros (minimal, exact convention)", () => {
+    // Documented convention: "0.1", never "0.1000000".
+    assert.equal(formatFee(1_000_000n), "0.1");
+    assert.equal(formatFee(1_500_000n), "0.15");
+    assert.equal(formatFee(1_234_560n), "0.123456");
+    assert.equal(formatFee(1_234_567n), "0.1234567");
+  });
+
+  it("keeps full precision above Number.MAX_SAFE_INTEGER via the bigint path", async () => {
+    const { INCLUSION_FEE } = await import("../../src/tx.ts");
+    // 2^53 + 1: a value a `number` cannot even hold. Anything routed through
+    // Number here would silently round to 2^53.
+    const beyondSafe = 9_007_199_254_740_993n;
+    assert.equal(formatFee(beyondSafe), "900719925.4740993");
+
+    // A real large total: the inclusion fee added to a very large resource fee.
+    const hugeTotal = feeBreakdown(beyondSafe).totalFeeStroops;
+    assert.equal(hugeTotal, beyondSafe + BigInt(INCLUSION_FEE));
+    assert.equal(formatFee(hugeTotal), "900719925.4741093");
+  });
+
+  it("accepts a base-10 string without going through Number", () => {
+    assert.equal(formatFee("1"), "0.0000001");
+    assert.equal(formatFee("100"), "0.00001");
+    assert.equal(formatFee("1000000000000000000000"), "100000000000000");
+    assert.equal(formatFee("-1"), "-0.0000001");
+  });
+
+  it("refuses inputs that would have to be coerced", () => {
+    for (const bad of ["", "abc", "1.5", "1e7", " 1", null, undefined]) {
+      assert.throws(
+        () => formatFee(bad as unknown as string),
+        (err: unknown) => {
+          assert(err instanceof TypeError);
+          assert.match(err.message, /integer-only|already have lost precision/);
+          return true;
+        },
+        `expected ${JSON.stringify(bad)} to be refused`,
+      );
+    }
+    // A number is a distinct, deliberate refusal: precision is already gone.
+    assert.throws(() => formatFee(1 as unknown as bigint), (err: unknown) => {
+      assert(err instanceof TypeError);
+      assert.match(err.message, /lost precision/);
+      return true;
+    });
+    assert.throws(() => formatFee(1.5 as unknown as bigint), TypeError);
+  });
+
+  it("round-trips: every accepted value renders back to the same integer", () => {
+    for (const stroops of [
+      0n,
+      1n,
+      7n,
+      999_999n,
+      1_000_000n,
+      9_999_999n,
+      10_000_000n,
+      123_456_789_012_345_678n,
+      -42n,
+    ]) {
+      const rendered = formatFee(stroops);
+      const [whole = "", fraction = ""] = rendered.replace("-", "").split(".");
+      const back =
+        BigInt(whole) * STROOPS_PER_XLM +
+        (fraction === "" ? 0n : BigInt(fraction.padEnd(7, "0")));
+      assert.equal(rendered.startsWith("-") ? -back : back, stroops, `round-trip of ${stroops}`);
+    }
   });
 });

@@ -21,8 +21,18 @@
  *
  * The topic vocabulary is the one verified against the live chain in
  * `docs/event-schema.md`, not the one the contracts documentation describes.
+ *
+ * ## Stable ids (issue #33)
+ *
+ * Every decoded `GuardEvent` carries a non-null, stable `id`, because the two
+ * streams fail identity in opposite ways: a committed event is anchored on a
+ * transaction hash, while a blocked one has no ledger anchor at all (it was
+ * rolled back before broadcast) and needs a synthetic id derived from its own
+ * content. The format and the collision notes are documented in
+ * `docs/event-schema.md` and implemented by `guardEventId` below.
  */
-import { rpc, scValToNative, xdr, StrKey } from "@stellar/stellar-sdk";
+import { createHash } from "node:crypto";
+import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, type GuardAuthDecision } from "./events.ts";
 import { topicSymbols } from "./invoke.ts";
 
@@ -68,6 +78,14 @@ export type GuardEventSource = "ledger" | "diagnostic";
 export type GuardEventStream = "committed" | "simulation" | "failed_tx";
 
 export interface GuardEvent {
+  /**
+   * Stable identity for this event, non-null on both streams.
+   *
+   * `ledger:<txHash>:<topic>` for a committed event; `diag:<sha256>` for a
+   * diagnostic one, which has no transaction to anchor on. Derived by
+   * `guardEventId`; see `docs/event-schema.md` for the format and collisions.
+   */
+  id: string;
   kind: GuardEventKind;
   /** The event's name topic, e.g. `event_auth_checked`. */
   topic: string;
@@ -95,18 +113,142 @@ function decodeData(value: unknown): unknown {
   }
 }
 
+/** The stream facts an event's `id` is derived from. */
+export interface GuardEventIdentityInput {
+  source: GuardEventSource;
+  /** Name topics in order, as decoded from the event. */
+  topics: readonly string[];
+  /** Decoded event data, exactly as it lands in `GuardEvent.data`. */
+  data: unknown;
+  /** The emitting guard, when the stream identifies one. */
+  contractId: string | null;
+  /** Ledger sequence, when committed; null on the diagnostic stream. */
+  ledger: number | null;
+  transactionHash: string | null;
+  /**
+   * Position of this event within the diagnostic batch it arrived in, or null
+   * on the ledger stream. This is the component that keeps two *distinct*
+   * blocks within one simulation from colliding.
+   */
+  simulationIndex: number | null;
+}
+
+/**
+ * Stable identity for a guard event, usable as a delivery / de-duplication key.
+ *
+ * One format per stream, because the two fail identity in opposite ways:
+ *
+ * - `ledger:<txHash>:<topic>` — a committed event is anchored on the
+ *   transaction that emitted it, plus its name topic. The topic is part of the
+ *   id because a single transaction emits several guard events: a `heartbeat`
+ *   call commits both `event_auth_checked` and `event_heartbeat` (see the live
+ *   capture in `docs/event-schema.md`), so `ledger:<txHash>` alone is not
+ *   unique. If an RPC response ever omits the hash, the ledger sequence
+ *   anchors instead — an id is always produced.
+ *
+ * - `diag:<sha256>` — a blocked decision never reaches a ledger (the guard
+ *   returns `Err`, the host rolls the event back), so there is nothing to
+ *   anchor on and the id is derived from the event's own content: a SHA-256
+ *   over the stream name, the guard address, the event's position within its
+ *   diagnostic batch, the decoded topics and the decoded data. Re-parsing the
+ *   same simulation therefore yields the same id, while two different blocks in
+ *   one simulation get different ids because their positions differ.
+ *
+ * Collision notes: two *separate* simulations that produce an identical
+ * diagnostic event for the same guard share an id. That is deliberate — the
+ * content is the same decision — so a consumer needing per-attempt identity
+ * should combine `id` with its own attempt counter instead of expecting a
+ * unique key per refusal. Within one batch, SHA-256 plus the position makes
+ * accidental collisions impossible in practice.
+ */
+export function guardEventId(event: GuardEventIdentityInput): string {
+  if (event.source === "ledger") {
+    const anchor =
+      event.transactionHash ?? (event.ledger !== null ? String(event.ledger) : "unknown");
+    return `ledger:${anchor}:${event.topics[0] ?? ""}`;
+  }
+  return `diag:${createHash("sha256").update(diagnosticIdMaterial(event)).digest("hex")}`;
+}
+
+/**
+ * The exact string hashed into a diagnostic id, in a fixed order: stream, guard
+ * address, position in batch, topics, data.
+ *
+ * Parts are length-prefixed rather than merely separated: a topic or a decoded
+ * value that itself contains the separator must not be able to shift the field
+ * boundaries and alias two different events onto one id. With framing, the
+ * rendering is unambiguous for any input.
+ */
+function diagnosticIdMaterial(event: GuardEventIdentityInput): string {
+  const parts = [
+    "diagnostic",
+    event.contractId ?? "",
+    String(event.simulationIndex ?? -1),
+    ...event.topics,
+    stableStringify(event.data),
+  ];
+  return parts
+    .map((part) => `${Buffer.byteLength(part, "utf8")}:${part}`)
+    .join("");
+}
+
+/**
+ * A canonical rendering of decoded event data for hashing: object keys sorted
+ * so key order cannot change an id, `bigint` and byte arrays rendered
+ * explicitly (`scValToNative` yields `bigint` for u64, which `JSON.stringify`
+ * throws on), and a depth cap so a pathological payload cannot build an
+ * unbounded string.
+ */
+function stableStringify(value: unknown, depth = 0): string {
+  if (value === null || value === undefined) return "null";
+  if (typeof value === "bigint") return `${value.toString()}n`;
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+    return JSON.stringify(value);
+  }
+  if (value instanceof Uint8Array) return `bytes:${Buffer.from(value).toString("hex")}`;
+  if (depth >= 8) return "depth";
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item, depth + 1)).join(",")}]`;
+  }
+  const entries = Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+  return `{${entries
+    .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item, depth + 1)}`)
+    .join(",")}}`;
+}
+
+/**
+ * The stream facts known at decode time, before the event's `id` is derived
+ * from them.
+ */
+export type GuardEventContext = Omit<GuardEvent, "kind" | "topic" | "id" | "decision" | "data"> & {
+  /** Position within the diagnostic batch; null on the ledger stream. */
+  simulationIndex: number | null;
+};
+
 /** Interpret an already-decoded topic list plus data as a `GuardEvent`. */
 function interpret(
   topics: string[],
   data: unknown,
-  context: Omit<GuardEvent, "kind" | "topic" | "decision" | "data">,
+  context: GuardEventContext,
 ): GuardEvent | null {
   const topic = topics[0];
   if (!topic || !KNOWN_TOPICS.has(topic)) return null;
+  const { simulationIndex, ...streamFacts } = context;
   return {
     kind: KIND_BY_TOPIC[topic] ?? "unknown",
     topic,
-    ...context,
+    id: guardEventId({
+      source: streamFacts.source,
+      contractId: streamFacts.contractId,
+      ledger: streamFacts.ledger,
+      transactionHash: streamFacts.transactionHash,
+      topics,
+      data,
+      simulationIndex,
+    }),
+    ...streamFacts,
     decision: decodeAuthDecision(topics, context.source),
     data,
   };
@@ -123,7 +265,7 @@ export function diagnosticsToEvents(
   guard?: string,
 ): GuardEvent[] {
   const out: GuardEvent[] = [];
-  for (const raw of diagnosticEvents) {
+  for (const [index, raw] of diagnosticEvents.entries()) {
     const bare = (raw as { event?: unknown }).event ?? raw;
     const topics = topicSymbols(bare);
     if (topics.length === 0) continue;
@@ -134,6 +276,9 @@ export function diagnosticsToEvents(
       ledger: null,
       ledgerClosedAt: null,
       transactionHash: null,
+      // The position within this batch is what keeps two blocked decisions from
+      // one simulation apart once both are rolled back and neither has a hash.
+      simulationIndex: index,
     });
     if (decoded) out.push(decoded);
   }
@@ -245,77 +390,46 @@ export interface PollResult {
   latestLedger: number;
 }
 
-/** Result of one failed-transaction diagnostics page. */
-export interface FailedTxPollResult {
-  events: GuardEvent[];
+export type TelemetryJitter = "none" | "full";
+
+export const DEFAULT_JITTER_FRACTION = 0.2;
+
+/**
+ * Compute the sleep delay for telemetry polling with optional uniform jitter.
+ *
+ * When `jitter` is `'full'` (the good-citizen default), delays are uniformly
+ * distributed in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2`. This
+ * prevents fleet-level thundering herds against public RPCs when multiple agents
+ * start at the same time.
+ */
+export function computePollDelay(
+  intervalMs: number,
+  jitter: TelemetryJitter = "full",
+  rng: () => number = Math.random,
+  jitterFraction: number = DEFAULT_JITTER_FRACTION,
+): number {
+  if (jitter === "none") return intervalMs;
+  const j = Math.max(0, Math.min(1, jitterFraction));
+  const factor = 1 - j + rng() * j;
+  return Math.round(intervalMs * factor);
+}
+
+export interface GuardTelemetryWatchParams {
+  startLedger?: number;
+  pollIntervalMs?: number;
+  limit?: number;
+  signal?: AbortSignal;
   /**
-   * `getTransactions` cursor to resume from. Independent of the committed
-   * `getEvents` cursor — the two must never be exchanged.
+   * Jitter mode for poll interval delays.
+   * - `'full'` (default): uniformly randomizes each delay in `[interval*(1-j), interval]` (j=0.2)
+   *   to avoid synchronized polling thundering herds across agent fleets.
+   * - `'none'`: exact fixed interval cadence.
    */
-  cursor: string;
-}
-
-/** Failed-transaction hashes tracked for dedup before the map is trimmed. */
-const MAX_TRACKED_FAILED_TX = 1_000;
-
-/**
- * Was this diagnostic event emitted by the guard contract?
- *
- * A parsed diagnostic carries the emitter as a `ContractId` XDR value in the
- * event's `contractId` field, whose toString is a raw hex hash — the same
- * quirk `scripts/capture-event.ts` documents. A wire-shaped event carries the
- * strkey directly. Check both against the guard's strkey; when neither is
- * present (host diagnostics carry no contract id) this returns false and the
- * event is not attributed to the guard on topic shape alone.
- */
-function diagnosticEmitter(raw: unknown): string | null {
-  const holder = raw as { event?: { contractId?: unknown }; contractId?: unknown };
-  const value = holder.event?.contractId ?? holder.contractId;
-  if (value instanceof xdr.ContractId) return contractIdFromBytes(value.value);
-  if (value instanceof Uint8Array) return contractIdFromBytes(value);
-  if (typeof value === "string" && value.startsWith("C")) return value;
-  return null;
-}
-
-/** A parsed diagnostic's contract id is a raw 32-byte hash, not a strkey. */
-function contractIdFromBytes(bytes: Uint8Array): string {
-  return StrKey.encodeContract(Buffer.from(bytes));
-}
-
-function emittedByGuard(raw: unknown, guard: string): boolean {
-  return diagnosticEmitter(raw) === guard;
-}
-
-/**
- * Does this transaction envelope invoke the guard contract?
- *
- * Purely typed public-XDR traversal: envelope variant → transaction →
- * operations → invoke-host-function body → `InvokeContractArgs`. Any
- * unexpected shape simply yields `false` — it can never throw, so a
- * fabricated or future-shaped envelope in the page cannot break the scan.
- */
-function envelopeInvokesGuard(envelope: xdr.TransactionEnvelope, guard: string): boolean {
-  try {
-    const ops =
-      envelope.type === "envelopeTypeTx"
-        ? envelope.v1.tx.operations
-        : envelope.type === "envelopeTypeTxV0"
-          ? envelope.v0.tx.operations
-          : envelope.type === "envelopeTypeTxFeeBump"
-            ? envelope.feeBump.tx.innerTx.v1.tx.operations
-            : [];
-    for (const op of ops) {
-      if (op.body.type !== "invokeHostFunction") continue;
-      const hostFunction = op.body.invokeHostFunctionOp.hostFunction;
-      if (hostFunction.type !== "hostFunctionTypeInvokeContract") continue;
-      const address = hostFunction.invokeContract.contractAddress;
-      if (address.type !== "scAddressTypeContract") continue;
-      if (contractIdFromBytes(address.contractId.value) === guard) return true;
-    }
-    return false;
-  } catch {
-    return false;
-  }
+  jitter?: TelemetryJitter;
+  /** Optional RNG injector for deterministic unit testing (defaults to Math.random). */
+  rng?: () => number;
+  /** Optional sleep handler for testing without wall-clock delays. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export class GuardTelemetryListener {
@@ -420,6 +534,9 @@ export class GuardTelemetryListener {
           ledger: event.ledger,
           ledgerClosedAt: event.ledgerClosedAt ?? null,
           transactionHash: event.txHash ?? null,
+          // Committed events anchor on the transaction hash, not on a position
+          // within a page: a page boundary would otherwise change an event's id.
+          simulationIndex: null,
         },
       );
       if (decoded) events.push(decoded);
@@ -502,9 +619,12 @@ export class GuardTelemetryListener {
    * internally so no event is delivered twice.
    */
   async *watch(
-    params: { startLedger?: number; pollIntervalMs?: number; limit?: number; signal?: AbortSignal } = {},
+    params: GuardTelemetryWatchParams = {},
   ): AsyncGenerator<GuardEvent[], void, undefined> {
     const interval = params.pollIntervalMs ?? 5_000;
+    const jitter = params.jitter ?? "full";
+    const rng = params.rng ?? Math.random;
+    const sleep = params.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
     let cursor: string | undefined;
     let startLedger = params.startLedger;
     // The failed-transaction scan's own cursor, started at the current head
@@ -550,7 +670,8 @@ export class GuardTelemetryListener {
       }
       if (batch.length > 0) yield batch;
       if (params.signal?.aborted) return;
-      await new Promise((resolve) => setTimeout(resolve, interval));
+      const delay = computePollDelay(interval, jitter, rng);
+      await sleep(delay);
     }
   }
 }

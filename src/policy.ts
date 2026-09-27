@@ -126,8 +126,30 @@ export function decodeCheckResult(raw: unknown): CheckResult {
   throw new Error(`unexpected CheckResult payload from the guard: ${JSON.stringify(raw)}`);
 }
 
-/** True when the dead-man switch has fired: frozen by silence, not by an admin. */
+/**
+ * True when the dead-man switch has fired: frozen by silence, not by an admin.
+ *
+ * Semantics are pinned to the contract's own truth (SPEC §5, the Dead-Man
+ * Switch section of `stellar-agent-guard-contracts/SPEC.md`): the freeze is
+ * derived lazily from `LastHeartbeat` and ledger time on every authorization,
+ * and rule #2 of that derivation **requires `LastHeartbeat != 0`** — a value
+ * of `0` means "never heartbeated" (the storage key's own documented default:
+ * "unix seconds of last agent heartbeat (0 = never)"), and a never-heartbeated
+ * account is not frozen *by the dead-man switch*. It is spendable if otherwise
+ * allowed. "Never" is therefore not "expired": treating `0` as epoch-0 would
+ * report a healthy fresh account as frozen since 1970, which is exactly the
+ * dashboard false alarm this guard exists to prevent.
+ *
+ * The check below is defensive rather than trustful: if a decoded `Status`
+ * ever carried `heartbeat_expired = true` alongside `last_heartbeat = 0` (a
+ * contract build that predates rule #2, or a hand-assembled status), this
+ * helper still reports not-dead-man-frozen, matching what the contract could
+ * truthfully enforce. An admin freeze is reported separately via
+ * `admin_frozen`, exactly as the contract treats the two conditions as
+ * separate (see SPEC §5, "Manual freeze" and "Reversal path").
+ */
 export function isDeadManFrozen(status: GuardStatus): boolean {
+  if (status.last_heartbeat === 0n) return false; // never ≠ expired (SPEC §5 rule #2)
   return status.heartbeat_expired && !status.admin_frozen;
 }
 
@@ -135,6 +157,15 @@ export function isDeadManFrozen(status: GuardStatus): boolean {
  * Seconds of grace remaining before the dead-man switch fires. `null` when the
  * switch is disabled (`dms_grace_secs == 0`), a positive number while the agent
  * is still within grace, and a negative number once the account is frozen.
+ *
+ * `null` also covers the never-heartbeated case: `last_heartbeat == 0` means
+ * "no heartbeat has ever been recorded" (the storage key's documented default,
+ * SPEC §3 — `0 = never`), so no grace countdown has started and there is no
+ * remaining time to report. Per SPEC §5 rule #2 a never-heartbeated account is
+ * **not** dead-man-frozen — "never ≠ expired" — it is spendable if otherwise
+ * allowed, and `null` here must never be read as "overdue". Callers that want
+ * a full-grace rendering for a fresh account can treat `null` (with a non-zero
+ * grace and `last_heartbeat == 0`) as "countdown not yet started".
  */
 export function deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null {
   if (!policy || policy.dms_grace_secs === 0n || status.last_heartbeat === 0n) return null;

@@ -7,6 +7,7 @@
   * [Simulation Cost Pre-Checking](concepts/simulation-cost-pre-checking.md)
   * [Dual-Stream Telemetry](concepts/dual-stream-telemetry.md)
   * [Custom Account Signing](concepts/custom-account-signing.md)
+  * [Multi-Key Agent Signing (spike)](concepts/multi-key-agent-signing.md)
 * [API Reference](api/)
   * [PreFlightInterceptor](api/interceptor.md)
   * [CostPreChecker](api/cost-checker.md)

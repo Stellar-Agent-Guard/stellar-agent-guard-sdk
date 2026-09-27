@@ -12,6 +12,7 @@ import {
   validateContractCall,
   type PreFlightCacheOptions,
 } from "../../src/preflight.ts";
+import { GuardBlockedError } from "../../src/reasons.ts";
 import type { ContractCall } from "../../src/tx.ts";
 
 const VALID_GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
@@ -416,6 +417,55 @@ describe("throw vs verdict contract asymmetry", () => {
       assert.equal(decision.reason, "per_tx_cap_exceeded");
       assert(decision.explanation.length > 0);
     }
+  });
+
+  it("assertAllowed throws GuardBlockedError carrying offending call and rawEvent on block", async () => {
+    const blockedErrorResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("recipient_not_allowed"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+
+    const mockServer = createMockServer({ enforcedSimulateResponse: blockedErrorResponse });
+    const interceptor = createTestInterceptor(mockServer);
+    const call = validTransferCall(100n);
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert(err instanceof GuardBlockedError);
+        assert.equal(err.reason, "recipient_not_allowed");
+        assert.equal(err.code, 21);
+        assert.equal(err.stage, "preflight");
+        assert.equal(err.charged, false);
+        assert.deepEqual(err.call, call);
+        assert.ok(err.rawEvent !== undefined);
+        assert.match(err.explanation, /recipient/i);
+        const json = err.toJSON();
+        assert.equal(json["reason"], "recipient_not_allowed");
+        assert.deepEqual(json["call"], {
+          contract: call.contract,
+          fn: call.fn,
+          argsCount: 3,
+        });
+        return true;
+      },
+    );
   });
 });
 
