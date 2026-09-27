@@ -236,6 +236,77 @@ Part of #7 (stable ids + unified stream). This slice delivers the id field only;
 the unified stream and any persistence for the dashboard remain out of scope
 there.
 
+## Coverage gaps — `GuardTelemetryGap`
+
+A cursor is opaque, and Soroban RPC retains events for a bounded window, so a
+listener that resumes after being offline may find the ledgers it needed have
+been pruned. Silently skipping that range is the one failure a security monitor
+must never have: an announced gap is operationally honest, an unnoticed one is
+not.
+
+### The rule (read from the RPC response, not inferred)
+
+`getEvents` returns its retention window on **every** response — `oldestLedger`
+and `latestLedger` (`Api.RetentionState` in `@stellar/stellar-sdk`). Coverage is
+broken precisely when:
+
+```
+earliestLedgerTheListenerStillNeeds  <  response.oldestLedger
+```
+
+- On a fresh ledger range the earliest ledger needed is `startLedger`.
+- Resuming from a stored cursor, it is `resumeLedger + 1`, where `resumeLedger`
+  is the last ledger already consumed. A cursor is opaque, so the listener cannot
+  derive that from the cursor itself — pass it explicitly. Without it no gap can
+  be proven and none is reported.
+- After each page, coverage advances to `latestLedger + 1` (or to one past the
+  last event on a full, partial page), so a gap is reported once per
+  discontinuity, never once per poll.
+
+The rule is about the retention boundary, not event density. An empty page inside
+the window is silence, not loss, so a sparse but fully-retained history raises no
+false notice; and no event is ever fabricated for a pruned range — the range is
+reported as a gap and the stream continues with real events only.
+
+### Gap notice shape
+
+| Field | Type | Stability | Meaning |
+| --- | --- | --- | --- |
+| `fromLedger` | `number` | **Stable** | First ledger that can no longer be retrieved (inclusive). |
+| `toLedger` | `number` | **Stable** | Last ledger that can no longer be retrieved (inclusive). |
+| `reason` | `"history_pruned"` | **Append-only** | Why coverage broke. New reasons may be added; switch with a default. |
+| `retainedFromLedger` | `number` | **Best-effort** | `oldestLedger` of the response that detected the gap. |
+| `retainedToLedger` | `number` | **Best-effort** | `latestLedger` of that same response. |
+
+Delivery is the optional `watch({ onGap })` callback. Without it, behaviour is
+unchanged and the listener stays silent. A throwing `onGap` is isolated — it
+cannot break the stream (the same contract as `invoke()`'s `onStep`).
+
+```ts
+for await (const events of listener.watch({
+  cursor: saved.cursor,
+  resumeLedger: saved.ledger, // the last ledger already consumed
+  onGap(gap) {
+    alerting.coverageGap(gap.fromLedger, gap.toLedger, gap.reason);
+  },
+})) {
+  /* ... */
+}
+```
+
+### Consumer guidance
+
+1. **Treat a gap as a fact, not a warning.** The `fromLedger..toLedger` range is
+   unrecoverable *from this RPC* — it is no longer in its window.
+2. **Alert an operator.** An unobserved range in a spend-policy monitor means
+   decisions were made outside the monitor's view.
+3. **Replay only from a durable checkpoint.** If you persist events (or a cursor)
+   downstream, reconcile the gap against that store. If you do not, there is
+   nothing to replay from — record the gap and move on rather than inventing the
+   missing events.
+4. **Do not read a gap as an authorization event.** It says "this range could not
+   be observed", not "the guard allowed or blocked anything here".
+
 ## Cross-check: do the classifications match the code?
 
 A stability table is only worth something if it describes what the code actually
