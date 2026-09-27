@@ -27,6 +27,7 @@
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { enforceCall } from "./invoke.ts";
+import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
