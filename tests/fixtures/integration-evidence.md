@@ -369,76 +369,81 @@ npm run test:smoke                       # 64 exports resolve via the ESM export
 
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output if needed.
 
-## Addendum — 2026-09-27 (PR #175: bounded jittered stale-ledger retries)
+## Addendum — 2026-09-27 (PR #170: batched pre-flight `checkBatch`)
 
-Recorded because this PR touches the enforcement path (`src/invoke.ts`,
-`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
+Recorded because this PR touches the enforcement path (`src/preflight.ts`,
+`src/policy.ts`) and CI's `enforcement-path evidence gate` therefore requires
 this file in the diff.
 
 **It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
-this checkout, so `npm run test:integration` cannot execute here. The recorded
-6-of-6 stale-ledger run earlier in this file remains the live evidence for the
-failure mode; what follows is the argument that this diff does not widen it.
+this checkout, so `npm run test:integration` cannot execute here. The five
+scenarios recorded above remain the live evidence for the single-call path.
 
 ### What the PR changes on the enforcement path
 
-- `src/invoke.ts`: the single hard-coded retry becomes a bounded budget
-  (`retry.maxAttempts`, default 3) with full-jitter exponential backoff
-  (`baseDelayMs` 100, `maxDelayMs` 2000, RNG and sleep injectable). Each attempt
-  still re-enters the whole pipeline — fresh account lookup, probe simulation,
-  signing, enforced simulation, broadcast — so the resource declaration is always
-  priced against current ledger state. Exhaustion returns a typed
-  `InvokeRetryError` carrying `attempts`, `lastCause` and `lastOutcome` instead of
-  a generic error.
-- `src/invoke.ts`: error outcomes now carry a `cause`
-  (`undetermined` | `stale_ledger_resource_limit`), so a host/RPC/input failure is
-  never confused with a guard refusal.
+- `src/preflight.ts`: adds `checkBatch()`, `assertBatchAllowed()` and the
+  `preflightBatch()` one-shot form. `checkBatch` evaluates each call in order
+  through the existing `check()`, then *stages* the cumulative window spend of
+  SAC transfers in memory. A call that passes enforced simulation in isolation
+  but would push the staged total past `window_cap` is returned as `blocked` with
+  `window_cap_exceeded`. The batch is admissible only when every call is.
+- `src/preflight.ts`: `PreFlightConfig.policy` is a new optional field so a caller
+  can supply the policy for staging without an extra ledger read.
+- `src/policy.ts`: adds `extractTransferAmount()` (the SAC `transfer` /
+  `transfer_from` amount argument), `readPersistentEntry()`, and
+  `fetchGuardPolicyAndWindow()` for the "no policy supplied" path.
 
-### Why the safety boundary is unchanged
+### What this is, and what it is not
 
-Retry is still gated *only* on `isStaleLedgerResourceFailure` — a post-inclusion
-`scecExceededLimit`. A guard block returns `blocked` immediately and is never
-retried, and an undetermined failure (bad input, RPC/host error, unsupported auth
-shape) returns immediately without sleeping. The predicate is untouched by this
-diff, so the set of failures eligible for a retry is identical to the recorded
-6-of-6 run; only the number of eligible attempts and the delay between them
-changed.
+`checkBatch` is an **off-chain approximation** of the contract's atomic auth-batch
+evaluation, and the code says so at the call site. The three known divergences,
+restated here because they bear on how much weight the evidence can carry:
 
-The one behavioural difference from the recorded run: the default budget is now 3
-attempts rather than 2, so a persistently stale ledger can produce two retries
-instead of one before the budget is exhausted. Each retry is still a full
-re-simulation against a fresh ledger snapshot, and inclusion of a prior attempt
-proves the ledger has advanced — the argument the single retry rested on, applied
-the same way.
+- state mutations between calls are not observed, because each call is simulated
+  independently;
+- the window is staged against the initial snapshot, with no modelling of
+  intra-batch time expiration;
+- `totalEstimatedResourceFee` is the sum of per-call estimates, not the resource
+  fee of a single batched envelope.
 
-`tests/unit/invoke.test.ts` now asserts the per-attempt `onStep` index across all
-three attempts (`a0`, `a1`, `a2`), so the added attempts are observably
-individuation, not silent extra work.
+The synthetic `window_cap_exceeded` verdict is the part that most needs review: it
+is produced by this SDK rather than by the contract, so on its own it is an
+argument and not a measurement. The single-call path it is layered on top of is
+unchanged — `check()`, `assertAllowed()` and `preflight()` are untouched, and a
+`blocked` or `undetermined` verdict from the contract is propagated verbatim
+rather than re-derived.
 
 ### What did run locally (Node 24.16.0)
 
 ```text
 npm run typecheck                        # clean
 npm run lint                             # clean
-npm test                                 # 241 unit tests passing, 0 fail
+npm test                                 # 247 unit tests passing, 0 fail
 npm run build                            # clean
-npm run test:smoke                       # 68 exports resolve via the ESM export map
+npm run test:smoke                       # 69 exports resolve via the ESM export map
 ```
 
-The retry-specific coverage is `tests/unit/invoke.test.ts` with a mocked RPC while
-still driving the real transaction builder and signing path:
+`tests/unit/preflight.test.ts` gains a `PreFlightInterceptor.checkBatch()` suite
+against a mocked RPC, covering:
 
-- three total attempts are bounded, and exhaustion returns `InvokeRetryError` with
-  `attempts = 3` and `lastCause = stale_ledger_resource_limit`;
-- full jitter produces the injected-RNG delays `25ms` then `150ms` against the
-  documented exponential window and cap, and `50ms`/`100ms` at a fixed 0.5 sample;
-- every attempt performs both probe and enforced simulations — 6 simulation calls
-  and 3 account lookups for 3 attempts, proving a genuinely fresh transaction per
-  retry rather than a resubmission of the first resource declaration;
-- `maxAttempts: 1` performs one attempt and never sleeps;
-- an `invalid_input`/undetermined result returns with no retry sleep and no
-  broadcast (`cause: "undetermined"`); and
-- a retry that discovers a non-retryable failure does not sleep again.
+- the empty batch (admissible, no verdicts, zero fee, zero simulations);
+- one verdict per call in input order, with per-call fees summed;
+- a call that passes alone but breaches the staged cap, asserting the
+  `window_cap_exceeded` reason and the `120 > window_cap 100` arithmetic, and that
+  a staged-out call is excluded from the fee total;
+- the already-committed window spend counting against the cap;
+- a contract refusal propagating its own decoded reason (`per_tx_cap_exceeded`)
+  and making the batch inadmissible;
+- a `null` cap meaning "no objection" rather than "refuse everything";
+- a missing `getLedgerEntries` degrading to a zero committed spend instead of
+  failing closed; and
+- `assertBatchAllowed` returning the batch when admissible, throwing
+  `GuardBlockedError` on the first refusal, and throwing
+  `PreFlightUndeterminedError` — never a block — on a host rejection.
+
+What these tests do **not** establish: that staged in-memory accumulation matches
+the contract's own batch accounting under real concurrency. That needs the live
+suite, and it needs the contract-side `check_batch` entrypoint to compare against.
 
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
 
