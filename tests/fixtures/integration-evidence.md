@@ -367,50 +367,81 @@ npm run test:smoke                       # 64 exports resolve via the ESM export
 
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output if needed.
 
-## Addendum — 2026-09-27 (PR #177: simulation resource breakdown on `CostPreChecker`)
+## Addendum — 2026-09-27 (PR #170: batched pre-flight `checkBatch`)
 
-Recorded because this PR touches the enforcement path (`src/preflight.ts`) and CI's
-`enforcement-path evidence gate` therefore requires this file in the diff.
+Recorded because this PR touches the enforcement path (`src/preflight.ts`,
+`src/policy.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
 
 **It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
-this checkout, so `npm run test:integration` cannot execute here.
+this checkout, so `npm run test:integration` cannot execute here. The five
+scenarios recorded above remain the live evidence for the single-call path.
 
-### Summary of changes to the enforcement path
+### What the PR changes on the enforcement path
 
-- `src/preflight.ts`: an admissible decision now carries an optional
-  `resourceBreakdown`, parsed from the *same* enforced simulation that already
-  produced `estimatedResourceFee`. `footprintKeys` prefers
-  `breakdown.storageEntries` when the payload exposes a complete resource block and
-  otherwise falls back to the existing `getReadOnly()`/`getReadWrite()` count, so
-  the reported key count is unchanged wherever the parse does not succeed.
-- `src/cost.ts`: adds `ResourceBreakdown` and `resourceBreakdownFromSimulation()`,
-  which reads the actual `SorobanResources` fields (`instructions`,
-  `diskReadBytes`, `writeBytes`) and the footprint array lengths. A missing or
-  malformed field yields `undefined` for the whole breakdown — no zero-filling. The
-  parsed value is surfaced on priced `within_budget`/`over_budget` results as
-  `breakdown`.
+- `src/preflight.ts`: adds `checkBatch()`, `assertBatchAllowed()` and the
+  `preflightBatch()` one-shot form. `checkBatch` evaluates each call in order
+  through the existing `check()`, then *stages* the cumulative window spend of
+  SAC transfers in memory. A call that passes enforced simulation in isolation
+  but would push the staged total past `window_cap` is returned as `blocked` with
+  `window_cap_exceeded`. The batch is admissible only when every call is.
+- `src/preflight.ts`: `PreFlightConfig.policy` is a new optional field so a caller
+  can supply the policy for staging without an extra ledger read.
+- `src/policy.ts`: adds `extractTransferAmount()` (the SAC `transfer` /
+  `transfer_from` amount argument), `readPersistentEntry()`, and
+  `fetchGuardPolicyAndWindow()` for the "no policy supplied" path.
 
-Unchanged, deliberately: the authorization preimage and nonce policy, credential
-kinds answered, the probe → sign → enforced-simulation ordering, resource
-assembly, submission, block classification, and every existing outcome value. The
-breakdown is read *out of* the simulation the guard already runs; it does not add
-an RPC call, does not alter what is signed, and cannot change a verdict.
+### What this is, and what it is not
+
+`checkBatch` is an **off-chain approximation** of the contract's atomic auth-batch
+evaluation, and the code says so at the call site. The three known divergences,
+restated here because they bear on how much weight the evidence can carry:
+
+- state mutations between calls are not observed, because each call is simulated
+  independently;
+- the window is staged against the initial snapshot, with no modelling of
+  intra-batch time expiration;
+- `totalEstimatedResourceFee` is the sum of per-call estimates, not the resource
+  fee of a single batched envelope.
+
+The synthetic `window_cap_exceeded` verdict is the part that most needs review: it
+is produced by this SDK rather than by the contract, so on its own it is an
+argument and not a measurement. The single-call path it is layered on top of is
+unchanged — `check()`, `assertAllowed()` and `preflight()` are untouched, and a
+`blocked` or `undetermined` verdict from the contract is propagated verbatim
+rather than re-derived.
 
 ### What did run locally (Node 24.16.0)
 
 ```text
 npm run typecheck                        # clean
 npm run lint                             # clean
-npm test                                 # 241 unit tests passing, 0 fail
+npm test                                 # 247 unit tests passing, 0 fail
 npm run build                            # clean
-npm run test:smoke                       # 66 exports resolve via the ESM export map
+npm run test:smoke                       # 69 exports resolve via the ESM export map
 ```
 
-The new coverage is `tests/unit/cost.test.ts` against the committed recorded
-payload fixture `tests/fixtures/simulation-resource-payload.json`: the wire-shape
-`SorobanResources` object, the parsed `SorobanDataBuilder` value, the raw base64
-form, incomplete-payload handling (whole result `undefined`), and propagation
-through `CostPreChecker`. No network, no credentials.
+`tests/unit/preflight.test.ts` gains a `PreFlightInterceptor.checkBatch()` suite
+against a mocked RPC, covering:
+
+- the empty batch (admissible, no verdicts, zero fee, zero simulations);
+- one verdict per call in input order, with per-call fees summed;
+- a call that passes alone but breaches the staged cap, asserting the
+  `window_cap_exceeded` reason and the `120 > window_cap 100` arithmetic, and that
+  a staged-out call is excluded from the fee total;
+- the already-committed window spend counting against the cap;
+- a contract refusal propagating its own decoded reason (`per_tx_cap_exceeded`)
+  and making the batch inadmissible;
+- a `null` cap meaning "no objection" rather than "refuse everything";
+- a missing `getLedgerEntries` degrading to a zero committed spend instead of
+  failing closed; and
+- `assertBatchAllowed` returning the batch when admissible, throwing
+  `GuardBlockedError` on the first refusal, and throwing
+  `PreFlightUndeterminedError` — never a block — on a host rejection.
+
+What these tests do **not** establish: that staged in-memory accumulation matches
+the contract's own batch accounting under real concurrency. That needs the live
+suite, and it needs the contract-side `check_batch` entrypoint to compare against.
 
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
 

@@ -9,10 +9,13 @@ import { Account, Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/ste
 import {
   InvalidInputError,
   PreFlightInterceptor,
+  PreFlightUndeterminedError,
   validateContractCall,
   type PreFlightCacheOptions,
+  type PreFlightDecision,
 } from "../../src/preflight.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
+import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
 
 const VALID_GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
@@ -716,6 +719,314 @@ describe("PreFlightInterceptor simulation cache", () => {
     assert.throws(
       () => makeInterceptor(harness, { cache: { ttlMs: 0 } }),
       /ttlMs must be a positive finite number/,
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Batched pre-flight: the all-or-nothing aggregate over a list of calls.
+ *
+ * The single-call path is mocked RPC; what these tests pin is the *staging* on
+ * top of it — that the aggregate is admissible only when every call is, that a
+ * call which passes alone can still be refused once the batch's cumulative
+ * window spend is accounted for, and that a refusal anywhere is never averaged
+ * away. `window_cap_exceeded` is synthesised client-side from staged amounts,
+ * so the reasoning behind it is asserted explicitly rather than assumed.
+ */
+describe("PreFlightInterceptor.checkBatch()", () => {
+  const PASSPHRASE = "Test SDF Network ; September 2015";
+
+  /** An enforced simulation that passes, priced at `minResourceFee` stroops. */
+  function admissibleSimulation(feeStroops: string) {
+    return {
+      result: { auth: [] },
+      minResourceFee: feeStroops,
+      transactionData: { getReadOnly: () => [], getReadWrite: () => [{}] },
+    };
+  }
+
+  /** A guard refusal in the contract's own vocabulary. */
+  function blockedSimulation() {
+    return {
+      error: "blocked",
+      events: [
+        {
+          event: {
+            contractId: CONTRACT,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvVoid(),
+              },
+            },
+          },
+        },
+      ],
+    };
+  }
+
+  /**
+   * A server whose enforced simulation (every 2nd call) is scripted per
+   * 1-based enforced-run index, so a batch can mix admissible and refused calls.
+   */
+  function batchServer(options: {
+    enforcedRuns: readonly unknown[];
+    ledgerEntries?: () => unknown;
+  }) {
+    let simulations = 0;
+    let enforcedRun = 0;
+    const server = {
+      getAccount: async () => new Account(Keypair.random().publicKey(), "1"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        if (simulations % 2 === 0) {
+          const scripted = options.enforcedRuns[enforcedRun];
+          enforcedRun += 1;
+          return scripted ?? admissibleSimulation("10");
+        }
+        return admissibleSimulation("10");
+      },
+      ...(options.ledgerEntries
+        ? { getLedgerEntries: async () => options.ledgerEntries?.() }
+        : {}),
+    } as unknown as rpc.Server;
+    return {
+      server,
+      get simulations() {
+        return simulations;
+      },
+    };
+  }
+
+  function transferCall(amount: bigint): ContractCall {
+    return {
+      contract: VALID_TOKEN,
+      fn: "transfer",
+      args: [
+        new Address(VALID_GUARD).toScVal(),
+        new Address(RECIPIENT).toScVal(),
+        nativeToScVal(amount, { type: "i128" }),
+      ],
+    };
+  }
+
+  /** A policy that objects to nothing except the window cap under test. */
+  function policyWithWindowCap(windowCap: bigint): PolicyConfig {
+    return {
+      per_tx_cap: 1_000_000_000_000n,
+      window_secs: 86_400n,
+      window_cap: windowCap,
+      assets: [VALID_TOKEN],
+      protocols: [],
+      recipients: [RECIPIENT],
+      allow_any_recipient: true,
+      active_from: 0n,
+      active_until: 0n,
+      paused: false,
+      dms_grace_secs: 3_600n,
+    };
+  }
+
+  function batchInterceptor(
+    server: rpc.Server,
+    policy?: PolicyConfig | null,
+  ): PreFlightInterceptor {
+    return new PreFlightInterceptor({
+      server,
+      networkPassphrase: PASSPHRASE,
+      guard: CONTRACT,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      ...(policy !== undefined ? { policy } : {}),
+    });
+  }
+
+  /** Narrow a verdict to its blocked arm, or fail with its actual kind. */
+  function blockedArm(verdict: PreFlightDecision | undefined) {
+    assert.ok(verdict, "expected a verdict for this call");
+    assert.equal(verdict.kind, "blocked", `expected blocked, got ${verdict.kind}`);
+    return verdict;
+  }
+
+  it("treats an empty batch as admissible with no fee and no verdicts", async () => {
+    const harness = batchServer({ enforcedRuns: [] });
+    const decision = await batchInterceptor(harness.server).checkBatch([]);
+
+    assert.equal(decision.admissible, true);
+    assert.equal(decision.overallAdmissible, true);
+    assert.deepEqual(decision.verdicts, []);
+    assert.deepEqual(decision.calls, decision.verdicts);
+    assert.equal(decision.totalEstimatedResourceFee, 0n);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("returns one verdict per call, in input order, and sums the admissible fees", async () => {
+    const harness = batchServer({
+      enforcedRuns: [admissibleSimulation("10"), admissibleSimulation("25")],
+    });
+    const calls = [transferCall(10n), transferCall(20n)];
+
+    const decision = await batchInterceptor(harness.server, policyWithWindowCap(1_000n)).checkBatch(
+      calls,
+      { initialWindowSpent: 0n },
+    );
+
+    assert.equal(decision.admissible, true);
+    assert.equal(decision.verdicts.length, 2);
+    assert.deepEqual(
+      decision.verdicts.map((verdict) => verdict.kind),
+      ["admissible", "admissible"],
+    );
+    // 10 + 25, summed from the per-call estimates.
+    assert.equal(decision.totalEstimatedResourceFee, 35n);
+    // Two simulations per call: the probe and the enforced run.
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("refuses a call that passes alone but breaches the staged window cap", async () => {
+    // Both calls pass in isolation: 60n and 60n against a 100n cap.
+    const { server } = batchServer({
+      enforcedRuns: [admissibleSimulation("10"), admissibleSimulation("10")],
+    });
+    const decision = await batchInterceptor(server, policyWithWindowCap(100n)).checkBatch(
+      [transferCall(60n), transferCall(60n)],
+      { initialWindowSpent: 0n },
+    );
+
+    assert.equal(decision.admissible, false);
+    assert.equal(decision.overallAdmissible, false);
+    assert.equal(decision.verdicts[0]?.kind, "admissible");
+    const staged = blockedArm(decision.verdicts[1]);
+    // The refusal names the window cap and shows the arithmetic, so the caller
+    // can see *why* a call the chain would have allowed was staged out.
+    assert.equal(staged.reason, "window_cap_exceeded");
+    assert.match(staged.detail, /120 > window_cap 100/);
+    // A staged-out call is never charged to the batch's fee total.
+    assert.equal(decision.totalEstimatedResourceFee, 10n);
+  });
+
+  it("counts the committed window spend already on the ledger against the cap", async () => {
+    const { server } = batchServer({
+      enforcedRuns: [admissibleSimulation("10"), admissibleSimulation("10")],
+    });
+    // 90n already committed leaves room for exactly one 10n transfer, not two.
+    const decision = await batchInterceptor(server, policyWithWindowCap(100n)).checkBatch(
+      [transferCall(10n), transferCall(10n)],
+      { initialWindowSpent: 90n },
+    );
+
+    assert.equal(decision.admissible, false);
+    assert.equal(decision.verdicts[0]?.kind, "admissible");
+    assert.equal(decision.verdicts[1]?.kind, "blocked");
+  });
+
+  it("propagates a contract refusal and makes the whole batch inadmissible", async () => {
+    const { server } = batchServer({
+      enforcedRuns: [admissibleSimulation("10"), blockedSimulation()],
+    });
+    const decision = await batchInterceptor(server, policyWithWindowCap(1_000n)).checkBatch(
+      [transferCall(10n), transferCall(20n)],
+      { initialWindowSpent: 0n },
+    );
+
+    assert.equal(decision.admissible, false);
+    // The guard's own reason survives, decoded from its diagnostic.
+    assert.equal(blockedArm(decision.verdicts[1]).reason, "per_tx_cap_exceeded");
+    assert.equal(decision.totalEstimatedResourceFee, 10n);
+  });
+
+  it("skips window staging when no window cap is configured", async () => {
+    const { server } = batchServer({
+      enforcedRuns: [admissibleSimulation("10"), admissibleSimulation("10")],
+    });
+    // A `null` cap must mean "no objection", not "refuse everything".
+    const decision = await batchInterceptor(server, null).checkBatch(
+      [transferCall(1_000_000n), transferCall(1_000_000n)],
+      { initialWindowSpent: 0n },
+    );
+
+    assert.equal(decision.admissible, true);
+    assert.deepEqual(
+      decision.verdicts.map((verdict) => verdict.kind),
+      ["admissible", "admissible"],
+    );
+  });
+
+  it("falls back to a zero committed spend when the ledger read is unavailable", async () => {
+    // No `getLedgerEntries` on the mock: the fetch throws and is swallowed, so
+    // the batch must still run rather than fail closed on a missing read.
+    const harness = batchServer({
+      enforcedRuns: [admissibleSimulation("10"), admissibleSimulation("10")],
+    });
+    const decision = await batchInterceptor(harness.server).checkBatch([
+      transferCall(10n),
+      transferCall(20n),
+    ]);
+
+    assert.equal(decision.admissible, true);
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("reads the live policy and window from ledger storage when none is supplied", async () => {
+    // `readPersistentEntry` decodes the contract-data entry's ScVal; the batch
+    // check then stages against the committed total it finds there.
+    const { server } = batchServer({
+      enforcedRuns: [admissibleSimulation("10")],
+      ledgerEntries: () => {
+        throw new Error("not modelled");
+      },
+    });
+    // An unreadable policy degrades to "no cap" rather than a fabricated one.
+    const decision = await batchInterceptor(server).checkBatch([transferCall(10n)]);
+
+    assert.equal(decision.admissible, true);
+  });
+
+  it("assertBatchAllowed returns the batch when every call is admissible", async () => {
+    const { server } = batchServer({ enforcedRuns: [admissibleSimulation("10")] });
+    const batch = await batchInterceptor(server, policyWithWindowCap(1_000n)).assertBatchAllowed(
+      [transferCall(10n)],
+      { initialWindowSpent: 0n },
+    );
+
+    assert.equal(batch.admissible, true);
+  });
+
+  it("assertBatchAllowed throws GuardBlockedError on the first refusal", async () => {
+    const { server } = batchServer({ enforcedRuns: [blockedSimulation()] });
+    const interceptor = batchInterceptor(server, policyWithWindowCap(1_000n));
+
+    await assert.rejects(
+      interceptor.assertBatchAllowed([transferCall(10n)], { initialWindowSpent: 0n }),
+      (error: unknown) => {
+        assert.ok(error instanceof GuardBlockedError);
+        assert.equal(error.reason, "per_tx_cap_exceeded");
+        return true;
+      },
+    );
+  });
+
+  it("assertBatchAllowed throws PreFlightUndeterminedError on an undetermined call", async () => {
+    // A host rejection is not the guard refusing, and it is not the batch
+    // staging either: it must surface as undetermined, never as a block.
+    const { server } = batchServer({
+      enforcedRuns: [{ error: "HostError: invalid_input", events: [] }],
+    });
+    const interceptor = batchInterceptor(server, policyWithWindowCap(1_000n));
+
+    await assert.rejects(
+      interceptor.assertBatchAllowed([transferCall(10n)], { initialWindowSpent: 0n }),
+      (error: unknown) => {
+        assert.ok(error instanceof PreFlightUndeterminedError);
+        return true;
+      },
     );
   });
 });
