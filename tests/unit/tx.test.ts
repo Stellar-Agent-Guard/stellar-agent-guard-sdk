@@ -13,12 +13,15 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
 import { Keypair, SorobanDataBuilder, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { ContractResponseError } from "../../src/errors.ts";
 import {
   buildGuardAuthEntry,
   describeSimulationResources,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
+  parseSimulationResourceFee,
   toAgentSigner,
+  verifyAgentSignature,
   type AgentSigner,
   type ContractCall,
 } from "../../src/tx.ts";
