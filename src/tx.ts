@@ -339,7 +339,18 @@ export async function buildGuardAuthEntry(params: {
         );
 
   const digest = createHash("sha256").update(preimage.toXDR()).digest();
-  const signature = await signer.signDigest(digest);
+  let signature: Uint8Array;
+  try {
+    signature = await signer.signDigest(digest);
+  } catch (error) {
+    // A signer that cannot produce a signature is a `SigningError` at the layer
+    // that owns the failure, so a direct caller of this helper gets the same
+    // typed category an `invoke()` caller would have gotten.
+    throw new SigningError("could not sign the guard authorization entry", {
+      address: guard,
+      cause: error,
+    });
+  }
 
   const addressCredentials = new xdr.SorobanAddressCredentials({
     address: guardAddress,
@@ -369,17 +380,24 @@ export async function signAccountAuthEntry(params: {
   networkPassphrase: string;
 }): Promise<xdr.SorobanAuthorizationEntry> {
   const { entry, signer, signatureExpirationLedger, networkPassphrase } = params;
-  if ("signAuthEntry" in signer && typeof signer.signAuthEntry === "function") {
-    return signer.signAuthEntry(entry, { signatureExpirationLedger, networkPassphrase });
-  }
-  if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
-    const { authorizeEntry } = await import("@stellar/stellar-sdk");
-    return authorizeEntry(
-      entry,
-      signer as Keypair,
-      signatureExpirationLedger,
-      networkPassphrase,
-    );
+  try {
+    if ("signAuthEntry" in signer && typeof signer.signAuthEntry === "function") {
+      return await signer.signAuthEntry(entry, { signatureExpirationLedger, networkPassphrase });
+    }
+    if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+      const { authorizeEntry } = await import("@stellar/stellar-sdk");
+      return await authorizeEntry(
+        entry,
+        signer as Keypair,
+        signatureExpirationLedger,
+        networkPassphrase,
+      );
+    }
+  } catch (error) {
+    throw new SigningError("could not sign the required account authorization entry", {
+      address: await signer.publicKey(),
+      cause: error,
+    });
   }
   // For classic transaction signers (e.g. Freighter) without a separate auth-entry signer,
   // return entry to be authorized via the envelope signature.
