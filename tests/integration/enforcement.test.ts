@@ -29,7 +29,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "../../src/events.ts";
-import { topicSymbols } from "../../src/invoke.ts";
+import { invoke, topicSymbols } from "../../src/invoke.ts";
 import { PreFlightInterceptor } from "../../src/preflight.ts";
 import { GUARD_REASON_CODES } from "../../src/reasons.ts";
 import {
