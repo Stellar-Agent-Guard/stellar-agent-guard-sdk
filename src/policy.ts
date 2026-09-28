@@ -14,6 +14,7 @@
  * on exactly the values a spend guard exists to compare.
  */
 import { Address, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
 import type { ContractCall } from "./tx.ts";
 
 export interface ProtocolRule {
