@@ -22,6 +22,7 @@ import {
   invoke,
   InvokeRetryError,
 } from "../../src/invoke.ts";
+import { SimulationError } from "../../src/errors.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
 import type { InvokeStepEvent } from "../../src/invoke.ts";
 
@@ -278,7 +279,10 @@ describe("invoke() onStep: pipeline order", () => {
 
     const outcome = await invoke(makeParams(server, { dryRun: true, onStep: callback }));
 
-    assert.equal(outcome.kind, "error");
+    // A dry run returns its own structured result rather than an `invoke()`
+    // outcome, but the stages it does run are the same instrumented pipeline.
+    assert.equal(outcome.kind, "dry_run");
+    assert.equal(outcome.admissible, true);
     assert.deepEqual(events.map((event) => [event.name, event.status]), [
       ["probe", "start"],
       ["probe", "ok"],
@@ -287,6 +291,7 @@ describe("invoke() onStep: pipeline order", () => {
       ["simulate", "start"],
       ["simulate", "ok"],
     ]);
+    assert.equal(server.sendCount, 0);
   });
 
   it("emits a fail event for the simulate stage on a guard block, with no ok for it", async () => {
@@ -344,7 +349,12 @@ describe("invoke() onStep: durationMs", () => {
 });
 
 describe("invoke() onStep: original error identity", () => {
-  it("rethrows the exact error object a stage threw", async () => {
+  // `invoke()` is result-oriented: a stage that throws becomes a typed
+  // `kind: "error"` outcome rather than a rejection, so the original error
+  // travels as the typed error's `cause`. The identity that matters is
+  // unchanged — the pipeline's own error is the one that survives, and a
+  // throwing consumer callback never replaces it with its own.
+  it("keeps the exact error object a stage threw as the typed cause", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -352,10 +362,15 @@ describe("invoke() onStep: original error identity", () => {
       },
     });
 
-    await assert.rejects(invoke(makeParams(server)), (error: unknown) => error === boom);
+    const outcome = await invoke(makeParams(server));
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.stage, "probe");
+    assert.equal(outcome.error.cause, boom);
   });
 
-  it("rethrows the original error when the fail callback also throws", async () => {
+  it("keeps the original error when the fail callback also throws", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -363,16 +378,17 @@ describe("invoke() onStep: original error identity", () => {
       },
     });
 
-    await assert.rejects(
-      invoke(
-        makeParams(server, {
-          onStep: (step) => {
-            if (step.status === "fail") throw new Error("callback exploded");
-          },
-        }),
-      ),
-      (error: unknown) => error === boom,
+    const outcome = await invoke(
+      makeParams(server, {
+        onStep: (step) => {
+          if (step.status === "fail") throw new Error("callback exploded");
+        },
+      }),
     );
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.cause, boom);
   });
 });
 
@@ -523,7 +539,7 @@ describe("invoke() without onStep: default behavior unchanged", () => {
     }
   });
 
-  it("still rethrows stage errors with no callback supplied", async () => {
+  it("still reports stage errors as typed results with no callback supplied", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -531,7 +547,11 @@ describe("invoke() without onStep: default behavior unchanged", () => {
       },
     });
 
-    await assert.rejects(invoke(makeParams(server)), (error: unknown) => error === boom);
+    const outcome = await invoke(makeParams(server));
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.cause, boom);
   });
 });
 

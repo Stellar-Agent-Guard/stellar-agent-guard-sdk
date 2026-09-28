@@ -9,6 +9,8 @@
  * code therefore share one vocabulary, which is why this table is duplicated
  * rather than inferred.
  */
+import { GuardError } from "./errors.ts";
+
 export const GUARD_REASON_CODES = {
   unauthorized: 1,
   already_initialized: 2,
@@ -114,7 +116,7 @@ export interface GuardBlockedErrorParams {
  * an extra RPC round-trip. Catch-sites have the reason, explanation, and call
  * needed to construct operator alerts without re-simulating.
  */
-export class GuardBlockedError extends Error {
+export class GuardBlockedError extends GuardError {
   readonly reason: string;
   readonly code: number | undefined;
   readonly explanation: string;

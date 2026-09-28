@@ -21,6 +21,15 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  BroadcastError,
+  ContractResponseError,
+  GuardError,
+  PolicyDecodeError,
+  SigningError,
+  SimulationError,
+} from "./errors.ts";
+
+export {
   GuardBlockedError,
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
@@ -33,11 +42,13 @@ export {
 
 export {
   decodeCheckResult,
+  decodePolicy,
   deadManRemaining,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
   isDeadManFrozen,
+  policyFromScVal,
   policyToScVal,
   readPersistentEntry,
   type CheckResult,
@@ -63,10 +74,14 @@ export {
   topicSymbols,
   type EnforcementOutcome,
   type GuardAuthorization,
+  type InvokeDryRunResult,
+  type InvokeDryRunStepName,
+  type InvokeDryRunVerdict,
   type InvokeErrorCause,
   type InvokeErrorOutcome,
   type InvokeOptions,
   type InvokeOutcome,
+  type InvokePipelineStep,
   type InvokeParams,
   type InvokeStepEvent,
 } from "./invoke.ts";
@@ -146,6 +161,7 @@ export {
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
+  verifyAgentSignature,
   type AdminSigner,
   type AgentSigner,
   type ContractCall,
