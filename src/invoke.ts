@@ -76,6 +76,10 @@ export type InvokeErrorCause =
 export interface InvokeErrorOutcome {
   kind: "error";
   detail: string;
+  /** Machine-readable failure; branch on this with `instanceof`. */
+  error: GuardError;
+  /** Diagnostic events the host bundled with the failure, if any. */
+  diagnosticEvents: unknown[];
   /** Coarse cause; absent for a dry run because no failure was classified. */
   cause?: InvokeErrorCause;
   /**
@@ -99,6 +103,14 @@ export class InvokeRetryError extends Error {
   readonly lastCause: InvokeErrorCause;
   readonly detail: string;
   readonly lastOutcome: InvokeErrorOutcome;
+  /**
+   * The last attempt's typed failure. Present so that narrowing an
+   * `InvokeOutcome` to `kind: "error"` always yields an `error` to branch on
+   * with `instanceof`, whatever exhausted the retry budget.
+   */
+  readonly error: GuardError;
+  /** Diagnostic events from the last attempt, if any. */
+  readonly diagnosticEvents: unknown[];
   /** An exhausted attempt is no longer itself retryable. */
   readonly retryable?: undefined;
 
@@ -117,14 +129,27 @@ export class InvokeRetryError extends Error {
     this.lastCause = lastCause;
     this.detail = params.lastOutcome.detail;
     this.lastOutcome = params.lastOutcome;
+    this.error = params.lastOutcome.error;
+    this.diagnosticEvents = params.lastOutcome.diagnosticEvents;
   }
 }
 
 export type InvokeDryRunVerdict = "admissible" | "blocked" | "undetermined";
 
+/**
+ * Stage names a dry-run trace reports.
+ *
+ * The first three come from the shared trace vocabulary so a dry run and an
+ * `onStep` trace can never name the same stage differently; `verdict` and
+ * `fees` are the two stages a dry run adds, which a real invocation has no
+ * equivalent of. `broadcast` is excluded on purpose: a dry run must be
+ * structurally incapable of reporting it.
+ */
+export type InvokeDryRunStepName = Exclude<TraceStepName, "broadcast"> | "verdict" | "fees";
+
 /** One completed stage in a dry run. `ok` describes the stage, not policy approval. */
 export interface InvokePipelineStep {
-  name: "probe" | "sign" | "simulate" | "verdict" | "fees";
+  name: InvokeDryRunStepName;
   durationMs: number;
   ok: boolean;
 }
@@ -316,17 +341,21 @@ async function withStepTiming<T>(
 
 /**
  * Internal signal that the signing stage refused an authorization shape.
- * Carries the exact detail text the pipeline has always reported; `enforceCall`
- * converts it back to an `error` outcome so a shape refusal stays a result,
- * while still giving the `sign` stage a real `fail` event on the way through.
+ *
+ * Carries the exact detail text the pipeline has always reported plus the
+ * typed failure the caller should branch on. `enforceCall` converts it back to
+ * an `error` outcome so a shape refusal stays a result, while still giving the
+ * `sign` stage a real `fail` event on the way through.
  */
 class SigningStageError extends Error {
   readonly detail: string;
+  readonly guardError: GuardError;
 
-  constructor(detail: string) {
+  constructor(detail: string, guardError: GuardError) {
     super(detail);
     this.name = "SigningStageError";
     this.detail = detail;
+    this.guardError = guardError;
   }
 }
 
@@ -421,6 +450,50 @@ function diagnosticEventsOf(response: unknown): unknown[] {
   return [];
 }
 
+/**
+ * The authorization entries a recording-mode probe asked for, read strictly.
+ *
+ * RPC hands these back as decoded objects, but the same payload can arrive from
+ * a proxy, a fixture, or a host that reports a different JSON shape. Every
+ * downstream step assumes a well-formed entry, so a malformed one is rejected
+ * here with a typed `ContractResponseError` naming the exact field rather than
+ * surfacing later as a `TypeError` that says nothing about which response was
+ * bad. An absent `auth` is legitimate and means "nothing to sign".
+ */
+function requiredAuthorizationEntries(
+  response: unknown,
+): xdr.SorobanAuthorizationEntry[] {
+  const result = (response as { result?: unknown }).result;
+  if (result !== undefined && (result === null || typeof result !== "object")) {
+    throw new ContractResponseError("simulation result is not an object", {
+      field: "result",
+    });
+  }
+  const auth = (result as { auth?: unknown } | undefined)?.auth;
+  if (auth === undefined) return [];
+  if (!Array.isArray(auth)) {
+    throw new ContractResponseError("simulation result.auth is not an array", {
+      field: "result.auth",
+    });
+  }
+  return auth.map((entry, index) => {
+    const credentials = (entry as { credentials?: unknown } | null)?.credentials;
+    if (
+      entry === null ||
+      typeof entry !== "object" ||
+      credentials === null ||
+      typeof credentials !== "object" ||
+      typeof (credentials as { type?: unknown }).type !== "string"
+    ) {
+      throw new ContractResponseError(
+        `simulation result.auth[${index}] has no credential payload`,
+        { field: `result.auth[${index}].credentials` },
+      );
+    }
+    return entry as xdr.SorobanAuthorizationEntry;
+  });
+}
+
 interface ResolvedRetryOptions {
   maxAttempts: number;
   baseDelayMs: number;
@@ -485,6 +558,11 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
  * decide whether a block is an expected outcome (agents hitting a guardrail) or
  * a failure worth surfacing.
  *
+ * With `dryRun`, the pipeline stops after the enforced simulation and returns a
+ * structured {@link InvokeDryRunResult} instead of an `invoke()` outcome: no
+ * transaction is ever assembled, signed for broadcast, or submitted, so there is
+ * no hash to report and nothing was charged.
+ *
  * Stale ledger resource failures are retried with bounded full-jitter backoff.
  * Every attempt starts a fresh invocation pipeline, including discovery and
  * enforced simulation, so the resource declaration is always priced against
@@ -499,6 +577,10 @@ export function invoke(
 export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   const retry = resolveRetryOptions(params.retry);
+  // A dry run performs exactly one pass: it never reaches broadcast, so there
+  // is no stale-ledger rejection to retry and no sleep to justify.
+  if (params.dryRun) return invokeDryRun(params);
+
   let attempts = 0;
 
   while (true) {
@@ -509,7 +591,6 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
     if (outcome.kind !== "error" || outcome.retryable !== "stale_ledger_resource_limit") {
       return outcome;
     }
-    if (params.dryRun) return outcome;
     if (attempts >= retry.maxAttempts) {
       return new InvokeRetryError({ attempts, lastOutcome: outcome });
     }
@@ -518,10 +599,37 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   }
 }
 
+/**
+ * `probe → sign → simulate → verdict → fees`, then stop before assembly.
+ *
+ * The first three stages are the real pipeline, instrumented through the same
+ * `onStep` hook an ordinary invocation uses, so a dry run's trace and a live
+ * invocation's trace are the same measurement of the same code. The last two
+ * are local to this function: classifying the guard's answer, and pricing it.
+ */
 async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
   const steps: InvokePipelineStep[] = [];
-  const enforced = await enforceCallWithTrace(params, (step) => steps.push(step));
-  const verdictStartedAt = Date.now();
+  const observer = params.onStep;
+  const enforced = await enforceCall(
+    {
+      ...params,
+      onStep: (event) => {
+        // A dry run can never reach broadcast, so a broadcast stage is a bug
+        // rather than a stage to report. Dropping it here keeps that guarantee
+        // in the trace itself, not just in the control flow.
+        if (event.status !== "start" && event.name !== "broadcast") {
+          steps.push({
+            name: event.name,
+            durationMs: event.durationMs,
+            ok: event.status === "ok",
+          });
+        }
+        observer?.(event);
+      },
+    },
+    0,
+  );
+  const verdictStartedAt = performance.now();
 
   let verdict: InvokeDryRunVerdict =
     enforced.kind === "admissible" ? "admissible" : enforced.kind === "blocked" ? "blocked" : "undetermined";
@@ -540,6 +648,9 @@ async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
     try {
       resourceFee = parseSimulationResourceFee(enforced.simulation.minResourceFee);
     } catch (cause) {
+      // The guard approved, but the network's own price for it is unusable.
+      // Reporting `admissible` here would hand the caller a fee figure that
+      // never came from the host, so the verdict degrades to undetermined.
       verdict = "undetermined";
       detail = `enforced simulation succeeded but returned an invalid resource fee: ${
         cause instanceof Error ? cause.message : String(cause)
@@ -554,9 +665,9 @@ async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
       feesOk = false;
     }
   }
-  const verdictDurationMs = Math.max(0, Date.now() - verdictStartedAt);
+  const verdictDurationMs = Math.max(0, performance.now() - verdictStartedAt);
 
-  const feesStartedAt = Date.now();
+  const feesStartedAt = performance.now();
   const fees: FeeBreakdown =
     verdict === "admissible"
       ? feeBreakdown(resourceFee)
@@ -565,9 +676,9 @@ async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
           inclusionFeeStroops: 0n,
           totalFeeStroops: 0n,
         };
-  const feesDurationMs = Math.max(0, Date.now() - feesStartedAt);
-  // Observer is intentionally installed only for enforceCall; append the local
-  // verdict/fee stages here so all five stages are in one ordered trace.
+  const feesDurationMs = Math.max(0, performance.now() - feesStartedAt);
+  // The pipeline stages above are the three `enforceCall` produced; append the
+  // two local ones so all five stages are in one ordered trace.
   steps.push(
     { name: "verdict", durationMs: verdictDurationMs, ok: enforced.kind !== "error" },
     { name: "fees", durationMs: feesDurationMs, ok: feesOk },
@@ -633,6 +744,7 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
   if (enforced.kind !== "admissible") return enforced;
 
   // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
+  const sourcePubKey = await params.source.publicKey();
   let assembled: ReturnType<typeof assembleFromSimulation>;
   try {
     assembled = assembleFromSimulation({
@@ -640,12 +752,14 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
       // A fresh `Account` per build: `TransactionBuilder` advances the sequence of
       // the instance it is handed, so sharing one across builds silently produces
       // `tx_bad_seq`.
-      source: new Account(params.source.publicKey(), enforced.nextSeq),
+      source: new Account(sourcePubKey, enforced.nextSeq),
       operation: enforced.operation,
       networkPassphrase: params.networkPassphrase,
       guard: params.guardAuth?.guard ?? null,
     });
   } catch (cause) {
+    // The enforced simulation passed, so a failure to turn its result into a
+    // transaction is a defect in construction — never a guardrail deciding.
     const detail = `transaction assembly failed: ${cause instanceof Error ? cause.message : String(cause)}`;
     return {
       kind: "error",
@@ -658,42 +772,61 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
     };
   }
 
-  // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
-  const sourcePubKey = await params.source.publicKey();
-  const assembled = assembleFromSimulation({
-    simulation: enforced.simulation,
-    // A fresh `Account` per build: `TransactionBuilder` advances the sequence of
-    // the instance it is handed, so sharing one across builds silently produces
-    // `tx_bad_seq`.
-    source: new Account(sourcePubKey, enforced.nextSeq),
-    operation: enforced.operation,
-    networkPassphrase: params.networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-  });
-
-  const submission = await withStepTiming(
-    params.onStep,
-    { name: "broadcast", attempt },
-    () =>
-      submitAndPoll(server, assembled.transaction, [params.source], {
-        pollAttempts: params.pollAttempts,
-        pollIntervalMs: params.pollIntervalMs,
-      }),
-    (result) => result.failure !== null,
-  );
+  let submission: SubmissionResult;
+  try {
+    submission = await withStepTiming(
+      params.onStep,
+      { name: "broadcast", attempt },
+      () =>
+        submitAndPoll(server, assembled.transaction, [params.source], {
+          pollAttempts: params.pollAttempts,
+          pollIntervalMs: params.pollIntervalMs,
+        }),
+      (result) => result.failure !== null,
+    );
+  } catch (error) {
+    const typed =
+      error instanceof GuardError ? error : new BroadcastError(String(error), { cause: error });
+    return {
+      kind: "error",
+      detail: typed.message,
+      error: typed,
+      diagnosticEvents: [],
+    };
+  }
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
     // construction (sequence, fee, footprint) or a contract trap — never a
     // guardrail doing its job.
-    const staleLedger = isStaleLedgerResourceFailure(submission.failure);
+    const detail = `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`;
+    const events = submission.failure.diagnosticEvents;
+    // One exception, and it is a real one: the guard can refuse *after*
+    // inclusion, when policy or account state has already moved. That is
+    // still the guard refusing, so it stays a `blocked` outcome — carrying the
+    // real hash and `charged`, because the caller did pay for the attempt.
+    const reason = reasonFromDiagnosticEvents(events);
+    if (reason !== null) {
+      return {
+        kind: "blocked",
+        reason,
+        detail,
+        diagnosticEvents: events,
+        transactionHash: submission.hash,
+        charged: true,
+      };
+    }
     return {
       kind: "error",
-      detail: `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`,
-      cause: staleLedger
+      detail,
+      error: new BroadcastError(detail, { transactionHash: submission.hash }),
+      diagnosticEvents: events,
+      cause: isStaleLedgerResourceFailure(submission.failure)
         ? INVOKE_ERROR_CAUSES.staleLedgerResourceLimit
         : INVOKE_ERROR_CAUSES.undetermined,
-      ...(staleLedger ? { retryable: "stale_ledger_resource_limit" as const } : {}),
+      ...(isStaleLedgerResourceFailure(submission.failure)
+        ? { retryable: "stale_ledger_resource_limit" as const }
+        : {}),
     };
   }
   return { kind: "allowed", submission };
@@ -711,7 +844,7 @@ export async function enforceCall(
   attempt: number = 0,
 ): Promise<EnforcementOutcome> {
   const { server, source, call, networkPassphrase } = params;
-  const probeStartedAt = Date.now();
+
   let operation: xdr.Operation;
   let expiration: number;
   let nextSeq: string;
@@ -724,7 +857,10 @@ export async function enforceCall(
       function: call.fn,
       args: call.args,
     });
-    const sourceAccount = await server.getAccount(source.publicKey());
+    // `publicKey()` may be async: an `AdminSigner` is allowed to resolve its
+    // identity late (a remote or threshold signer).
+    const sourcePubKey = await source.publicKey();
+    const sourceAccount = await server.getAccount(sourcePubKey);
     const latest = await server.getLatestLedger();
     expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
     // `TransactionBuilder` advances the sequence of the `Account` it is handed,
@@ -732,7 +868,7 @@ export async function enforceCall(
     // base sequence. Sharing one would silently build the second transaction on
     // sequence N+2 and the network would reject it with `tx_bad_seq`.
     nextSeq = sourceAccount.sequenceNumber();
-    freshAccount = () => new Account(source.publicKey(), nextSeq);
+    freshAccount = () => new Account(sourcePubKey, nextSeq);
 
     // ── Step 1: discover required authorizations ──────────────────────────
     const probe = buildInitialEnvelope({
@@ -741,9 +877,16 @@ export async function enforceCall(
       networkPassphrase,
       guard: params.guardAuth?.guard ?? null,
     });
-    first = await server.simulateTransaction(probe);
+    first = await withStepTiming(
+      params.onStep,
+      { name: "probe", attempt },
+      () => server.simulateTransaction(probe),
+      (response) => rpc.Api.isSimulationError(response),
+    );
   } catch (error) {
-    recordStep(onStep, "probe", probeStartedAt, false);
+    // Ledger lookup or transport failure: the guard was never asked, so this is
+    // `undetermined` rather than a refusal. The original error is kept as the
+    // typed cause — it is the only thing that explains *why* the probe failed.
     return {
       kind: "error",
       detail: `probe failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -755,30 +898,6 @@ export async function enforceCall(
     };
   }
 
-  const sourcePubKey = await source.publicKey();
-  const sourceAccount = await server.getAccount(sourcePubKey);
-  const latest = await server.getLatestLedger();
-  const expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
-  // `TransactionBuilder` advances the sequence of the `Account` it is handed,
-  // so every build in this function gets its own instance built from the same
-  // base sequence. Sharing one would silently build the second transaction on
-  // sequence N+2 and the network would reject it with `tx_bad_seq`.
-  const nextSeq = sourceAccount.sequenceNumber();
-  const freshAccount = () => new Account(sourcePubKey, nextSeq);
-
-  // ── Step 1: discover required authorizations ──────────────────────────
-  const probe = buildInitialEnvelope({
-    source: freshAccount(),
-    operation,
-    networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-  });
-  const first = await withStepTiming(
-    params.onStep,
-    { name: "probe", attempt },
-    () => server.simulateTransaction(probe),
-    (response) => rpc.Api.isSimulationError(response),
-  );
   if (rpc.Api.isSimulationError(first)) {
     // The discovery simulation runs in recording mode, so it can fail for
     // reasons that have nothing to do with policy (a contract trap, a missing
@@ -786,14 +905,12 @@ export async function enforceCall(
     // than pretending the guard made a decision.
     const error = first as rpc.Api.SimulateTransactionErrorResponse;
     const events = diagnosticEventsOf(error);
-    const detail = [
-      typeof error.error === "string" ? error.error : JSON.stringify(error.error),
-      ...summarizeDiagnosticEvents(events),
-    ].join("\n  ");
-    recordStep(onStep, "probe", probeStartedAt, false);
     return {
       kind: "error",
-      detail,
+      detail: [
+        typeof error.error === "string" ? error.error : JSON.stringify(error.error),
+        ...summarizeDiagnosticEvents(events),
+      ].join("\n  "),
       error: new SimulationError("authorization probe simulation failed", {
         stage: "probe",
         diagnosticEvents: events,
@@ -801,7 +918,6 @@ export async function enforceCall(
       diagnosticEvents: events,
     };
   }
-  recordStep(onStep, "probe", probeStartedAt, true);
   const success = first as rpc.Api.SimulateTransactionSuccessResponse;
 
   // ── Step 2: sign every authorization the call requires ────────────────
@@ -812,6 +928,22 @@ export async function enforceCall(
   // reports a real `fail`; `enforceCall` converts it straight back into the
   // error outcome the pipeline has always returned, detail text unchanged.
   const signRequiredAuth = async (): Promise<xdr.SorobanAuthorizationEntry[]> => {
+    let requiredAuth: xdr.SorobanAuthorizationEntry[];
+    try {
+      requiredAuth = requiredAuthorizationEntries(success);
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      throw new SigningStageError(
+        detail,
+        cause instanceof ContractResponseError
+          ? cause
+          : new SimulationError("could not read required authorization entries", {
+              stage: "probe",
+              cause,
+            }),
+      );
+    }
+
     const signedAuth: xdr.SorobanAuthorizationEntry[] = [];
     for (const entry of requiredAuth) {
       const creds = entry.credentials;
@@ -831,39 +963,57 @@ export async function enforceCall(
       ) {
         // ADDRESS_WITH_DELEGATES (CAP-71 delegation) is out of v1 scope; the
         // contract's SPEC records the same boundary.
-        throw new SigningStageError(
-          `unsupported credential type in required authorization: ${creds.type}`,
-        );
+        const detail = `unsupported credential type in required authorization: ${creds.type}`;
+        throw new SigningStageError(detail, new SigningError(detail));
       }
       const addressCredentials = addressCredentialsOf(creds);
       if (!addressCredentials) {
-        throw new SigningStageError(`credential kind has no address payload: ${creds.type}`);
+        const detail = `credential kind has no address payload: ${creds.type}`;
+        throw new SigningStageError(detail, new SigningError(detail));
       }
       // Works for both account (G…) and contract (C…) authorizers; the guard's
       // address is a contract, which is exactly why the agent key — not the
       // transaction source — has to produce this signature.
-      const address = Address.fromScAddress(addressCredentials.address).toString();
+      let address: string;
+      try {
+        address = Address.fromScAddress(addressCredentials.address).toString();
+      } catch (cause) {
+        const detail = `required authorization has an invalid address payload: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`;
+        throw new SigningStageError(detail, new SigningError(detail, { cause }));
+      }
 
       if (params.guardAuth && address === params.guardAuth.guard) {
         // The smart account authorizes: sign with the registered agent key over
         // the guard's own preimage (fresh nonce per transaction).
-        signedAuth.push(
-          await buildGuardAuthEntry({
-            guard: params.guardAuth.guard,
-            call,
-            signer: params.guardAuth.agent,
-            // The transaction's own sequence number doubles as the nonce: unique
-            // per transaction and never reused, so the host can never see a
-            // replay for this guard address.
-            nonce: BigInt(nextSeq),
-            signatureExpirationLedger: expiration,
-            networkPassphrase,
-            // Answer in the same credential kind the host asked for: the signed
-            // preimage differs between legacy ADDRESS and ADDRESS_V2, so using
-            // the wrong one produces a signature the account cannot verify.
-            credentialType: creds.type,
-          }),
-        );
+        try {
+          signedAuth.push(
+            await buildGuardAuthEntry({
+              guard: params.guardAuth.guard,
+              call,
+              signer: params.guardAuth.agent,
+              // The transaction's own sequence number doubles as the nonce: unique
+              // per transaction and never reused, so the host can never see a
+              // replay for this guard address.
+              nonce: BigInt(nextSeq),
+              signatureExpirationLedger: expiration,
+              networkPassphrase,
+              // Answer in the same credential kind the host asked for: the signed
+              // preimage differs between legacy ADDRESS and ADDRESS_V2, so using
+              // the wrong one produces a signature the account cannot verify.
+              credentialType: creds.type,
+            }),
+          );
+        } catch (error) {
+          const detail = `could not sign guard authorization for ${address}: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+          throw new SigningStageError(
+            detail,
+            new SigningError(detail, { address, cause: error }),
+          );
+        }
         continue;
       }
 
@@ -877,19 +1027,26 @@ export async function enforceCall(
         }
       }
       if (!signer) {
-        throw new SigningStageError(
+        const detail =
           `call requires authorization from ${address}, but no matching key was provided ` +
-            `(supplied: ${suppliedPubkeys.join(", ") || "none"})`,
-        );
+          `(supplied: ${suppliedPubkeys.join(", ") || "none"})`;
+        throw new SigningStageError(detail, new SigningError(detail, { address }));
       }
-      signedAuth.push(
-        await signAccountAuthEntry({
-          entry,
-          signer,
-          signatureExpirationLedger: expiration,
-          networkPassphrase,
-        }),
-      );
+      try {
+        signedAuth.push(
+          await signAccountAuthEntry({
+            entry,
+            signer,
+            signatureExpirationLedger: expiration,
+            networkPassphrase,
+          }),
+        );
+      } catch (error) {
+        const detail = `could not sign authorization for ${address}: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        throw new SigningStageError(detail, new SigningError(detail, { address, cause: error }));
+      }
     }
     return signedAuth;
   };
@@ -899,31 +1056,62 @@ export async function enforceCall(
     signedAuth = await withStepTiming(params.onStep, { name: "sign", attempt }, signRequiredAuth);
   } catch (error) {
     // A signing-stage shape refusal is a result, not an exception: keep
-    // reporting it exactly as the pipeline always has, word for word.
-    if (error instanceof SigningStageError) return { kind: "error", detail: error.detail };
+    // reporting it exactly as the pipeline always has, word for word, with the
+    // typed failure attached so a caller never has to match on the text.
+    if (error instanceof SigningStageError) {
+      return {
+        kind: "error",
+        detail: error.detail,
+        error: error.guardError,
+        diagnosticEvents: [],
+      };
+    }
     throw error;
   }
-  recordStep(onStep, "sign", signStartedAt, true);
 
   // ── Step 3: enforced simulation — this is where policy is applied ─────
-  const signedOperation = Operation.invokeContractFunction({
-    contract: call.contract,
-    function: call.fn,
-    args: call.args,
-    auth: signedAuth,
-  });
-  const enforcingTx = buildInitialEnvelope({
-    source: freshAccount(),
-    operation: signedOperation,
-    networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-  });
-  const enforced = await withStepTiming(
-    params.onStep,
-    { name: "simulate", attempt },
-    () => server.simulateTransaction(enforcingTx),
-    (response) => rpc.Api.isSimulationError(response),
-  );
+  // Building the signed envelope and running the enforced simulation are one
+  // timed stage: from a tracer's point of view they are the same question
+  // ("did the guard approve?"), and a build failure is a stage failure exactly
+  // like a transport failure.
+  let signedOperation: xdr.Operation;
+  let enforced: rpc.Api.SimulateTransactionResponse;
+  try {
+    const simulated = await withStepTiming(
+      params.onStep,
+      { name: "simulate", attempt },
+      async () => {
+        const authorized = Operation.invokeContractFunction({
+          contract: call.contract,
+          function: call.fn,
+          args: call.args,
+          auth: signedAuth,
+        });
+        const enforcingTx = buildInitialEnvelope({
+          source: freshAccount(),
+          operation: authorized,
+          networkPassphrase,
+          guard: params.guardAuth?.guard ?? null,
+        });
+        return { operation: authorized, response: await server.simulateTransaction(enforcingTx) };
+      },
+      (value) => rpc.Api.isSimulationError(value.response),
+    );
+    signedOperation = simulated.operation;
+    enforced = simulated.response;
+  } catch (cause) {
+    return {
+      kind: "error",
+      detail: `enforced simulation could not be prepared or run: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+      error: new SimulationError("enforced simulation could not be prepared or run", {
+        stage: "simulate",
+        cause,
+      }),
+      diagnosticEvents: [],
+    };
+  }
   if (process.env["SAG_DEBUG_RESOURCES"] === "1") {
     console.log(`[debug] enforced simulation:\n${describeSimulationResources(enforced, params.guardAuth?.guard ?? null)}`);
   }
@@ -940,14 +1128,12 @@ export async function enforceCall(
     // — a contract trap, an absent trustline, a host misuse — is an error, not
     // a block, and must not be reported as the guard refusing anything.
     if (reason === null) {
-      const detail = [
-        typeof error.error === "string" ? error.error : JSON.stringify(error.error),
-        ...summarizeDiagnosticEvents(events),
-      ].join("\n  ");
-      recordStep(onStep, "simulate", simulateStartedAt, false);
       return {
         kind: "error",
-        detail,
+        detail: [
+          typeof error.error === "string" ? error.error : JSON.stringify(error.error),
+          ...summarizeDiagnosticEvents(events),
+        ].join("\n  "),
         error: new SimulationError("enforced simulation failed without a guard verdict", {
           stage: "simulate",
           diagnosticEvents: events,
@@ -955,7 +1141,6 @@ export async function enforceCall(
         diagnosticEvents: events,
       };
     }
-    recordStep(onStep, "simulate", simulateStartedAt, true);
     return {
       kind: "blocked",
       reason,
@@ -964,7 +1149,6 @@ export async function enforceCall(
     };
   }
 
-  recordStep(onStep, "simulate", simulateStartedAt, true);
   return {
     kind: "admissible",
     simulation: enforced as rpc.Api.SimulateTransactionSuccessResponse,
