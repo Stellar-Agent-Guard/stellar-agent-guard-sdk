@@ -35,8 +35,11 @@ export {
   decodeCheckResult,
   deadManRemaining,
   describePolicy,
+  extractTransferAmount,
+  fetchGuardPolicyAndWindow,
   isDeadManFrozen,
   policyToScVal,
+  readPersistentEntry,
   type CheckResult,
   type GuardStatus,
   type PolicyConfig,
@@ -52,14 +55,21 @@ export {
 } from "./events.ts";
 
 export {
+  DEFAULT_INVOKE_RETRY_OPTIONS,
   enforceCall,
+  INVOKE_ERROR_CAUSES,
+  InvokeRetryError,
   invoke,
   topicSymbols,
   type EnforcementOutcome,
   type GuardAuthorization,
+  type InvokeErrorCause,
+  type InvokeErrorOutcome,
+  type InvokeOptions,
   type InvokeOutcome,
   type InvokeParams,
   type InvokeStepEvent,
+  type RetryableInvokeFailure,
 } from "./invoke.ts";
 
 export {
@@ -73,8 +83,11 @@ export {
   PreFlightInterceptor,
   PreFlightUndeterminedError,
   preflight,
+  preflightBatch,
   validateContractCall,
+  type CheckBatchOptions,
   type PolicyRevision,
+  type PreFlightBatchDecision,
   type PreFlightCacheOptions,
   type PreFlightCheckOptions,
   type PreFlightConfig,
@@ -90,8 +103,10 @@ export {
   feeBreakdown,
   formatFee,
   precheckCost,
+  precheckCostWithDecision,
   type CostDecision,
   type CostPreCheckConfig,
+  type CostWithDecision,
   type FeeBreakdown,
 } from "./cost.ts";
 
@@ -110,6 +125,8 @@ export {
   type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardTelemetryConfig,
+  type GuardTelemetryGap,
+  type GuardTelemetryGapReason,
   type GuardTelemetryWatchParams,
   type PollResult,
   type TelemetryJitter,

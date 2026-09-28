@@ -35,7 +35,7 @@
  * it was never allowed.
  */
 import { INCLUSION_FEE } from "./tx.ts";
-import type { PreFlightInterceptor } from "./preflight.ts";
+import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
 
 /**
@@ -173,6 +173,19 @@ export type CostDecision =
     };
 
 /**
+ * One interceptor verdict and the cost of the exact simulation that produced it.
+ *
+ * `cost` is derived from `decision`, never from a second simulation, so the two
+ * always describe the same ledger snapshot. See `checkWithCost`.
+ */
+export interface CostWithDecision {
+  /** The verdict, exactly as `PreFlightInterceptor.check` returns it. */
+  decision: PreFlightDecision;
+  /** The cost view of that same verdict. */
+  cost: CostDecision;
+}
+
+/**
  * Split a simulation's resource fee into the two components a caller is charged.
  *
  * Pure: no network, no configuration. The inclusion fee is the SDK's own
@@ -236,9 +249,36 @@ export class CostPreChecker {
     this.config = config;
   }
 
+  /** Price a call. Equivalent to `(await this.checkWithCost(call)).cost`. */
   async check(call: ContractCall): Promise<CostDecision> {
-    const decision = await this.config.interceptor.check(call);
+    return (await this.checkWithCost(call)).cost;
+  }
 
+  /**
+   * Price a call **and** return the interceptor's verdict, from one enforced
+   * simulation.
+   *
+   * ## Why this exists — and why not to call `check()` twice
+   *
+   * The obvious consumer flow is `interceptor.check(call)` for the policy
+   * verdict, then `costChecker.check(call)` for the price. Those are two
+   * simulations of the same call, and the problem is not only the extra RPC: the
+   * two simulations see two ledger snapshots, so the fee the caller is *told* can
+   * differ from the fee implied by the verdict that was actually enforced. A
+   * price that no longer corresponds to the approved decision is a correctness
+   * bug in a security tool, not a performance one — so this method asks the
+   * interceptor once and derives both results from that one verdict.
+   *
+   * Additive: `check()`, `precheckCost()` and `PreFlightInterceptor.check()` are
+   * unchanged.
+   */
+  async checkWithCost(call: ContractCall): Promise<CostWithDecision> {
+    const decision = await this.config.interceptor.check(call);
+    return { decision, cost: this.costOf(decision) };
+  }
+
+  /** The pure cost view of an already-obtained verdict. No network, no state. */
+  private costOf(decision: PreFlightDecision): CostDecision {
     if (decision.kind === "blocked") {
       return {
         kind: "blocked",
@@ -289,4 +329,15 @@ export function precheckCost(
   call: ContractCall,
 ): Promise<CostDecision> {
   return new CostPreChecker(config).check(call);
+}
+
+/**
+ * One-shot form of `checkWithCost`: one simulation, both the verdict and the
+ * price. Prefer this over a `preflight()` + `precheckCost()` pair.
+ */
+export function precheckCostWithDecision(
+  config: CostPreCheckConfig,
+  call: ContractCall,
+): Promise<CostWithDecision> {
+  return new CostPreChecker(config).checkWithCost(call);
 }

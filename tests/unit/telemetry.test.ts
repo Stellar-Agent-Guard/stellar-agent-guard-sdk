@@ -19,6 +19,8 @@ import {
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
+  type GuardEvent,
+  type GuardTelemetryGap,
 } from "../../src/telemetry.ts";
 
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
@@ -438,6 +440,209 @@ describe("telemetry polling jitter", () => {
     }
 
     assert.deepEqual(delaysRecorded, [4_000, 4_500, 5_000]);
+  });
+});
+
+/**
+ * Coverage-gap detection (issue #86).
+ *
+ * The RPC reports its retention window (`oldestLedger` / `latestLedger`) on
+ * every `getEvents` response, so a pruned range is a fact the listener can
+ * prove — not a guess inferred from how sparse the events look. These tests pin
+ * both halves of that: a gap is reported once with the correct bounds, and a
+ * simply-quiet range is not reported at all.
+ */
+describe("GuardTelemetryListener coverage-gap detection", () => {
+  /** A committed ledger event in the shape `poll()` reads from the RPC. */
+  function ledgerEvent(ledger: number) {
+    return {
+      contractId: GUARD,
+      type: "contract",
+      ledger,
+      ledgerClosedAt: "2026-09-27T00:00:00Z",
+      txHash: "ab".repeat(32),
+      topic: ["event_auth_checked", "allowed", ""].map((topic) => xdr.ScVal.scvSymbol(topic)),
+      value: xdr.ScVal.scvMap([]),
+    };
+  }
+
+  /** A fake RPC serving queued getEvents pages, recording what it was asked. */
+  function pagedServer(
+    pages: Array<{ events: unknown[]; oldestLedger?: number; latestLedger: number }>,
+  ) {
+    let index = 0;
+    return {
+      getLatestLedger: async () => ({ sequence: pages[0]?.latestLedger ?? 1 }),
+      getEvents: async () => {
+        const page = pages[Math.min(index, pages.length - 1)]!;
+        index += 1;
+        return { ...page, cursor: `cursor_${index}` };
+      },
+    };
+  }
+
+  async function drainWatch(
+    listener: GuardTelemetryListener,
+    params: Parameters<GuardTelemetryListener["watch"]>[0],
+    abortAfterTicks: number,
+  ): Promise<GuardEvent[][]> {
+    const controller = new AbortController();
+    let ticks = 0;
+    const batches: GuardEvent[][] = [];
+    for await (const batch of listener.watch({
+      ...params,
+      sleep: async () => {
+        if (++ticks >= abortAfterTicks) controller.abort();
+      },
+      signal: controller.signal,
+    })) {
+      batches.push(batch);
+    }
+    return batches;
+  }
+
+  it("exposes the retention boundary on poll() for callers managing their own loop", async () => {
+    const server = pagedServer([{ events: [], oldestLedger: 4778215, latestLedger: 4899174 }]);
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    const page = await listener.poll({ startLedger: 4_899_000 });
+    assert.equal(page.oldestLedger, 4_778_215);
+    assert.equal(page.latestLedger, 4_899_174);
+  });
+
+  it("reports the pruned range exactly once when retention moved past a fresh startLedger", async () => {
+    // Three polls, all with the retention edge at 500. The gap must be announced
+    // on the first and then stay quiet — an alert per poll would be noise, and
+    // coverage cannot un-break itself. Only the real ledger-500 event streams:
+    // the missing range is reported, never filled with fabricated events.
+    const server = pagedServer([
+      { events: [ledgerEvent(500)], oldestLedger: 500, latestLedger: 600 },
+      { events: [ledgerEvent(500)], oldestLedger: 500, latestLedger: 601 },
+      { events: [ledgerEvent(500)], oldestLedger: 500, latestLedger: 602 },
+    ]);
+    const gaps: GuardTelemetryGap[] = [];
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    const batches = await drainWatch(
+      listener,
+      { startLedger: 100, onGap: (gap) => gaps.push(gap) },
+      3,
+    );
+
+    assert.equal(gaps.length, 1, "once per discontinuity, not once per poll");
+    assert.deepEqual(gaps[0], {
+      fromLedger: 100,
+      toLedger: 499,
+      reason: "history_pruned",
+      retainedFromLedger: 500,
+      retainedToLedger: 600,
+    });
+    assert.deepEqual(
+      batches.flat().map((event) => event.ledger),
+      [500, 500, 500],
+      "only real events stream — no dummies for the pruned range",
+    );
+  });
+
+  it("does not report a gap when the requested range is inside the retention window", async () => {
+    const server = pagedServer([
+      { events: [ledgerEvent(100)], oldestLedger: 90, latestLedger: 120 },
+    ]);
+    const gaps: GuardTelemetryGap[] = [];
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    const batches = await drainWatch(
+      listener,
+      { startLedger: 100, onGap: (gap) => gaps.push(gap) },
+      1,
+    );
+    assert.deepEqual(gaps, [], "a quiet-but-retained range is silence, not loss");
+    assert.equal(batches.flat().length, 1);
+  });
+
+  it("uses the caller's resume ledger to prove a pruned cursor", async () => {
+    const server = pagedServer([
+      { events: [ledgerEvent(500)], oldestLedger: 500, latestLedger: 600 },
+    ]);
+    const gaps: GuardTelemetryGap[] = [];
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    await drainWatch(
+      listener,
+      { cursor: "saved_cursor", resumeLedger: 100, onGap: (gap) => gaps.push(gap) },
+      1,
+    );
+    assert.deepEqual(gaps, [
+      {
+        fromLedger: 101,
+        toLedger: 499,
+        reason: "history_pruned",
+        retainedFromLedger: 500,
+        retainedToLedger: 600,
+      },
+    ]);
+  });
+
+  it("reports no gap for a cursor resume that is still inside retention", async () => {
+    const server = pagedServer([
+      { events: [ledgerEvent(400)], oldestLedger: 100, latestLedger: 600 },
+    ]);
+    const gaps: GuardTelemetryGap[] = [];
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    await drainWatch(
+      listener,
+      { cursor: "saved_cursor", resumeLedger: 100, onGap: (gap) => gaps.push(gap) },
+      1,
+    );
+    assert.deepEqual(gaps, []);
+  });
+
+  it("cannot prove a gap from a cursor alone, and does not pretend to", async () => {
+    const server = pagedServer([
+      { events: [ledgerEvent(500)], oldestLedger: 500, latestLedger: 600 },
+    ]);
+    const gaps: GuardTelemetryGap[] = [];
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    await drainWatch(listener, { cursor: "saved_cursor", onGap: (gap) => gaps.push(gap) }, 1);
+    assert.deepEqual(gaps, [], "without resumeLedger the boundary cannot be derived");
+  });
+
+  it("isolates a throwing onGap so the stream keeps yielding real events", async () => {
+    const server = pagedServer([
+      { events: [ledgerEvent(500)], oldestLedger: 500, latestLedger: 600 },
+    ]);
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    const batches = await drainWatch(
+      listener,
+      {
+        startLedger: 100,
+        onGap: () => {
+          throw new Error("alerting sink is down");
+        },
+      },
+      1,
+    );
+    assert.equal(batches.flat().length, 1);
+    assert.equal(batches.flat()[0]!.ledger, 500);
+  });
+
+  it("skips gap detection when the host reports no retention boundary", async () => {
+    const server = {
+      getLatestLedger: async () => ({ sequence: 100 }),
+      getEvents: async () => ({ events: [], cursor: "c", latestLedger: 100 }),
+    };
+    const gaps: GuardTelemetryGap[] = [];
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    await drainWatch(listener, { startLedger: 1, onGap: (gap) => gaps.push(gap) }, 1);
+    assert.deepEqual(gaps, []);
+    const page = await listener.poll({ startLedger: 1 });
+    assert.equal(page.oldestLedger, null);
+  });
+
+  it("leaves the stream untouched when no onGap callback is supplied", async () => {
+    const server = pagedServer([
+      { events: [ledgerEvent(50)], oldestLedger: 500, latestLedger: 600 },
+    ]);
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+    const batches = await drainWatch(listener, { startLedger: 100 }, 1);
+    assert.equal(batches.flat().length, 1);
+    assert.equal(batches.flat()[0]!.ledger, 50);
   });
 });
 
