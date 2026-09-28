@@ -149,85 +149,302 @@ Waiting for the ledger to advance past the previous write fixed 6 of 6 runs,
 confirming the cause: the enforced simulation priced the transaction against a
 ledger snapshot that predated the write the SDK had just made.
 
-The SDK fix is a single bounded retry, gated on this specific failure
-(`isStaleLedgerResourceFailure`). It is safe because a transaction rejected for
-exceeding a resource limit applies nothing, and inclusion proves the ledger has
-since advanced. It is deliberately *not* applied to `Auth` failures — those are
-the guard refusing, and retrying a block would be wrong. Re-running the same six
-transfers returned 6 of 6 allowed with no waits.
+At the time of this recorded run, the SDK fix was a single bounded retry, gated
+on this specific failure (`isStaleLedgerResourceFailure`). It is safe because a
+transaction rejected for exceeding a resource limit applies nothing, and
+inclusion proves the ledger has since advanced. It is deliberately *not* applied
+to `Auth` failures — those are the guard refusing, and retrying a block would be
+wrong. Re-running the same six transfers returned 6 of 6 allowed with no waits.
+The retry-hardening change in this branch preserves that safety boundary while
+making the retry budget and backoff explicit.
 
 This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
 
-## 2026-09-25 — policy decoder, typed failures, dry run, and auth verification
+## Addendum — 2026-09-24 (maintenance PR: #33, #29, #46)
 
-This section records the validation for SDK issues #22, #23, #26, and #30. The
-commit sequence follows this repository's one-file-per-commit-and-push rule.
+This PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`,
+`src/policy.ts`, `src/preflight.ts`), so per `CONTRIBUTING.md` it is recorded
+here. **It is not accompanied by a fresh live-testnet run**: the contributor
+environment has no funded Phase 2 testnet credentials, so the live suite was
+not re-executed. What that means for review, stated plainly:
 
-### Public on-chain read actually executed
+- **The enforcement *behaviour* on-chain is unchanged by this diff.** The four
+  files were touched only as follows: `src/tx.ts` extracts an `AgentSigner`
+  interface for digest signing (the single-`Keypair` path is identical);
+  `src/invoke.ts`/`src/preflight.ts` widen a config *type* (`AgentSigner |
+  Keypair`) and `await` the now-async entry builder; `src/policy.ts` documents
+  and guards the `LastHeartbeat = 0` ("never") case in the dead-man helpers.
+  The authorization preimage, nonce policy, credential types, policy encoding,
+  footprint assembly and block classification are all untouched, so the five
+  scenarios above must still hold — but that is an argument, not a measurement.
+- **A maintainer with `.env.phase2` should run `npm run test:integration` against
+  this branch before merge** and replace this addendum with the fresh run
+  output, per the rule the gate exists to enforce. The CI gate only verifies
+  that this file was touched; it cannot verify the numbers, and this addendum
+  does not pretend otherwise.
 
-A read-only `simulateTransaction` call was sent to Stellar testnet for the deployed
-Phase-1 contract's `policy()` function. It used the public Phase-1 admin account as
-the read source and submitted no transaction.
+## Pre-flight Input Validation Verification
 
-| | |
-| --- | --- |
-| Guard | `CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7` |
-| RPC | `https://soroban-testnet.stellar.org` |
-| Return variant | `scvMap` |
-| Raw ScVal size | 460 bytes |
-| Raw ScVal SHA-256 | `e2a77a730409ff0e11ddfa327edab872cb9baca93158dfd58e726db616aa8d93` |
-| Simulation resource fee | 114056267 stroops |
+Pre-flight interceptor input validation checks execute prior to RPC simulation dispatch:
+- Programmatic validation (`validateContractCall`) synchronously rejects invalid StrKey addresses, invalid symbols, non-array arguments, and non-i128 amounts with typed `InvalidInputError`.
+- Valid calls continue through the enforcement pipeline and retain parity with on-chain policy enforcement outcomes.
 
-The unmodified base64 retval, provenance, expected Phase-1 values, byte length, and
-hash are committed in `tests/fixtures/phase1-policy-scval.json`. The unit suite parses
-that XDR with `xdr.ScVal.fromXDR`, verifies its size/hash, and decodes it to the Phase-1
-fixture policy. This is a captured network read, not a value generated solely by the
-SDK encoder.
+## Pre-flight cache validation (2026-09-25)
 
-### Node 24 local gates
+The opt-in cache behavior is covered without network access in
+`tests/unit/preflight.test.ts` using a mocked RPC and the real
+probe/enforced-simulation path. The tests verify default opt-out, cache hits,
+ledger-based configuration, TTL expiry, full and call-specific invalidation,
+ledger advance invalidation, policy-revision invalidation, argument-sensitive
+keys, and non-caching of transient undetermined results.
 
-Successful on Node `v24.21.0`:
+Local checks completed successfully:
 
 ```text
-npm run typecheck   # pass
-npm run lint        # pass
-npm test            # 112 tests, 112 pass, 0 fail
-npm run build       # pass; public declarations include every new export
-npm pack --dry-run  # pass; 51 package files, no private fixture or env file
+npm run typecheck
+npm run lint
+npm test                 # 89 passing unit tests
+npm run build
 ```
 
-The 112-test suite includes, without network or secrets:
+A fresh live-testnet run was not claimed for this change: `.env.phase2` is
+absent from this checkout, and the available runtime is Node 22 while the
+package requires Node 24 for the documented live workflow. The cache tests are
+fully mocked and reproducible without credentials; a maintainer can rerun the
+live suite with the repository's documented testnet credentials before merge.
 
-- policy encode/decode round trips for default, populated Vec, `fns: null`,
-  `fns: []`, populated `fns`, i128 bounds, u64 max, and string-number normalization;
-- strict rejection of missing/duplicate/unknown/unsorted fields, i128/u64 confusion,
-  non-address values, and missing policy;
-- admissible and blocked dry runs with exact five-stage traces, diagnostics, fees, and
-  zero `sendTransaction` / `getTransaction` calls at the mocked RPC boundary;
-- a guard-auth-bearing enforced simulation whose second transaction contains the real
-  64-byte agent signature at the guard authorization entry;
-- missing, negative, malformed, unsafe-number, and out-of-range fee rejection in dry run,
-  preflight, and cost pre-check paths (all fail closed rather than pricing at zero);
-- typed probe, signing, malformed-auth, post-inclusion guard-block, and broadcast failures
-  with `instanceof`, charged/hash, diagnostic, and cause assertions; and
-- valid, wrong-key, mutated-payload, non-32-byte-payload, truncated, empty, oversized,
-  malformed-key, and SEP-53-mismatch signature checks; plus
-- public-root imports proving the complete `GuardError` subclass hierarchy.
+## Paired pre-flight fidelity: verdict vs on-chain outcome, delay = 0 (2026-09-26)
 
-### Live enforcement-suite limitation — not claimed as passing
+`tests/integration/enforcement.test.ts` now carries a paired test: the *same*
+transfer is sent through `PreFlightInterceptor.check()` and then, with no delay
+in between, through the full `invoke()` pipeline, and the two results are
+compared. Both paths call the same `enforceCall()`, so the comparison is two
+independent observations of one state — a verdict, and the outcome it predicted.
 
-`npm run test:integration` was attempted on Node `v24.21.0` and could not begin its
-scenarios because this checkout has no `.env.phase2` credential file. Node reported
-`ENOENT: no such file or directory, open '.env.phase2'`; 0 integration tests passed and
-19 child tests were cancelled. This is an environment limitation, not a passing live
-result, and no fresh Phase-2 dry-run transcript is claimed here.
+**Allow case.** Pre-flight reports `admissible`, `invoke()` reports `allowed`,
+and the transaction is then re-read from the RPC and asserted `SUCCESS`, with the
+guarded account's balance down by exactly the transfer amount and the rolling
+window recording it. The evidence is a transaction hash, not a claim.
 
-A new live integration scenario is committed in
-`tests/integration/enforcement.test.ts`. It calls `invoke({ dryRun: true })` for an
-over-cap transfer, requires the `per_tx_cap_exceeded` blocked verdict and five ordered
-stages, asserts there is no submission/hash, and re-reads both balance and rolling
-window to prove no state moved. A maintainer/CI runner holding the documented
-`.env.phase2` credentials must run it before merge to complete the live evidence that
-this local environment cannot produce.
+**Block case.** Pre-flight reports `blocked, per_tx_cap_exceeded` for an
+over-cap transfer, and the immediately following `invoke()` attempt reports the
+*identical* reason symbol. The reason is additionally decoded from the
+`event_auth_checked` diagnostic carried by each refusal, so the paired assertion
+is between two decisions the contract itself made.
+
+Why the block case stops at the enforced-simulation refusal rather than forcing a
+broadcast: the block happens in enforced simulation, before broadcast, so no
+transaction exists to look up — that is the pre-flight guarantee, and demanding a
+hash for it would be demanding fabricated evidence (see "What counts as evidence
+for a block" above). Broadcasting past that gate would require hand-assembling an
+envelope that bypasses this SDK's enforcement, a path the SDK deliberately does
+not provide, and it would add nothing the contract has not already stated: the
+reason asserted here comes from `__check_auth`'s own diagnostic event. This is
+the honest variant the issue permits, and the reason for choosing it.
+
+**Not run live in this checkout.** `.env.phase2` is absent, so
+`npm run test:integration` cannot execute here, and no fresh transaction hash is
+claimed for this section — unlike the scenario run above, which was recorded from
+a real run. What did run locally, on Node 25:
+
+```text
+npm run typecheck
+npm run lint
+npm test                 # 131 passing unit tests
+npm run build
+npm run test:smoke
+```
+
+The paired test compiles and type-checks against the same harness the live
+scenarios use. A maintainer with `.env.phase2` can reproduce it with
+`npm run test:integration` before merge; it needs no new credentials, no new
+deployment, and no policy change beyond the `installPolicy()` call every scenario
+already makes.
+
+## Addendum — 2026-09-26 (PR: structured pipeline step timing for observability hooks)
+
+Recorded because this PR touches the enforcement path (`src/invoke.ts`,
+`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this checkout, so `npm run test:integration` cannot execute here. As with
+the addenda above, this is stated rather than glossed, and the CI gate verifies
+only that this file was touched — not the numbers.
+
+### What the PR changes on the enforcement path
+
+The diff is observability plumbing only. It adds an optional `onStep` hook to
+`invoke()`/`enforceCall()`, an `InvokeStepEvent` shape (name, status, durationMs,
+attempt) over the existing `TraceStepName` vocabulary, and a `withStepTiming`
+wrapper around the pipeline's existing stages: `probe` (discovery simulation),
+`sign` (all entries, one stage per attempt), `simulate` (enforced simulation) and
+`broadcast`. The stale-ledger retry threads an `attempt` index (0/1) through
+those events. A throwing callback is swallowed; with no hook supplied, each
+stage runs directly — no timers, no events, no added work.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification and every outcome value and detail
+string. The one behavioural nuance is internal only: signing-shape refusals are
+raised as an internal `SigningStageError` so the `sign` stage emits a real `fail`
+event, and `enforceCall` converts it straight back into the same `error` outcome
+text the pipeline has always returned. The enforcement *decisions* the five
+scenarios above assert on are produced by the contract during enforced
+simulation, which this diff does not touch.
+
+### What did run locally (Node 24.21.0, matching the package's engine)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 171 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 44 exports resolve via the ESM export map
+```
+
+The unit suite includes `tests/unit/invoke.test.ts`, which drives the real
+pipeline against a mocked RPC and asserts the enforcement outcomes this file's
+live scenarios exercise — allowed, blocked (with the contract's reason decoded
+from `event_auth_checked` diagnostics), error, and the stale-ledger retry's
+two-attempt event stream — plus `PreFlightInterceptor` validation and cache
+behavior in `tests/unit/preflight.test.ts`. Those cover the classification and
+plumbing this PR touched, but they are mocks: they cannot substitute for the
+live run, and this addendum does not claim otherwise.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.
+
+## Addendum — 2026-09-26 (PR #182: Admin operations, SDK jitter, adapter examples, AgentSigner type fixes)
+
+Recorded because this PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`)
+and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
+this checkout, so `npm run test:integration` cannot execute here. The on-chain
+enforcement behaviour is unchanged by this diff.
+
+### Summary of changes to the enforcement path
+
+- `src/tx.ts`: Deduplicated `GuardCredentialType` and unified `AgentSigner` to the clean `readonly publicKey: string` / `signDigest` definition; updated `submitAndPoll` options parameter types for compatibility with `exactOptionalPropertyTypes`.
+- `src/invoke.ts`: Imported `AdminSigner`, added `pollAttempts` and `pollIntervalMs` to `InvokeParams` and forwarded them to `submitAndPoll`, and updated `enforceCall` to `await` `publicKey()` across `accountSigners` so asynchronous custom admin signers (e.g., Freighter) match correctly.
+
+### What did run locally
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 191 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 64 exports resolve via the ESM export map
+```
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
+
+## Addendum — 2026-09-26 (PR #184: GuardBlockedError decision payload and differential fixture test table #63, #70)
+
+Recorded because this PR touches the enforcement path (`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from this checkout, so `npm run test:integration` cannot execute here. The on-chain enforcement behaviour is unchanged by this diff.
+
+### Summary of changes to the enforcement path
+
+- `src/preflight.ts`: Updated `assertAllowed()` in `PreFlightInterceptor` to pass the offending `call` and `rawEvent` (the contract's first diagnostic event) into `GuardBlockedError` when rejecting blocked invocations.
+- `src/reasons.ts`: Extended `GuardBlockedErrorOptions` and `GuardBlockedError` to carry `call?: ContractCall` and `rawEvent?: DiagnosticEvent`, along with a structured `toJSON()` serialization method for observability and logging.
+- `scripts/sync-contract-fixtures.ts` & `tests/fixtures/contract-fixtures.json`: Added differential fixture tables and synchronization tooling asserting parity between contract diagnostics and SDK preflight reasoning.
+
+### What did run locally (Node 24)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 215 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 64 exports resolve via the ESM export map
+```
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output if needed.
+
+## Addendum — 2026-09-27 (PR #170: batched pre-flight `checkBatch`)
+
+Recorded because this PR touches the enforcement path (`src/preflight.ts`,
+`src/policy.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
+this checkout, so `npm run test:integration` cannot execute here. The five
+scenarios recorded above remain the live evidence for the single-call path.
+
+### What the PR changes on the enforcement path
+
+- `src/preflight.ts`: adds `checkBatch()`, `assertBatchAllowed()` and the
+  `preflightBatch()` one-shot form. `checkBatch` evaluates each call in order
+  through the existing `check()`, then *stages* the cumulative window spend of
+  SAC transfers in memory. A call that passes enforced simulation in isolation
+  but would push the staged total past `window_cap` is returned as `blocked` with
+  `window_cap_exceeded`. The batch is admissible only when every call is.
+- `src/preflight.ts`: `PreFlightConfig.policy` is a new optional field so a caller
+  can supply the policy for staging without an extra ledger read.
+- `src/policy.ts`: adds `extractTransferAmount()` (the SAC `transfer` /
+  `transfer_from` amount argument), `readPersistentEntry()`, and
+  `fetchGuardPolicyAndWindow()` for the "no policy supplied" path.
+
+### What this is, and what it is not
+
+`checkBatch` is an **off-chain approximation** of the contract's atomic auth-batch
+evaluation, and the code says so at the call site. The three known divergences,
+restated here because they bear on how much weight the evidence can carry:
+
+- state mutations between calls are not observed, because each call is simulated
+  independently;
+- the window is staged against the initial snapshot, with no modelling of
+  intra-batch time expiration;
+- `totalEstimatedResourceFee` is the sum of per-call estimates, not the resource
+  fee of a single batched envelope.
+
+The synthetic `window_cap_exceeded` verdict is the part that most needs review: it
+is produced by this SDK rather than by the contract, so on its own it is an
+argument and not a measurement. The single-call path it is layered on top of is
+unchanged — `check()`, `assertAllowed()` and `preflight()` are untouched, and a
+`blocked` or `undetermined` verdict from the contract is propagated verbatim
+rather than re-derived.
+
+### What did run locally (Node 24.16.0)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 247 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 69 exports resolve via the ESM export map
+```
+
+`tests/unit/preflight.test.ts` gains a `PreFlightInterceptor.checkBatch()` suite
+against a mocked RPC, covering:
+
+- the empty batch (admissible, no verdicts, zero fee, zero simulations);
+- one verdict per call in input order, with per-call fees summed;
+- a call that passes alone but breaches the staged cap, asserting the
+  `window_cap_exceeded` reason and the `120 > window_cap 100` arithmetic, and that
+  a staged-out call is excluded from the fee total;
+- the already-committed window spend counting against the cap;
+- a contract refusal propagating its own decoded reason (`per_tx_cap_exceeded`)
+  and making the batch inadmissible;
+- a `null` cap meaning "no objection" rather than "refuse everything";
+- a missing `getLedgerEntries` degrading to a zero committed spend instead of
+  failing closed; and
+- `assertBatchAllowed` returning the batch when admissible, throwing
+  `GuardBlockedError` on the first refusal, and throwing
+  `PreFlightUndeterminedError` — never a block — on a host rejection.
+
+What these tests do **not** establish: that staged in-memory accumulation matches
+the contract's own batch accounting under real concurrency. That needs the live
+suite, and it needs the contract-side `check_batch` entrypoint to compare against.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
+
+

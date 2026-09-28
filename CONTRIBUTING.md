@@ -125,8 +125,26 @@ chat log.
 npm run typecheck
 npm run lint
 npm test
-npm run test:integration   # live testnet; needs .env.phase2
+npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 ```
+
+## Test tiers and fixtures
+
+- **Unit** (`npm test`) — no network, no secrets, deterministic.
+- **Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
+  (template: `.env.phase2.example`). Not run on pull requests; see
+  "The live testnet suite is not run on every PR" above.
+
+Fixtures that encode real network shapes are committed and refreshed when the
+code or the SDK beneath them changes:
+
+- `tests/fixtures/contract-fixtures.json` — the guard's event vocabulary. Refresh
+  with `npm run sync:fixtures` when the contracts repo's schema moves.
+- `tests/fixtures/rpc/*.json` — real RPC payloads decoded by
+  `tests/unit/rpc-fixtures.test.ts`. Refresh with `npm run capture:rpc-fixtures`
+  after touching `src/telemetry.ts` or `src/invoke.ts`, or after upgrading
+  `@stellar/stellar-sdk`. Provenance and capture details:
+  `tests/fixtures/rpc/README.md`.
 
 ## Secrets
 

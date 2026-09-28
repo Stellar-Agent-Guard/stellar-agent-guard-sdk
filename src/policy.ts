@@ -13,8 +13,8 @@
  * caps are `i128` and silently narrowing them to `number` would lose precision
  * on exactly the values a spend guard exists to compare.
  */
-import { Address, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
+import { Address, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import type { ContractCall } from "./tx.ts";
 
 export interface ProtocolRule {
   contract: string;
@@ -368,8 +368,30 @@ export function decodeCheckResult(raw: unknown): CheckResult {
   );
 }
 
-/** True when the dead-man switch has fired: frozen by silence, not by an admin. */
+/**
+ * True when the dead-man switch has fired: frozen by silence, not by an admin.
+ *
+ * Semantics are pinned to the contract's own truth (SPEC §5, the Dead-Man
+ * Switch section of `stellar-agent-guard-contracts/SPEC.md`): the freeze is
+ * derived lazily from `LastHeartbeat` and ledger time on every authorization,
+ * and rule #2 of that derivation **requires `LastHeartbeat != 0`** — a value
+ * of `0` means "never heartbeated" (the storage key's own documented default:
+ * "unix seconds of last agent heartbeat (0 = never)"), and a never-heartbeated
+ * account is not frozen *by the dead-man switch*. It is spendable if otherwise
+ * allowed. "Never" is therefore not "expired": treating `0` as epoch-0 would
+ * report a healthy fresh account as frozen since 1970, which is exactly the
+ * dashboard false alarm this guard exists to prevent.
+ *
+ * The check below is defensive rather than trustful: if a decoded `Status`
+ * ever carried `heartbeat_expired = true` alongside `last_heartbeat = 0` (a
+ * contract build that predates rule #2, or a hand-assembled status), this
+ * helper still reports not-dead-man-frozen, matching what the contract could
+ * truthfully enforce. An admin freeze is reported separately via
+ * `admin_frozen`, exactly as the contract treats the two conditions as
+ * separate (see SPEC §5, "Manual freeze" and "Reversal path").
+ */
 export function isDeadManFrozen(status: GuardStatus): boolean {
+  if (status.last_heartbeat === 0n) return false; // never ≠ expired (SPEC §5 rule #2)
   return status.heartbeat_expired && !status.admin_frozen;
 }
 
@@ -377,6 +399,15 @@ export function isDeadManFrozen(status: GuardStatus): boolean {
  * Seconds of grace remaining before the dead-man switch fires. `null` when the
  * switch is disabled (`dms_grace_secs == 0`), a positive number while the agent
  * is still within grace, and a negative number once the account is frozen.
+ *
+ * `null` also covers the never-heartbeated case: `last_heartbeat == 0` means
+ * "no heartbeat has ever been recorded" (the storage key's documented default,
+ * SPEC §3 — `0 = never`), so no grace countdown has started and there is no
+ * remaining time to report. Per SPEC §5 rule #2 a never-heartbeated account is
+ * **not** dead-man-frozen — "never ≠ expired" — it is spendable if otherwise
+ * allowed, and `null` here must never be read as "overdue". Callers that want
+ * a full-grace rendering for a fresh account can treat `null` (with a non-zero
+ * grace and `last_heartbeat == 0`) as "countdown not yet started".
  */
 export function deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null {
   if (!policy || policy.dms_grace_secs === 0n || status.last_heartbeat === 0n) return null;
@@ -399,3 +430,95 @@ export function describePolicy(policy: PolicyConfig | null): string {
   ];
   return parts.join(", ");
 }
+
+/**
+ * Extract the token transfer amount from a SAC contract call.
+ *
+ * Full recipient/amount enforcement is native to SAC token transfers (`transfer`
+ * and `transfer_from`). For `transfer(from, to, amount)`, the amount is the 3rd
+ * argument (index 2). For `transfer_from(spender, from, to, amount)`, the amount
+ * is the 4th argument (index 3).
+ *
+ * Returns null if the call is not a recognized SAC transfer or if the amount
+ * argument cannot be decoded into a BigInt.
+ */
+export function extractTransferAmount(call: ContractCall): bigint | null {
+  const arg =
+    call.fn === "transfer" ? call.args?.[2] : call.fn === "transfer_from" ? call.args?.[3] : undefined;
+  if (arg === undefined) return null;
+  if (typeof arg === "bigint") return arg;
+  if (typeof arg === "number") return BigInt(arg);
+  try {
+    const native = scValToNative(arg);
+    return typeof native === "bigint" ? native : BigInt(native as number | string);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Read one of a contract's persistent storage entries from ledger state via RPC.
+ */
+export async function readPersistentEntry(
+  server: rpc.Server,
+  contractId: string,
+  dataKeyName: string,
+): Promise<{ value: unknown; lastModifiedLedgerSeq: number | null } | null> {
+  const key = xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(contractId).toScAddress(),
+      key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(dataKeyName)]),
+      durability: xdr.ContractDataDurability.persistent,
+    }),
+  );
+  const response = await server.getLedgerEntries(key);
+  const entry = response.entries?.[0] as unknown as {
+    val?: { contractData?: () => { val?: () => xdr.ScVal } | { val?: xdr.ScVal } } | { contractData?: { val?: xdr.ScVal } };
+    lastModifiedLedgerSeq?: number;
+  };
+  let scval: xdr.ScVal | undefined;
+  if (entry?.val) {
+    const contractData =
+      typeof (entry.val as { contractData?: unknown }).contractData === "function"
+        ? (entry.val as { contractData: () => { val?: unknown } }).contractData()
+        : (entry.val as { contractData?: { val?: unknown } }).contractData;
+    if (contractData) {
+      scval =
+        typeof contractData.val === "function"
+          ? (contractData.val() as xdr.ScVal)
+          : (contractData.val as xdr.ScVal);
+    }
+  }
+  if (!scval) return null;
+  return {
+    value: scValToNative(scval) as unknown,
+    lastModifiedLedgerSeq: entry.lastModifiedLedgerSeq ?? null,
+  };
+}
+
+/**
+ * Read the live policy and committed window spent from ledger state via RPC.
+ */
+export async function fetchGuardPolicyAndWindow(
+  server: rpc.Server,
+  guard: string,
+): Promise<{ policy: PolicyConfig | null; windowSpent: bigint }> {
+  const [policyEntry, windowEntry] = await Promise.all([
+    readPersistentEntry(server, guard, "Policy"),
+    readPersistentEntry(server, guard, "Window"),
+  ]);
+
+  let policy: PolicyConfig | null = null;
+  if (policyEntry?.value && typeof policyEntry.value === "object") {
+    policy = policyEntry.value as PolicyConfig;
+  }
+
+  let windowSpent = 0n;
+  if (windowEntry?.value && typeof windowEntry.value === "object") {
+    const windowObj = windowEntry.value as { total?: bigint | number };
+    windowSpent = BigInt(windowObj.total ?? 0);
+  }
+
+  return { policy, windowSpent };
+}
+

@@ -36,6 +36,7 @@ export {
   explainReason,
   reasonName,
   reasonNameFromCode,
+  type GuardBlockedErrorParams,
   type GuardReasonName,
 } from "./reasons.ts";
 
@@ -44,9 +45,12 @@ export {
   decodePolicy,
   deadManRemaining,
   describePolicy,
+  extractTransferAmount,
+  fetchGuardPolicyAndWindow,
   isDeadManFrozen,
   policyFromScVal,
   policyToScVal,
+  readPersistentEntry,
   type CheckResult,
   type GuardStatus,
   type PolicyConfig,
@@ -62,55 +66,119 @@ export {
 } from "./events.ts";
 
 export {
+  DEFAULT_INVOKE_RETRY_OPTIONS,
   enforceCall,
+  INVOKE_ERROR_CAUSES,
+  InvokeRetryError,
   invoke,
   topicSymbols,
   type EnforcementOutcome,
   type GuardAuthorization,
-  type InvokeDryRunResult,
-  type InvokeDryRunVerdict,
+  type InvokeErrorCause,
+  type InvokeErrorOutcome,
+  type InvokeOptions,
   type InvokeOutcome,
   type InvokePipelineStep,
   type InvokeParams,
+  type InvokeStepEvent,
 } from "./invoke.ts";
 
 export {
+  TRACE_STEP_NAMES,
+  type TraceStepName,
+  type TraceStepStatus,
+} from "./trace.ts";
+
+export {
+  InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
   preflight,
+  preflightBatch,
+  validateContractCall,
+  type CheckBatchOptions,
+  type PolicyRevision,
+  type PreFlightBatchDecision,
+  type PreFlightCacheOptions,
+  type PreFlightCheckOptions,
   type PreFlightConfig,
   type PreFlightDecision,
+  type PreFlightInterceptorOptions,
 } from "./preflight.ts";
 
 export {
   CostPreChecker,
+  STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
   feeBreakdown,
+  formatFee,
   precheckCost,
+  precheckCostWithDecision,
   type CostDecision,
   type CostPreCheckConfig,
+  type CostWithDecision,
   type FeeBreakdown,
 } from "./cost.ts";
 
 export {
+  DEFAULT_JITTER_FRACTION,
   GuardTelemetryListener,
+  computePollDelay,
   describeGuardEvent,
+  diagnosticsToEvents,
+  guardEventId,
   guardEventsFromDiagnostics,
   isAllowedDecision,
   telemetryFromDecision,
   type GuardEvent,
+  type GuardEventContext,
+  type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardTelemetryConfig,
+  type GuardTelemetryGap,
+  type GuardTelemetryGapReason,
+  type GuardTelemetryWatchParams,
+  type PollResult,
+  type TelemetryJitter,
 } from "./telemetry.ts";
 
 export {
   GUARD_STORAGE_KEYS,
+  INCLUSION_FEE,
+  SIG_EXPIRATION_LEDGERS,
+  assembleFromSimulation,
+  buildGuardAuthEntry,
+  buildInitialEnvelope,
+  describeSimulationResources,
+  describeSubmissionFailure,
+  describeTransactionResult,
   isStaleLedgerResourceFailure,
-  verifyAgentSignature,
+  keypairAgentSigner,
+  toAgentSigner,
+  type AdminSigner,
+  type AgentSigner,
   type ContractCall,
+  type GuardCredentialType,
+  type SimulationOutcome,
   type SubmissionResult,
 } from "./tx.ts";
+
+export {
+  DEFAULT_NETWORK_PASSPHRASE,
+  agentPubkeyToScVal,
+  buildFreezeCall,
+  buildRotateAgentKeyCall,
+  buildSetPolicyCall,
+  buildUnfreezeCall,
+  submitFreeze,
+  submitRotateAgentKey,
+  submitSetPolicy,
+  submitUnfreeze,
+  type AdminOpParams,
+  type RotateAgentKeyParams,
+  type SetPolicyParams,
+} from "./admin.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
@@ -128,3 +196,4 @@ export {
   type ElizaGuardOptions,
   type ElizaValidator,
 } from "./adapters/elizaos.ts";
+
