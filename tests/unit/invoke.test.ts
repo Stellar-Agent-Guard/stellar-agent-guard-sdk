@@ -22,6 +22,7 @@ import {
   invoke,
   InvokeRetryError,
 } from "../../src/invoke.ts";
+import { SimulationError } from "../../src/errors.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
 import type { InvokeStepEvent } from "../../src/invoke.ts";
 
@@ -278,7 +279,10 @@ describe("invoke() onStep: pipeline order", () => {
 
     const outcome = await invoke(makeParams(server, { dryRun: true, onStep: callback }));
 
-    assert.equal(outcome.kind, "error");
+    // A dry run returns its own structured result rather than an `invoke()`
+    // outcome, but the stages it does run are the same instrumented pipeline.
+    assert.equal(outcome.kind, "dry_run");
+    assert.equal(outcome.admissible, true);
     assert.deepEqual(events.map((event) => [event.name, event.status]), [
       ["probe", "start"],
       ["probe", "ok"],
@@ -287,6 +291,7 @@ describe("invoke() onStep: pipeline order", () => {
       ["simulate", "start"],
       ["simulate", "ok"],
     ]);
+    assert.equal(server.sendCount, 0);
   });
 
   it("emits a fail event for the simulate stage on a guard block, with no ok for it", async () => {
@@ -344,7 +349,12 @@ describe("invoke() onStep: durationMs", () => {
 });
 
 describe("invoke() onStep: original error identity", () => {
-  it("rethrows the exact error object a stage threw", async () => {
+  // `invoke()` is result-oriented: a stage that throws becomes a typed
+  // `kind: "error"` outcome rather than a rejection, so the original error
+  // travels as the typed error's `cause`. The identity that matters is
+  // unchanged — the pipeline's own error is the one that survives, and a
+  // throwing consumer callback never replaces it with its own.
+  it("keeps the exact error object a stage threw as the typed cause", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -352,10 +362,15 @@ describe("invoke() onStep: original error identity", () => {
       },
     });
 
-    await assert.rejects(invoke(makeParams(server)), (error: unknown) => error === boom);
+    const outcome = await invoke(makeParams(server));
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.stage, "probe");
+    assert.equal(outcome.error.cause, boom);
   });
 
-  it("rethrows the original error when the fail callback also throws", async () => {
+  it("keeps the original error when the fail callback also throws", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -363,16 +378,17 @@ describe("invoke() onStep: original error identity", () => {
       },
     });
 
-    await assert.rejects(
-      invoke(
-        makeParams(server, {
-          onStep: (step) => {
-            if (step.status === "fail") throw new Error("callback exploded");
-          },
-        }),
-      ),
-      (error: unknown) => error === boom,
+    const outcome = await invoke(
+      makeParams(server, {
+        onStep: (step) => {
+          if (step.status === "fail") throw new Error("callback exploded");
+        },
+      }),
     );
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.cause, boom);
   });
 });
 
@@ -523,7 +539,7 @@ describe("invoke() without onStep: default behavior unchanged", () => {
     }
   });
 
-  it("still rethrows stage errors with no callback supplied", async () => {
+  it("still reports stage errors as typed results with no callback supplied", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -531,7 +547,11 @@ describe("invoke() without onStep: default behavior unchanged", () => {
       },
     });
 
-    await assert.rejects(invoke(makeParams(server)), (error: unknown) => error === boom);
+    const outcome = await invoke(makeParams(server));
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.cause, boom);
   });
 });
 
@@ -599,7 +619,8 @@ describe("invoke sequence reservation", () => {
 
   it("serializes concurrent calls and gives each transaction a distinct sequence", async () => {
     const source = Keypair.random();
-    const sequences: string[] = [];
+    const simulated: string[] = [];
+    const sent: string[] = [];
     let simulationsStarted = 0;
     let releaseFirst!: () => void;
     const firstSimulation = new Promise<void>((resolve) => {
@@ -612,31 +633,36 @@ describe("invoke sequence reservation", () => {
       result: { auth: [] },
     };
     const server = {
+      // The RPC snapshot deliberately never advances: the second invoke can
+      // only get a fresh sequence from the per-account reservation.
       getAccount: async () => new Account(source.publicKey(), "7"),
       getLatestLedger: async () => ({ sequence: 100 }),
       simulateTransaction: async (transaction: { sequence: string }) => {
-        sequences.push(transaction.sequence);
+        simulated.push(transaction.sequence);
         simulationsStarted += 1;
         if (simulationsStarted === 1) await firstSimulation;
         return simulation;
       },
+      sendTransaction: async (transaction: { sequence: string }) => {
+        sent.push(transaction.sequence);
+        return { status: "PENDING", hash: `tx-${sent.length}` };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 101,
+        events: { contractEventsXdr: [] },
+      }),
     } as unknown as rpc.Server;
 
-    const first = invoke({
+    const params = {
       server,
       source,
       call: { contract: TOKEN, fn: "transfer", args: [] },
       networkPassphrase: PASSPHRASE,
-      dryRun: true,
-    });
+    };
+    const first = invoke(params);
     await new Promise<void>((resolve) => setImmediate(resolve));
-    const second = invoke({
-      server,
-      source,
-      call: { contract: TOKEN, fn: "transfer", args: [] },
-      networkPassphrase: PASSPHRASE,
-      dryRun: true,
-    });
+    const second = invoke(params);
     await new Promise<void>((resolve) => setImmediate(resolve));
 
     // The second invoke must still be waiting behind the first one's queue.
@@ -644,9 +670,11 @@ describe("invoke sequence reservation", () => {
     releaseFirst();
     const outcomes = await Promise.all([first, second]);
 
-    assert.deepEqual(outcomes.map((outcome) => outcome.kind), ["error", "error"]);
-    // TransactionBuilder consumes the base account sequence and emits base + 1.
-    assert.deepEqual(sequences, ["8", "8", "9", "9"]);
+    assert.deepEqual(outcomes.map((outcome) => outcome.kind), ["allowed", "allowed"]);
+    // TransactionBuilder consumes the base account sequence and emits base + 1,
+    // so the reservation is what keeps the two broadcast envelopes distinct.
+    assert.deepEqual(sent, ["8", "9"]);
+    assert.deepEqual(simulated, ["8", "8", "9", "9"]);
   });
 });
 
