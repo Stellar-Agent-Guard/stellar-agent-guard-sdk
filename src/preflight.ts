@@ -26,6 +26,7 @@
  */
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
+import { GuardError, SimulationError } from "./errors.ts";
 import { enforceCall } from "./invoke.ts";
 import {
   extractTransferAmount,
@@ -34,7 +35,7 @@ import {
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
-import { toAgentSigner } from "./tx.ts";
+import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
 
 /**
@@ -478,7 +479,12 @@ export class PreFlightInterceptor {
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
-      decision = { allowed: false, kind: "undetermined", detail: outcome.detail };
+      decision = {
+        allowed: false,
+        kind: "undetermined",
+        detail: outcome.detail,
+        error: outcome.error,
+      };
     } else if (outcome.kind === "blocked") {
       decision = {
         allowed: false,
@@ -494,10 +500,33 @@ export class PreFlightInterceptor {
         | undefined;
       const footprintKeys =
         (data?.getReadOnly?.().length ?? 0) + (data?.getReadWrite?.().length ?? 0);
+
+      // Fail closed on an unpriceable simulation: a guardrail must never hand
+      // back an admissible verdict carrying a fabricated or silently zero fee.
+      let estimatedResourceFee: bigint;
+      try {
+        estimatedResourceFee = parseSimulationResourceFee(outcome.simulation.minResourceFee);
+      } catch (cause) {
+        decision = {
+          allowed: false,
+          kind: "undetermined",
+          detail: `enforced simulation returned an invalid resource fee: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+          error:
+            cause instanceof GuardError
+              ? cause
+              : new SimulationError("enforced simulation returned an invalid resource fee", {
+                  stage: "preflight",
+                  cause,
+                }),
+        };
+        return decision;
+      }
       decision = {
         allowed: true,
         kind: "admissible",
-        estimatedResourceFee: BigInt(outcome.simulation.minResourceFee ?? 0),
+        estimatedResourceFee,
         footprintKeys,
       };
     }
@@ -609,27 +638,6 @@ export class PreFlightInterceptor {
         verdicts.push(decision);
         allAdmissible = false;
       }
-    }
-
-    let estimatedResourceFee: bigint;
-    try {
-      estimatedResourceFee = parseSimulationResourceFee(outcome.simulation.minResourceFee);
-    } catch (cause) {
-      const detail = `enforced simulation returned an invalid resource fee: ${
-        cause instanceof Error ? cause.message : String(cause)
-      }`;
-      return {
-        allowed: false,
-        kind: "undetermined",
-        detail,
-        error:
-          cause instanceof GuardError
-            ? cause
-            : new SimulationError("enforced simulation returned an invalid resource fee", {
-                stage: "preflight",
-                cause,
-              }),
-      };
     }
 
     return {
