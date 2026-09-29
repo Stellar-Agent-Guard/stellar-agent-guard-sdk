@@ -451,6 +451,10 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
 
 ## API Reference
 
+> During 0.x, a minor release may contain breaking changes (`0.2.0` may break
+> `0.1.x` callers); patch releases are fixes only. The full versioning and
+> release policy lives in [`docs/releasing.md`](docs/releasing.md).
+
 ### Interception & Execution
 
 - `PreFlightInterceptor`
