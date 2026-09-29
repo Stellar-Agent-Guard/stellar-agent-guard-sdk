@@ -143,7 +143,7 @@ Both tiers run through one runner configuration, `tests/test.config.ts`, read by
 | --- | --- | --- |
 | `npm test` / `npm run test:unit` | `unit` (`tests/unit`) | Offline; Node test-runner default concurrency. |
 | `npm run test:watch` | `unit` (`tests/unit`) | Development loop: Node's test-runner watch mode, re-running the unit suite on every change to a watched file, so you can edit → read the failure → fix → repeat without re-issuing `npm test`. Same project, same `tsx` transform, same files as `npm test`. |
-| `npm run test:integration` | `integration` (`tests/integration`) | Live; concurrency pinned to `1`, because the files share on-chain state. |
+| `npm run test:integration` | `integration` (`tests/integration`) | Live; concurrency pinned to `1`, because the files share on-chain state. Validates `.env.phase2` up front on entry, failing fast with a single actionable message before launching test files if missing or incomplete. |
 | `npm run test:all` | every project, one run | Both suites in a single invocation. |
 | `npm run test:coverage` | every project, one run, coverage | Node's `--experimental-test-coverage`; needs `.env.phase2`, because the integration project is included. |
 
@@ -152,10 +152,29 @@ identically in either tier. A project's invariants — its directory has matchin
 files, the live project stays serialised — are asserted by
 `tests/unit/test-runner.test.ts` rather than left to convention.
 
-When `.env.phase2` is absent the live suite fails once with the copy/deploy
-pointer (`missingEnvFileMessage` in `tests/integration/harness.ts`) instead of a
-bare `ENOENT`; an existing-but-incomplete file still names every missing key at
-once.
+When `.env.phase2` is absent or incomplete, the test runner fails immediately at entry with a single actionable message pointing to `.env.phase2.example` and the provision command (`npm run deploy:phase2`) without cascading test cancellations:
+
+```
+.env.phase2 was not found in the working directory.
+
+Copy the documented template and fill it in:  cp .env.phase2.example .env.phase2
+Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  npm run deploy:phase2
+```
+
+An existing-but-incomplete file lists all missing required keys in one place:
+
+```
+.env.phase2 is incomplete: 6 required key(s) are missing:
+  - PHASE2_GUARD
+  - PHASE2_TOKEN
+  - PHASE2_ADMIN_SECRET
+  - PHASE2_AGENT_SECRET
+  - PHASE2_RECIPIENT_SECRET
+  - PHASE2_OUTSIDER_SECRET
+
+Copy the documented template and fill it in:  cp .env.phase2.example .env.phase2
+Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  npm run deploy:phase2
+```
 
 Fixtures that encode real network shapes are committed and refreshed when the
 code or the SDK beneath them changes:

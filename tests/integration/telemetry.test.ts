@@ -132,5 +132,7 @@ async function pollUntil(
 }
 
 after(() => {
-  console.log(`[telemetry] listener finished against ${config.guard}`);
+  if (config?.guard) {
+    console.log(`[telemetry] listener finished against ${config.guard}`);
+  }
 });

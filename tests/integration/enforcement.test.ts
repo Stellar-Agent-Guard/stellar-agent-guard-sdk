@@ -392,5 +392,7 @@ describe("live pre-flight fidelity: verdict vs on-chain outcome (delay = 0)", ()
 });
 
 after(() => {
-  console.log(`[live] suite finished against ${config.guard} on ${TESTNET_PASSPHRASE}`);
+  if (config?.guard) {
+    console.log(`[live] suite finished against ${config.guard} on ${TESTNET_PASSPHRASE}`);
+  }
 });

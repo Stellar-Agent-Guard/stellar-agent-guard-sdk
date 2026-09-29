@@ -51,13 +51,19 @@ export {
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
   isDeadManFrozen,
+  POLICY_RULE_IDS,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
+  validateGuardPolicy,
   type CheckResult,
   type GuardStatus,
   type PolicyConfig,
+  type PolicyFailure,
+  type PolicyRuleId,
   type ProtocolRule,
+  type RecipientWindowCap,
+  type ValidatePolicyOptions,
 } from "./policy.ts";
 
 export {

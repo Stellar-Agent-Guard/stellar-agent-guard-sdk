@@ -295,6 +295,48 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
 - **LangChain**: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
 - **ElizaOS**: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
 
+### Policy validation before broadcast (validateGuardPolicy)
+
+Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
+This provides a **fail-before-broadcast** safety rail that catches configuration errors before burning transaction fees or facing on-chain contract rejections.
+
+Unlike fail-fast validators, `validateGuardPolicy` returns **all** failures at once (`PolicyFailure[]`), which is critical for dashboard form UX where an operator needs to see all field-level issues simultaneously. The failure `rule` identifiers align with SPEC §8 rules:
+
+```ts
+import {
+  validateGuardPolicy,
+  type PolicyConfig,
+  type PolicyFailure,
+} from "stellar-agent-guard-sdk";
+
+const draftPolicy: PolicyConfig = {
+  per_tx_cap: 10_000n,
+  window_secs: 0n,         // Incompatible with window_cap > 0
+  window_cap: 50_000n,
+  assets: [],              // Empty assets vector is a no-op
+  protocols: [],
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  allow_any_recipient: false,
+  active_from: 1000n,
+  active_until: 500n,      // Inverted active window (active_until <= active_from)
+  paused: false,
+  dms_grace_secs: 0n,
+};
+
+const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
+  guardAddress: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+});
+
+if (failures.length > 0) {
+  for (const failure of failures) {
+    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+  }
+  // Safe-exit before encode or broadcast
+} else {
+  // Proceed with policyToScVal(draftPolicy) and broadcast
+}
+```
+
 ### Policy encode/decode round trip
 
 `decodePolicy` is the canonical read-side counterpart to `policyToScVal`. It returns
@@ -538,6 +580,8 @@ one-shot form.
   - `constructor(options: GuardTelemetryListenerOptions)`
   - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover).
   - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
+- `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX.
+- `POLICY_RULE_IDS` — Canonical array of SPEC §8 validation rule identifiers.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct.
 - `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
 - `policyFromScVal(scVal)` — Alias for callers using the issue's original function name.

@@ -16,6 +16,7 @@
  *  - The live policy is read, not assumed, and the tests skip with an explicit
  *    reason if the deployed instance does not match the shape they need.
  */
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
   Address,
@@ -49,6 +50,34 @@ export interface Phase2Config {
   policy: PolicyConfig;
 }
 
+/**
+ * Parses simple KEY=VALUE lines from an env file string, ignoring comments and whitespace.
+ */
+export function parseEnvContent(raw: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const index = trimmed.indexOf("=");
+    if (index > 0) out[trimmed.slice(0, index)] = trimmed.slice(index + 1);
+  }
+  return out;
+}
+
+/**
+ * Synchronous reader for the env file, used for up-front entry checks before test runners launch.
+ */
+export function readEnvFileSync(path = ENV_FILE): Record<string, string> | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  return parseEnvContent(raw);
+}
+
 async function readEnvFile(path = ENV_FILE): Promise<Record<string, string> | null> {
   let raw: string;
   try {
@@ -60,14 +89,7 @@ async function readEnvFile(path = ENV_FILE): Promise<Record<string, string> | nu
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  const out: Record<string, string> = {};
-  for (const line of raw.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    const index = trimmed.indexOf("=");
-    if (index > 0) out[trimmed.slice(0, index)] = trimmed.slice(index + 1);
-  }
-  return out;
+  return parseEnvContent(raw);
 }
 
 /**
@@ -128,14 +150,39 @@ export function missingEnvFileMessage(): string {
   ].join("\n");
 }
 
-export async function loadPhase2Config(): Promise<Phase2Config> {
-  const env = await readEnvFile();
+export interface Phase2EnvValidationResult {
+  readonly ok: boolean;
+  readonly message?: string;
+  readonly missingKeys?: readonly string[];
+}
+
+/**
+ * Validates the Phase 2 live testnet environment up front before executing test runners.
+ * Returns { ok: true } when all required keys are present, or { ok: false, message }
+ * with the single actionable failure message listing all missing keys and the template copy pointer.
+ */
+export function validatePhase2Env(
+  env: Record<string, string> | null = readEnvFileSync(),
+): Phase2EnvValidationResult {
   if (env === null) {
-    throw new Error(missingEnvFileMessage());
+    return { ok: false, message: missingEnvFileMessage() };
   }
   const missing = REQUIRED_PHASE2_KEYS.filter((key) => !env[key]);
   if (missing.length > 0) {
-    throw new Error(missingPhase2KeysMessage(missing));
+    return {
+      ok: false,
+      missingKeys: [...missing],
+      message: missingPhase2KeysMessage(missing),
+    };
+  }
+  return { ok: true };
+}
+
+export async function loadPhase2Config(): Promise<Phase2Config> {
+  const env = await readEnvFile();
+  const validation = validatePhase2Env(env);
+  if (!validation.ok || env === null) {
+    throw new Error(validation.message);
   }
   const need = (key: (typeof REQUIRED_PHASE2_KEYS)[number]): string => env[key]!;
 

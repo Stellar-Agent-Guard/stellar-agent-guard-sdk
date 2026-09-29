@@ -17,6 +17,16 @@ import {
   SHARED_IMPORTS,
   TEST_PROJECTS,
 } from "../test.config.ts";
+import {
+  DEPLOY_COMMAND,
+  ENV_EXAMPLE_FILE,
+  ENV_FILE,
+  REQUIRED_PHASE2_KEYS,
+  missingEnvFileMessage,
+  missingPhase2KeysMessage,
+  parseEnvContent,
+  validatePhase2Env,
+} from "../integration/harness.ts";
 
 describe("unified test-runner configuration", () => {
   it("routes every project through the same TypeScript transform", () => {
@@ -58,5 +68,76 @@ describe("unified test-runner configuration", () => {
   it("uses `all` as the selector that runs every configured project", () => {
     assert.equal(ALL_PROJECTS, "all");
     assert.equal(ALL_PROJECTS in TEST_PROJECTS, false, "`all` is a selector, not a project");
+  });
+});
+
+describe("integration harness env-missing entry check parity", () => {
+  it("fails with single actionable not-found message when env file is absent", () => {
+    const result = validatePhase2Env(null);
+    assert.equal(result.ok, false);
+    assert.equal(result.message, missingEnvFileMessage());
+    assert.ok(result.message?.includes(`${ENV_FILE} was not found`));
+    assert.ok(result.message?.includes(`cp ${ENV_EXAMPLE_FILE} ${ENV_FILE}`));
+    assert.ok(result.message?.includes(DEPLOY_COMMAND));
+  });
+
+  it("fails with single actionable incomplete message listing all missing keys when env is empty", () => {
+    const result = validatePhase2Env({});
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.missingKeys, [...REQUIRED_PHASE2_KEYS]);
+    assert.equal(result.message, missingPhase2KeysMessage(REQUIRED_PHASE2_KEYS));
+    assert.ok(
+      result.message?.includes(
+        `.env.phase2 is incomplete: ${REQUIRED_PHASE2_KEYS.length} required key(s) are missing:`,
+      ),
+    );
+    for (const key of REQUIRED_PHASE2_KEYS) {
+      assert.ok(result.message?.includes(`- ${key}`));
+    }
+    assert.ok(result.message?.includes(`cp ${ENV_EXAMPLE_FILE} .env.phase2`));
+    assert.ok(result.message?.includes(DEPLOY_COMMAND));
+  });
+
+  it("lists only the specific missing keys when env is partially populated", () => {
+    const partial = {
+      PHASE2_GUARD: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      PHASE2_TOKEN: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+    };
+    const result = validatePhase2Env(partial);
+    assert.equal(result.ok, false);
+    assert.equal(result.missingKeys?.length, 4);
+    assert.ok(!result.missingKeys?.includes("PHASE2_GUARD"));
+    assert.ok(!result.missingKeys?.includes("PHASE2_TOKEN"));
+    assert.ok(result.missingKeys?.includes("PHASE2_ADMIN_SECRET"));
+    assert.ok(result.missingKeys?.includes("PHASE2_AGENT_SECRET"));
+    assert.ok(result.missingKeys?.includes("PHASE2_RECIPIENT_SECRET"));
+    assert.ok(result.missingKeys?.includes("PHASE2_OUTSIDER_SECRET"));
+  });
+
+  it("passes validation when all required Phase 2 keys are populated", () => {
+    const complete: Record<string, string> = {};
+    for (const key of REQUIRED_PHASE2_KEYS) {
+      complete[key] = "test-value";
+    }
+    const result = validatePhase2Env(complete);
+    assert.equal(result.ok, true);
+    assert.equal(result.message, undefined);
+    assert.equal(result.missingKeys, undefined);
+  });
+
+  it("parses env file content ignoring comments, blank lines, and whitespace", () => {
+    const raw = `
+# This is a comment
+PHASE2_GUARD=CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44
+
+  # Another comment
+PHASE2_TOKEN=CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB
+PHASE2_EXTRA=some=complex=value
+`;
+    const parsed = parseEnvContent(raw);
+    assert.equal(parsed["PHASE2_GUARD"], "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+    assert.equal(parsed["PHASE2_TOKEN"], "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+    assert.equal(parsed["PHASE2_EXTRA"], "some=complex=value");
+    assert.equal(parsed["# This is a comment"], undefined);
   });
 });
