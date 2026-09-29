@@ -109,6 +109,194 @@ Real output, 2026-09-14, heartbeat tx
 ]
 ```
 
+## Worked example — decoding real events end-to-end
+
+This is the on-ramp the field reference above assumes you have already crossed: a
+raw `getEvents` / simulation payload in, a decoded `GuardEvent` out, the reason
+turned into an operator sentence. Two examples, because the guard emits into two
+streams and only one of them is the ledger — see
+[Consequence for the telemetry listener](#consequence-for-the-telemetry-listener).
+
+### Example 1 — an allowed decision, committed to the ledger
+
+**Raw payload.** A `getEvents` response for the guard, sliced to the two events a
+single `heartbeat()` transaction emitted. Topic and value fields are the RPC's
+base64 `ScVal`-XDR form, not decoded JSON.
+
+- **Provenance:** transaction
+  `74751b83d9ffdba3d9aea6b0c24cae866b536a802724085bb88bbeaa72f8d970`, ledger
+  `4673929`, captured 2026-09-14 (the live capture recorded above). The topic XDR
+  is the committed golden vocabulary for those symbols in
+  [`tests/fixtures/contract-fixtures.json`](../tests/fixtures/contract-fixtures.json)
+  (`allowed` → `AAAADwAAAAdhbGxvd2VkAA==`).
+
+```json
+{
+  "events": [
+    {
+      "type": "contract",
+      "ledger": 4673929,
+      "ledgerClosedAt": "2026-09-14T18:20:32Z",
+      "contractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      "txHash": "74751b83d9ffdba3d9aea6b0c24cae866b536a802724085bb88bbeaa72f8d970",
+      "topic": [
+        "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+        "AAAADwAAAAdhbGxvd2VkAA==",
+        "AAAADwAAAAA="
+      ],
+      "value": "AAAAEQAAAAEAAAAA"
+    },
+    {
+      "type": "contract",
+      "ledger": 4673929,
+      "ledgerClosedAt": "2026-09-14T18:20:32Z",
+      "contractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      "txHash": "74751b83d9ffdba3d9aea6b0c24cae866b536a802724085bb88bbeaa72f8d970",
+      "topic": ["AAAADwAAAA9ldmVudF9oZWFydGJlYXQA"],
+      "value": "AAAAEQAAAAEAAAABAAAADwAAAAJhdAAAAAAABQAAAABqp/lQ"
+    }
+  ],
+  "cursor": "...",
+  "latestLedger": 4673930,
+  "oldestLedger": 4590000
+}
+```
+
+**The call.** One page of the listener's loop decodes both events; you never
+hand-parse the topics.
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+
+const listener = new GuardTelemetryListener({ server, guard: GUARD });
+const page = await listener.poll({ startLedger: 4_673_929 });
+const [decision, heartbeat] = page.events; // GuardEvent[]
+```
+
+**The decoded `GuardEvent`s.** Comments mark the fields that carry the stream's
+meaning; the full field list with stability tiers is the reference table above.
+
+```ts
+decision;
+// {
+//   id: "ledger:74751b83…:event_auth_checked",   // stable id — see “Event identity”
+//   kind: "auth_checked",
+//   topic: "event_auth_checked",
+//   source: "ledger",                  // stream discriminator: this event committed
+//   contractId: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+//   ledger: 4673929,
+//   ledgerClosedAt: "2026-09-14T18:20:32Z",
+//   transactionHash: "74751b83d9ff…",
+//   decision: { result: "allowed", reason: null, source: "ledger" },
+//   data: {}
+// }
+
+heartbeat;
+// {
+//   id: "ledger:74751b83…:event_heartbeat",
+//   kind: "heartbeat",
+//   topic: "event_heartbeat",
+//   source: "ledger",
+//   ledger: 4673929,
+//   decision: null,                     // only auth_checked carries a decision
+//   data: { at: 1789393232n }           // unix seconds, from event data — not a topic
+// }
+```
+
+The reason on that decision is `null`, not `""`: the chain sends the empty symbol
+as topics[2] and the SDK normalises it (see "An allowed decision carries an empty
+reason symbol" below). There is no explanation to look up for an allowed event —
+`reason` is only meaningful on a block.
+
+**Operator interpretation.** "The agent's heartbeat was authorised at ledger
+4673929; the guard permitted it, so nothing was blocked and nothing was spent."
+
+### Example 2 — a blocked decision, on the diagnostic stream
+
+A refusal is never committed: the guard returns `Err`, the host rolls the event
+back, so it is observable only as a diagnostic event on the failed enforced
+simulation. That is why both streams matter.
+
+**Raw payload.** A diagnostic event as the RPC attaches it to a failed
+simulation — `event.body.v0.topics` is an array of `ScVal`s, and `event.body.v0.data`
+is the (empty) data map.
+
+- **Provenance:** the per-tx-cap violation (a `transfer` of 1100 against a 1000
+  cap) from the live capture recorded above; the same topic XDR is committed in
+  [`tests/fixtures/contract-fixtures.json`](../tests/fixtures/contract-fixtures.json)
+  (`blocked_per_tx_cap_exceeded`).
+
+```json
+{
+  "event": {
+    "contractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+    "type": "contract",
+    "body": {
+      "v0": {
+        "topics": [
+          "AAAADwAAABJldmVudF9hdXRoX2NoZWNrZWQAAA==",
+          "AAAADwAAAAdibG9ja2VkAA==",
+          "AAAADwAAABNwZXJfdHhfY2FwX2V4Y2VlZGVkAA=="
+        ],
+        "data": "AAAAEQAAAAEAAAAA"
+      }
+    }
+  }
+}
+```
+
+**The call.** `guardEventsFromDiagnostics` is the canonical entry point; it is
+also what `telemetryFromDecision()` calls for you when you already hold a blocked
+`PreFlightDecision`. Pass the guard address so the diagnostic `id` is scoped to
+the right contract.
+
+```ts
+import { guardEventsFromDiagnostics, explainReason } from "stellar-agent-guard-sdk";
+
+const [blocked] = guardEventsFromDiagnostics([diagnosticEvent], GUARD);
+```
+
+**The decoded `GuardEvent`.**
+
+```ts
+blocked;
+// {
+//   id: "diag:1f0c…",                // sha256 of the content — a block has no tx to anchor on
+//   kind: "auth_checked",
+//   topic: "event_auth_checked",
+//   source: "diagnostic",            // stream discriminator: pre-broadcast, never committed
+//   contractId: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+//   ledger: null,                    // a refusal has no ledger — this is a fact, not a gap
+//   ledgerClosedAt: null,
+//   transactionHash: null,
+//   decision: { result: "blocked", reason: "per_tx_cap_exceeded", source: "diagnostic" },
+//   data: {}
+// }
+```
+
+**Explanation lookup and operator interpretation.**
+
+```ts
+explainReason(blocked.decision!.reason ?? "");
+// "The transfer amount exceeds the policy's per-transaction cap."
+```
+
+"This means the transfer was blocked on the pre-tx cap at the moment of the
+enforced simulation: a 1100-unit transfer against a 1000-unit cap. Nothing was
+broadcast, so there is no ledger or transaction hash to point at (the `null`s
+above), and the attempt is identified by its content hash, not a tx hash."
+
+### Reading the stream discriminator
+
+Both `event.source` and `event.decision.source` are the same closed set —
+`"ledger" | "diagnostic"` (tier: **Stable**) — and they are the field to branch
+on. Do not infer the stream from `ledger === null`: a committed event whose RPC
+response omitted the retention fields is still `source: "ledger"`. This SDK has
+not merged the two streams into one shape with a distinct `stream` field; the
+discriminator today is `source` (the unified-stream follow-up is tracked in
+[Event identity](#event-identity--guardeventid)'s scope note). The `id` prefix
+agrees with it: `ledger:` for committed events, `diag:` for pre-broadcast ones.
+
 ## What this changed
 
 The capture caught a real drift between the documentation and the chain, and a
