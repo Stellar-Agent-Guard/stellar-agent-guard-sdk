@@ -26,3 +26,28 @@ Subsequent releases, starting with `0.1.1`, are produced through the automated p
 1. Version bump in `package.json`.
 2. Git release tag (`v*.*.*`) pushed to `main`.
 3. Execution of `.github/workflows/publish.yml` on GitHub Actions using the maintainer `NPM_TOKEN`.
+4. Write the release notes: create the GitHub Release for the tag and paste the body from
+   [`.github/RELEASE_TEMPLATE.md`](../.github/RELEASE_TEMPLATE.md), filling each section.
+
+Step 4 is manual by choice, not an oversight — see [Release notes](#release-notes) below.
+It runs after the publish run rather than before it: the notes describe what actually
+shipped, so they are written once the `npm publish` run for that tag is green, and they
+name the version that is live rather than the one that was intended.
+
+## Release notes
+
+The GitHub Release body is written by hand from a template. A drafter action was
+considered and rejected (issue #154): no PR in this repository carries a label, so
+label-driven categorisation would draft an empty release every run, and no workflow here
+pins an action by SHA, so a drafter would be the single workflow introducing a different
+pinning discipline. Conventional-commit discipline is real in this repo and is what the
+template's sections are keyed to, but with no tags and no GitHub Releases yet there is no
+draft history for automation to learn from.
+
+The template uses the standard [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
+sections and the commit types `CONTRIBUTING.md` documents as in use — `feat`, `fix`,
+`docs`, `chore`, `ci`, `test` — so the mapping from a merged PR to a release section is
+the mapping from its type. Keep the headings even when a section is empty and write
+"None." under it: a missing section cannot be told from a forgotten one, and until issue
+#6 is decided this release body is the only published record of what changed in a
+version.
