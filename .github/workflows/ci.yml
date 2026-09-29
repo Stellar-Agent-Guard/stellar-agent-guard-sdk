@@ -66,6 +66,12 @@ jobs:
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
 
+      # Prove the published artifact ships dist + metadata only: no .env*, no
+      # tests/fixtures, no scripts/ (issue #49). Reads the packed tarball via
+      # `npm pack --json`, so it measures exactly what a consumer downloads.
+      - name: pack-file-set check (no source leaks, no fixtures bloat)
+        run: npm run test:pack
+
       # Informational only, never gating: shared runners are too noisy for a
       # wall-time threshold to mean anything. The committed baseline lives in
       # docs/benchmarks.md; compare changes on a developer machine, not here.
