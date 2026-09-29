@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
-import { Address, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
 import {
   decodeCheckResult,
@@ -22,6 +22,7 @@ import {
   policyToScVal,
   type GuardStatus,
   type PolicyConfig,
+  type ProtocolRule,
 } from "../../src/policy.ts";
 
 const TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
@@ -522,5 +523,215 @@ describe("describePolicy", () => {
 describe("address decoding", () => {
   it("round-trips a contract address through Address", () => {
     assert.equal(new Address(TOKEN).toString(), TOKEN);
+  });
+});
+
+/**
+ * Property tests for `policyToScVal` (issue #48).
+ *
+ * Unit cases pin individual encodings; these tests pin the encoder's *shape*
+ * against arbitrary valid policies: every generated policy must encode to an
+ * `ScVal::Map` whose key set is exactly the committed field list (so "field
+ * added to the type but not to the encoder" fails here, independently of the
+ * decoder), keys sorted as the host requires, no `undefined` values hiding in
+ * any nested map, and — once `decodePolicy` landed — exact round-trip identity
+ * for every generated policy.
+ *
+ * The generator is seeded and reproducible: a failure prints the policy JSON
+ * and the seed, so any red run can be replayed locally. 1000 iterations run in
+ * well under CI's time budget (the encode/decode pair is a few microseconds).
+ */
+describe("policyToScVal: property tests (seeded, arbitrary valid policies)", () => {
+  /**
+    * A deterministic xorshift PRNG. `Math.random()` would make failures
+    * unreproducible; this way the same seed always produces the same sequence
+    * of policies, in CI and locally.
+    */
+  function mulberry32(seed: number): () => number {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+
+  const rand = mulberry32(0x5eedc0de);
+  const int = (max: number) => Math.floor(rand() * (max + 1));
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)]!;
+  const bool = () => rand() < 0.5;
+
+  /** Bounded valid u64/i128 bigints (caps stay far below the i128 maximum). */
+  const cap = () => BigInt(int(10_000_000));
+  const secs = () => BigInt(int(60 * 60 * 24 * 365));
+
+  /** Deterministic 32-byte payloads encoded as valid strkeys. */
+  let addressCounter = 0;
+  function contractAddress(): string {
+    const bytes = Buffer.alloc(32);
+    bytes.writeUInt32BE(++addressCounter, 28);
+    return StrKey.encodeContract(bytes);
+  }
+  function accountAddress(): string {
+    const bytes = Buffer.alloc(32);
+    bytes.writeUInt32BE(++addressCounter, 28);
+    return StrKey.encodeEd25519PublicKey(bytes);
+  }
+
+  const FN_NAMES = ["transfer", "approve", "mint", "swap", "set_fee"] as const;
+
+  function arbitraryProtocolRule(): ProtocolRule {
+    return {
+      contract: contractAddress(),
+      fns:
+        rand() < 0.5
+          ? null
+          : Array.from({ length: int(4) }, () => pick(FN_NAMES)).filter(
+              (fn, index, all) => all.indexOf(fn) === index,
+            ),
+    };
+  }
+
+  function arbitraryPolicy(): PolicyConfig {
+    return {
+      per_tx_cap: cap(),
+      window_secs: secs(),
+      window_cap: cap(),
+      assets: Array.from({ length: int(3) }, contractAddress),
+      protocols: Array.from({ length: int(3) }, arbitraryProtocolRule),
+      recipients: Array.from({ length: int(3) }, accountAddress),
+      allow_any_recipient: bool(),
+      active_from: secs(),
+      active_until: secs(),
+      paused: bool(),
+      dms_grace_secs: secs(),
+    };
+  }
+
+  const SEED = 0x5eedc0de;
+  const ITERATIONS = 1000;
+
+  /** The committed field list — the encoder must emit exactly these keys. */
+  const EXPECTED_POLICY_KEYS = [
+    "active_from",
+    "active_until",
+    "allow_any_recipient",
+    "assets",
+    "dms_grace_secs",
+    "paused",
+    "per_tx_cap",
+    "protocols",
+    "recipients",
+    "window_cap",
+    "window_secs",
+  ];
+  const EXPECTED_RULE_KEYS = ["contract", "fns"];
+
+  function entryKey(entry: xdr.ScMapEntry): string {
+    return String(scValToNative(entry.key));
+  }
+
+  /** The XDR union's discriminator, read off the plain-property shape. */
+  function kindOf(val: xdr.ScVal): string {
+    return val.type;
+  }
+
+  /** The union payloads are plain properties here, not dust accessors — see the file top. */
+  function mapEntriesOf(val: xdr.ScVal): xdr.ScMapEntry[] {
+    return ((val as unknown as { map?: xdr.ScMapEntry[] }).map ?? []) as xdr.ScMapEntry[];
+  }
+  function vecEntriesOf(val: xdr.ScVal): xdr.ScVal[] {
+    return ((val as unknown as { vec?: xdr.ScVal[] }).vec ?? []) as xdr.ScVal[];
+  }
+
+  function assertNoUndefinedInMaps(val: xdr.ScVal, path: string): void {
+    const kind = kindOf(val);
+    if (kind === "scvMap") {
+      for (const entry of mapEntriesOf(val)) {
+        // The one legal Void in a policy map is `protocols[].fns: null` ("any
+        // function"); every other field must be present and typed.
+        const isProtocolRuleMap = /\.protocols\[\d+\]$/.test(path);
+        const isOptionalFns = isProtocolRuleMap && entryKey(entry) === "fns";
+        assert.ok(
+          isOptionalFns || kindOf(entry.val) !== "scvVoid",
+          `${path}.${entryKey(entry)}: undefined field encoded as Void — the classic silent on-chain failure`,
+        );
+        assertNoUndefinedInMaps(entry.val, `${path}.${entryKey(entry)}`);
+      }
+      return;
+    }
+    if (kind === "scvVec") {
+      vecEntriesOf(val).forEach((item, index) => assertNoUndefinedInMaps(item, `${path}[${index}]`));
+    }
+  }
+
+  it(`structural: key set, ordering and no-undefined hold for ${ITERATIONS} generated policies`, () => {
+    for (let i = 0; i < ITERATIONS; i++) {
+      const policy = arbitraryPolicy();
+      const val = policyToScVal(policy);
+
+      assert.equal(kindOf(val), "scvMap", `iteration ${i}: not an ScVal::Map`);
+      const entries = mapEntriesOf(val);
+      const keys = entries.map(entryKey);
+      assert.deepEqual(
+        keys,
+        EXPECTED_POLICY_KEYS,
+        `iteration ${i}: encoder drifted from the committed field list\npolicy: ${JSON.stringify(
+          policy,
+          (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+        )}`,
+      );
+      assert.deepEqual(keys, [...keys].sort(), `iteration ${i}: keys not sorted`);
+
+      for (const entry of entries) {
+        if (entryKey(entry) === "protocols") {
+          for (const rule of vecEntriesOf(entry.val)) {
+            const ruleEntries = mapEntriesOf(rule);
+            const ruleKeys = ruleEntries.map(entryKey);
+            assert.deepEqual(ruleKeys, EXPECTED_RULE_KEYS, `iteration ${i}: protocol rule key drift`);
+            assert.deepEqual(ruleKeys, [...ruleKeys].sort());
+            // The one legal Void is `fns: null`; `contract` must be an address.
+            const fns = ruleEntries.find((e: xdr.ScMapEntry) => entryKey(e) === "fns")!;
+            if (kindOf(fns.val) === "scvVoid") continue;
+            assert.equal(kindOf(fns.val), "scvVec");
+            for (const fn of vecEntriesOf(fns.val)) {
+              assert.equal(kindOf(fn), "scvSymbol");
+            }
+          }
+        }
+      }
+
+      assertNoUndefinedInMaps(val, "policy");
+    }
+  });
+
+  it(`round-trip: decodePolicy(policyToScVal(p)) is exactly p for ${ITERATIONS} generated policies`, () => {
+    for (let i = 0; i < ITERATIONS; i++) {
+      const policy = arbitraryPolicy();
+      const decoded = decodePolicy(policyToScVal(policy));
+      assert.deepEqual(
+        decoded,
+        policy,
+        `iteration ${i}: round-trip drift\nseed ${SEED}\npolicy: ${JSON.stringify(
+          policy,
+          (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+        )}`,
+      );
+    }
+  });
+
+  it(`round-trip is stable under re-encode for ${ITERATIONS} generated policies`, () => {
+    for (let i = 0; i < ITERATIONS; i++) {
+      const policy = arbitraryPolicy();
+      const once = policyToScVal(policy);
+      const twice = policyToScVal(decodePolicy(once));
+      assert.equal(
+        once.toXDR("base64"),
+        twice.toXDR("base64"),
+        `iteration ${i}: re-encoding the decoded policy produced different XDR`,
+      );
+    }
   });
 });
