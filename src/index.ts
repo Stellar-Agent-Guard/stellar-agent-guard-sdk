@@ -203,3 +203,15 @@ export {
   type ElizaGuardOptions,
   type ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+// Optional logging. `SILENT_LOGGER` is the default every config resolves to
+// when no logger is supplied: the SDK writes nothing unless a host asks.
+export {
+  GUARD_LOG_LEVELS,
+  SILENT_LOGGER,
+  resolveLogger,
+  type GuardLogger,
+  type GuardLoggerInput,
+  type GuardLogLevel,
+  type GuardLogMeta,
+} from "./logger.ts";
