@@ -142,6 +142,7 @@ Both tiers run through one runner configuration, `tests/test.config.ts`, read by
 | Script | Project(s) | Notes |
 | --- | --- | --- |
 | `npm test` / `npm run test:unit` | `unit` (`tests/unit`) | Offline; Node test-runner default concurrency. |
+| `npm run test:watch` | `unit` (`tests/unit`) | Development loop: Node's test-runner watch mode, re-running the unit suite on every change to a watched file, so you can edit → read the failure → fix → repeat without re-issuing `npm test`. Same project, same `tsx` transform, same files as `npm test`. |
 | `npm run test:integration` | `integration` (`tests/integration`) | Live; concurrency pinned to `1`, because the files share on-chain state. |
 | `npm run test:all` | every project, one run | Both suites in a single invocation. |
 | `npm run test:coverage` | every project, one run, coverage | Node's `--experimental-test-coverage`; needs `.env.phase2`, because the integration project is included. |

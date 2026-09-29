@@ -10,6 +10,7 @@
  * Usage:
  *   npm test                      # unit project (default)
  *   npm run test:unit             # unit project, explicit
+ *   npm run test:watch            # unit project, re-running on change
  *   npm run test:integration      # live testnet project (needs .env.phase2)
  *   npm run test:all              # every project in one run
  *   npm run test:coverage         # every project in one run, with coverage
@@ -18,7 +19,7 @@
  * passed) is reported across both projects in one report. It pins concurrency to
  * 1 for that run because the integration files share live on-chain state.
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -72,10 +73,11 @@ function planFor(name: string): RunPlan {
   };
 }
 
-function nodeArgs(plan: RunPlan, coverage: boolean): string[] {
+function nodeArgs(plan: RunPlan, coverage: boolean, watch: boolean): string[] {
   const args: string[] = [];
   for (const loader of SHARED_IMPORTS) args.push("--import", loader);
   args.push("--test");
+  if (watch) args.push("--watch");
   if (plan.concurrency !== null) args.push(`--test-concurrency=${plan.concurrency}`);
   if (coverage) args.push("--experimental-test-coverage");
   args.push(...plan.files);
@@ -85,6 +87,7 @@ function nodeArgs(plan: RunPlan, coverage: boolean): string[] {
 function main(): void {
   const argv = process.argv.slice(2);
   const coverage = argv.includes("--coverage");
+  const watch = argv.includes("--watch");
   const name = argv.find((arg) => !arg.startsWith("--")) ?? DEFAULT_PROJECT;
 
   const plan = planFor(name);
@@ -99,7 +102,28 @@ function main(): void {
     console.log("coverage includes the live project: .env.phase2 must be present or that part fails");
   }
 
-  const result = spawnSync(process.execPath, nodeArgs(plan, coverage), {
+  // Watch mode resolves the project's files once, at startup, exactly as a
+  // one-shot run does, and then hands the terminal to the runner. A file added
+  // to the project after startup is therefore not watched until the run is
+  // restarted; edits to files already in the plan re-run in place.
+  if (watch) {
+    console.log("watching for changes — press Ctrl+C to stop");
+    const child = spawn(process.execPath, nodeArgs(plan, coverage, watch), {
+      cwd: ROOT,
+      stdio: "inherit",
+    });
+    child.on("error", (error: Error) => {
+      console.error(`failed to start the test runner: ${error.message}`);
+      process.exit(1);
+    });
+    child.on("exit", (code, signal) => {
+      // A signal-terminated runner is the normal Ctrl+C path, not a failure.
+      process.exit(signal ? 0 : (code ?? 1));
+    });
+    return;
+  }
+
+  const result = spawnSync(process.execPath, nodeArgs(plan, coverage, watch), {
     cwd: ROOT,
     stdio: "inherit",
   });
