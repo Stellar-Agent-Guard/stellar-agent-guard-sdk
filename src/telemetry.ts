@@ -364,10 +364,84 @@ export function computePollDelay(
   return Math.round(intervalMs * factor);
 }
 
+/**
+ * The sleep used between polls: waits `ms`, or until `signal` aborts.
+ *
+ * The signal argument is optional, so a caller can inject a plain
+ * `(ms) => Promise<void>` exactly as before; the watch loop cuts that short
+ * itself (`raceAbort`) rather than requiring the hook to be abort-aware.
+ */
+export type PollSleep = (ms: number, signal?: AbortSignal) => Promise<void>;
+
+/**
+ * The default poll delay: a `setTimeout` an abort cancels outright.
+ *
+ * Clearing the timer rather than merely abandoning it is what makes abort
+ * usable during teardown: a listener stopped mid-interval must not leave an
+ * open handle behind, or a Node process — a test suite most visibly — stays
+ * alive until the timer would have fired.
+ */
+function defaultPollSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/**
+ * Wait out a poll delay, ending as soon as `signal` aborts.
+ *
+ * A caller-supplied sleep cannot be cancelled from the outside, so the wait is
+ * *raced* against the abort event instead: aborting resolves this promise
+ * immediately and whatever the abandoned sleep does later is ignored. A sleep
+ * that rejects after the abort is likewise swallowed — a stop request is
+ * teardown, not a telemetry failure — while a sleep that rejects without an
+ * abort still surfaces to the caller exactly as it did before.
+ */
+function raceAbort(signal: AbortSignal | undefined, wait: () => Promise<void>): Promise<void> {
+  if (!signal) return wait();
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    wait().then(
+      () => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        if (signal.aborted) resolve();
+        else reject(error);
+      },
+    );
+  });
+}
+
 export interface GuardTelemetryWatchParams {
   startLedger?: number;
   pollIntervalMs?: number;
   limit?: number;
+  /**
+   * Stop the stream. Abort is honoured at **loop boundaries**: before the first
+   * request, before each poll, and during the delay between polls (the default
+   * delay's timer is cleared, so no handle is left open). It is deliberately
+   * *not* honoured inside a request that is already in flight — see the
+   * cancellation note in the README for why, and for the one-request bound that
+   * implies.
+   */
   signal?: AbortSignal;
   /**
    * Jitter mode for poll interval delays.
@@ -378,8 +452,13 @@ export interface GuardTelemetryWatchParams {
   jitter?: TelemetryJitter;
   /** Optional RNG injector for deterministic unit testing (defaults to Math.random). */
   rng?: () => number;
-  /** Optional sleep handler for testing without wall-clock delays. */
-  sleep?: (ms: number) => Promise<void>;
+  /**
+   * Optional sleep handler, for testing without wall-clock delays.
+   *
+   * It receives the watch signal as a second argument so it can end early on
+   * abort; one that ignores the argument is still cut short by the loop.
+   */
+  sleep?: PollSleep;
   /**
    * Resume from a previously stored RPC cursor instead of a ledger range.
    * Cursors are opaque, so pair this with `resumeLedger` — the last ledger the
@@ -475,6 +554,17 @@ export class GuardTelemetryListener {
    * When `onGap` is supplied, the listener also checks each response's retention
    * window and reports a provable hole (see `GuardTelemetryGap`) instead of
    * silently skipping it. Omitting `onGap` changes nothing about the stream.
+   *
+   * ## Aborting
+   *
+   * `signal` ending the stream is a normal exit, never a throw: an abort before
+   * the first request issues no RPC call at all, an abort between pages prevents
+   * the next poll and does not serve out the remaining interval, and an abort
+   * that lands while a request is in flight lets that request's rejection go
+   * quietly as teardown rather than surfacing as an unhandled rejection. The
+   * one bound on promptness is the request already in flight: `getEvents` takes
+   * no `AbortSignal` (see the README's cancellation note), so the listener can
+   * stop *issuing* requests immediately but cannot cancel one already sent.
    */
   async *watch(
     params: GuardTelemetryWatchParams = {},
@@ -482,9 +572,15 @@ export class GuardTelemetryListener {
     const interval = params.pollIntervalMs ?? 5_000;
     const jitter = params.jitter ?? "full";
     const rng = params.rng ?? Math.random;
-    const sleep = params.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
+    const signal = params.signal;
+    const sleep: PollSleep = params.sleep ?? defaultPollSleep;
     let cursor = params.cursor;
     let startLedger = params.startLedger;
+
+    // An abort that landed before the iterator was first pulled must not probe
+    // the RPC — not even the `getLatestLedger` call that resolves the default
+    // start ledger. Teardown gets no requests at all, not one.
+    if (signal?.aborted) return;
 
     // `expectedFrom` is the earliest ledger the listener has not yet confirmed
     // coverage through: `startLedger` for a fresh range request, or the ledger
@@ -501,12 +597,24 @@ export class GuardTelemetryListener {
       expectedFrom = startLedger;
     }
 
-    while (!params.signal?.aborted) {
-      const page = await this.poll({
-        ...(startLedger !== undefined ? { startLedger } : {}),
-        ...(cursor !== undefined ? { cursor } : {}),
-        ...(params.limit !== undefined ? { limit: params.limit } : {}),
-      });
+    while (!signal?.aborted) {
+      let page: PollResult;
+      try {
+        page = await this.poll({
+          ...(startLedger !== undefined ? { startLedger } : {}),
+          ...(cursor !== undefined ? { cursor } : {}),
+          ...(params.limit !== undefined ? { limit: params.limit } : {}),
+        });
+      } catch (error) {
+        // Abort landed while this request was in flight. The request itself
+        // cannot be cancelled — `@stellar/stellar-sdk`'s `getEvents` accepts no
+        // signal — so the caller's stop request usually shows up here, as the
+        // rejection of the request it arrived during. That is teardown, not a
+        // telemetry failure: end the stream quietly instead of throwing at the
+        // `for await` consumer or leaving an unhandled rejection behind.
+        if (signal?.aborted) return;
+        throw error;
+      }
       cursor = page.cursor;
       // Once a cursor is held, the ledger range must not be sent again — the RPC
       // rejects a request that mixes the two modes.
@@ -555,9 +663,11 @@ export class GuardTelemetryListener {
           ? Math.max(...ledgers) + 1
           : page.latestLedger + 1;
 
-      if (params.signal?.aborted) return;
+      if (signal?.aborted) return;
       const delay = computePollDelay(interval, jitter, rng);
-      await sleep(delay);
+      // Abort-aware: otherwise a caller that aborts mid-interval waits out the
+      // whole poll delay (5s by default, jittered) before the iterator ends.
+      await raceAbort(signal, () => sleep(delay, signal));
     }
   }
 }

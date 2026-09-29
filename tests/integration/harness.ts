@@ -49,8 +49,17 @@ export interface Phase2Config {
   policy: PolicyConfig;
 }
 
-async function readEnvFile(path = ".env.phase2"): Promise<Record<string, string>> {
-  const raw = await readFile(path, "utf8");
+async function readEnvFile(path = ENV_FILE): Promise<Record<string, string> | null> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    // A missing file is the ordinary first-run case, not an unexpected I/O
+    // failure. Return null so the caller fails with the same actionable pointer
+    // an incomplete file gets, instead of a bare ENOENT with no next step.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
   const out: Record<string, string> = {};
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -77,6 +86,9 @@ export const REQUIRED_PHASE2_KEYS = [
   "PHASE2_OUTSIDER_SECRET",
 ] as const;
 
+/** The gitignored env file the live suite reads. Template: `ENV_EXAMPLE_FILE`. */
+export const ENV_FILE = ".env.phase2";
+
 /** Safe-to-commit template listing every key, with no values. */
 export const ENV_EXAMPLE_FILE = ".env.phase2.example";
 
@@ -98,8 +110,29 @@ export function missingPhase2KeysMessage(missing: readonly string[]): string {
   ].join("\n");
 }
 
+/**
+ * The fail-fast message for a missing `.env.phase2`: the same two ways to
+ * produce it that `missingPhase2KeysMessage` points at, stated as a not-found
+ * rather than a not-incomplete file, so a first run is not misreported.
+ *
+ * Before this, a missing file surfaced as a raw `ENOENT` from `readFile` — the
+ * exact case the README's quick start hits first — with no `cp`/deploy pointer;
+ * only a file that existed *and* was incomplete got the actionable message.
+ */
+export function missingEnvFileMessage(): string {
+  return [
+    `${ENV_FILE} was not found in the working directory.`,
+    "",
+    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} ${ENV_FILE}`,
+    `Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  ${DEPLOY_COMMAND}`,
+  ].join("\n");
+}
+
 export async function loadPhase2Config(): Promise<Phase2Config> {
   const env = await readEnvFile();
+  if (env === null) {
+    throw new Error(missingEnvFileMessage());
+  }
   const missing = REQUIRED_PHASE2_KEYS.filter((key) => !env[key]);
   if (missing.length > 0) {
     throw new Error(missingPhase2KeysMessage(missing));
