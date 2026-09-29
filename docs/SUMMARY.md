@@ -21,4 +21,5 @@
 * [Benchmarks](benchmarks.md)
 * [Enforcement Scope](enforcement-scope.md)
 * [Contributing](contributing.md)
+* [Releasing](releasing.md)
 * [FAQ](faq.md)
