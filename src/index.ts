@@ -196,8 +196,8 @@ export {
   type SetPolicyParams,
 } from "./admin.ts";
 
-// Framework adapters. Both are written structurally against their host's hook,
-// so neither framework is a dependency of this package.
+// Framework adapters. All are written structurally against their host's hook,
+// so no framework is a dependency of this package.
 export {
   createLangChainGuardMiddleware,
   type LangChainGuardOptions,
@@ -212,3 +212,11 @@ export {
   type ElizaGuardOptions,
   type ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+export {
+  createVercelAIGuard,
+  wrapToolWithGuard,
+  type VercelAIGuardOptions,
+  type VercelAIToolCallInput,
+  type VercelAIToolLike,
+} from "./adapters/vercelai.ts";
