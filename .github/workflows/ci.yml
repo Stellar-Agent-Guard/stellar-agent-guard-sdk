@@ -14,6 +14,26 @@
 #
 # A green `ci` means the required checks ran. It does not mean the live suite ran
 # against this change — the evidence file it points at is the record for that.
+#
+# Job-shape and cache audit (issue #101):
+#   - `actions/setup-node` with `cache: npm` was already enabled in every
+#     workflow (default package-lock.json dependency path), so nothing was added.
+#   - This workflow is a single install -> check job: no duplicated `npm ci`
+#     across jobs and no matrix fan-out exists to dedupe. Combining
+#     typecheck+lint+test into one script was evaluated and rejected: the steps
+#     are already serial in one warm environment and together cost a few
+#     seconds, so a combined run saves nothing and obscures which gate failed.
+#   - `typecheck` and `build` are deliberately NOT merged: tsconfig.json
+#     typechecks the whole tree (src, scripts, tests, examples, benches) with
+#     noEmit, while tsconfig.build.json emits dist/ from src only. Different
+#     inputs, and the smoke/export steps below consume dist/.
+#   - The one provable win: the decode-path benchmarks were the longest step
+#     after the unit tests (median ~15s of a ~53s job across recent runs) while
+#     being informational-only. They import src/ through tsx, need no dist/, and
+#     assert no threshold, so they now run in the parallel, non-gating `bench`
+#     job below (same npm cache, one extra cache-backed `npm ci`) instead of on
+#     the required check's critical path. Measured before/after durations are
+#     cited in the PR for this change.
 name: ci
 
 on:
@@ -66,13 +86,6 @@ jobs:
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
 
-      # Informational only, never gating: shared runners are too noisy for a
-      # wall-time threshold to mean anything. The committed baseline lives in
-      # docs/benchmarks.md; compare changes on a developer machine, not here.
-      - name: decode-path benchmarks (informational)
-        run: npm run bench
-        continue-on-error: true
-
       # Structural validation of the evidence record (issue #65): asserts the
       # document's expected sections and row minimums, and fails loudly when its
       # shape drifts. This is what stops the file-list gate below going vacuously
@@ -90,3 +103,29 @@ jobs:
         run: |
           git fetch --no-tags origin "$BASE_REF"
           node scripts/check-enforcement-evidence.ts "origin/$BASE_REF" HEAD
+
+  # Informational decode-path benchmarks, moved out of the required `ci` job
+  # (issue #101). They measure the pure-CPU work around the RPC round trip,
+  # assert no wall-time threshold (shared runners are too noisy for one to mean
+  # anything), and read only src/ through tsx — so they need no dist/ and gate
+  # nothing: `continue-on-error` keeps them exactly as informational as before.
+  # The committed baseline lives in docs/benchmarks.md; compare changes on a
+  # developer machine, not here.
+  bench:
+    name: decode-path benchmarks (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      - name: decode-path benchmarks (informational)
+        run: npm run bench
+        continue-on-error: true
