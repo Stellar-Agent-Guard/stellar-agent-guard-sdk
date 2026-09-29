@@ -34,6 +34,7 @@
     "lint": "eslint .",
     "test": "node --import tsx scripts/run-tests.ts unit",
     "test:unit": "node --import tsx scripts/run-tests.ts unit",
+    "test:watch": "node --import tsx scripts/run-tests.ts unit --watch",
     "test:integration": "node --import tsx scripts/run-tests.ts integration",
     "test:all": "node --import tsx scripts/run-tests.ts all",
     "test:coverage": "node --import tsx scripts/run-tests.ts all --coverage",
