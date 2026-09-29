@@ -38,6 +38,7 @@
     "test:all": "node --import tsx scripts/run-tests.ts all",
     "test:coverage": "node --import tsx scripts/run-tests.ts all --coverage",
     "test:exports": "node --import tsx scripts/check-export-map.ts",
+    "test:pack": "node --import tsx scripts/check-pack-contents.ts",
     "test:smoke": "node --input-type=module -e \"import('./dist/index.js').then(m => { if (!m.PreFlightInterceptor) throw new Error('Missing PreFlightInterceptor'); console.log('ESM export-map resolution smoke test passed: ' + Object.keys(m).length + ' exports found'); })\"",
     "bench": "node --import tsx benches/check-decode.bench.ts",
     "bench:preflight": "node --import tsx scripts/bench-preflight-encode.ts",
