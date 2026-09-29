@@ -21,6 +21,15 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  BroadcastError,
+  ContractResponseError,
+  GuardError,
+  PolicyDecodeError,
+  SigningError,
+  SimulationError,
+} from "./errors.ts";
+
+export {
   GuardBlockedError,
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
@@ -33,11 +42,13 @@ export {
 
 export {
   decodeCheckResult,
+  decodePolicy,
   deadManRemaining,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
   isDeadManFrozen,
+  policyFromScVal,
   policyToScVal,
   readPersistentEntry,
   type CheckResult,
@@ -64,12 +75,17 @@ export {
   topicSymbols,
   type EnforcementOutcome,
   type GuardAuthorization,
+  type InvokeDryRunResult,
+  type InvokeDryRunStepName,
+  type InvokeDryRunVerdict,
   type InvokeErrorCause,
   type InvokeErrorOutcome,
   type InvokeOptions,
   type InvokeOutcome,
+  type InvokePipelineStep,
   type InvokeParams,
   type InvokeStepEvent,
+  type RetryableInvokeFailure,
 } from "./invoke.ts";
 
 export {
@@ -130,6 +146,7 @@ export {
   type GuardTelemetryGapReason,
   type GuardTelemetryWatchParams,
   type PollResult,
+  type PollSleep,
   type TelemetryJitter,
 } from "./telemetry.ts";
 
@@ -143,9 +160,11 @@ export {
   describeSimulationResources,
   describeSubmissionFailure,
   describeTransactionResult,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
+  verifyAgentSignature,
   type AdminSigner,
   type AgentSigner,
   type ContractCall,
@@ -186,4 +205,3 @@ export {
   type ElizaGuardOptions,
   type ElizaValidator,
 } from "./adapters/elizaos.ts";
-

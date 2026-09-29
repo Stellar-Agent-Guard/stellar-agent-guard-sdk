@@ -58,6 +58,22 @@ describe("package module format and export-map", () => {
       "GUARD_AUTH_RESULTS",
       "GUARD_REASON_CODES",
       "GuardBlockedError",
+      // Typed failure hierarchy, the canonical policy decoder, the dry-run
+      // trace, and the verify-only agent-auth check. These are published API:
+      // each is documented in the README and each is the whole point of the
+      // change that introduced it, so losing one to a merge would be a silent
+      // breaking change for a consumer rather than a compile error here.
+      "GuardError",
+      "SimulationError",
+      "SigningError",
+      "BroadcastError",
+      "ContractResponseError",
+      "PolicyDecodeError",
+      "decodePolicy",
+      "policyFromScVal",
+      "InvokeRetryError",
+      "verifyAgentSignature",
+      "TRACE_STEP_NAMES",
     ];
 
     for (const exp of requiredExports) {

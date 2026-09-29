@@ -448,3 +448,166 @@ suite, and it needs the contract-side `check_batch` entrypoint to compare agains
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
 
 
+
+## 2026-09-28 — merge of `main` into the policy/dry-run/auth branch, and its re-validation
+
+This branch was merged with `main` (merge commit `d7ffb89`) so it could sit on the
+current base. That merge was resolved incorrectly: the conflict resolution kept *both*
+sides of several hunks rather than integrating them, so the tree did not compile. The
+failures were not confined to the compiler — the resolution also silently dropped
+committed work, which is why this section records what was recovered and not just that
+the build went green.
+
+### What the broken resolution had dropped
+
+- `tests/unit/invoke.test.ts` reverted wholesale to `main`'s version, discarding all
+  eleven dry-run and typed-failure tests for #22 and #23. They are restored, unchanged
+  in substance, in a new `tests/unit/invoke-dry-run.test.ts` rather than merged back
+  into `invoke.test.ts`: the two files drive the same pipeline through two different
+  harnesses (a recorder for `onStep`, an RPC-boundary fake for the dry-run trace), and
+  reconciling the duplicate helpers would have produced a third, worse file.
+- The `src/errors.ts` import was missing from `src/policy.ts` and `src/preflight.ts`.
+- The fail-closed resource-fee check in `PreFlightInterceptor.check()` had been moved
+  into `checkBatch()`, where it referenced an out-of-scope `outcome` and returned a
+  single `PreFlightDecision` from a function typed to return a batch decision. It is
+  back in `check()`, where the fee is actually computed.
+- `verifyAgentSignature`, `InvokeDryRunResult`, `InvokeDryRunVerdict`, and
+  `requiredAuthorizationEntries` were absent, and the `SigningError` wrappers in
+  `buildGuardAuthEntry` / `signAccountAuthEntry` had been reverted. The public-root
+  export list in `src/index.ts` had lost `verifyAgentSignature` and the dry-run types,
+  so a consumer importing them from the package root would have broken with no compile
+  error anywhere in this repository. `tests/unit/exports.test.ts` now pins the whole
+  published surface of this branch so the next merge cannot drop one quietly again.
+- `invokePipeline` had two copies of the assembly step, and `enforceCall` had two copies
+  of the probe and of the signing loop. Only one copy of each survived the cleanup.
+
+### One deliberate behaviour decision, recorded because it changes `main`'s tests
+
+`main` (#186) pins that a pipeline stage which throws propagates out of `invoke()`.
+This branch (#22) pins that `invoke()` is result-oriented: a stage that throws becomes
+`kind: "error"` with a typed `error` whose `cause` is the original object. The two
+cannot both hold. This branch's contract wins, because a guardrail that failed to
+reach a verdict has no business throwing at its caller, and the original error object
+is still reachable as `cause`. The invariant #186 was actually protecting — the
+pipeline's own error survives, and a throwing consumer `onStep` callback never replaces
+it with its own — is now asserted in that form. Three assertions in `invoke.test.ts`
+were rewritten accordingly, and one dry-run assertion was updated from the old
+`kind: "error"` sentinel to `kind: "dry_run"`. No test was deleted.
+
+### Re-validation on the merged tree
+
+Run locally in this checkout, on Node `v22.22.1` (below the declared `>=24` engine
+range; CI runs Node 24 and is the authority for that runtime):
+
+```text
+npm run typecheck   # pass
+npm run lint        # pass
+npm test            # 289 tests, 289 pass, 0 fail
+npm run build       # pass
+npm run test:smoke  # pass; 80 named exports resolved from the built ESM entry
+node --import tsx scripts/check-enforcement-evidence.ts origin/main HEAD
+                    # pass; evidence file detected as updated
+```
+
+The test count is now 289 rather than the 112 recorded above: `main` added its own
+suite (`onStep` observability, retry, preflight, telemetry, admin, cost, and fixture
+tests), and the eleven restored dry-run/typed-failure tests bring the branch's own
+back. The 112 figure remains accurate for the pre-merge commit it was written against.
+
+The eleven restored tests are the branch's core evidence and all pass unmodified
+against the merged implementation, which is the strongest available signal that the
+integration is semantically right rather than merely type-correct: the exact five-stage
+dry-run trace and step ordering, a real 64-byte guard agent signature inside the
+enforced simulation with zero send/poll calls, fail-closed fee handling in dry run,
+preflight, and cost pre-check, `ContractResponseError` on malformed `result.auth`,
+`SigningError` with the required address, `BroadcastError` preserving the transport
+error as `cause`, and a post-inclusion guard refusal staying `blocked` with a real
+hash and `charged: true`.
+
+### Live enforcement-suite limitation — still not claimed as passing
+
+Unchanged from the section above and still true: this checkout has no `.env.phase2`
+credential file, so `npm run test:integration` cannot begin its scenarios and no fresh
+Phase-2 transcript is claimed. The merged tree adds `onStep` observability and a
+bounded jittered retry to the same path the live suite exercises, so the five recorded
+scenarios above should be re-run by a maintainer holding credentials before merge.
+That is an argument, not a measurement, and this section does not present it as one.
+
+## Addendum — 2026-09-29 (PR #169: per-account invoke queue and sequence reservation)
+
+Recorded because this PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`)
+and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: this checkout has no
+`.env.phase2` credentials, so `npm run test:integration` cannot begin its
+scenarios. No fresh Phase-2 transcript is claimed below. The CI gate verifies
+only that this file was touched, not the numbers, and the same limitation stated
+in every addendum above applies here unchanged.
+
+### What the PR changes on the enforcement path
+
+This PR makes concurrent `invoke()` calls safe for one source account, and
+nothing else on that path moves.
+
+- `src/tx.ts`: adds `isSequenceNumberFailure()`, a deliberately narrow classifier
+  for a submission rejected for a stale/duplicate account sequence (`tx_bad_seq`
+  and its prose variants). It sits next to `isStaleLedgerResourceFailure()` and
+  follows the same shape. No existing function is modified, so the stale-ledger
+  classifier the five scenarios above depend on is byte-identical.
+- `src/invoke.ts`: adds a per-(server, account) serialization queue, so a whole
+  invocation — fetch, build, simulate, **and submit** — runs one at a time per
+  source account, plus a monotonic sequence reservation that advances past an
+  RPC snapshot which has not yet observed the preceding submission. A
+  `tx_bad_seq` outcome is classified as `retryable: "sequence_number_collision"`
+  and re-runs the full pipeline against a refreshed account snapshot.
+- `src/index.ts`: exports `isSequenceNumberFailure` and the
+  `RetryableInvokeFailure` type.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification, and every outcome value and detail
+string. The queue releases in `finally`, so a failed transaction cannot strand
+later calls, and the reservation is scoped to the RPC server object as well as
+the account key so the same account on two networks does not share state.
+
+### The one behavioural change a reviewer should actually weigh
+
+The retry predicate widened. Before this PR only `stale_ledger_resource_limit`
+was retryable; now any outcome carrying a `retryable` tag is, which adds
+`sequence_number_collision`. A transaction rejected for a bad sequence applies
+nothing, so retrying it is safe on the same grounds as the stale-ledger case
+argued above. It is deliberately **not** extended to `Auth` failures — those are
+the guard refusing, and retrying a block would be wrong. Both directions are
+pinned in `tests/unit/tx.test.ts`: `tx_bad_seq` and prose mismatches classify as
+sequence failures, and an unrelated `tx_insufficient_fee` does not.
+
+The one case this cannot fully settle offline: when a sequence collision is
+caused by *another process* broadcasting for the same account, the reservation
+keeps advancing and each retry re-fetches. The unit test for this asserts the
+observable contract — two serialized envelopes, sequences 8 and 9, from a mock
+whose `getAccount` never advances — but whether that holds against real
+concurrent writers needs the live suite.
+
+### What did run locally
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 294 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 82 exports resolve via the ESM export map
+node --import tsx scripts/check-enforcement-evidence.ts upstream/main HEAD
+                                        # pass; evidence file detected as updated
+```
+
+`tests/unit/invoke.test.ts` gains a "invoke sequence reservation" suite driving
+the real pipeline against a mocked RPC: a `tx_bad_seq` first send followed by a
+successful retry, and two concurrent invocations proven serialized with distinct
+envelope sequences. These are mocks. They pin the client-side ordering
+guarantee; they cannot substitute for the live run, and this addendum does not
+claim they do.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.

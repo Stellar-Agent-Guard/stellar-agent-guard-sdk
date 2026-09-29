@@ -26,6 +26,7 @@
  */
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
+import { GuardError, SimulationError } from "./errors.ts";
 import { enforceCall } from "./invoke.ts";
 import {
   extractTransferAmount,
@@ -34,7 +35,7 @@ import {
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
-import { toAgentSigner } from "./tx.ts";
+import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
 
 /**
@@ -164,11 +165,14 @@ export function validateContractCall(call: ContractCall): void {
  * when the guard never ruled would be a false claim about the security
  * boundary, which is the one thing an operator must be able to trust.
  */
-export class PreFlightUndeterminedError extends Error {
+export class PreFlightUndeterminedError extends SimulationError {
   readonly detail: string;
 
-  constructor(detail: string) {
-    super(`stellar-agent-guard could not determine this action's status\n${detail}`);
+  constructor(detail: string, options: { cause?: unknown } = {}) {
+    super(`stellar-agent-guard could not determine this action's status\n${detail}`, {
+      stage: "preflight",
+      ...(options.cause === undefined ? {} : { cause: options.cause }),
+    });
     this.name = "PreFlightUndeterminedError";
     this.detail = detail;
   }
@@ -197,6 +201,8 @@ export type PreFlightDecision =
       allowed: false;
       kind: "undetermined";
       detail: string;
+      /** Machine-readable cause; use `instanceof` instead of matching `detail`. */
+      error?: GuardError;
     };
 
 /**
@@ -473,7 +479,12 @@ export class PreFlightInterceptor {
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
-      decision = { allowed: false, kind: "undetermined", detail: outcome.detail };
+      decision = {
+        allowed: false,
+        kind: "undetermined",
+        detail: outcome.detail,
+        error: outcome.error,
+      };
     } else if (outcome.kind === "blocked") {
       decision = {
         allowed: false,
@@ -489,10 +500,33 @@ export class PreFlightInterceptor {
         | undefined;
       const footprintKeys =
         (data?.getReadOnly?.().length ?? 0) + (data?.getReadWrite?.().length ?? 0);
+
+      // Fail closed on an unpriceable simulation: a guardrail must never hand
+      // back an admissible verdict carrying a fabricated or silently zero fee.
+      let estimatedResourceFee: bigint;
+      try {
+        estimatedResourceFee = parseSimulationResourceFee(outcome.simulation.minResourceFee);
+      } catch (cause) {
+        decision = {
+          allowed: false,
+          kind: "undetermined",
+          detail: `enforced simulation returned an invalid resource fee: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+          error:
+            cause instanceof GuardError
+              ? cause
+              : new SimulationError("enforced simulation returned an invalid resource fee", {
+                  stage: "preflight",
+                  cause,
+                }),
+        };
+        return decision;
+      }
       decision = {
         allowed: true,
         kind: "admissible",
-        estimatedResourceFee: BigInt(outcome.simulation.minResourceFee ?? 0),
+        estimatedResourceFee,
         footprintKeys,
       };
     }
@@ -635,7 +669,7 @@ export class PreFlightInterceptor {
         rawEvent,
       });
     }
-    throw new PreFlightUndeterminedError(decision.detail);
+    throw new PreFlightUndeterminedError(decision.detail, { cause: decision.error });
   }
 
   /**
