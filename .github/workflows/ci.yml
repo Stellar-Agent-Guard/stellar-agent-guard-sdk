@@ -59,6 +59,20 @@ jobs:
       - name: smoke test export resolution
         run: npm run test:smoke
 
+      # Pack the tarball, install it into a temp consumer, and import the root
+      # and every declared subpath through a real resolver — and prove that a
+      # path *not* in the export map is refused. The smoke step above imports
+      # dist/ in-place; this one exercises the published artifact.
+      - name: export-map resolution (pack + install + import)
+        run: npm run test:exports
+
+      # Informational only, never gating: shared runners are too noisy for a
+      # wall-time threshold to mean anything. The committed baseline lives in
+      # docs/benchmarks.md; compare changes on a developer machine, not here.
+      - name: decode-path benchmarks (informational)
+        run: npm run bench
+        continue-on-error: true
+
       # A PR that changes the enforcement path must ship fresh live-testnet
       # evidence in the same PR. This checks the file list only: no network, no
       # secret, so it cannot go green on a missing credential.
