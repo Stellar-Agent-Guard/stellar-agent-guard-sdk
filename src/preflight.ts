@@ -214,6 +214,11 @@ export type PreFlightDecision =
  * Both fields exist so a caller can run the batch check against values it
  * already knows, without an extra ledger read. Omit them and the interceptor
  * fetches the live policy and committed window spend from the guard's storage.
+ *
+ * | Option | Type | Default | Semantics |
+ * | --- | --- | --- | --- |
+ * | `policy` | `PolicyConfig \| null` | `null` (fetched from ledger) | Policy to enforce against during batch staging. ⚠ Supplying a stale policy can admit calls the live guard would refuse. |
+ * | `initialWindowSpent` | `bigint` | `0n` (fetched from ledger) | Committed amount already spent in the current rolling window. ⚠ Understating this weakens window-cap enforcement. |
  */
 export interface CheckBatchOptions {
   /**
@@ -258,6 +263,15 @@ export interface PreFlightBatchDecision {
   totalEstimatedResourceFee: bigint;
 }
 
+/**
+ * A caller-supplied policy revision token used as part of the cache key.
+ *
+ * | Value | Semantics |
+ * | --- | --- |
+ * | `undefined` | Cache lookup is skipped (treated as unknown revision). |
+ * | `null` | Serialized as `"null"` in the cache key. |
+ * | `string \| number \| bigint \| boolean` | Serialized as `"<typeof>:<value>"`. |
+ */
 /** A caller-supplied policy revision token used as part of the cache key. */
 export type PolicyRevision = string | number | bigint | boolean | null | undefined;
 
@@ -268,11 +282,24 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  * simulate; `check()` never broadcasts), using the same `InvokeStepEvent`
  * shape and shared trace vocabulary as `invoke()`'s `onStep`. Entirely
  * optional — omitting it changes nothing about the check.
+ *
+ * | Option | Type | Default | Semantics |
+ * | --- | --- | --- | --- |
+ * | `onStep` | `(step: InvokeStepEvent) => void` | `undefined` | Observability hook for pipeline stages (probe → sign → simulate). Purely informational; never affects the verdict. |
  */
 export interface PreFlightCheckOptions {
   onStep?: (step: InvokeStepEvent) => void;
 }
 
+/**
+ * Opt-in short-lived cache for pre-flight verdicts.
+ *
+ * | Option | Type | Default | Semantics |
+ * | --- | --- | --- | --- |
+ * | `ttlMs` | `number` | `undefined` | Maximum cache age in ms. Capped at one ledger close (~5000 ms). ⚠ A cache hit can return a verdict staler than one admitted transfer. |
+ * | `ttlLedgers` | `number` | `undefined` | Ledger-based spelling of `ttlMs`; one ledger ≈ 5000 ms. ⚠ Same staleness caveat as `ttlMs`. |
+ * | `policyRevision` | `PolicyRevision \| (() => PolicyRevision \| Promise<PolicyRevision>)` | `undefined` | Policy revision token mixed into the cache key. ⚠ Omitting it means a policy change may not invalidate cached verdicts until TTL expiry. |
+ */
 export interface PreFlightCacheOptions {
   /**
    * Maximum cache age in milliseconds. The effective value is capped at one
@@ -289,6 +316,20 @@ export interface PreFlightCacheOptions {
   policyRevision?: PolicyRevision | (() => PolicyRevision | Promise<PolicyRevision>);
 }
 
+/**
+ * Constructor options for {@link PreFlightInterceptor}.
+ *
+ * | Option | Type | Default | Semantics |
+ * | --- | --- | --- | --- |
+ * | `server` | `rpc.Server` | required | Soroban RPC server used for simulation and ledger reads. |
+ * | `networkPassphrase` | `string` | required | Network passphrase the auth entry is signed against. |
+ * | `guard` | `string` | required | The guarded smart account whose policy is enforced. |
+ * | `agent` | `AgentSigner \| Keypair` | required | Key registered as the account's agent, used to sign the auth entry. |
+ * | `source` | `Keypair` | required | Classic account that pays fees and supplies the sequence number. |
+ * | `accountSigners` | `Keypair[]` | `undefined` | Authorizers for non-guard requirements (e.g. an admin on a policy call). |
+ * | `policy` | `PolicyConfig \| null` | `null` (fetched from ledger) | Optional policy used for batch staging. ⚠ A stale policy can admit calls the live guard would refuse. |
+ * | `cache` | `PreFlightCacheOptions` | `undefined` (uncached) | Opt-in short-lived verdict cache. ⚠ A cached verdict can be staler than one admitted transfer; omit to preserve uncached behavior. |
+ */
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
@@ -313,6 +354,11 @@ export interface PreFlightConfig {
   cache?: PreFlightCacheOptions;
 }
 
+/**
+ * Alias used by the README's constructor terminology.
+ *
+ * See {@link PreFlightConfig} for the full option table and defaults.
+ */
 /** Alias used by the README's constructor terminology. */
 export type PreFlightInterceptorOptions = PreFlightConfig;
 

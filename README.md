@@ -451,6 +451,73 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
 
 ## API Reference
 
+### Constructor options
+
+Every exported options interface, with defaults verified against source. Options
+marked ⚠️ are safety-relevant: read what disabling or weakening them means before
+changing them.
+
+#### `PreFlightInterceptorOptions`
+
+| Option | Type | Default | Semantics |
+|---|---|---|---|
+| `server` | `rpc.Server` | — (required) | Soroban RPC server used for simulation. |
+| `networkPassphrase` | `string` | — (required) | Network passphrase bound into the auth digest. |
+| `guard` | `string` | — (required) | Guard (custom account) contract ID. |
+| `agent` | `Keypair \| AgentSigner` | — (required) | Agent key that signs the authorization entry. |
+| `source` | `Keypair` | — (required) | Source account funding the simulation. |
+| `cache` | `PreFlightCacheOptions` | `undefined` (cache disabled) | ⚠️ Opt-in short-lived verdict cache. When supplied, a returned verdict may be **staler than one admitted transfer** — the rolling spend window can change while a cached result is reused. Omit it for a fresh simulation on every check. |
+
+`PreFlightCacheOptions` (the `cache` object):
+
+| Option | Type | Default | Semantics |
+|---|---|---|---|
+| `ttlMs` | `number` | `undefined` | ⚠️ Wall-clock TTL in milliseconds. Capped at one approximate ledger-close interval; takes precedence over `ttlLedgers` when both are supplied. |
+| `ttlLedgers` | `number` | `undefined` | ⚠️ TTL in ledgers. Capped at one approximate ledger-close interval. |
+| `policyRevision` | `() => string \| number \| bigint` | `undefined` | ⚠️ Caller-supplied policy revision folded into the cache key. Without it, a policy change that does not advance the ledger will not invalidate cached verdicts. |
+
+The cache stores only `admissible` and `blocked` decisions; transient
+`undetermined` results are never cached. Entries are discarded when the observed
+ledger advances, when the TTL expires, or when `invalidate()` is called.
+
+#### `CostPreCheckerOptions`
+
+| Option | Type | Default | Semantics |
+|---|---|---|---|
+| `interceptor` | `PreFlightInterceptor` | — (required) | Interceptor whose enforced simulation is priced. |
+| `maxFeeStroops` | `bigint` | `undefined` (no ceiling) | ⚠️ Optional total-fee ceiling in stroops. When omitted, no `over_budget` result is ever produced — cost is reported but never refused. |
+
+#### `GuardTelemetryListenerOptions`
+
+| Option | Type | Default | Semantics |
+|---|---|---|---|
+| `server` | `rpc.Server` | — (required) | Soroban RPC server used to tail events. |
+| `guard` | `string` | — (required) | Guard contract ID whose events are decoded. |
+| `networkPassphrase` | `string` | — (required) | Network passphrase used to decode contract events. |
+| `startLedger` | `number` | `undefined` (resolved from `getLatestLedger`) | First ledger to tail. When omitted, the listener probes `getLatestLedger` to resolve a default. |
+| `jitter` | `'full' \| 'none'` | `'full'` | Poll-delay jitter. `'full'` uniformly randomizes each delay in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2` to break fleet lockstep; `'none'` restores deterministic cadence. |
+| `jitterRatio` | `number` | `0.2` | Variance window used when `jitter: 'full'`. |
+
+`GuardTelemetryWatchParams` (passed to `watch()` / `watchAll()`):
+
+| Option | Type | Default | Semantics |
+|---|---|---|---|
+| `pollIntervalMs` | `number` | `5_000` | Delay between polls, before jitter is applied. |
+| `signal` | `AbortSignal` | `undefined` | ⚠️ Aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the inter-poll delay is cut short. A request already in flight is **not** cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover). |
+| `startLedger` | `number` | `undefined` | Per-call override of the constructor's `startLedger`. |
+
+#### `InvokeOptions`
+
+| Option | Type | Default | Semantics |
+|---|---|---|---|
+| `server` | `rpc.Server` | — (required) | Soroban RPC server used for the pipeline. |
+| `source` | `Keypair` | — (required) | Source account that submits the transaction. |
+| `call` | `ContractCall` | — (required) | Contract call to probe, sign, simulate, and broadcast. |
+| `networkPassphrase` | `string` | — (required) | Network passphrase bound into the auth digest. |
+| `guardAuth` | `{ guard: string; agent: Keypair \| AgentSigner }` | — (required) | Guard contract ID and agent signer for the auth entry. |
+| `dryRun` | `boolean` | `false` | ⚠️ When `true`, stops before final assembly and cannot call `sendTransaction` — the result carries no transaction hash and nothing is broadcast. |
+| `onStep` | `(step: InvokeStepEvent) => void` | `undefined` | Pure observability hook; omitting it changes nothing. Callback exceptions are isolated and never break the pipeline. |
+
 ### Interception & Execution
 
 - `PreFlightInterceptor`
