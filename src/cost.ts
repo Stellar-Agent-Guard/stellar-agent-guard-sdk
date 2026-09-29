@@ -35,8 +35,78 @@
  * it was never allowed.
  */
 import { INCLUSION_FEE } from "./tx.ts";
-import type { PreFlightInterceptor } from "./preflight.ts";
+import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
+
+/**
+ * Stroops in one XLM. Stellar defines 10^7 stroops per lumen, fixed by the
+ * protocol — not a display choice.
+ */
+export const STROOPS_PER_XLM = 10_000_000n;
+
+/**
+ * Render a fee in stroops as an XLM decimal string, using **integer arithmetic
+ * only**.
+ *
+ * ## Why there is no floating point here
+ *
+ * XLM has exactly 7 decimal places, so every stroop value is a rational number
+ * with a denominator that is a power of ten — representable exactly as a decimal
+ * string and *not* representable exactly as an IEEE-754 binary64. `0.1` stroops
+ * is not a thing, but `stroops / 1e7` in `Number` lands on 0.1 for `1_000_000`
+ * and drifts for others, and `Number` cannot even hold integers above 2^53.
+ * This is a security tool that prints money-adjacent numbers: a formatter that
+ * rounds silently is worse than one that refuses, so the division is done on
+ * `bigint` and the digits are produced by string padding. Nothing here ever
+ * passes through `Number`, `parseFloat`, `/`, or `toFixed`.
+ *
+ * ## Output convention: minimal, exact, no trailing garbage
+ *
+ * The result is the shortest decimal string that equals the input exactly —
+ * trailing fractional zeros are dropped and a whole number prints with no
+ * separator: `10_000_000` → `"1"`, `1_000_000` → `"0.1"` (not `"0.1000000"`),
+ * `0` → `"0"`, `1` → `"0.0000001"`. The alternative, a fixed 7-dp pad, adds
+ * zeros that imply precision the fee does not have; the minimal form is exact
+ * in both directions, so `formatFee(parse(x)) === x` holds for every value this
+ * function accepts.
+ *
+ * Input is `bigint` (exact, and the only way to express values above 2^53) or a
+ * base-10 integer string. A `number` is rejected outright rather than coerced:
+ * by the time it reaches this function any precision loss has already happened,
+ * and accepting it would launder that loss into output that looks authoritative.
+ */
+export function formatFee(stroops: bigint | string): string {
+  const value = parseStroops(stroops);
+  const negative = value < 0n;
+  const magnitude = negative ? -value : value;
+
+  const whole = magnitude / STROOPS_PER_XLM;
+  const fraction = magnitude % STROOPS_PER_XLM;
+
+  // Exact decimal digits: pad to 7 places, then drop trailing zeros. String
+  // padding is the whole trick — it is the step that would silently become a
+  // rounding operation if any of this were done in floating point.
+  const fractionDigits = fraction.toString().padStart(7, "0").replace(/0+$/, "");
+  const body = fractionDigits.length === 0 ? whole.toString() : `${whole}.${fractionDigits}`;
+  return negative ? `-${body}` : body;
+}
+
+/** Parse and reject fee input without ever routing it through `Number`. */
+function parseStroops(stroops: bigint | string): bigint {
+  if (typeof stroops === "bigint") return stroops;
+  if (typeof stroops === "string") {
+    if (/^-?\d+$/.test(stroops)) return BigInt(stroops);
+    throw new TypeError(
+      `formatFee expects a base-10 integer stroops value, got ${JSON.stringify(stroops)} ` +
+        `(fee math is integer-only: XLM has 7 decimals, and binary floating point cannot ` +
+        `represent them exactly)`,
+    );
+  }
+  throw new TypeError(
+    `formatFee expects bigint | string, got ${typeof stroops} ` +
+      `(a number would already have lost precision before reaching this function)`,
+  );
+}
 
 export interface CostPreCheckConfig {
   /**
@@ -103,6 +173,19 @@ export type CostDecision =
     };
 
 /**
+ * One interceptor verdict and the cost of the exact simulation that produced it.
+ *
+ * `cost` is derived from `decision`, never from a second simulation, so the two
+ * always describe the same ledger snapshot. See `checkWithCost`.
+ */
+export interface CostWithDecision {
+  /** The verdict, exactly as `PreFlightInterceptor.check` returns it. */
+  decision: PreFlightDecision;
+  /** The cost view of that same verdict. */
+  cost: CostDecision;
+}
+
+/**
  * Split a simulation's resource fee into the two components a caller is charged.
  *
  * Pure: no network, no configuration. The inclusion fee is the SDK's own
@@ -166,9 +249,36 @@ export class CostPreChecker {
     this.config = config;
   }
 
+  /** Price a call. Equivalent to `(await this.checkWithCost(call)).cost`. */
   async check(call: ContractCall): Promise<CostDecision> {
-    const decision = await this.config.interceptor.check(call);
+    return (await this.checkWithCost(call)).cost;
+  }
 
+  /**
+   * Price a call **and** return the interceptor's verdict, from one enforced
+   * simulation.
+   *
+   * ## Why this exists — and why not to call `check()` twice
+   *
+   * The obvious consumer flow is `interceptor.check(call)` for the policy
+   * verdict, then `costChecker.check(call)` for the price. Those are two
+   * simulations of the same call, and the problem is not only the extra RPC: the
+   * two simulations see two ledger snapshots, so the fee the caller is *told* can
+   * differ from the fee implied by the verdict that was actually enforced. A
+   * price that no longer corresponds to the approved decision is a correctness
+   * bug in a security tool, not a performance one — so this method asks the
+   * interceptor once and derives both results from that one verdict.
+   *
+   * Additive: `check()`, `precheckCost()` and `PreFlightInterceptor.check()` are
+   * unchanged.
+   */
+  async checkWithCost(call: ContractCall): Promise<CostWithDecision> {
+    const decision = await this.config.interceptor.check(call);
+    return { decision, cost: this.costOf(decision) };
+  }
+
+  /** The pure cost view of an already-obtained verdict. No network, no state. */
+  private costOf(decision: PreFlightDecision): CostDecision {
     if (decision.kind === "blocked") {
       return {
         kind: "blocked",
@@ -219,4 +329,15 @@ export function precheckCost(
   call: ContractCall,
 ): Promise<CostDecision> {
   return new CostPreChecker(config).check(call);
+}
+
+/**
+ * One-shot form of `checkWithCost`: one simulation, both the verdict and the
+ * price. Prefer this over a `preflight()` + `precheckCost()` pair.
+ */
+export function precheckCostWithDecision(
+  config: CostPreCheckConfig,
+  call: ContractCall,
+): Promise<CostWithDecision> {
+  return new CostPreChecker(config).checkWithCost(call);
 }

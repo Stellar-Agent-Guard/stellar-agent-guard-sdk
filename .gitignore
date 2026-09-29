@@ -4,6 +4,10 @@ build/
 *.log
 .env
 .env.*
-!.env.example
+# Templates are the exception: they carry key *names* only, never values. The
+# glob (not just !.env.example) is deliberate so a future .env.phase3.example is
+# committable without a follow-up gitignore edit — the live suite's requirement
+# is a moving target, and the guard against committing a real .env.* must not be.
+!.env*.example
 .DS_Store
 *.tsbuildinfo

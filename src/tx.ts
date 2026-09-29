@@ -26,6 +26,20 @@
  * transaction sequence numbers are unique per transaction and never reused, so
  * the sequence doubles as the nonce (same choice as the Phase 1 `agent-tx`
  * tool, which proved this path on-chain).
+ *
+ * ## Why there is an `AgentSigner` seam
+ *
+ * v1 registers exactly one Ed25519 agent key, so this module used to take a
+ * bare `Keypair` and call `keypair.sign(digest)`. Contracts v2 will change the
+ * guard's own `Signature` type to something multi-key (a threshold scheme),
+ * and the SDK should absorb that without another breaking change to every
+ * caller's config object. `AgentSigner` is the seam that allows it: the SDK
+ * depends on "something that signs the authorization digest", not on
+ * "something that is a `Keypair`". The single-key `Keypair` remains a valid
+ * input everywhere, wrapped by `keypairAgentSigner` / `toAgentSigner` — the
+ * current behaviour is unchanged, and multi-key support lands behind the same
+ * interface when the contracts decision does. Research, options and the revisit
+ * trigger: `docs/concepts/multi-key-agent-signing.md`.
  */
 import { createHash } from "node:crypto";
 import {
@@ -33,17 +47,26 @@ import {
   Address,
   Keypair,
   SorobanDataBuilder,
+  StrKey,
   Transaction,
   TransactionBuilder,
   rpc,
   scValToNative,
+  verify as verifyEd25519,
   xdr,
 } from "@stellar/stellar-sdk";
+import {
+  BroadcastError,
+  ContractResponseError,
+  SigningError,
+  SimulationError,
+} from "./errors.ts";
 
 /** Extra ledger validity granted to a guard auth entry when it is signed. */
 const SIG_EXPIRATION_LEDGERS = 10_000;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
+const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
 
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
@@ -51,6 +74,39 @@ export interface ContractCall {
   /** Function name as it appears in the contract spec. */
   fn: string;
   args: xdr.ScVal[];
+}
+
+/**
+ * Parse the RPC's simulation resource fee without allowing a missing or
+ * malformed value to masquerade as a free transaction.
+ *
+ * Stellar SDK versions have surfaced this field as a decimal string, number,
+ * or bigint. All three are accepted only when they are an exact non-negative
+ * u64. A missing field is invalid, not zero: callers must report the simulation
+ * as undetermined rather than make a budget decision from fabricated pricing.
+ */
+export function parseSimulationResourceFee(raw: unknown): bigint {
+  let value: bigint;
+  if (typeof raw === "bigint") {
+    value = raw;
+  } else if (typeof raw === "number" && Number.isSafeInteger(raw)) {
+    value = BigInt(raw);
+  } else if (typeof raw === "string" && /^\d+$/.test(raw)) {
+    value = BigInt(raw);
+  } else {
+    throw new ContractResponseError(
+      `simulation returned an invalid resource fee: ${JSON.stringify(raw)}`,
+      { field: "minResourceFee" },
+    );
+  }
+
+  if (value < 0n || value > MAX_RESOURCE_FEE) {
+    throw new ContractResponseError(
+      `simulation resource fee ${value} is outside the u64 range`,
+      { field: "minResourceFee" },
+    );
+  }
+  return value;
 }
 
 /** The guard's own persistent storage keys, as they exist in ledger state. */
@@ -68,6 +124,37 @@ function ledgerKeyId(key: xdr.LedgerKey): string {
 
 export function addressToScVal(strkey: string): xdr.ScVal {
   return new Address(strkey).toScVal();
+}
+
+/**
+ * Verify an Ed25519 agent-auth signature without accepting or deriving a
+ * private key.
+ *
+ * `publicKey` accepts the registered account strkey (`G…`) or the raw 32-byte
+ * public key stored by the contract. The Stellar SDK's low-level Ed25519
+ * verifier is the same primitive used by `Keypair.verify` and the Stellar auth
+ * path, so callers do not need a second cryptographic implementation.
+ *
+ * `payload` is verified exactly as supplied and is never re-hashed. The guard
+ * verifies the host-provided 32-byte `HashIdPreimage` digest, so an integration
+ * checking an auth entry must pass that same digest. Malformed keys, payloads that
+ * are not 32 bytes, non-64-byte signatures, and verification failures all return
+ * `false`; this diagnostic
+ * helper does not throw for attacker-controlled input.
+ */
+export function verifyAgentSignature(
+  publicKey: string | Uint8Array,
+  payload: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  try {
+    const rawPublicKey =
+      typeof publicKey === "string" ? StrKey.decodeEd25519PublicKey(publicKey) : publicKey;
+    if (rawPublicKey.length !== 32 || payload.length !== 32 || signature.length !== 64) return false;
+    return verifyEd25519(payload, signature, rawPublicKey);
+  } catch {
+    return false;
+  }
 }
 
 export function invocationArgs(call: ContractCall): xdr.InvokeContractArgs {
@@ -106,12 +193,80 @@ export function guardStorageLedgerKeys(guard: string): xdr.LedgerKey[] {
   return keys;
 }
 
+export interface AdminSigner {
+  /** Return public key (G...) of the admin */
+  publicKey(): string | Promise<string>;
+  /**
+   * Sign a transaction envelope.
+   * Accepts a Transaction and returns a signed Transaction or base64 XDR string.
+   */
+  signTransaction?(
+    transaction: Transaction,
+    options?: { networkPassphrase?: string },
+  ): Promise<Transaction | string> | Transaction | string;
+  /** Direct authorization entry signing hook */
+  signAuthEntry?(
+    entry: xdr.SorobanAuthorizationEntry,
+    options: { signatureExpirationLedger: number; networkPassphrase: string },
+  ): Promise<xdr.SorobanAuthorizationEntry>;
+}
+
+/**
+ * The signing capability the guard's authorization needs — the seam that lets
+ * N-key (or otherwise non-`Keypair`) agent signing land without a second
+ * breaking change (see the module header and
+ * `docs/concepts/multi-key-agent-signing.md`).
+ *
+ * It is deliberately the *digest* that crosses this boundary, not the XDR
+ * entry: the host hashes the authorization preimage and hands `__check_auth`
+ * the 32-byte digest, so a signer never has to understand Soroban XDR to be
+ * usable here. `signDigest` may return synchronously (a local key) or as a
+ * promise (a remote/HSM-backed signer); `buildGuardAuthEntry` awaits it.
+ */
+export interface AgentSigner {
+  /** The signer's public identity, for diagnostics and key matching. */
+  readonly publicKey: string;
+  /** Sign the 32-byte SHA-256 digest `__check_auth` will verify. */
+  signDigest(digest: Uint8Array): Uint8Array | Promise<Uint8Array>;
+}
+
+/**
+ * The current single-key signer: a local Ed25519 `Keypair`, exposed through
+ * the `AgentSigner` interface. One key, one raw 64-byte signature — exactly the
+ * behaviour the SDK has always had.
+ */
+export function keypairAgentSigner(agent: Keypair): AgentSigner {
+  return {
+    publicKey: agent.publicKey(),
+    signDigest: (digest) => agent.sign(Buffer.from(digest)),
+  };
+}
+
+/**
+ * Accept either a ready-made `AgentSigner` or a plain `Keypair`.
+ *
+ * The `Keypair` branch is what keeps this refactor non-breaking: every existing
+ * caller passing a keypair still works, and only a caller with a genuinely
+ * different signing setup has to supply the interface itself.
+ */
+export function toAgentSigner(signer: AgentSigner | Keypair): AgentSigner {
+  if (typeof (signer as AgentSigner).signDigest === "function") {
+    return signer as AgentSigner;
+  }
+  return keypairAgentSigner(signer as Keypair);
+}
+
 /**
  * Build and sign the guard's authorization entry for one call.
  *
  * `nonce` and `signatureExpirationLedger` are written into the signed payload,
  * so the returned entry is only valid for that nonce — build a fresh entry per
  * submission rather than reusing one.
+ *
+ * Async because an `AgentSigner` may be: a remote or threshold signer resolves
+ * its signatures as a promise. The single-`Keypair` path still resolves
+ * immediately, so this is a source-compatible widening for `await`ing callers
+ * and a signature change for callers that used the return value synchronously.
  */
 /**
  * Credential kinds the host may demand for this account.
@@ -130,24 +285,30 @@ export type GuardCredentialType =
   | "sorobanCredentialsAddress"
   | "sorobanCredentialsAddressV2";
 
-export function buildGuardAuthEntry(params: {
+export async function buildGuardAuthEntry(params: {
   guard: string;
   call: ContractCall;
-  agent: Keypair;
+  /**
+   * The account's agent signer. A `Keypair` is accepted for the single-key case
+   * and wrapped via `toAgentSigner`; supply an `AgentSigner` directly for any
+   * other signing setup.
+   */
+  signer: AgentSigner | Keypair;
   nonce: bigint;
   signatureExpirationLedger: number;
   networkPassphrase: string;
   credentialType?: GuardCredentialType;
-}): xdr.SorobanAuthorizationEntry {
+}): Promise<xdr.SorobanAuthorizationEntry> {
   const {
     guard,
     call,
-    agent,
+    signer: rawSigner,
     nonce,
     signatureExpirationLedger,
     networkPassphrase,
     credentialType = "sorobanCredentialsAddress",
   } = params;
+  const signer = toAgentSigner(rawSigner);
   const rootInvocation = new xdr.SorobanAuthorizedInvocation({
     function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
       invocationArgs(call),
@@ -178,7 +339,18 @@ export function buildGuardAuthEntry(params: {
         );
 
   const digest = createHash("sha256").update(preimage.toXDR()).digest();
-  const signature = agent.sign(digest);
+  let signature: Uint8Array;
+  try {
+    signature = await signer.signDigest(digest);
+  } catch (error) {
+    // A signer that cannot produce a signature is a `SigningError` at the layer
+    // that owns the failure, so a direct caller of this helper gets the same
+    // typed category an `invoke()` caller would have gotten.
+    throw new SigningError("could not sign the guard authorization entry", {
+      address: guard,
+      cause: error,
+    });
+  }
 
   const addressCredentials = new xdr.SorobanAddressCredentials({
     address: guardAddress,
@@ -198,22 +370,38 @@ export function buildGuardAuthEntry(params: {
 
 /**
  * Sign a classic-account authorization entry (used for admin calls such as
- * `initialize` / `set_policy`, where the authorizer is a normal keypair rather
- * than the smart account).
+ * `initialize` / `set_policy`, where the authorizer is a normal keypair or
+ * an AdminSigner rather than the smart account).
  */
 export async function signAccountAuthEntry(params: {
   entry: xdr.SorobanAuthorizationEntry;
-  signer: Keypair;
+  signer: Keypair | AdminSigner;
   signatureExpirationLedger: number;
   networkPassphrase: string;
 }): Promise<xdr.SorobanAuthorizationEntry> {
-  const { authorizeEntry } = await import("@stellar/stellar-sdk");
-  return authorizeEntry(
-    params.entry,
-    params.signer,
-    params.signatureExpirationLedger,
-    params.networkPassphrase,
-  );
+  const { entry, signer, signatureExpirationLedger, networkPassphrase } = params;
+  try {
+    if ("signAuthEntry" in signer && typeof signer.signAuthEntry === "function") {
+      return await signer.signAuthEntry(entry, { signatureExpirationLedger, networkPassphrase });
+    }
+    if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+      const { authorizeEntry } = await import("@stellar/stellar-sdk");
+      return await authorizeEntry(
+        entry,
+        signer as Keypair,
+        signatureExpirationLedger,
+        networkPassphrase,
+      );
+    }
+  } catch (error) {
+    throw new SigningError("could not sign the required account authorization entry", {
+      address: await signer.publicKey(),
+      cause: error,
+    });
+  }
+  // For classic transaction signers (e.g. Freighter) without a separate auth-entry signer,
+  // return entry to be authorized via the envelope signature.
+  return entry;
 }
 
 export interface SimulationOutcome {
@@ -234,7 +422,15 @@ export async function simulateSigned(
   server: rpc.Server,
   transaction: Transaction,
 ): Promise<SimulationOutcome> {
-  const raw = await server.simulateTransaction(transaction);
+  let raw: rpc.Api.SimulateTransactionResponse;
+  try {
+    raw = await server.simulateTransaction(transaction);
+  } catch (error) {
+    throw new SimulationError("signed transaction simulation request failed", {
+      stage: "simulate",
+      cause: error,
+    });
+  }
   if (rpc.Api.isSimulationError(raw)) {
     const error = raw as rpc.Api.SimulateTransactionErrorResponse;
     return {
@@ -582,12 +778,30 @@ export function describeSubmissionFailure(failure: NonNullable<SubmissionResult[
 export async function submitAndPoll(
   server: rpc.Server,
   transaction: Transaction,
-  signers: Keypair[],
-  options: { pollAttempts?: number; pollIntervalMs?: number } = {},
+  signers: Array<Keypair | AdminSigner>,
+  options: { pollAttempts?: number | undefined; pollIntervalMs?: number | undefined } = {},
 ): Promise<SubmissionResult> {
-  transaction.sign(...signers);
+  for (const signer of signers) {
+    if ("signTransaction" in signer && typeof signer.signTransaction === "function") {
+      const signed = await signer.signTransaction(transaction, {
+        networkPassphrase: transaction.networkPassphrase,
+      });
+      if (typeof signed === "string") {
+        transaction = new Transaction(signed, transaction.networkPassphrase);
+      } else {
+        transaction = signed;
+      }
+    } else if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+      transaction.sign(signer as Keypair);
+    }
+  }
 
-  const sent = await server.sendTransaction(transaction);
+  let sent: Awaited<ReturnType<rpc.Server["sendTransaction"]>>;
+  try {
+    sent = await server.sendTransaction(transaction);
+  } catch (error) {
+    throw new BroadcastError("transaction submission request failed", { cause: error });
+  }
   if (sent.status === "ERROR") {
     return {
       hash: sent.hash,
@@ -607,7 +821,15 @@ export async function submitAndPoll(
   const interval = options.pollIntervalMs ?? 3_000;
   for (let attempt = 0; attempt < attempts; attempt++) {
     await new Promise((resolve) => setTimeout(resolve, interval));
-    const result = await server.getTransaction(sent.hash);
+    let result: Awaited<ReturnType<rpc.Server["getTransaction"]>>;
+    try {
+      result = await server.getTransaction(sent.hash);
+    } catch (error) {
+      throw new BroadcastError(`could not poll transaction ${sent.hash}`, {
+        transactionHash: sent.hash,
+        cause: error,
+      });
+    }
     if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
       return {
         hash: sent.hash,
