@@ -33,14 +33,53 @@ export const GUARD_REASON_CODES = {
   create_contract_not_allowed: 28,
 } as const;
 
-export type GuardReasonName = keyof typeof GUARD_REASON_CODES;
+/**
+ * The guard's block reasons, as a symbol-only union derived from the single
+ * source above.
+ *
+ * Numeric codes stay runtime-side (`GUARD_REASON_CODES`); the type is intentionally
+ * symbol-only so a value cannot carry a code where the contract emits a symbol.
+ * Use this instead of `string` wherever a value must be one of the contract's
+ * known reasons.
+ */
+export type GuardReason = keyof typeof GUARD_REASON_CODES;
 
-const BY_CODE = new Map<number, GuardReasonName>(
-  Object.entries(GUARD_REASON_CODES).map(([name, code]) => [code, name as GuardReasonName]),
+/**
+ * The reason vocabulary, derived from the single source above.
+ *
+ * Every reason is listed exactly once in this module (`GUARD_REASON_CODES`);
+ * this object only reshapes it into symbol -> symbol so callers can enumerate
+ * the vocabulary without a second, drift-prone literal. `tests/unit/reasons.test.ts`
+ * keeps its keys in lockstep with the vendored contract fixture in both
+ * directions.
+ */
+export const GUARD_REASONS: Readonly<Record<GuardReason, GuardReason>> = Object.freeze(
+  (Object.keys(GUARD_REASON_CODES) as GuardReason[]).reduce(
+    (reasons, reason) => {
+      reasons[reason] = reason;
+      return reasons;
+    },
+    {} as Record<GuardReason, GuardReason>,
+  ),
+);
+
+/**
+ * @deprecated Use `GuardReason`. Kept as an alias so existing imports keep
+ * compiling; new code should import the canonical name.
+ */
+export type GuardReasonName = GuardReason;
+
+/** True when `value` is one of the contract's known reason symbols. */
+export function isGuardReason(value: unknown): value is GuardReason {
+  return typeof value === "string" && value in GUARD_REASON_CODES;
+}
+
+const BY_CODE = new Map<number, GuardReason>(
+  Object.entries(GUARD_REASON_CODES).map(([name, code]) => [code, name as GuardReason]),
 );
 
 /** Human-readable, one-line meaning per reason, for surfacing to operators. */
-const EXPLANATIONS: Record<GuardReasonName, string> = {
+const EXPLANATIONS: Record<GuardReason, string> = {
   unauthorized: "The presented signature did not verify against the account's registered agent key.",
   already_initialized: "The guard account has already been initialized.",
   not_initialized: "The guard account has no registered agent key yet.",
@@ -62,19 +101,19 @@ const EXPLANATIONS: Record<GuardReasonName, string> = {
   create_contract_not_allowed: "The account may not authorize contract creation.",
 };
 
-export function reasonNameFromCode(code: number): GuardReasonName | undefined {
+export function reasonNameFromCode(code: number): GuardReason | undefined {
   return BY_CODE.get(code);
 }
 
 /** Accepts either the numeric enum value or its snake_case name. */
-export function reasonName(reason: number | string): GuardReasonName | string {
+export function reasonName(reason: number | string): GuardReason | string {
   if (typeof reason === "number") return BY_CODE.get(reason) ?? `unknown_reason_${reason}`;
   return reason;
 }
 
 export function explainReason(reason: number | string): string {
   const name = reasonName(reason);
-  return EXPLANATIONS[name as GuardReasonName] ?? `Unrecognised guard reason: ${String(reason)}`;
+  return EXPLANATIONS[name as GuardReason] ?? `Unrecognised guard reason: ${String(reason)}`;
 }
 
 import type { ContractCall } from "./tx.ts";
@@ -142,7 +181,7 @@ export class GuardBlockedError extends GuardError {
     this.code =
       typeof params.reason === "number"
         ? params.reason
-        : GUARD_REASON_CODES[name as GuardReasonName];
+        : GUARD_REASON_CODES[name as GuardReason];
     this.explanation = explanation;
     this.stage = params.stage;
     this.charged = params.charged ?? false;
@@ -182,7 +221,7 @@ export class GuardBlockedError extends GuardError {
 }
 
 /** Reasons that mean "the guard itself is not ready", as opposed to "this call violated policy". */
-export const ACCOUNT_STATE_REASONS: readonly string[] = [
+export const ACCOUNT_STATE_REASONS: readonly GuardReason[] = [
   "admin_frozen",
   "heartbeat_expired",
   "no_policy",

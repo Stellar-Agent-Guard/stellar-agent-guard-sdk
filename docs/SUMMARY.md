@@ -18,6 +18,7 @@
 * [Event Schema](event-schema.md)
 * [Integration Hooks](integration-hooks.md)
 * [Testnet Verification](verification.md)
+* [Benchmarks](benchmarks.md)
 * [Enforcement Scope](enforcement-scope.md)
 * [Contributing](contributing.md)
 * [FAQ](faq.md)

@@ -33,10 +33,13 @@ export {
   GuardBlockedError,
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
+  GUARD_REASONS,
   explainReason,
+  isGuardReason,
   reasonName,
   reasonNameFromCode,
   type GuardBlockedErrorParams,
+  type GuardReason,
   type GuardReasonName,
 } from "./reasons.ts";
 
@@ -144,6 +147,7 @@ export {
   type GuardTelemetryGapReason,
   type GuardTelemetryWatchParams,
   type PollResult,
+  type PollSleep,
   type TelemetryJitter,
 } from "./telemetry.ts";
 

@@ -8,14 +8,19 @@
  * refusal.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import {
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
+  GUARD_REASONS,
   GuardBlockedError,
   explainReason,
+  isGuardReason,
   reasonName,
   reasonNameFromCode,
+  type GuardReason,
 } from "../../src/reasons.ts";
 
 describe("reason code table", () => {
@@ -58,6 +63,45 @@ describe("reason code table", () => {
 
   it("returns undefined for a code the contract does not define", () => {
     assert.equal(reasonNameFromCode(999), undefined);
+  });
+});
+
+describe("GuardReason vocabulary", () => {
+  it("derives GUARD_REASONS from the single reason table", () => {
+    assert.deepEqual(Object.keys(GUARD_REASONS).sort(), Object.keys(GUARD_REASON_CODES).sort());
+    for (const reason of Object.values(GUARD_REASONS)) {
+      assert.equal(GUARD_REASONS[reason], reason);
+    }
+  });
+
+  it("keeps GUARD_REASONS and the vendored contract fixture in lockstep, both ways", () => {
+    const fixturePath = resolve(process.cwd(), "tests/fixtures/contract-fixtures.json");
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      entries: Array<{ result: string; reason: string; code: number | null }>;
+    };
+    const fixtureReasons = fixture.entries
+      .filter((entry) => entry.result === "blocked")
+      .map((entry) => entry.reason)
+      .sort();
+    // deepEqual on sorted arrays is bidirectional: a reason present in only one
+    // of the SDK vocabulary and the fixture fails in either direction.
+    assert.deepEqual(Object.keys(GUARD_REASONS).sort(), fixtureReasons);
+    for (const entry of fixture.entries) {
+      if (entry.result !== "blocked") continue;
+      assert.equal(GUARD_REASON_CODES[entry.reason as GuardReason], entry.code);
+    }
+  });
+
+  it("recognises only the known vocabulary", () => {
+    assert.equal(isGuardReason("paused"), true);
+    assert.equal(isGuardReason("not_a_reason"), false);
+    assert.equal(isGuardReason(22), false);
+  });
+
+  it("rejects an unknown reason at compile time", () => {
+    // @ts-expect-error `drain_the_account` is not part of the guard vocabulary
+    const notAReason: GuardReason = "drain_the_account";
+    assert.equal(notAReason, "drain_the_account");
   });
 });
 
