@@ -28,6 +28,7 @@ import { createHash } from "node:crypto";
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, type GuardAuthDecision } from "./events.ts";
 import { topicSymbols } from "./invoke.ts";
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 
 /** The event name topics this SDK knows how to interpret. */
 const KNOWN_TOPICS = new Set<string>(Object.values(GUARD_EVENT_TOPICS));
@@ -294,6 +295,14 @@ export interface GuardTelemetryConfig {
   guard: string;
   /** RPC URL, only used for error messages. */
   rpcUrl?: string;
+  /**
+   * Optional log sink for this listener's diagnostics: a summary of every page
+   * received (with how many events were dropped as unrecognised), a coverage
+   * gap, and a poll that failed or was aborted.
+   *
+   * Omitted — the default — the listener says nothing at all.
+   */
+  logger?: GuardLoggerInput | undefined;
 }
 
 export interface PollResult {
@@ -485,9 +494,11 @@ export interface GuardTelemetryWatchParams {
 
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
+  private readonly logger: GuardLogger;
 
   constructor(config: GuardTelemetryConfig) {
     this.config = config;
+    this.logger = resolveLogger(config.logger);
   }
 
   /**
@@ -517,6 +528,11 @@ export class GuardTelemetryListener {
 
     const response = await this.config.server.getEvents(request);
     const events: GuardEvent[] = [];
+    // Kept rather than merely skipped: an event this listener cannot interpret
+    // is a coverage fact a host may need to see, and counting it is the only
+    // way to tell "the guard was quiet" from "the guard spoke in a vocabulary
+    // this SDK version does not know".
+    let dropped = 0;
     for (const event of response.events) {
       const contractId = event.contractId ? String(event.contractId) : null;
       const decoded = interpret(
@@ -534,14 +550,23 @@ export class GuardTelemetryListener {
         },
       );
       if (decoded) events.push(decoded);
+      else dropped += 1;
     }
+    const oldestLedger = typeof response.oldestLedger === "number" ? response.oldestLedger : null;
+    this.logger.debug("telemetry page received", {
+      guard: this.config.guard,
+      events: events.length,
+      dropped,
+      latestLedger: response.latestLedger,
+      oldestLedger,
+    });
     return {
       events,
       cursor: response.cursor,
       latestLedger: response.latestLedger,
       // Best-effort: a host that omits the retention boundary gets no gap
       // detection, rather than a boundary invented from `latestLedger`.
-      oldestLedger: typeof response.oldestLedger === "number" ? response.oldestLedger : null,
+      oldestLedger,
     };
   }
 
@@ -612,7 +637,16 @@ export class GuardTelemetryListener {
         // rejection of the request it arrived during. That is teardown, not a
         // telemetry failure: end the stream quietly instead of throwing at the
         // `for await` consumer or leaving an unhandled rejection behind.
-        if (signal?.aborted) return;
+        if (signal?.aborted) {
+          this.logger.debug("telemetry watch aborted with a request in flight", {
+            guard: this.config.guard,
+          });
+          return;
+        }
+        this.logger.warn(
+          `telemetry poll failed: ${error instanceof Error ? error.message : String(error)}`,
+          { guard: this.config.guard },
+        );
         throw error;
       }
       cursor = page.cursor;
@@ -640,6 +674,13 @@ export class GuardTelemetryListener {
           retainedFromLedger: page.oldestLedger,
           retainedToLedger: page.latestLedger,
         };
+        // Also reported through the logger, because `onGap` is only wired when a
+        // caller supplies it and a pruned range is worth seeing in a log even
+        // for a listener that did not ask for a callback.
+        this.logger.warn(
+          `telemetry coverage gap: ledgers ${gap.fromLedger}-${gap.toLedger} are no longer retained by the RPC`,
+          { ...gap, guard: this.config.guard },
+        );
         try {
           params.onGap(gap);
         } catch {
