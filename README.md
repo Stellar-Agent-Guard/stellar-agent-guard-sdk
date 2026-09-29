@@ -253,6 +253,41 @@ for await (const events of listener.watch({
 }
 ```
 
+### Aborting a watch: what cancellation does and does not cover
+
+`watch({ signal })` ends the stream — aborting is a normal exit, never a throw.
+Abort is honoured at **loop boundaries**: before the first request (an
+already-aborted listener issues no RPC call at all, not even the
+`getLatestLedger` probe that resolves a default `startLedger`), before each
+poll, and during the delay between polls. The default delay's timer is cleared
+on abort, so a stopped listener leaves no open handle behind for a Node process
+or a test suite to hang on.
+
+```ts
+const controller = new AbortController();
+for await (const events of listener.watch({ signal: controller.signal })) {
+  handle(events);
+}
+// Runtime teardown, a new tool call, or a shutdown hook:
+controller.abort(); // the loop ends, and no further getEvents is issued
+```
+
+**One limitation, stated rather than papered over: a request already in flight
+is not cancelled.** `@stellar/stellar-sdk` ^17 (the version this package
+depends on, `dependencies` in `package.json`) declares
+`getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, and
+its internal JSON-RPC `postObject` helper takes no per-request config, so there
+is no supported way to plumb a signal through to the socket. The listener
+consequently stops *issuing* requests immediately but cannot cancel one already
+sent: the worst case between `signal.abort()` and the iterator ending is **one
+request duration** — never a whole poll interval. The rejection of that
+in-flight request (or of an abort-aware `sleep`) is swallowed as teardown, so an
+aborted watch ends quietly in a `for await` loop instead of surfacing an
+`AbortError` or an unhandled rejection.
+
+Revisit this when the SDK adds per-request signals to `getEvents`; until then,
+read `signal` as *stop soon and stop asking*, not *cancel the socket*.
+
 ### Framework Middleware (LangChain & ElizaOS)
 
 Plug-and-play middleware intercepts agent actions before tools are executed:
@@ -481,7 +516,7 @@ one-shot form.
 - [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)`
-  - `watch(signal?: AbortSignal): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events.
+  - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover).
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct.
 - `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
 - `policyFromScVal(scVal)` — Alias for callers using the issue's original function name.
