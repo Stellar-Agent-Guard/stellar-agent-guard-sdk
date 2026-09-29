@@ -33,10 +33,13 @@ export {
   GuardBlockedError,
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
+  GUARD_REASONS,
   explainReason,
+  isGuardReason,
   reasonName,
   reasonNameFromCode,
   type GuardBlockedErrorParams,
+  type GuardReason,
   type GuardReasonName,
 } from "./reasons.ts";
 
@@ -84,6 +87,7 @@ export {
   type InvokePipelineStep,
   type InvokeParams,
   type InvokeStepEvent,
+  type RetryableInvokeFailure,
 } from "./invoke.ts";
 
 export {
@@ -145,6 +149,7 @@ export {
   type GuardTelemetryGapReason,
   type GuardTelemetryWatchParams,
   type PollResult,
+  type PollSleep,
   type TelemetryJitter,
 } from "./telemetry.ts";
 
@@ -158,6 +163,7 @@ export {
   describeSimulationResources,
   describeSubmissionFailure,
   describeTransactionResult,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
@@ -202,4 +208,3 @@ export {
   type ElizaGuardOptions,
   type ElizaValidator,
 } from "./adapters/elizaos.ts";
-

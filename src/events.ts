@@ -37,6 +37,8 @@
  *      its name; the unix-second timestamp arrives as event **data**, not as a
  *      topic: `data = { at: u64 }`.
  */
+import type { GuardReason } from "./reasons.ts";
+
 export const GUARD_EVENT_TOPICS = {
   /** Every policy decision, in-path and pre-flight. */
   authChecked: "event_auth_checked",
@@ -68,7 +70,7 @@ export type GuardAuthResult =
  */
 export interface GuardAuthDecision {
   result: GuardAuthResult;
-  reason: string | null;
+  reason: GuardReason | null;
   /** Where the event was observed: a committed ledger event, or a pre-broadcast diagnostic. */
   source: "ledger" | "diagnostic";
 }
@@ -96,6 +98,11 @@ export function decodeAuthDecision(
   // An allowed decision carries the empty symbol as its reason; treat that as
   // "no reason" rather than surfacing `""` to operators.
   const rawReason = topics[2];
-  const reason = rawReason && rawReason.length > 0 ? rawReason : null;
+  // The contract's reason vocabulary is a closed set (`GuardReason`, derived
+  // from `src/reasons.ts`, and pinned to the vendored fixture by
+  // `tests/unit/reasons.test.ts`). A symbol outside it is drift the fixture test
+  // catches in CI, so the decoded value is surfaced as-is rather than silently
+  // dropped here.
+  const reason = rawReason && rawReason.length > 0 ? (rawReason as GuardReason) : null;
   return { result, reason, source };
 }

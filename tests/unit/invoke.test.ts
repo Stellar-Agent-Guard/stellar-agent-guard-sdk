@@ -577,6 +577,107 @@ describe("invoke() onStep: shared step vocabulary", () => {
   });
 });
 
+/** Deterministic coverage for the per-account invoke queue. */
+describe("invoke sequence reservation", () => {
+  it("retries a sequence collision once after refreshing the account sequence", async () => {
+    const source = Keypair.random();
+    const sentSequences: string[] = [];
+    let sends = 0;
+    const simulation = {
+      transactionData: new SorobanDataBuilder().setResources(1, 0, 0).build(),
+      minResourceFee: "1",
+      result: { auth: [] },
+    };
+    const server = {
+      getAccount: async () => new Account(source.publicKey(), "7"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => simulation,
+      sendTransaction: async (transaction: { sequence: string }) => {
+        sentSequences.push(transaction.sequence);
+        sends += 1;
+        return sends === 1
+          ? { status: "ERROR", hash: "bad-seq", errorResult: { code: "tx_bad_seq" } }
+          : { status: "PENDING", hash: "good-seq" };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 101,
+        events: { contractEventsXdr: [] },
+      }),
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke({
+      server,
+      source,
+      call: { contract: TOKEN, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+    });
+
+    assert.equal(outcome.kind, "allowed");
+    assert.deepEqual(sentSequences, ["8", "9"]);
+  });
+
+  it("serializes concurrent calls and gives each transaction a distinct sequence", async () => {
+    const source = Keypair.random();
+    const simulated: string[] = [];
+    const sent: string[] = [];
+    let simulationsStarted = 0;
+    let releaseFirst!: () => void;
+    const firstSimulation = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const simulation = {
+      transactionData: new SorobanDataBuilder().setResources(1, 0, 0).build(),
+      minResourceFee: "1",
+      result: { auth: [] },
+    };
+    const server = {
+      // The RPC snapshot deliberately never advances: the second invoke can
+      // only get a fresh sequence from the per-account reservation.
+      getAccount: async () => new Account(source.publicKey(), "7"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async (transaction: { sequence: string }) => {
+        simulated.push(transaction.sequence);
+        simulationsStarted += 1;
+        if (simulationsStarted === 1) await firstSimulation;
+        return simulation;
+      },
+      sendTransaction: async (transaction: { sequence: string }) => {
+        sent.push(transaction.sequence);
+        return { status: "PENDING", hash: `tx-${sent.length}` };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 101,
+        events: { contractEventsXdr: [] },
+      }),
+    } as unknown as rpc.Server;
+
+    const params = {
+      server,
+      source,
+      call: { contract: TOKEN, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+    };
+    const first = invoke(params);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const second = invoke(params);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // The second invoke must still be waiting behind the first one's queue.
+    assert.equal(simulationsStarted, 1);
+    releaseFirst();
+    const outcomes = await Promise.all([first, second]);
+
+    assert.deepEqual(outcomes.map((outcome) => outcome.kind), ["allowed", "allowed"]);
+    // TransactionBuilder consumes the base account sequence and emits base + 1,
+    // so the reservation is what keeps the two broadcast envelopes distinct.
+    assert.deepEqual(sent, ["8", "9"]);
+    assert.deepEqual(simulated, ["8", "8", "9", "9"]);
+  });
+});
+
 /**
  * The retry boundary itself: how many attempts, how long between them, and what
  * comes back when the budget runs out.
