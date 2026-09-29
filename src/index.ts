@@ -84,6 +84,7 @@ export {
   type InvokePipelineStep,
   type InvokeParams,
   type InvokeStepEvent,
+  type RetryableInvokeFailure,
 } from "./invoke.ts";
 
 export {
@@ -157,6 +158,7 @@ export {
   describeSimulationResources,
   describeSubmissionFailure,
   describeTransactionResult,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
@@ -201,4 +203,3 @@ export {
   type ElizaGuardOptions,
   type ElizaValidator,
 } from "./adapters/elizaos.ts";
-

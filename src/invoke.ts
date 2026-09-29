@@ -33,6 +33,7 @@ import {
   buildInitialEnvelope,
   describeSimulationResources,
   describeSubmissionFailure,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   parseSimulationResourceFee,
   signAccountAuthEntry,
@@ -67,10 +68,27 @@ export interface GuardAuthorization {
 export const INVOKE_ERROR_CAUSES = {
   undetermined: "undetermined",
   staleLedgerResourceLimit: "stale_ledger_resource_limit",
+  sequenceNumberCollision: "sequence_number_collision",
 } as const;
 
 export type InvokeErrorCause =
   (typeof INVOKE_ERROR_CAUSES)[keyof typeof INVOKE_ERROR_CAUSES];
+
+/**
+ * Failures that a fresh invocation pipeline can fix: a stale-ledger resource
+ * declaration (see `isStaleLedgerResourceFailure`) or a sequence-number
+ * collision (see `isSequenceNumberFailure`) in `tx.ts`. Both share the single
+ * bounded retry policy in `invoke`.
+ */
+export type RetryableInvokeFailure =
+  | "stale_ledger_resource_limit"
+  | "sequence_number_collision";
+
+/** The coarse cause each retryable failure reports once the budget is spent. */
+const RETRYABLE_CAUSES = {
+  stale_ledger_resource_limit: INVOKE_ERROR_CAUSES.staleLedgerResourceLimit,
+  sequence_number_collision: INVOKE_ERROR_CAUSES.sequenceNumberCollision,
+} as const satisfies Record<RetryableInvokeFailure, InvokeErrorCause>;
 
 /** The error arm returned by one invocation attempt. */
 export interface InvokeErrorOutcome {
@@ -82,11 +100,8 @@ export interface InvokeErrorOutcome {
   diagnosticEvents: unknown[];
   /** Coarse cause; absent for a dry run because no failure was classified. */
   cause?: InvokeErrorCause;
-  /**
-   * Set when the failure is a stale-ledger resource declaration that a
-   * re-simulation can fix. See `isStaleLedgerResourceFailure` in `tx.ts`.
-   */
-  retryable?: "stale_ledger_resource_limit";
+  /** Set when a re-simulation against fresh state can fix the failure. */
+  retryable?: RetryableInvokeFailure;
 }
 
 /**
@@ -116,9 +131,9 @@ export class InvokeRetryError extends Error {
 
   constructor(params: { attempts: number; lastOutcome: InvokeErrorOutcome }) {
     const lastCause =
-      params.lastOutcome.retryable === "stale_ledger_resource_limit"
-        ? INVOKE_ERROR_CAUSES.staleLedgerResourceLimit
-        : (params.lastOutcome.cause ?? INVOKE_ERROR_CAUSES.undetermined);
+      params.lastOutcome.retryable === undefined
+        ? (params.lastOutcome.cause ?? INVOKE_ERROR_CAUSES.undetermined)
+        : RETRYABLE_CAUSES[params.lastOutcome.retryable];
     super(
       `stellar-agent-guard invoke retry budget exhausted after ${params.attempts} attempt(s) ` +
         `(last cause: ${lastCause})\n${params.lastOutcome.detail}`,
@@ -558,45 +573,127 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
  * decide whether a block is an expected outcome (agents hitting a guardrail) or
  * a failure worth surfacing.
  *
+ * The whole invocation, submission included, is serialized per source account
+ * so two concurrent calls can never build from the same account sequence.
+ *
  * With `dryRun`, the pipeline stops after the enforced simulation and returns a
  * structured {@link InvokeDryRunResult} instead of an `invoke()` outcome: no
  * transaction is ever assembled, signed for broadcast, or submitted, so there is
  * no hash to report and nothing was charged.
  *
- * Stale ledger resource failures are retried with bounded full-jitter backoff.
- * Every attempt starts a fresh invocation pipeline, including discovery and
- * enforced simulation, so the resource declaration is always priced against
- * current ledger state. Non-retryable outcomes return immediately and never
- * sleep. When the budget is exhausted, the returned `InvokeRetryError` carries
- * the attempt count and the last retry cause.
+ * Stale-ledger resource failures and sequence-number collisions are retried
+ * with bounded full-jitter backoff. Every attempt starts a fresh invocation
+ * pipeline, including discovery and enforced simulation, so the resource
+ * declaration is always priced against current ledger state. Non-retryable
+ * outcomes return immediately and never sleep. When the budget is exhausted,
+ * the returned `InvokeRetryError` carries the attempt count and the last retry
+ * cause.
  */
+type AccountState = {
+  queue: Promise<void>;
+  lastReservedSequence?: bigint;
+};
+
+const accountStates = new WeakMap<object, Map<string, AccountState>>();
+
+function accountStateFor(server: rpc.Server, publicKey: string): AccountState {
+  let states = accountStates.get(server);
+  if (!states) {
+    states = new Map<string, AccountState>();
+    accountStates.set(server, states);
+  }
+  let state = states.get(publicKey);
+  if (!state) {
+    state = { queue: Promise.resolve() };
+    states.set(publicKey, state);
+  }
+  return state;
+}
+
+/**
+ * Serialize invoke() for one source account, including its submission.
+ *
+ * The queue is scoped to the RPC server object as well as the account key: the
+ * same account can have an unrelated sequence on a different network/server.
+ * A rejected task releases the queue in `finally`, so one failed transaction
+ * cannot strand all later calls.
+ */
+async function withAccountQueue<T>(
+  server: rpc.Server,
+  publicKey: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const state = accountStateFor(server, publicKey);
+  const previous = state.queue;
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.queue = current;
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (state.queue === current) state.queue = Promise.resolve();
+  }
+}
+
+/**
+ * Reserve a sequence number for an account.
+ *
+ * The RPC snapshot can remain one transaction behind immediately after a
+ * successful broadcast (and test doubles commonly do). Remember the last
+ * reservation and advance past it when the next fetch is not newer. This also
+ * makes the reservation safe when `enforceCall` is used directly, while the
+ * invoke queue still guarantees fetch → build → submit ordering.
+ */
+function reserveNextSequence(
+  server: rpc.Server,
+  publicKey: string,
+  fetchedSequence: string,
+): string {
+  const state = accountStateFor(server, publicKey);
+  const fetched = BigInt(fetchedSequence);
+  const next =
+    state.lastReservedSequence !== undefined && state.lastReservedSequence >= fetched
+      ? state.lastReservedSequence + 1n
+      : fetched;
+  state.lastReservedSequence = next;
+  return next.toString();
+}
+
 export function invoke(params: InvokeParams & { dryRun: true }): Promise<InvokeDryRunResult>;
 export function invoke(
   params: InvokeParams & { dryRun?: false },
 ): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
 export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
-  const retry = resolveRetryOptions(params.retry);
   // A dry run performs exactly one pass: it never reaches broadcast, so there
-  // is no stale-ledger rejection to retry and no sleep to justify.
+  // is no stale-ledger rejection to retry, no sleep to justify, and nothing to
+  // serialize against the account queue.
   if (params.dryRun) return invokeDryRun(params);
 
-  let attempts = 0;
+  const sourceKey = await params.source.publicKey();
+  return withAccountQueue(params.server, sourceKey, async () => {
+    const retry = resolveRetryOptions(params.retry);
+    let attempts = 0;
 
-  while (true) {
-    attempts += 1;
-    // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
-    const outcome = await invokePipeline(params, attempts - 1);
+    while (true) {
+      attempts += 1;
+      // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
+      const outcome = await invokePipeline(params, attempts - 1);
 
-    if (outcome.kind !== "error" || outcome.retryable !== "stale_ledger_resource_limit") {
-      return outcome;
+      if (outcome.kind !== "error" || outcome.retryable === undefined) {
+        return outcome;
+      }
+      if (attempts >= retry.maxAttempts) {
+        return new InvokeRetryError({ attempts, lastOutcome: outcome });
+      }
+
+      await retry.sleep(fullJitterDelay(attempts, retry));
     }
-    if (attempts >= retry.maxAttempts) {
-      return new InvokeRetryError({ attempts, lastOutcome: outcome });
-    }
-
-    await retry.sleep(fullJitterDelay(attempts, retry));
-  }
+  });
 }
 
 /**
@@ -816,17 +913,26 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
         charged: true,
       };
     }
+    const staleLedger = isStaleLedgerResourceFailure(submission.failure);
+    // A sequence collision is only expected when something outside this queue
+    // broadcasts for the same account; inside the queue it means the RPC
+    // snapshot lagged further than the per-account reservation assumed.
+    const sequenceCollision = !staleLedger && isSequenceNumberFailure(submission.failure);
     return {
       kind: "error",
       detail,
       error: new BroadcastError(detail, { transactionHash: submission.hash }),
       diagnosticEvents: events,
-      cause: isStaleLedgerResourceFailure(submission.failure)
+      cause: staleLedger
         ? INVOKE_ERROR_CAUSES.staleLedgerResourceLimit
-        : INVOKE_ERROR_CAUSES.undetermined,
-      ...(isStaleLedgerResourceFailure(submission.failure)
+        : sequenceCollision
+          ? INVOKE_ERROR_CAUSES.sequenceNumberCollision
+          : INVOKE_ERROR_CAUSES.undetermined,
+      ...(staleLedger
         ? { retryable: "stale_ledger_resource_limit" as const }
-        : {}),
+        : sequenceCollision
+          ? { retryable: "sequence_number_collision" as const }
+          : {}),
     };
   }
   return { kind: "allowed", submission };
@@ -866,8 +972,10 @@ export async function enforceCall(
     // `TransactionBuilder` advances the sequence of the `Account` it is handed,
     // so every build in this function gets its own instance built from the same
     // base sequence. Sharing one would silently build the second transaction on
-    // sequence N+2 and the network would reject it with `tx_bad_seq`.
-    nextSeq = sourceAccount.sequenceNumber();
+    // sequence N+2 and the network would reject it with `tx_bad_seq`. The
+    // per-account reservation also advances past an RPC snapshot that has not
+    // yet observed the preceding submission.
+    nextSeq = reserveNextSequence(server, sourcePubKey, sourceAccount.sequenceNumber());
     freshAccount = () => new Account(sourcePubKey, nextSeq);
 
     // ── Step 1: discover required authorizations ──────────────────────────
