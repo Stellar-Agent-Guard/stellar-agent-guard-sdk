@@ -125,6 +125,7 @@ chat log.
 npm run typecheck
 npm run lint
 npm test
+npm run build && npm run test:exports   # packs the tarball and resolves every export
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 ```
 
@@ -134,6 +135,26 @@ npm run test:integration   # live testnet; needs .env.phase2 (template: .env.pha
 - **Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
   (template: `.env.phase2.example`). Not run on pull requests; see
   "The live testnet suite is not run on every PR" above.
+
+Both tiers run through one runner configuration, `tests/test.config.ts`, read by
+`scripts/run-tests.ts`. Projects are named and explicit:
+
+| Script | Project(s) | Notes |
+| --- | --- | --- |
+| `npm test` / `npm run test:unit` | `unit` (`tests/unit`) | Offline; Node test-runner default concurrency. |
+| `npm run test:integration` | `integration` (`tests/integration`) | Live; concurrency pinned to `1`, because the files share on-chain state. |
+| `npm run test:all` | every project, one run | Both suites in a single invocation. |
+| `npm run test:coverage` | every project, one run, coverage | Node's `--experimental-test-coverage`; needs `.env.phase2`, because the integration project is included. |
+
+Both projects share the `tsx` transform, so the same `src/` modules load
+identically in either tier. A project's invariants — its directory has matching
+files, the live project stays serialised — are asserted by
+`tests/unit/test-runner.test.ts` rather than left to convention.
+
+When `.env.phase2` is absent the live suite fails once with the copy/deploy
+pointer (`missingEnvFileMessage` in `tests/integration/harness.ts`) instead of a
+bare `ENOENT`; an existing-but-incomplete file still names every missing key at
+once.
 
 Fixtures that encode real network shapes are committed and refreshed when the
 code or the SDK beneath them changes:
