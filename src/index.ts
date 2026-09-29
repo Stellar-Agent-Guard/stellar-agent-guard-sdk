@@ -21,21 +21,39 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  BroadcastError,
+  ContractResponseError,
+  GuardError,
+  PolicyDecodeError,
+  SigningError,
+  SimulationError,
+} from "./errors.ts";
+
+export {
   GuardBlockedError,
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
+  GUARD_REASONS,
   explainReason,
+  isGuardReason,
   reasonName,
   reasonNameFromCode,
+  type GuardBlockedErrorParams,
+  type GuardReason,
   type GuardReasonName,
 } from "./reasons.ts";
 
 export {
   decodeCheckResult,
+  decodePolicy,
   deadManRemaining,
   describePolicy,
+  extractTransferAmount,
+  fetchGuardPolicyAndWindow,
   isDeadManFrozen,
+  policyFromScVal,
   policyToScVal,
+  readPersistentEntry,
   type CheckResult,
   type GuardStatus,
   type PolicyConfig,
@@ -51,23 +69,45 @@ export {
 } from "./events.ts";
 
 export {
+  DEFAULT_INVOKE_RETRY_OPTIONS,
   enforceCall,
+  INVOKE_ERROR_CAUSES,
+  InvokeRetryError,
   invoke,
   topicSymbols,
   type EnforcementOutcome,
   type GuardAuthorization,
+  type InvokeDryRunResult,
+  type InvokeDryRunStepName,
+  type InvokeDryRunVerdict,
+  type InvokeErrorCause,
+  type InvokeErrorOutcome,
+  type InvokeOptions,
   type InvokeOutcome,
+  type InvokePipelineStep,
   type InvokeParams,
+  type InvokeStepEvent,
+  type RetryableInvokeFailure,
 } from "./invoke.ts";
+
+export {
+  TRACE_STEP_NAMES,
+  type TraceStepName,
+  type TraceStepStatus,
+} from "./trace.ts";
 
 export {
   InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
   preflight,
+  preflightBatch,
   validateContractCall,
+  type CheckBatchOptions,
   type PolicyRevision,
+  type PreFlightBatchDecision,
   type PreFlightCacheOptions,
+  type PreFlightCheckOptions,
   type PreFlightConfig,
   type PreFlightDecision,
   type PreFlightInterceptorOptions,
@@ -81,37 +121,80 @@ export {
   feeBreakdown,
   formatFee,
   precheckCost,
+  precheckCostWithDecision,
+  resourceBreakdownFromSimulation,
   type CostDecision,
   type CostPreCheckConfig,
+  type CostWithDecision,
   type FeeBreakdown,
+  type ResourceBreakdown,
 } from "./cost.ts";
 
 export {
+  DEFAULT_JITTER_FRACTION,
   GuardTelemetryListener,
-  InMemoryCursorStore,
+  computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
   guardEventsFromDiagnostics,
   isAllowedDecision,
+  mergeGuardEventStreams,
   telemetryFromDecision,
-  type CursorStore,
+  type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardEventContext,
   type GuardEventIdentityInput,
   type GuardEventKind,
+  type GuardEventStream,
   type GuardTelemetryConfig,
+  type GuardTelemetryGap,
+  type GuardTelemetryGapReason,
+  type GuardTelemetryUnifiedParams,
+  type GuardTelemetryWatchParams,
+  type PollResult,
+  type PollSleep,
+  type TelemetryJitter,
 } from "./telemetry.ts";
 
 export {
   GUARD_STORAGE_KEYS,
+  INCLUSION_FEE,
+  SIG_EXPIRATION_LEDGERS,
+  assembleFromSimulation,
+  buildGuardAuthEntry,
+  buildInitialEnvelope,
+  describeSimulationResources,
+  describeSubmissionFailure,
+  describeTransactionResult,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
+  verifyAgentSignature,
+  type AdminSigner,
   type AgentSigner,
   type ContractCall,
+  type GuardCredentialType,
+  type SimulationOutcome,
   type SubmissionResult,
 } from "./tx.ts";
+
+export {
+  DEFAULT_NETWORK_PASSPHRASE,
+  agentPubkeyToScVal,
+  buildFreezeCall,
+  buildRotateAgentKeyCall,
+  buildSetPolicyCall,
+  buildUnfreezeCall,
+  submitFreeze,
+  submitRotateAgentKey,
+  submitSetPolicy,
+  submitUnfreeze,
+  type AdminOpParams,
+  type RotateAgentKeyParams,
+  type SetPolicyParams,
+} from "./admin.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
