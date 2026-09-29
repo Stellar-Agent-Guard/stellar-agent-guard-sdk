@@ -14,6 +14,11 @@
 #
 # A green `ci` means the required checks ran. It does not mean the live suite ran
 # against this change — the evidence file it points at is the record for that.
+#
+# PERFORMANCE (issue #101): the informational decode-path benchmark used to run
+# inside `ci`, where it was the largest single step (~13.5s of a ~48s job). It
+# now runs as a separate, never-gating job beside `ci` — see `bench` below — so
+# the required check's wall time is the gated path only, with no step dropped.
 name: ci
 
 on:
@@ -41,8 +46,12 @@ jobs:
           node-version: 24
           cache: npm
 
+      # --no-audit: the registry audit round-trip is pure CI overhead — the
+      #   result is never read here and it does not gate anything. --no-fund:
+      #   funding banners are local noise. Same flags the export-map consumer
+      #   install already uses (scripts/check-export-map.ts).
       - name: install
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
       - name: typecheck
         run: npm run typecheck
@@ -66,13 +75,6 @@ jobs:
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
 
-      # Informational only, never gating: shared runners are too noisy for a
-      # wall-time threshold to mean anything. The committed baseline lives in
-      # docs/benchmarks.md; compare changes on a developer machine, not here.
-      - name: decode-path benchmarks (informational)
-        run: npm run bench
-        continue-on-error: true
-
       # Structural validation of the evidence record (issue #65): asserts the
       # document's expected sections and row minimums, and fails loudly when its
       # shape drifts. This is what stops the file-list gate below going vacuously
@@ -90,3 +92,39 @@ jobs:
         run: |
           git fetch --no-tags origin "$BASE_REF"
           node scripts/check-enforcement-evidence.ts "origin/$BASE_REF" HEAD
+
+  # Informational only, never gating: shared runners are too noisy for a
+  # wall-time threshold to mean anything. The committed baseline lives in
+  # docs/benchmarks.md; compare changes on a developer machine, not here.
+  #
+  # It runs as its own job beside `ci` rather than inside it (issue #101):
+  # measured on baseline run
+  # https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/actions/runs/36628093146,
+  # the bench step alone was ~13.5s of the 48s `ci` job — the largest single
+  # item on the gated critical path. Splitting it out keeps every step that used
+  # to run while `ci`'s wall time drops to the gating path only. The split costs
+  # this job one warm install behind the same shared `cache: npm` (~3s) against
+  # ~13.5s removed from `ci`, so parallel time beats cache-rebuild cost.
+  # `continue-on-error` at both levels: neither the benchmark's own failure nor
+  # runner noise in this job may redden a PR — branch protection gates on `ci`.
+  bench:
+    name: decode-path benchmarks (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      # Shallow on purpose: the benchmark imports src/ through tsx — nothing
+      # here diffs history (the evidence gate that needs full history is in `ci`).
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci --no-audit --no-fund
+
+      - name: decode-path benchmarks (informational)
+        run: npm run bench
+        continue-on-error: true
