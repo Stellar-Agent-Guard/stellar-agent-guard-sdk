@@ -59,6 +59,12 @@ jobs:
       - name: smoke test export resolution
         run: npm run test:smoke
 
+      # Docs-vs-package.json consistency: every `npm run <name>` referenced in
+      # README/CONTRIBUTING/docs must exist in package.json scripts. Fails CI on
+      # drift so docs can't reference scripts that were renamed or removed.
+      - name: docs script consistency
+        run: npm run check:doc-scripts
+
       # Pack the tarball, install it into a temp consumer, and import the root
       # and every declared subpath through a real resolver — and prove that a
       # path *not* in the export map is refused. The smoke step above imports
