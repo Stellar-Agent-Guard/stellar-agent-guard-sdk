@@ -519,6 +519,141 @@ export interface GuardTelemetryWatchParams {
 }
 
 /**
+ * Sliding-window counters for allowed/blocked decisions (issue #68).
+ *
+ * Opt-in via `GuardTelemetryListenerOptions.counters`. When absent, no counter
+ * state is allocated at all and `stats()` returns `null` — memory discipline
+ * matters for a listener that may run for the lifetime of an agent.
+ *
+ * Exactly one of `windowEvents` / `windowMs` selects the eviction rule:
+ *
+ * - `windowEvents` (preferred): the window holds the last N decisions. No
+ *   clock is consulted, so the counters are deterministic under test and
+ *   unaffected by wall-clock skew.
+ * - `windowMs`: time-based eviction, using the injected `clock`. Time-based
+ *   windows are a follow-up to the count-based form; the count form is the
+ *   one the acceptance criteria exercise.
+ */
+export interface GuardTelemetryCountersOptions {
+  /** Keep the last N decisions. Mutually exclusive with `windowMs`. */
+  windowEvents?: number;
+  /** Keep decisions observed within the last `windowMs` milliseconds. */
+  windowMs?: number;
+  /**
+   * Clock used for `windowMs` eviction and for `windowStart`. Defaults to
+   * `Date.now`. Injected so tests need no wall-clock waits.
+   */
+  clock?: () => number;
+}
+
+/** A snapshot of the sliding-window counters. Never mutated by callers. */
+export interface GuardTelemetryStats {
+  /** Decisions observed in the window whose verdict was `allowed`. */
+  allowed: number;
+  /** Decisions observed in the window whose verdict was `blocked`. */
+  blocked: number;
+  /** Blocked decisions in the window, keyed by reason. */
+  byReason: Record<string, number>;
+  /** Timestamp (per the injected clock) of the oldest decision in the window. */
+  windowStart: number;
+}
+
+/** One decision recorded in the window, retained for eviction. */
+interface CounterEntry {
+  verdict: "allowed" | "blocked";
+  reason: string | null;
+  at: number;
+}
+
+/**
+ * Sliding-window counters over guard decisions.
+ *
+ * Fed one event at a time by the listener; `stats()` returns a fresh snapshot
+ * object each call so a caller cannot mutate internal state by holding onto it.
+ */
+export class GuardDecisionCounters {
+  private readonly windowEvents: number | null;
+  private readonly windowMs: number | null;
+  private readonly clock: () => number;
+  private readonly entries: CounterEntry[] = [];
+  private allowed = 0;
+  private blocked = 0;
+  private readonly byReason = new Map<string, number>();
+
+  constructor(options: GuardTelemetryCountersOptions) {
+    const { windowEvents, windowMs } = options;
+    if (windowEvents !== undefined && windowMs !== undefined) {
+      throw new Error("counters: specify windowEvents or windowMs, not both");
+    }
+    if (windowEvents === undefined && windowMs === undefined) {
+      throw new Error("counters: windowEvents or windowMs is required");
+    }
+    if (windowEvents !== undefined && (!Number.isInteger(windowEvents) || windowEvents <= 0)) {
+      throw new Error("counters: windowEvents must be a positive integer");
+    }
+    if (windowMs !== undefined && (!Number.isFinite(windowMs) || windowMs <= 0)) {
+      throw new Error("counters: windowMs must be a positive number");
+    }
+    this.windowEvents = windowEvents ?? null;
+    this.windowMs = windowMs ?? null;
+    this.clock = options.clock ?? Date.now;
+  }
+
+  /** Record one decision. Non-decision events are ignored by the caller. */
+  record(event: GuardEvent): void {
+    if (event.kind !== "auth_checked" || event.decision === null) return;
+    const verdict = isAllowedDecision(event.decision) ? "allowed" : "blocked";
+    const reason = event.decision.reason ?? null;
+    const at = this.clock();
+    this.entries.push({ verdict, reason, at });
+    if (verdict === "allowed") this.allowed += 1;
+    else {
+      this.blocked += 1;
+      if (reason !== null) this.byReason.set(reason, (this.byReason.get(reason) ?? 0) + 1);
+    }
+    this.evict();
+  }
+
+  /** Drop entries that have aged out of the window. */
+  private evict(): void {
+    if (this.windowEvents !== null) {
+      while (this.entries.length > this.windowEvents) {
+        this.remove(this.entries.shift()!);
+      }
+      return;
+    }
+    const cutoff = this.clock() - (this.windowMs ?? 0);
+    while (this.entries.length > 0 && this.entries[0]!.at < cutoff) {
+      this.remove(this.entries.shift()!);
+    }
+  }
+
+  private remove(entry: CounterEntry): void {
+    if (entry.verdict === "allowed") {
+      this.allowed -= 1;
+      return;
+    }
+    this.blocked -= 1;
+    if (entry.reason !== null) {
+      const next = (this.byReason.get(entry.reason) ?? 0) - 1;
+      if (next <= 0) this.byReason.delete(entry.reason);
+      else this.byReason.set(entry.reason, next);
+    }
+  }
+
+  /** A fresh snapshot; callers may mutate it freely. */
+  stats(): GuardTelemetryStats {
+    this.evict();
+    return {
+      allowed: this.allowed,
+      blocked: this.blocked,
+      byReason: Object.fromEntries(this.byReason),
+      windowStart: this.entries.length > 0 ? this.entries[0]!.at : this.clock(),
+    };
+  }
+}
+
+/**
  * A batch of already-decoded diagnostic events, with the time they were
  * observed. This is the second source the unified stream (`watchAll()`) merges
  * with the committed ledger feed — see `docs/event-schema.md`.
@@ -669,9 +804,20 @@ export async function* mergeGuardEventStreams(
 
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
+  private readonly counters: GuardDecisionCounters | null;
 
-  constructor(config: GuardTelemetryConfig) {
+  constructor(config: GuardTelemetryConfig, options: GuardTelemetryListenerOptions = {}) {
     this.config = config;
+    this.counters = options.counters ? new GuardDecisionCounters(options.counters) : null;
+  }
+
+  /**
+   * Snapshot of the sliding-window decision counters, or `null` when counters
+   * were not opted into. The returned object is a copy: mutating it does not
+   * affect the listener.
+   */
+  stats(): GuardTelemetryStats | null {
+    return this.counters ? this.counters.stats() : null;
   }
 
   /**
@@ -876,8 +1022,20 @@ export class GuardTelemetryListener {
     params: GuardTelemetryUnifiedParams = {},
   ): AsyncGenerator<GuardEvent, void, undefined> {
     if (params.signal?.aborted) return;
-    yield* mergeGuardEventStreams(this.watch(params), params.diagnostics, params.signal);
+    for await (const event of mergeGuardEventStreams(this.watch(params), params.diagnostics, params.signal)) {
+      this.counters?.record(event);
+      yield event;
+    }
   }
+}
+
+/** Options accepted by `GuardTelemetryListener`. */
+export interface GuardTelemetryListenerOptions {
+  /**
+   * Opt-in sliding-window counters over allowed/blocked decisions. Absent →
+   * no counter state is allocated and `stats()` returns `null`.
+   */
+  counters?: GuardTelemetryCountersOptions;
 }
 
 /**
