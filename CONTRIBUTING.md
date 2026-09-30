@@ -1,3 +1,4 @@
+
 # Contributing
 
 ## Commit convention
@@ -120,6 +121,11 @@ Anything still open when a phase closes gets an issue, not just a note in a pull
 chat log.
 
 ## Local gates before pushing
+
+Every file under `examples/` must be imported by, or compiled in, CI — see the
+policy in `examples/README.md`. Adding an example therefore requires wiring it
+into the examples typecheck project in the same PR; an example that no CI step
+reaches will fail review.
 
 ```bash
 npm run typecheck

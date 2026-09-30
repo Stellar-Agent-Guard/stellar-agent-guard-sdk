@@ -66,6 +66,22 @@ jobs:
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
 
+      # Policy: every file under examples/ must be imported-by or compiled-in
+      # CI (see examples/README.md). This step reuses the same snippet-checker
+      # mechanism that validates README fenced blocks, extended to walk
+      # examples/ and assert each file is either typechecked by the examples
+      # tsconfig project or imported by a checked snippet. No network, no
+      # secret: a file that is neither fails the job, so examples cannot rot
+      # silently.
+      - name: examples policy check (runnable, typechecked, never stale)
+        run: node scripts/check-examples-policy.ts
+
+      # Typecheck the examples/ project so every example file present at merge
+      # time is compiled, not just parsed. This is the "compiled-in CI" half of
+      # the examples policy; the step above is the "imported-by" half.
+      - name: typecheck examples
+        run: npm run typecheck:examples
+
       # Informational only, never gating: shared runners are too noisy for a
       # wall-time threshold to mean anything. The committed baseline lives in
       # docs/benchmarks.md; compare changes on a developer machine, not here.
