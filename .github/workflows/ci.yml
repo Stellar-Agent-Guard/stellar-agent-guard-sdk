@@ -36,7 +36,7 @@ jobs:
           # Full history, so the evidence gate can diff the PR against its base.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@v2
         with:
           node-version: 24
           cache: npm
@@ -62,13 +62,13 @@ jobs:
       # Pack the tarball, install it into a temp consumer, and import the root
       # and every declared subpath through a real resolver — and prove that a
       # path *not* in the export map is refused. The smoke step above imports
-      # dist/ in-place; this one exercises the published artifact.
+# dist/ in-place; this one exercises the published artifact.
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
 
       # Informational only, never gating: shared runners are too noisy for a
-      # wall-time threshold to mean anything. The committed baseline lives in
-      # docs/benchmarks.md; compare changes on a developer machine, not here.
+# wall-time threshold to mean anything. The committed baseline lives in
+# docs/benchmarks.md; compare changes on a developer machine, not here.
       - name: decode-path benchmarks (informational)
         run: npm run bench
         continue-on-error: true
