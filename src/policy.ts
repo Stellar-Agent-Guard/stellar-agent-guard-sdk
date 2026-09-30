@@ -146,6 +146,41 @@ export interface PolicyConfig {
   blocked_recipients?: AccountAddress[];
 }
 
+/** Recursively marks every property and array element as readonly. */
+export type DeepReadonly<T> = T extends string | number | bigint | boolean | symbol | null | undefined
+  ? T
+  : T extends (infer U)[]
+    ? ReadonlyArray<DeepReadonly<U>>
+    : T extends object
+      ? { readonly [K in keyof T]: DeepReadonly<T[K]> }
+      : T;
+
+/** Immutable view of a PolicyConfig — the type all internal consumers use. */
+export type ReadonlyPolicyConfig = DeepReadonly<PolicyConfig>;
+
+/**
+ * Freeze a policy object at the boundary so any later mutation throws in strict
+ * mode (ESM modules are always strict) rather than silently producing a wrong
+ * verdict. Cheap: one freeze per array, no copies.
+ *
+ * Call this once when a policy first enters the SDK — not on every read.
+ */
+export function freezePolicy(policy: PolicyConfig): ReadonlyPolicyConfig {
+  for (const rule of policy.protocols) {
+    if (rule.fns !== null) Object.freeze(rule.fns);
+    Object.freeze(rule);
+  }
+  Object.freeze(policy.assets);
+  Object.freeze(policy.protocols);
+  Object.freeze(policy.recipients);
+  if (policy.recipient_window_caps) {
+    for (const cap of policy.recipient_window_caps) Object.freeze(cap);
+    Object.freeze(policy.recipient_window_caps);
+  }
+  if (policy.blocked_recipients) Object.freeze(policy.blocked_recipients);
+  return Object.freeze(policy) as ReadonlyPolicyConfig;
+}
+
 /**
  * SPEC §8 rule identifiers for granular policy validation failures.
  *
@@ -219,7 +254,7 @@ export type CheckResult =
  * conversion to host object`. Sorting by the symbol text is the same order the
  * host's `Symbol` comparison uses.
  */
-export function policyToScVal(policy: PolicyConfig): xdr.ScVal {
+export function policyToScVal(policy: ReadonlyPolicyConfig): xdr.ScVal {
   const entries: Array<{ key: string; val: xdr.ScVal }> = [
     { key: "per_tx_cap", val: nativeToScVal(policy.per_tx_cap, { type: "i128" }) },
     { key: "window_secs", val: nativeToScVal(policy.window_secs, { type: "u64" }) },
@@ -569,13 +604,13 @@ export function isDeadManFrozen(status: GuardStatus): boolean {
  * a full-grace rendering for a fresh account can treat `null` (with a non-zero
  * grace and `last_heartbeat == 0`) as "countdown not yet started".
  */
-export function deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null {
+export function deadManRemaining(status: GuardStatus, policy: ReadonlyPolicyConfig | null): bigint | null {
   if (!policy || policy.dms_grace_secs === 0n || status.last_heartbeat === 0n) return null;
   return status.last_heartbeat + policy.dms_grace_secs - status.now;
 }
 
 /** A compact, log-friendly rendering of the policy in force. */
-export function describePolicy(policy: PolicyConfig | null): string {
+export function describePolicy(policy: ReadonlyPolicyConfig | null): string {
   if (!policy) return "no policy installed (default-deny: every action is blocked)";
   const parts = [
     `per-tx cap ${policy.per_tx_cap}`,
