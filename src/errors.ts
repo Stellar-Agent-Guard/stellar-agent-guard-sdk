@@ -84,3 +84,25 @@ export class PolicyDecodeError extends GuardError {
     this.path = options.path;
   }
 }
+
+/**
+ * The RPC server's network passphrase did not match the caller's expected
+ * network. This is a guardrail against a misconfigured RPC URL (e.g. a testnet
+ * key pointed at mainnet), not a sandbox: an RPC that lies about its own
+ * passphrase is out of scope.
+ */
+export class NetworkMismatchError extends GuardError {
+  /** Passphrase the caller required. */
+  readonly expected: string;
+  /** Passphrase reported by the RPC server. */
+  readonly actual: string;
+
+  constructor(
+    message: string,
+    options: { expected: string; actual: string; cause?: unknown },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.expected = options.expected;
+    this.actual = options.actual;
+  }
+}

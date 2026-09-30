@@ -58,6 +58,7 @@ import {
 import {
   BroadcastError,
   ContractResponseError,
+  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -68,12 +69,49 @@ const SIG_EXPIRATION_LEDGERS = 10_000;
 const INCLUSION_FEE = "100";
 const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
 
+export type NetworkPassphrase = string;
+
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
   contract: string;
   /** Function name as it appears in the contract spec. */
   fn: string;
   args: xdr.ScVal[];
+}
+
+/**
+ * Assert that the RPC server's reported network passphrase matches the
+ * caller's expectation.
+ *
+ * The interlock is a guardrail, not a sandbox: an RPC that lies about its
+ * passphrase is not defended against. It catches the classic footgun of a
+ * testnet key pointed at a mainnet RPC (or the reverse), where signing keys
+ * and networks are mismatched and a "test" run can touch real funds.
+ *
+ * `expected` is optional and defaults to unchecked — explicitly NOT
+ * recommended. Callers should pass `expectedNetwork` on every entry surface.
+ */
+export async function assertExpectedNetwork(
+  server: rpc.Server,
+  expected: NetworkPassphrase | undefined,
+): Promise<void> {
+  if (expected === undefined) return;
+  let actual: string;
+  try {
+    const info = await server.getNetwork();
+    actual = info.passphrase;
+  } catch (error) {
+    throw new NetworkMismatchError(
+      `could not verify the RPC network passphrase (expected ${expected})`,
+      { expected, actual: null, cause: error },
+    );
+  }
+  if (actual !== expected) {
+    throw new NetworkMismatchError(
+      `RPC network passphrase mismatch: expected ${expected}, got ${actual}`,
+      { expected, actual },
+    );
+  }
 }
 
 /**
@@ -197,6 +235,11 @@ export interface AdminSigner {
   /** Return public key (G...) of the admin */
   publicKey(): string | Promise<string>;
   /**
+   * Expected network passphrase for this signer's key material. When set, the
+   * SDK verifies the RPC's reported passphrase matches before signing.
+   */
+  expectedNetwork?: NetworkPassphrase;
+  /**
    * Sign a transaction envelope.
    * Accepts a Transaction and returns a signed Transaction or base64 XDR string.
    */
@@ -226,6 +269,11 @@ export interface AdminSigner {
 export interface AgentSigner {
   /** The signer's public identity, for diagnostics and key matching. */
   readonly publicKey: string;
+  /**
+   * Expected network passphrase for this signer's key material. When set, the
+   * SDK verifies the RPC's reported passphrase matches before signing.
+   */
+  readonly expectedNetwork?: NetworkPassphrase;
   /** Sign the 32-byte SHA-256 digest `__check_auth` will verify. */
   signDigest(digest: Uint8Array): Uint8Array | Promise<Uint8Array>;
 }
@@ -238,6 +286,7 @@ export interface AgentSigner {
 export function keypairAgentSigner(agent: Keypair): AgentSigner {
   return {
     publicKey: agent.publicKey(),
+    expectedNetwork: undefined,
     signDigest: (digest) => agent.sign(Buffer.from(digest)),
   };
 }
@@ -254,6 +303,20 @@ export function toAgentSigner(signer: AgentSigner | Keypair): AgentSigner {
     return signer as AgentSigner;
   }
   return keypairAgentSigner(signer as Keypair);
+}
+
+/**
+ * Shared network-interlock options accepted by every entry surface.
+ * A single shared type keeps the three surfaces from diverging.
+ */
+export interface NetworkInterlockOptions {
+  /**
+   * Expected network passphrase. When set, the SDK fetches the RPC server's
+   * reported passphrase (at construction or first use) and throws a typed
+   * `NetworkMismatchError` unless it matches. Default: `undefined` =
+   * unchecked, which is explicitly NOT recommended.
+   */
+  expectedNetwork?: NetworkPassphrase;
 }
 
 /**
@@ -288,6 +351,7 @@ export type GuardCredentialType =
 export async function buildGuardAuthEntry(params: {
   guard: string;
   call: ContractCall;
+  expectedNetwork?: NetworkPassphrase;
   /**
    * The account's agent signer. A `Keypair` is accepted for the single-key case
    * and wrapped via `toAgentSigner`; supply an `AgentSigner` directly for any
@@ -307,6 +371,7 @@ export async function buildGuardAuthEntry(params: {
     signatureExpirationLedger,
     networkPassphrase,
     credentialType = "sorobanCredentialsAddress",
+    expectedNetwork,
   } = params;
   const signer = toAgentSigner(rawSigner);
   const rootInvocation = new xdr.SorobanAuthorizedInvocation({
@@ -317,6 +382,13 @@ export async function buildGuardAuthEntry(params: {
   });
   const networkId = createHash("sha256").update(networkPassphrase).digest();
   const guardAddress = new Address(guard).toScAddress();
+
+  if (expectedNetwork !== undefined && expectedNetwork !== networkPassphrase) {
+    throw new NetworkMismatchError(
+      `network passphrase mismatch: expected ${expectedNetwork}, got ${networkPassphrase}`,
+      { expected: expectedNetwork, actual: networkPassphrase },
+    );
+  }
 
   const preimage =
     credentialType === "sorobanCredentialsAddressV2"
@@ -378,6 +450,7 @@ export async function signAccountAuthEntry(params: {
   signer: Keypair | AdminSigner;
   signatureExpirationLedger: number;
   networkPassphrase: string;
+  expectedNetwork?: NetworkPassphrase;
 }): Promise<xdr.SorobanAuthorizationEntry> {
   const { entry, signer, signatureExpirationLedger, networkPassphrase } = params;
   try {
@@ -421,7 +494,9 @@ export interface SimulationOutcome {
 export async function simulateSigned(
   server: rpc.Server,
   transaction: Transaction,
+  options: NetworkInterlockOptions = {},
 ): Promise<SimulationOutcome> {
+  await assertExpectedNetwork(server, options.expectedNetwork);
   let raw: rpc.Api.SimulateTransactionResponse;
   try {
     raw = await server.simulateTransaction(transaction);
@@ -469,8 +544,15 @@ export function assembleFromSimulation(params: {
   networkPassphrase: string;
   guard: string | null;
   extraResourceFee?: bigint;
+  expectedNetwork?: NetworkPassphrase;
 }): AssembleResult {
   const { simulation, source, operation, networkPassphrase, guard } = params;
+  if (params.expectedNetwork !== undefined && params.expectedNetwork !== networkPassphrase) {
+    throw new NetworkMismatchError(
+      `network passphrase mismatch: expected ${params.expectedNetwork}, got ${networkPassphrase}`,
+      { expected: params.expectedNetwork, actual: networkPassphrase },
+    );
+  }
   // v17 hands back a builder already; older shapes hand back the data itself.
   const data =
     simulation.transactionData instanceof SorobanDataBuilder
@@ -737,6 +819,7 @@ export async function submitAndPoll(
   signers: Array<Keypair | AdminSigner>,
   options: { pollAttempts?: number | undefined; pollIntervalMs?: number | undefined } = {},
 ): Promise<SubmissionResult> {
+  await assertExpectedNetwork(server, undefined);
   for (const signer of signers) {
     if ("signTransaction" in signer && typeof signer.signTransaction === "function") {
       const signed = await signer.signTransaction(transaction, {
@@ -835,7 +918,14 @@ export function buildInitialEnvelope(params: {
   operation: xdr.Operation;
   networkPassphrase: string;
   guard: string | null;
+  expectedNetwork?: NetworkPassphrase;
 }): Transaction {
+  if (params.expectedNetwork !== undefined && params.expectedNetwork !== params.networkPassphrase) {
+    throw new NetworkMismatchError(
+      `network passphrase mismatch: expected ${params.expectedNetwork}, got ${params.networkPassphrase}`,
+      { expected: params.expectedNetwork, actual: params.networkPassphrase },
+    );
+  }
   const builder = new TransactionBuilder(params.source, {
     fee: INCLUSION_FEE,
     networkPassphrase: params.networkPassphrase,

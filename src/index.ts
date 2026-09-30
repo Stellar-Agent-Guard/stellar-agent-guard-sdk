@@ -24,6 +24,7 @@ export {
   BroadcastError,
   ContractResponseError,
   GuardError,
+  NetworkMismatchError,
   PolicyDecodeError,
   SigningError,
   SimulationError,
@@ -187,8 +188,8 @@ export {
 } from "./tx.ts";
 
 export {
-  DEFAULT_NETWORK_PASSPHRASE,
-  agentPubkeyToScVal,
+  DEFAULT_NETWORK_PASSTHRASE,
+  agentPubKeyToScVal,
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,

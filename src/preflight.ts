@@ -26,7 +26,7 @@
  */
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
-import { GuardError, SimulationError } from "./errors.ts";
+import { GuardError, NetworkMismatchError, SimulationError } from "./errors.ts";
 import { enforceCall } from "./invoke.ts";
 import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
@@ -37,7 +37,7 @@ import {
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
-import type { AgentSigner, ContractCall } from "./tx.ts";
+import type { AgentSigner, ContractCall, NetworkPassphrase } from "./tx.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -292,6 +292,14 @@ export interface PreFlightCacheOptions {
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
+  /**
+   * The network passphrase this interceptor expects the RPC server to be
+   * serving. When set, the interceptor fetches the server's network passphrase
+   * on first use and fails with a typed `NetworkMismatchError` unless it
+   * matches. Default: undefined = unchecked (NOT recommended; a misconfigured
+   * RPC URL can silently sign for the wrong network).
+   */
+  expectedNetwork?: NetworkPassphrase;
   /** The guarded smart account whose policy is being enforced. */
   guard: string;
   /**
@@ -356,6 +364,7 @@ function callFingerprint(call: ContractCall): string {
 function configFingerprint(config: PreFlightConfig): string {
   const hash = createHash("sha256");
   hashPart(hash, config.networkPassphrase);
+  hashPart(hash, config.expectedNetwork ?? "");
   hashPart(hash, config.guard);
   hashPart(hash, config.source.publicKey());
   hashPart(hash, toAgentSigner(config.agent).publicKey);
@@ -370,12 +379,33 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  private networkCheck: Promise<void> | undefined;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
+  }
+
+  /**
+   * Fetch the server's network passphrase once and compare it to
+   * `expectedNetwork`. No-op when `expectedNetwork` is unset (legacy behavior).
+   * The in-flight promise is memoized so concurrent checks share one round-trip.
+   */
+  private async ensureNetwork(): Promise<void> {
+    const expected = this.config.expectedNetwork;
+    if (expected === undefined) return;
+    if (!this.networkCheck) {
+      this.networkCheck = (async () => {
+        const info = await this.config.server.getNetwork();
+        const actual = info.passphrase;
+        if (actual !== expected) {
+          throw new NetworkMismatchError({ expected, actual });
+        }
+      })();
+    }
+    return this.networkCheck;
   }
 
   private validateCacheOptions(): void {
@@ -458,6 +488,7 @@ export class PreFlightInterceptor {
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
+    await this.ensureNetwork();
 
     const context = await this.cacheContext(call);
     if (context) {
@@ -578,6 +609,7 @@ export class PreFlightInterceptor {
     calls: ContractCall[],
     options?: CheckBatchOptions,
   ): Promise<PreFlightBatchDecision> {
+    await this.ensureNetwork();
     if (calls.length === 0) {
       return {
         admissible: true,

@@ -1,4 +1,14 @@
 /**
+ * Network interlock: bind the invocation pipeline to an expected network
+ * passphrase so a misconfigured RPC URL (testnet key + mainnet RPC, or the
+ * reverse) fails loudly with a typed `NetworkMismatchError` instead of
+ * silently signing against the wrong network.
+ *
+ * See `docs/concepts/network-interlock.md` for the honest boundary: this is a
+ * guardrail, not a sandbox — an RPC that lies about its passphrase is not
+ * defended against.
+ */
+/**
  * The full invocation pipeline for a guarded account, in the order the Stellar
  * host actually requires:
  *
@@ -21,6 +31,7 @@ import {
   BroadcastError,
   ContractResponseError,
   GuardError,
+  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -258,6 +269,14 @@ export interface InvokeParams {
   retry?: InvokeRetryOptions | undefined;
   pollAttempts?: number | undefined;
   pollIntervalMs?: number | undefined;
+  /**
+   * Expected network passphrase. When set, the pipeline fetches the server's
+   * own network passphrase at first use and fails with a typed
+   * `NetworkMismatchError` unless it matches. Default: `undefined` = unchecked
+   * (legacy behavior; explicitly NOT recommended — pass this in production so
+   * a misconfigured RPC URL cannot silently sign for the wrong network).
+   */
+  expectedNetwork?: string | undefined;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -568,6 +587,60 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
 }
 
 /**
+ * Cache of the server's reported network passphrase, keyed by the `rpc.Server`
+ * instance so the fetch happens at most once per server per process. The
+ * promise is cached (not just the resolved value) so concurrent invocations
+ * share a single in-flight `getNetwork()` call.
+ */
+const serverNetworkPassphrases = new WeakMap<rpc.Server, Promise<string>>();
+
+/**
+ * Fetch (and memoize) the network passphrase the server reports for itself.
+ *
+ * `rpc.Server.getNetwork()` is the only honest source for "which network is
+ * this RPC actually on?" — the URL is a hint, not a fact. A failure to fetch
+ * is surfaced as a typed `NetworkMismatchError` with `actual: null` so the
+ * caller can distinguish "RPC unreachable" from "RPC on the wrong network".
+ */
+async function fetchServerNetworkPassphrase(server: rpc.Server): Promise<string> {
+  let cached = serverNetworkPassphrases.get(server);
+  if (!cached) {
+    cached = server.getNetwork().then((info) => info.passphrase);
+    serverNetworkPassphrases.set(server, cached);
+  }
+  return cached;
+}
+
+/**
+ * Enforce the network interlock, if the caller opted in.
+ *
+ * `expectedNetwork === undefined` is the documented legacy behavior: no fetch,
+ * no check, exactly as `invoke()` behaved before this option existed. When set,
+ * the server's own passphrase is fetched (memoized) and compared; a mismatch
+ * throws a typed `NetworkMismatchError` naming both the expected and actual
+ * passphrases.
+ */
+async function assertExpectedNetwork(
+  server: rpc.Server,
+  expectedNetwork: string | undefined,
+): Promise<void> {
+  if (expectedNetwork === undefined) return;
+  let actual: string | null = null;
+  try {
+    actual = await fetchServerNetworkPassphrase(server);
+  } catch (cause) {
+    throw new NetworkMismatchError({
+      expected: expectedNetwork,
+      actual: null,
+      cause,
+    });
+  }
+  if (actual !== expectedNetwork) {
+    throw new NetworkMismatchError({ expected: expectedNetwork, actual });
+  }
+}
+
+/**
  * Run one contract call through simulate → sign → enforce, submitting only on a
  * pass. Returns a discriminated result rather than throwing, so callers can
  * decide whether a block is an expected outcome (agents hitting a guardrail) or
@@ -669,6 +742,11 @@ export function invoke(
 ): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
 export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+  // The interlock runs before anything else — before the account queue, before
+  // any signing, before any simulation. A mismatched network must fail before
+  // a key is ever used to sign for the wrong chain.
+  await assertExpectedNetwork(params.server, params.expectedNetwork);
+
   // A dry run performs exactly one pass: it never reaches broadcast, so there
   // is no stale-ledger rejection to retry, no sleep to justify, and nothing to
   // serialize against the account queue.
@@ -949,6 +1027,10 @@ export async function enforceCall(
   params: InvokeParams,
   attempt: number = 0,
 ): Promise<EnforcementOutcome> {
+  // `enforceCall` is exported and callable directly (the pre-flight interceptor
+  // uses it), so the interlock is enforced here too — not only in `invoke()`.
+  await assertExpectedNetwork(params.server, params.expectedNetwork);
+
   const { server, source, call, networkPassphrase } = params;
 
   let operation: xdr.Operation;
