@@ -64,6 +64,7 @@ behaves:
 | `GUARD_REASON_CODES` numbers | contract | **Append-only** | Numeric codes are never renumbered and never reused; removed variants keep their number. |
 | `describeGuardEvent()` text | SDK | **Internal** | A log line, not a format. Parse `GuardEvent`, not this string. |
 | `poll()` `cursor` / `latestLedger` | RPC | **Best-effort** | Pagination is host-defined; treat as opaque. |
+| `startFrom` (listener option) | SDK | **Stable** | `{ ledger: number }` \| `'latest'` \| `'oldest-available'`. Maps to the `getEvents` start cursor. `'latest'` starts from the current cursor and replays no history; `'oldest-available'` starts from the oldest retained event. An explicit `startFrom` overrides any stored cursor (a log line notes the override). |
 
 ## How it was captured
 
