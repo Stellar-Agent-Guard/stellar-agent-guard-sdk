@@ -596,6 +596,27 @@ one-shot form.
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 
+#### Dashboard-style snapshot (issue #68)
+
+A consumer that wants "the last N decisions, right now" — a dashboard panel, an agent status endpoint — can opt into a bounded in-memory window instead of maintaining its own store:
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD_ID,
+  buffer: { max: 200 }, // opt-in; omitted → no buffer is allocated
+});
+
+// ...drive it with listener.watch() or listener.watchAll(), then read on demand:
+const lastBlocked = listener.recent({ stream: "diagnostic" });
+const capRefusals = listener.recent({ reason: "per_tx_cap_exceeded" });
+const recentWindow = listener.recent({ fromLedger: 4_700_000 });
+```
+
+`recent(filter?)` returns the retained events oldest-first, filtered by any of `stream`, `reason`, `fromLedger`, `toLedger`. The buffer is FIFO and non-durable: it holds only what this listener decoded in this process, and a restart empties it. Persistence across restarts is a cursor store (tracked separately), not something this buffer pretends to provide.
+
 ## Architecture
 
 Stellar Agent Guard operates across three dedicated repositories:

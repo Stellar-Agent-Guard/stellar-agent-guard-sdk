@@ -323,12 +323,123 @@ function dataOf(raw: unknown): unknown {
   return body?.v0?.data ?? body?.value?.v0?.data;
 }
 
+/**
+ * Opt-in retention of the most recent events, so a consumer can answer "what
+ * did the guard decide just now?" without standing up its own store (issue #68).
+ *
+ * Off by default: an embedded agent runtime should not pay for a buffer it never
+ * reads. Non-durable by construction — the buffer lives in process memory, so a
+ * restart empties it. Persistence, if needed, is a cursor store (its own issue),
+ * not something this buffer pretends to provide.
+ */
+export interface GuardEventBufferOptions {
+  /** How many of the most recent events to keep. Must be a positive integer. */
+  max: number;
+}
+
+/**
+ * The filter surface of `recent()`, deliberately small.
+ *
+ * `stream` and `reason` are the useful selectors ("show me blocked decisions",
+ * "show me refusals for this reason"); `fromLedger`/`toLedger` narrow to a
+ * ledger range. Kept to these four so the accessor stays a snapshot, not a
+ * query engine: a consumer that needs more should keep its own store with the
+ * full event stream.
+ */
+export interface RecentEventFilter {
+  /** Only events observed on this stream. */
+  stream?: GuardEventStream;
+  /** Only events whose decoded decision reason equals this code. */
+  reason?: string;
+  /** Only events at or after this ledger (committed events only). */
+  fromLedger?: number;
+  /** Only events at or before this ledger (committed events only). */
+  toLedger?: number;
+}
+
+/** True when an event satisfies every field set in `filter`. */
+function matchesRecentFilter(event: GuardEvent, filter: RecentEventFilter): boolean {
+  if (filter.stream !== undefined && event.stream !== filter.stream) return false;
+  if (filter.reason !== undefined && event.decision?.reason !== filter.reason) return false;
+  // A diagnostic event has no ledger; a ledger bound therefore excludes it,
+  // rather than silently treating `null` as "inside the range".
+  if (filter.fromLedger !== undefined && (event.ledger === null || event.ledger < filter.fromLedger)) {
+    return false;
+  }
+  if (filter.toLedger !== undefined && (event.ledger === null || event.ledger > filter.toLedger)) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * A fixed-capacity FIFO ring of the most recent `GuardEvent`s (issue #68).
+ *
+ * O(1) push with no allocation after construction: the backing array is
+ * allocated once at `max` and reused, so a long-running agent does not grow the
+ * heap with telemetry it already decided to keep only a window of. Once full,
+ * each push overwrites the oldest slot; `recent()` always returns events in
+ * observation order (oldest first).
+ */
+export class GuardEventRingBuffer {
+  readonly max: number;
+  private readonly slots: GuardEvent[];
+  /** Index of the oldest retained event. */
+  private start = 0;
+  /** Number of live slots, `0..max`. */
+  private count = 0;
+
+  constructor(max: number) {
+    if (!Number.isInteger(max) || max < 1) {
+      throw new RangeError(`buffer.max must be a positive integer, received ${max}`);
+    }
+    this.max = max;
+    this.slots = new Array<GuardEvent>(max);
+  }
+
+  /** Append an event, evicting the oldest once `max` is reached. */
+  push(event: GuardEvent): void {
+    const index = (this.start + this.count) % this.max;
+    this.slots[index] = event;
+    if (this.count < this.max) {
+      this.count += 1;
+    } else {
+      // Full: the write above landed on the oldest slot, so advance past it.
+      this.start = (this.start + 1) % this.max;
+    }
+  }
+
+  /** True when no events are retained (e.g. nothing observed yet). */
+  get size(): number {
+    return this.count;
+  }
+
+  /**
+   * The retained events in observation order, optionally narrowed by `filter`.
+   *
+   * Returns a copy, so a caller cannot mutate the ring by holding the result.
+   */
+  recent(filter?: RecentEventFilter): GuardEvent[] {
+    const out: GuardEvent[] = [];
+    for (let i = 0; i < this.count; i += 1) {
+      const event = this.slots[(this.start + i) % this.max]!;
+      if (!filter || matchesRecentFilter(event, filter)) out.push(event);
+    }
+    return out;
+  }
+}
+
 export interface GuardTelemetryConfig {
   server: rpc.Server;
   /** The guard contract to follow. */
   guard: string;
   /** RPC URL, only used for error messages. */
   rpcUrl?: string;
+  /**
+   * Opt-in: retain the most recent events for `recent()` snapshots (issue #68).
+   * Omitted → no buffer is allocated and `recent()` always returns `[]`.
+   */
+  buffer?: GuardEventBufferOptions;
 }
 
 export interface PollResult {
@@ -669,9 +780,36 @@ export async function* mergeGuardEventStreams(
 
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
+  /**
+   * Null unless `config.buffer` is set: with no buffer requested, there is no
+   * structure to allocate and every `recent()` call short-circuits (issue #68).
+   */
+  private readonly buffer: GuardEventRingBuffer | null;
 
   constructor(config: GuardTelemetryConfig) {
     this.config = config;
+    this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
+  }
+
+  /**
+   * The most recent events the listener has observed, oldest first, optionally
+   * narrowed by `filter` (issue #68). Empty when no `buffer` was configured.
+   *
+   * Only events this listener decoded are retained: committed events from
+   * `poll()`/`watch()`, and diagnostic events merged in by `watchAll()`. A
+   * consumer that never calls `watchAll()` sees no diagnostic half — the same
+   * two-stream distinction the rest of the telemetry API makes.
+   *
+   * The buffer is in-process and non-durable; a restart empties it.
+   */
+  recent(filter?: RecentEventFilter): GuardEvent[] {
+    return this.buffer ? this.buffer.recent(filter) : [];
+  }
+
+  /** Record decoded events into the opt-in buffer, if one is configured. */
+  private record(events: readonly GuardEvent[]): void {
+    if (!this.buffer) return;
+    for (const event of events) this.buffer.push(event);
   }
 
   /**
@@ -719,6 +857,7 @@ export class GuardTelemetryListener {
       );
       if (decoded) events.push(decoded);
     }
+    this.record(events);
     return {
       events,
       cursor: response.cursor,
@@ -876,7 +1015,17 @@ export class GuardTelemetryListener {
     params: GuardTelemetryUnifiedParams = {},
   ): AsyncGenerator<GuardEvent, void, undefined> {
     if (params.signal?.aborted) return;
-    yield* mergeGuardEventStreams(this.watch(params), params.diagnostics, params.signal);
+    for await (const event of mergeGuardEventStreams(
+      this.watch(params),
+      params.diagnostics,
+      params.signal,
+    )) {
+      // Committed events were already recorded when their page was decoded in
+      // `poll()`, so only the diagnostic half is recorded here — recording the
+      // merged stream wholesale would double every committed event.
+      if (event.stream === "diagnostic") this.record([event]);
+      yield event;
+    }
   }
 }
 

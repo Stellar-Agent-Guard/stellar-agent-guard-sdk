@@ -138,6 +138,7 @@ export {
 
 export {
   DEFAULT_JITTER_FRACTION,
+  GuardEventRingBuffer,
   GuardTelemetryListener,
   computePollDelay,
   describeGuardEvent,
@@ -149,6 +150,7 @@ export {
   telemetryFromDecision,
   type GuardDiagnosticBatch,
   type GuardEvent,
+  type GuardEventBufferOptions,
   type GuardEventContext,
   type GuardEventIdentityInput,
   type GuardEventKind,
@@ -160,6 +162,7 @@ export {
   type GuardTelemetryWatchParams,
   type PollResult,
   type PollSleep,
+  type RecentEventFilter,
   type TelemetryJitter,
 } from "./telemetry.ts";
 
