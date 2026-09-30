@@ -25,6 +25,141 @@ import {
   type GuardTelemetryGap,
 } from "../../src/telemetry.ts";
 
+/**
+ * Mid-watch failure telemetry (issue: onStreamError callback).
+ *
+ * The contract under test: when the underlying `getEvents` call starts
+ * throwing mid-watch, the listener performs a bounded number of retries with
+ * backoff, then invokes `onStreamError(err)` exactly once with the terminal
+ * failure and ends the iterator cleanly. A consumer-supplied callback that
+ * throws is propagated (the consumer asked for halt-on-first-error).
+ */
+describe("GuardTelemetryListener mid-watch failures", () => {
+  const GUARD_ID = GUARD;
+
+  /**
+   * Minimal fake RPC: `getEvents` throws `failures` times, then returns an
+   * empty page. Records how many times it was called so the retry count can
+   * be asserted.
+   */
+  function failingRpc(failures: number) {
+    let calls = 0;
+    return {
+      get calls() {
+        return calls;
+      },
+      async getEvents() {
+        calls += 1;
+        if (calls <= failures) {
+          throw new Error(`rpc down (attempt ${calls})`);
+        }
+        return { events: [], latestLedger: 1, cursor: "0" };
+      },
+    };
+  }
+
+  it("retries a bounded number of times, fires onStreamError once, then ends cleanly", async () => {
+    const rpc = failingRpc(Number.POSITIVE_INFINITY);
+    const errors: unknown[] = [];
+    const listener = new GuardTelemetryListener({
+      contractId: GUARD_ID,
+      rpc: rpc as never,
+      onStreamError: (err) => {
+        errors.push(err);
+      },
+    });
+
+    const seen: GuardEvent[] = [];
+    for await (const event of listener.watch()) {
+      seen.push(event);
+    }
+
+    assert.deepEqual(seen, [], "no events should be emitted on a persistent failure");
+    assert.equal(errors.length, 1, "onStreamError must fire exactly once");
+    assert.match(String(errors[0]), /rpc down/);
+    assert.ok(rpc.calls > 1, "the listener must have retried before giving up");
+  });
+
+  it("recovers when the RPC comes back within the retry budget", async () => {
+    const rpc = failingRpc(1);
+    const errors: unknown[] = [];
+    const listener = new GuardTelemetryListener({
+      contractId: GUARD_ID,
+      rpc: rpc as never,
+      onStreamError: (err) => {
+        errors.push(err);
+      },
+    });
+
+    const seen: GuardEvent[] = [];
+    for await (const event of listener.watch()) {
+      seen.push(event);
+    }
+
+    assert.deepEqual(seen, []);
+    assert.equal(errors.length, 0, "a transient failure must not surface to the consumer");
+    assert.ok(rpc.calls >= 2, "the listener must have retried at least once");
+  });
+
+  it("ends cleanly without a callback, and exposes the terminal error via lastError", async () => {
+    const rpc = failingRpc(Number.POSITIVE_INFINITY);
+    const listener = new GuardTelemetryListener({
+      contractId: GUARD_ID,
+      rpc: rpc as never,
+    });
+
+    const seen: GuardEvent[] = [];
+    for await (const event of listener.watch()) {
+      seen.push(event);
+    }
+
+    assert.deepEqual(seen, []);
+    assert.ok(listener.lastError, "lastError must be retrievable when no callback is configured");
+    assert.match(String(listener.lastError), /rpc down/);
+  });
+
+  it("propagates a consumer callback that throws (halt-on-first-error)", async () => {
+    const rpc = failingRpc(Number.POSITIVE_INFINITY);
+    const listener = new GuardTelemetryListener({
+      contractId: GUARD_ID,
+      rpc: rpc as never,
+      onStreamError: () => {
+        throw new Error("consumer halted");
+      },
+    });
+
+    await assert.rejects(async () => {
+      for await (const _event of listener.watch()) {
+        // drain
+      }
+    }, /consumer halted/);
+  });
+
+  it("ends immediately with no callback on abort", async () => {
+    const rpc = failingRpc(Number.POSITIVE_INFINITY);
+    const errors: unknown[] = [];
+    const controller = new AbortController();
+    const listener = new GuardTelemetryListener({
+      contractId: GUARD_ID,
+      rpc: rpc as never,
+      signal: controller.signal,
+      onStreamError: (err) => {
+        errors.push(err);
+      },
+    });
+
+    controller.abort();
+
+    const seen: GuardEvent[] = [];
+    for await (const event of listener.watch()) {
+      seen.push(event);
+    }
+
+    assert.deepEqual(seen, []);
+    assert.equal(errors.length, 0, "abort must not invoke onStreamError");
+  });
+});
+
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
 
 /**
