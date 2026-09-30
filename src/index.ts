@@ -205,6 +205,14 @@ export {
   type SetPolicyParams,
 } from "./admin.ts";
 
+export {
+  GUARD_WASM_HASH,
+  sha256Hex,
+  toHex,
+  verifyGuardWasm,
+  type GuardWasmVerification,
+} from "./wasm.ts";
+
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
 export {

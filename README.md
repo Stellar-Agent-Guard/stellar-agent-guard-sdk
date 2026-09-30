@@ -661,6 +661,20 @@ Proven against a real deployed instance on Stellar testnet (protocol 28, `Test S
 - **SAC Token**: `CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB`
 - **WASM bytecode hash**: `f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63` (identical to Phase 1 artifact)
 
+Verify a downloaded artifact against the pinned hash before deploying — the same constant the dashboard checks, so there is one source of truth rather than a copy per consumer:
+
+```ts
+import { readFileSync } from "node:fs";
+import { verifyGuardWasm } from "stellar-agent-guard-sdk";
+
+const result = await verifyGuardWasm(readFileSync("guard.wasm"));
+if (!result.ok) {
+  throw new Error(`WASM mismatch: got ${result.actual}, expected ${result.expected}`);
+}
+```
+
+`verifyGuardWasm` hashes with WebCrypto (`crypto.subtle`), so the identical call runs in Node and in the browser and needs no extra dependency. It is async, because `crypto.subtle.digest` is. `GUARD_WASM_HASH` is exported if you need the constant on its own.
+
 ### 5/5 Live Enforcement Scenarios
 
 | Scenario | Condition | Result | Evidence |
