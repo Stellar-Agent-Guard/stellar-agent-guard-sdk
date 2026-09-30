@@ -665,6 +665,11 @@ Full recipient/amount enforcement — spend caps, allowlists, per-transaction li
 
 This boundary is an inherent property of the platform (the auth context does not expose arbitrary call arguments generically), not a gap this project hides or overclaims. The classification that produces this boundary (`AssetTransfer` vs `Protocol` vs `Unknown` default-deny) is spelled out in SPEC §6.
 
+## Topics
+
+`stellar`, `soroban`, `ai-agents`, `guardrails`, `custom-account`, `pre-flight`,
+`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `telemetry`, `typescript`
+
 ## Maintainers
 
 | Name | GitHub | Telegram |
