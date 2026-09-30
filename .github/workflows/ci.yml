@@ -73,6 +73,13 @@ jobs:
         run: npm run bench
         continue-on-error: true
 
+      # Structural validation of the evidence record (issue #65): asserts the
+      # document's expected sections and row minimums, and fails loudly when its
+      # shape drifts. This is what stops the file-list gate below going vacuously
+      # green on a document nothing can parse. No network, no secret.
+      - name: evidence structure check
+        run: node scripts/check-enforcement-evidence.ts --check-structure
+
       # A PR that changes the enforcement path must ship fresh live-testnet
       # evidence in the same PR. This checks the file list only: no network, no
       # secret, so it cannot go green on a missing credential.

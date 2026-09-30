@@ -19,6 +19,7 @@ import {
   isMinimumFeeBroadcastFailure,
   isStaleLedgerResourceFailure,
 } from "../../src/tx.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
 /** The real failure payload from the live testnet run, trimmed. */
 const staleLedgerFailure = {
@@ -223,7 +224,7 @@ describe("describeSimulationResources", () => {
   });
 
   it("names each guard storage key and whether it is declared read-write", () => {
-    const guard = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+    const guard = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
     const data = new SorobanDataBuilder().setResources(1, 2, 3);
     const text = describeSimulationResources({ transactionData: data, minResourceFee: "0" }, guard);
     assert.match(text, /guard key Policy: NOT in the footprint/);

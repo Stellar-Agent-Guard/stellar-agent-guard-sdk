@@ -49,13 +49,15 @@ behaves:
 | `decision.reason` | SDK (from topics[2]) | **Append-only** | `string \| null`. Never re-spelled for the same condition. |
 | `decision.source` | SDK | **Stable** | Closed set `ledger` \| `diagnostic`. |
 | `source` | SDK | **Stable** | Same closed set as `decision.source`. |
+| `stream` | SDK | **Stable** | `committed` \| `diagnostic`. Derived from `source`; present on every event. Additive (issue #67). |
 | `contractId` | stream | **Best-effort** | May be `null`; the diagnostic stream only carries the contract the SDK was pointed at. |
 | `ledger` | stream | **Best-effort** | `null` on the diagnostic stream; present only for committed events. |
 | `ledgerClosedAt` | stream | **Best-effort** | Host-formatted timestamp; `null` on the diagnostic stream. |
+| `observedAt` | SDK (unified stream) | **Best-effort** | ISO-8601 time `watchAll()` observed a diagnostic batch; `null` on the committed stream. Additive (issue #67). |
 | `transactionHash` | stream | **Best-effort** | Always `null` on the diagnostic stream — a refusal has no transaction. |
-| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Semantics are stable; the decoded JS rendering is for display. |
+| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Delivered as a string in JSON, normalised to `bigint` by the SDK to prevent >2^53 precision loss. |
 | `data.by` (admin events) | contract payload | **Stable** | The acting admin address, for `event_initialized` / `event_frozen` / `event_unfrozen` / `event_policy_set` / `event_policy_revoked`. |
-| `data` — any other key | contract / host | **Best-effort** | Not under SDK control; ignore rather than infer. |
+| `data` — any other key | contract / host | **Best-effort** | Not under SDK control. Normalised: strings of pure digits become `bigint`; other strings (e.g. ISO dates) are preserved. |
 | Raw topic list (undecoded XDR / `ScVal` objects) | RPC | **Best-effort** | Host-shaped. Decode with `topicSymbols()` / `decodeAuthDecision()`. |
 | `contractEventsXdr` grouping | RPC | **Best-effort** | An array of *groups*, one per contract — reading it as a flat list silently loses events (see "The capture"). |
 | `GUARD_EVENT_TOPICS` values | contract | **Stable** | The name-topic vocabulary. |
@@ -177,7 +179,8 @@ from topics, requiring no payload decoding. It must consume **both** streams:
 committed ledger events for allowed decisions and administrative actions, and
 enforced-simulation diagnostic events for blocked ones — because a refusal is
 never committed, and a listener that only tails the ledger would see a guard that
-appears to never block anything.
+appears to never block anything. `watchAll()` (see "Merged stream" below)
+delivers exactly that union as one ordered iterator.
 
 ## Event identity — `GuardEvent.id`
 
@@ -232,9 +235,65 @@ an id is always produced.
   hashed from the `diagnostic` stream name regardless of how the event was
   observed.
 
-Part of #7 (stable ids + unified stream). This slice delivers the id field only;
-the unified stream and any persistence for the dashboard remain out of scope
-there.
+Part of #7 (stable ids + unified stream). The `id` field was the first slice;
+the unified stream below (`watchAll()`, issue #67) is the second. Persistence for
+the dashboard remains out of scope.
+
+## Merged stream — `watchAll()`
+
+`GuardTelemetryListener.watch()` tails committed ledger events only. That is a
+trap for a telemetry consumer: a blocked decision is rolled back before
+broadcast and never reaches a ledger, so a guard read through `watch()` alone
+appears to approve everything (the motivating failure in #7).
+
+`watchAll()` follows both streams as one iterator of `GuardEvent`:
+
+```ts
+for await (const event of listener.watchAll({
+  startLedger,
+  // Batches of guardEventsFromDiagnostics(...) / telemetryFromDecision(...),
+  // in observation order.
+  diagnostics: diagnosticBatches,
+})) {
+  if (event.stream === "diagnostic" && event.decision?.result === "blocked") {
+    alerting.blocked(event.decision.reason);
+  }
+}
+```
+
+Every event carries a `stream` discriminator — `committed` for a ledger event,
+`diagnostic` for a pre-broadcast one — so the loop above needs no knowledge of
+the SDK's two-channel model. `source` remains and is unchanged; `stream` is its
+alias in the merged vocabulary, and both are additive (`watch()` output gains the
+fields, and nothing else about it moves).
+
+### Ordering rule
+
+- **Committed events are emitted in ledger order.** A page is sorted by `ledger`
+  ascending before it is yielded, and pages arrive in cursor order, so no
+  committed event overtakes an earlier-ledger one.
+- **Diagnostic events are emitted when the batch carrying them is observed**,
+  tagged with `observedAt` (ISO-8601; defaults to the merge time). A refusal has
+  no ledger — it was rolled back before broadcast — so it is positioned at its
+  point of observation relative to the committed events already drained, not by a
+  ledger. A decision observed at time T appears after the committed events
+  drained at or before T.
+
+### De-duplication rule
+
+`GuardEvent.id` (above) is the SDK's delivery key, and the merged stream emits
+each id **at most once** — first observation wins. A guard decision is
+single-homed: a blocked decision is rolled back and never committed, and an
+allowed decision has no diagnostic, so one decision cannot arrive under two ids.
+The duplicate the merge actually guards against is the *same id* delivered twice
+— a re-fed diagnostic batch, or an overlapping committed page — which the
+emitted-id set suppresses.
+
+### `observedAt`
+
+| Field | Type | Stability | Meaning |
+| --- | --- | --- | --- |
+| `observedAt` | `string \| null` | **Best-effort** | ISO-8601 time the unified stream observed a diagnostic batch. `null` on the committed stream, which carries `ledgerClosedAt` instead. |
 
 ## Coverage gaps — `GuardTelemetryGap`
 

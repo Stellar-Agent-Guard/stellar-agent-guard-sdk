@@ -28,15 +28,18 @@ import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { GuardError, SimulationError } from "./errors.ts";
 import { enforceCall } from "./invoke.ts";
+import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
+  type ContractAddress,
   type PolicyConfig,
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
+import { systemClock, type Clock } from "./clock.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -186,6 +189,8 @@ export type PreFlightDecision =
       estimatedResourceFee: bigint;
       /** Number of ledger keys the call is priced to touch. */
       footprintKeys: number;
+      /** Resource limits and footprint counts from the same simulation. */
+      resourceBreakdown?: ResourceBreakdown;
     }
   | {
       allowed: false;
@@ -290,7 +295,7 @@ export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
-  guard: string;
+  guard: ContractAddress;
   /**
    * The key registered as the account's agent, used to sign the auth entry: an
    * `AgentSigner` for any signing setup, or a plain Ed25519 `Keypair` for the
@@ -308,6 +313,11 @@ export interface PreFlightConfig {
    * A cached verdict can be staler than one admitted transfer.
    */
   cache?: PreFlightCacheOptions;
+  /**
+   * Inject a custom clock for time-dependent operations (cache TTL, etc.).
+   * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
+   */
+  clock?: Clock;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -367,10 +377,12 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  private readonly clock: Clock;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
+    this.clock = config.clock ?? systemClock;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
   }
@@ -421,7 +433,7 @@ export class PreFlightInterceptor {
       return null;
     }
 
-    const now = Date.now();
+    const now = this.clock.now();
     for (const [key, entry] of this.cache) {
       if (entry.ledger !== ledger || entry.expiresAt <= now) this.cache.delete(key);
     }
@@ -460,7 +472,7 @@ export class PreFlightInterceptor {
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {
-        const now = Date.now();
+        const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
           return cached.decision;
         }
@@ -495,6 +507,7 @@ export class PreFlightInterceptor {
         diagnosticEvents: outcome.diagnosticEvents,
       };
     } else {
+      const resourceBreakdown = resourceBreakdownFromSimulation(outcome.simulation);
       const data = outcome.simulation.transactionData as unknown as
         | { getReadOnly?: () => unknown[]; getReadWrite?: () => unknown[] }
         | undefined;
@@ -528,6 +541,7 @@ export class PreFlightInterceptor {
         kind: "admissible",
         estimatedResourceFee,
         footprintKeys,
+        ...(resourceBreakdown ? { resourceBreakdown } : {}),
       };
     }
 
