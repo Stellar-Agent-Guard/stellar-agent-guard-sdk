@@ -5,6 +5,7 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
 **Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
+**Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
 
 ## Instance under test
 
