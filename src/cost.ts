@@ -33,6 +33,16 @@
  * submitted, so nothing was charged. Folding a refusal into an "over budget"
  * answer would tell a caller their call was too expensive when the truth is that
  * it was never allowed.
+ *
+ * ## Determinism
+ *
+ * This module reads no wall clock and draws no randomness: no `Date.now()`,
+ * no `new Date()`, no `Math.random()`. Fees are integer arithmetic over values
+ * supplied by the caller's interceptor, and every decision is a pure function
+ * of its inputs. If a future change needs a timestamp or an identifier here,
+ * it must take a `Clock` (see `src/clock.ts`) or an injected RNG rather than
+ * reaching for the ambient globals — the lint ratchet in the eslint config
+ * will reject the ambient form.
  */
 import { SorobanDataBuilder } from "@stellar/stellar-sdk";
 import { INCLUSION_FEE } from "./tx.ts";

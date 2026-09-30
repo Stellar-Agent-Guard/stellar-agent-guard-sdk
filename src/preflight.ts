@@ -377,6 +377,9 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  // Sole time source for this module: all TTL/expiry reads go through `clock`
+  // (injected via `config.clock`, defaulting to `systemClock`). This file must
+  // never call `Date.now()` or `Math.random()` directly — see determinism sweep.
   private readonly clock: Clock;
 
   constructor(config: PreFlightConfig) {
