@@ -69,10 +69,14 @@ function extractVerdict(
   }
 
   const event = guardEvents[0];
-  if (event.status === "allowed") {
+  if (!event || !event.decision) {
+    return { verdict: "undetermined" };
+  }
+
+  if (event.decision.result === "allowed") {
     return { verdict: "admissible" };
-  } else if (event.status === "blocked") {
-    return { verdict: "blocked", reason: event.reason };
+  } else if (event.decision.result === "blocked") {
+    return { verdict: "blocked", reason: event.decision.reason ?? undefined };
   }
 
   return { verdict: "undetermined" };
