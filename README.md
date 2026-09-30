@@ -1,3 +1,4 @@
+<!-- npm keywords: stellar, soroban, ai-agents, guardrails, stellar-sdk, policy, firewall, langchain, elizaos, non-custodial, smart-account, custom-account-abstraction, spend-limits, allowlist, telemetry, typescript, web3, blockchain-security -->
 <p align="center">
 <img src="Gemini_Generated_Image_mvimg2mvimg2mvim.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
@@ -46,6 +47,10 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 - `Telemetry listener (`GuardTelemetryListener`)`: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
 
 ## Quick Start
+
+> **A verdict is a prediction, not a settlement guarantee.** Before relying on a
+> pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
+> known gaps in simulation fidelity, and what the SDK does about each.
 
 ### Installation
 
@@ -114,18 +119,27 @@ committable); never commit the filled-in copy.
 
 ```ts
 import { Keypair, rpc } from "@stellar/stellar-sdk";
-import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
+import { PreFlightInterceptor, isContractAddress, type ContractAddress } from "stellar-agent-guard-sdk";
+
+// Validate contract address from environment
+const guardAddress = process.env.GUARD_ADDRESS;
+if (!isContractAddress(guardAddress)) {
+  throw new Error(`Invalid guard contract address: ${guardAddress}`);
+}
+
+// For known hardcoded addresses, use type assertion
+const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB" as ContractAddress;
 
 const interceptor = new PreFlightInterceptor({
   server: new rpc.Server("https://soroban-testnet.stellar.org"),
   networkPassphrase: "Test SDF Network ; September 2015",
-  guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQQNKLYK7MFKC5WFENPP44",
+ main
   agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
   source: Keypair.fromSecret(process.env.SOURCE_SECRET!!),
 });
 
 const decision = await interceptor.check({
-  contract: "CDCYDGBGS5AZ5BZS6XY2 SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+ main
   fn: "transfer",
   args: [/* from, to, amount */],
 });
@@ -139,6 +153,28 @@ if (decision.kind === "admissible") {
 }
 ```
 
+#### Branded Address Types (v0.2.0+)
+
+This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
+
+**Type Guards:**
+
+```ts
+import { 
+  isContractAddress,    // Validates C... addresses
+  isAccountAddress,     // Validates G... addresses
+  isStrKeyAddress,      // Validates any StrKey (C... or G...)
+  isPublicKeyHex,       // Validates 64-char hex public keys
+} from "stellar-agent-guard-sdk";
+
+// Runtime validation before use
+if (!isContractAddress(userInput)) {
+  throw new Error("Expected contract address (C...)");
+}
+```
+
+**Migration:** If upgrading from an earlier version, see [MIGRATION.md](./MIGRATION.md) for guidance on updating your code to use typed addresses.
+
 #### Throw vs. Verdict Contract
 
 Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
@@ -146,6 +182,26 @@ Pre-flight policy interception makes an intentional asymmetric distinction betwe
 - `Input validation throws `InvalidInputError` (synchronous)`: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-`symbol`-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
 - `Policy refusals return a verdict (`kind: "blocked"`)`: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
 - Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+
+### Fidelity & limits
+
+Pre-flight simulation is a prediction made against one ledger snapshot, not a settlement guarantee. These are the four known limitations of that prediction, each with the mitigation the SDK applies and the residual risk that remains. Every claim is pinned to the function that implements it so a reviewer can check it rather than trust it.
+
+1. **Window state can move between `check` and broadcast (concurrent spenders).**
+   - *Mitigation:* `PreFlightInterceptor.check()` never broadcasts; it calls `enforceCall()` (`src/invoke.ts`) to run the guard's real `__check_auth` against live ledger state, which is what makes a refusal free. Under `invoke()`, `withAccountQueue()` (`src/invoke.ts`) serializes fetch → build → submit per source account, and the committed contract re-evaluates the rolling window atomically. If the window moved anyway, the post-inclusion refusal is still reported as `blocked` with `charged: true` (`src/invoke.ts`).
+   - *Residual risk:* a spender that does not route through this SDK's queue, or that uses a different source account, can consume the window after an `admissible` verdict; the transfer can then be refused on-chain and, when it reaches inclusion, charged. The optional cache reuses verdicts within one ledger, so a cached `admissible` can be staler than one admitted transfer (`src/preflight.ts`).
+
+2. **The fee market can move (fee-bump).**
+   - *Mitigation:* `CostPreChecker.checkWithCost()` and `costOf()` (`src/cost.ts`) derive the quote from the same enforced simulation that produced the verdict, so price and verdict never describe two snapshots, and `feeBreakdown()` uses the same `INCLUSION_FEE` the submitted envelope declares (`src/tx.ts`).
+   - *Residual risk:* Soroban fees are dynamic and the SDK does not implement fee-bump handling. A fee-bump or an inclusion/base-fee change between simulation and broadcast can move the real price. `maxFeeStroops` in `CostPreChecker` is a pre-flight ceiling, not a network guarantee.
+
+3. **Simulation does not execute — return-value-dependent effects are invisible.**
+   - *Mitigation:* the enforced simulation runs the real `__check_auth` (Step 3 of `enforceCall()`, `src/invoke.ts`), and refusals are recovered from simulation diagnostics by `reasonFromDiagnosticEvents()` (`src/invoke.ts`) and `decodeAuthDecision()` (`src/events.ts`) even though a rolled-back block never commits to a ledger.
+   - *Residual risk:* simulation rolls back its writes; it cannot reveal effects that depend on a return value or on state another call would produce (an oracle price, a swap quote, a balance read mid-transaction). Such a call can be `admissible` pre-flight and still behave differently on-chain. Telemetry `telemetryFromDecision()` (`src/telemetry.ts`) observes the decision event, not the call's return value.
+
+4. **Multi-context batch semantics are approximated (batch).**
+   - *Mitigation:* `PreFlightInterceptor.checkBatch()` and `preflightBatch()` (`src/preflight.ts`) simulate each call in sequence with staged window accounting, so a call that passes in isolation but pushes cumulative spend past `window_cap` is reported `blocked` with `window_cap_exceeded`.
+   - *Residual risk:* it is sequential single-call simulation, not atomic batch simulation. State mutations between calls other than guard window spend are not observed, intra-batch window expiry is not modelled, and `totalEstimatedResourceFee` is the sum of per-call estimates rather than one envelope's fee (`src/preflight.ts:571`). The intended fix is to route to a contract-side `check_batch` once it lands, keeping this sequential staging as the fallback.
 
 ### Optional simulation-result cache
 
@@ -185,6 +241,46 @@ window can change after a simulation while a cached result is still being
 reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
+
+### Deterministic time control in tests (Clock injection)
+
+Time-dependent operations (cache TTL, transaction polling) support optional `Clock` injection for deterministic testing without real delays.
+
+**For tests**, use `FakeClock` to control time:
+
+```ts
+import { FakeClock, PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+test("cache entry expires", async () => {
+  const clock = new FakeClock(0);
+  const interceptor = new PreFlightInterceptor({
+    server,
+    guard,
+    agent,
+    source,
+    cache: { ttlMs: 5000 },
+    clock, // Inject the fake clock
+  });
+
+  const decision1 = await interceptor.check(call);
+
+  // Advance clock without real delays
+  clock.advance(6000); // Skip to t=6000ms (past the 5000ms TTL)
+
+  const decision2 = await interceptor.check(call); // Cache expired, fresh lookup
+});
+```
+
+**For production**, no action is needed: modules default to the system clock. The `Clock` interface is purely optional and for testing.
+
+Key methods on `FakeClock`:
+
+- `now()` — returns current time in milliseconds
+- `sleep(ms)` — returns a promise (resolves instantly when time allows)
+- `advance(ms)` — move the clock forward deterministically
+- `setTime(ms)` — set clock to an absolute time
+
+Time-dependent modules (preflight cache, transaction polling) accept an optional `clock` parameter. When omitted, they use the system clock (`Date.now()`, real `setTimeout`). Tests pass a `FakeClock` to eliminate real waits and make timing deterministic. For full guidance, see [CONTRIBUTING.md](CONTRIBUTING.md) under "Deterministic time control in tests".
 
 ### Pipeline step observability (`onStep`)
 
@@ -237,7 +333,6 @@ if (event === null) {
 console.log(`${event.kind}: ${event.reason}`);
 console.log(event.explanation);
 ```
-
-Invalid input — a malformed base64 string, an XDR that is not a `DiagnosticEvent`, or an event whose topic is not a guard event — decodes to `null` rather than throwing. This keeps CLI tooling and fixture checks from having to wrap every call in a try/catch. The object-path decode (`decodeGuardEvent`) produces the same `GuardEvent` for the same underlying event, so fixtures committed as raw XDR round-trip identically.
+ main
 
 > The raw XDR fixture format is the one consumed from the contract repo's golden-fixture issue ([stellar-agent-guard-contracts](https://github.com/aigbagbobila/stellar-agent-guard-contracts)).

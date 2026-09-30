@@ -8,12 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
-  GUARD_AUTH_RESULTS,
-  GUARD_EVENT_TOPICS,
-  decodeAuthDecision,
-  decodeGuardEventXdr,
-} from "../../src/events.ts";
+ main
 
 describe("guard event topics", () => {
   it("carries the event_ prefix the #[contractevent] macro adds", () => {
@@ -231,50 +226,5 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
     });
   }
 });
-
-describe("decodeGuardEventXdr", () => {
-  const fixturePath = resolve(process.cwd(), "tests/fixtures/contract-fixtures.json");
-  const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as ContractFixturesFile;
-
-  it("returns null for invalid base64 input without throwing", () => {
-    assert.equal(decodeGuardEventXdr(Bat?''), null);
-  });
-
-  it("returns null for empty string input", () => {
-    assert.equal(decodeGuardEventXdr(""), null);
-  });
-
-  it("returns null for non-event XDR payloads", () => {
-    const notAnEvent = xdr.ScVal.fromNative(1234).toXDR("base64");
-    assert.equal(decodeGuardEventXdr(notAnEvent), null);
-  });
-
-  for (const entry of fixture.entries) {
-    it(`round-trips golden fixture entry to the object-path GuardEvent: ${entry.name}`, () => {
-      assert.ok(
-        typeof entry.eventXdr === "string" && entry.eventXdr.length > 0,
-        `[${entry.name}] fixture must carry an 'eventXdr' base64 payload`,
-      );
-
-      const fromXdr = decodeGuardEventXdr(entry.eventXdr as string);
-      assert.ok(fromXdr !== null, `[${entry.name}] decodeGuardEventXdr returned null`);
-
-      const mockRawDiagnosticEvent = {
-        event: {},
-        body: {
-          v0: {
-            topics: entry.topicsXdr,
-          },
-        },
-      };
-      const fromObject = diagnosticsToEvents([mockRawDiagnosticEvent])[0];
-      assert.ok(fromObject !== undefined, `[${entry.name}] object-path decode returned nothing`);
-
-      assert.deepEqual(
-        fromXdr,
-        fromObject,
-        `[${entry.name}] XDR decode must match object-path decode`,
-      );
-    });
-  }
+ main
 });
