@@ -15,7 +15,6 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import { rpc } from "@stellar/stellar-sdk";
-import { parseRawSimulation } from "@stellar/stellar-sdk/rpc";
 import { guardEventsFromDiagnostics } from "../../src/telemetry.ts";
 import type { GuardReason } from "../../src/reasons.ts";
 
@@ -50,18 +49,20 @@ function loadReplayFixture(name: string): ReplayFixture {
 }
 
 /**
- * Extract verdict from simulation response diagnostics.
- * Returns null for undetermined (no guard event found or simulation error).
+ * Extract verdict from raw simulation response diagnostics.
+ * Works directly on RawSimulateTransactionResponse to avoid XDR parsing.
  */
 function extractVerdict(
-  simulation: rpc.Api.SimulateTransactionResponse,
+  rawSimulation: rpc.Api.RawSimulateTransactionResponse,
   guardContract: string,
 ): { verdict: "admissible" | "blocked" | "undetermined"; reason?: string | undefined } {
-  if (rpc.Api.isSimulationError(simulation)) {
+  // Check if it's an error response
+  if ("error" in rawSimulation) {
     return { verdict: "undetermined" };
   }
 
-  const events = (simulation as unknown as { events?: unknown[] }).events ?? [];
+  // Extract events from the raw response
+  const events = rawSimulation.events ?? [];
   const guardEvents = guardEventsFromDiagnostics(events, guardContract);
 
   if (guardEvents.length === 0) {
@@ -103,11 +104,8 @@ describe("offline enforcement replay", () => {
       assert.equal(fixture.header.network, "testnet");
       assert.ok(fixture.guardContractId, `${fixtureName} missing guardContractId`);
 
-      // Parse simulation response through production decode path
-      const parsed = parseRawSimulation(fixture.simulationResponse);
-
-      // Extract verdict using production decode pipeline
-      const actual = extractVerdict(parsed, fixture.guardContractId);
+      // Extract verdict directly from raw simulation (no XDR parsing needed)
+      const actual = extractVerdict(fixture.simulationResponse, fixture.guardContractId);
 
       // Assert expected verdict
       assert.equal(
