@@ -34,7 +34,7 @@
  * answer would tell a caller their call was too expensive when the truth is that
  * it was never allowed.
  */
-import { scValToNative, type xdr } from "@stellar/stellar-sdk";
+import { SorobanDataBuilder, scValToNative, type xdr } from "@stellar/stellar-sdk";
 import { INCLUSION_FEE } from "./tx.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
@@ -302,7 +302,8 @@ export type CostDecision =
       feeCeilingStroops: bigint | null;
       /** Additive policy-relative context when a policy source is configured; null otherwise. */
       policyContext: PolicyContext | null;
-    } & FeeBreakdown)
+    } & FeeBreakdown &
+      CostResultBreakdown)
   | ({
       kind: "over_budget";
       /** Not allowed to proceed *at this price* — the guard itself may allow it. */
@@ -310,8 +311,9 @@ export type CostDecision =
       footprintKeys: number;
       feeCeilingStroops: bigint;
       policyContext: PolicyContext | null;
-    } & FeeBreakdown)
-  | {
+    } & FeeBreakdown &
+      CostResultBreakdown)
+  | ({
       kind: "blocked";
       /** The guard refused. This is not a cost problem. */
       allowed: false;
@@ -323,8 +325,8 @@ export type CostDecision =
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
       policyContext: PolicyContext | null;
-    }
-  | {
+    } & CostResultBreakdown)
+  | ({
       kind: "undetermined";
       /** Enforcement could not reach a decision; treated as not-allowed. */
       allowed: false;
@@ -333,10 +335,22 @@ export type CostDecision =
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
       policyContext: PolicyContext | null;
-    };
+    } & CostResultBreakdown);
 
 /** Type alias matching documentation nomenclature. */
 export type CostPreCheckResult = CostDecision;
+
+/**
+ * Per-call options for cost checking, including fee ceilings and opt-in policy context.
+ */
+export interface CostPreCheckOptions {
+  /** Opt-in policy source (contract address or PolicyConfig/GuardPolicy). */
+  policySource?: string | PolicyConfig | null | undefined;
+  /** Optional policy or contract address. Alias for `policySource`. */
+  policy?: string | PolicyConfig | null | undefined;
+  /** Override the fee ceiling in stroops for this check. */
+  maxFeeStroops?: bigint | undefined;
+}
 
 /**
  * One interceptor verdict and the cost of the exact simulation that produced it.
@@ -514,21 +528,53 @@ export class CostPreChecker {
     this.config = config;
   }
 
+  /** Price a call. Equivalent to `(await this.checkWithCost(call, options)).cost`. */
   async check(
     call: ContractCall,
-    options?: {
-      policySource?: string | PolicyConfig | null | undefined;
-      policy?: string | PolicyConfig | null | undefined;
-      maxFeeStroops?: bigint | undefined;
-    },
+    options?: CostPreCheckOptions,
   ): Promise<CostDecision> {
+    return (await this.checkWithCost(call, options)).cost;
+  }
+
+  /**
+   * Price a call **and** return the interceptor's verdict, from one enforced
+   * simulation.
+   *
+   * ## Why this exists — and why not to call `check()` twice
+   *
+   * The obvious consumer flow is `interceptor.check(call)` for the policy
+   * verdict, then `costChecker.check(call)` for the price. Those are two
+   * simulations of the same call, and the problem is not only the extra RPC: the
+   * two simulations see two ledger snapshots, so the fee the caller is *told* can
+   * differ from the fee implied by the verdict that was actually enforced. A
+   * price that no longer corresponds to the approved decision is a correctness
+   * bug in a security tool, not a performance one — so this method asks the
+   * interceptor once and derives both results from that one verdict.
+   *
+   * Additive: `check()`, `precheckCost()` and `PreFlightInterceptor.check()` are
+   * unchanged.
+   */
+  async checkWithCost(
+    call: ContractCall,
+    options?: CostPreCheckOptions,
+  ): Promise<CostWithDecision> {
     const decision = await this.config.interceptor.check(call);
     const policySource =
       options?.policySource ?? options?.policy ?? this.config.policySource ?? this.config.policy;
     const policyContext = computePolicyContext(policySource, decision, call);
+    const ceiling = options?.maxFeeStroops ?? this.config.maxFeeStroops ?? null;
+    return {
+      decision,
+      cost: this.costOf(decision, policyContext, ceiling),
+    };
+  }
 
   /** The pure cost view of an already-obtained verdict. No network, no state. */
-  private costOf(decision: PreFlightDecision): CostDecision {
+  private costOf(
+    decision: PreFlightDecision,
+    policyContext: PolicyContext | null = null,
+    ceiling: bigint | null = this.config.maxFeeStroops ?? null,
+  ): CostDecision {
     if (decision.kind === "blocked") {
       return {
         kind: "blocked",
@@ -555,7 +601,6 @@ export class CostPreChecker {
     }
 
     const fees = feeBreakdown(decision.estimatedResourceFee);
-    const ceiling = options?.maxFeeStroops ?? this.config.maxFeeStroops ?? null;
     if (exceedsCeiling(fees.totalFeeStroops, ceiling)) {
       return {
         kind: "over_budget",
@@ -564,6 +609,7 @@ export class CostPreChecker {
         footprintKeys: decision.footprintKeys,
         feeCeilingStroops: ceiling as bigint,
         policyContext,
+        ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
       };
     }
     return {
@@ -573,6 +619,7 @@ export class CostPreChecker {
       footprintKeys: decision.footprintKeys,
       feeCeilingStroops: ceiling,
       policyContext,
+      ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
     };
   }
 }
@@ -581,11 +628,7 @@ export class CostPreChecker {
 export function precheckCost(
   config: CostPreCheckConfig,
   call: ContractCall,
-  options?: {
-    policySource?: string | PolicyConfig | null | undefined;
-    policy?: string | PolicyConfig | null | undefined;
-    maxFeeStroops?: bigint | undefined;
-  },
+  options?: CostPreCheckOptions,
 ): Promise<CostDecision> {
   return new CostPreChecker(config).check(call, options);
 }
@@ -597,6 +640,7 @@ export function precheckCost(
 export function precheckCostWithDecision(
   config: CostPreCheckConfig,
   call: ContractCall,
+  options?: CostPreCheckOptions,
 ): Promise<CostWithDecision> {
-  return new CostPreChecker(config).checkWithCost(call);
+  return new CostPreChecker(config).checkWithCost(call, options);
 }

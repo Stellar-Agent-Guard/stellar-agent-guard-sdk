@@ -17,8 +17,12 @@ import {
   describeCostDecision,
   exceedsCeiling,
   feeBreakdown,
+  formatFee,
   precheckCost,
+  precheckCostWithDecision,
+  resourceBreakdownFromSimulation,
   type PolicyContext,
+  type ResourceBreakdown,
 } from "../../src/cost.ts";
 import { INCLUSION_FEE } from "../../src/tx.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
@@ -253,6 +257,177 @@ describe("describeCostDecision", () => {
     });
     assert.match(text, /recipient_not_allowed/);
     assert.match(text, /0 stroops charged/);
+  });
+});
+
+describe("formatFee", () => {
+  it("pins XLM's 7-decimal definition as an exact integer", () => {
+    assert.equal(STROOPS_PER_XLM, 10_000_000n);
+  });
+
+  it("renders the exact edge values the money rule is about", () => {
+    // 0, 1 stroop, and 10^7-1: the three inputs where any off-by-one in the
+    // divisor or the padding shows up immediately.
+    assert.equal(formatFee(0n), "0");
+    assert.equal(formatFee(1n), "0.0000001");
+    assert.equal(formatFee(9_999_999n), "0.9999999");
+    assert.equal(formatFee(10_000_000n), "1");
+    assert.equal(formatFee(10_000_001n), "1.0000001");
+  });
+
+  it("drops trailing fractional zeros (minimal, exact convention)", () => {
+    // Documented convention: "0.1", never "0.1000000".
+    assert.equal(formatFee(1_000_000n), "0.1");
+    assert.equal(formatFee(1_500_000n), "0.15");
+    assert.equal(formatFee(1_234_560n), "0.123456");
+    assert.equal(formatFee(1_234_567n), "0.1234567");
+  });
+
+  it("keeps full precision above Number.MAX_SAFE_INTEGER via the bigint path", async () => {
+    const { INCLUSION_FEE } = await import("../../src/tx.ts");
+    // 2^53 + 1: a value a `number` cannot even hold. Anything routed through
+    // Number here would silently round to 2^53.
+    const beyondSafe = 9_007_199_254_740_993n;
+    assert.equal(formatFee(beyondSafe), "900719925.4740993");
+
+    // A real large total: the inclusion fee added to a very large resource fee.
+    const hugeTotal = feeBreakdown(beyondSafe).totalFeeStroops;
+    assert.equal(hugeTotal, beyondSafe + BigInt(INCLUSION_FEE));
+    assert.equal(formatFee(hugeTotal), "900719925.4741093");
+  });
+
+  it("accepts a base-10 string without going through Number", () => {
+    assert.equal(formatFee("1"), "0.0000001");
+    assert.equal(formatFee("100"), "0.00001");
+    assert.equal(formatFee("1000000000000000000000"), "100000000000000");
+    assert.equal(formatFee("-1"), "-0.0000001");
+  });
+
+  it("refuses inputs that would have to be coerced", () => {
+    for (const bad of ["", "abc", "1.5", "1e7", " 1", null, undefined]) {
+      assert.throws(
+        () => formatFee(bad as unknown as string),
+        (err: unknown) => {
+          assert(err instanceof TypeError);
+          assert.match(err.message, /integer-only|already have lost precision/);
+          return true;
+        },
+        `expected ${JSON.stringify(bad)} to be refused`,
+      );
+    }
+    // A number is a distinct, deliberate refusal: precision is already gone.
+    assert.throws(() => formatFee(1 as unknown as bigint), (err: unknown) => {
+      assert(err instanceof TypeError);
+      assert.match(err.message, /lost precision/);
+      return true;
+    });
+    assert.throws(() => formatFee(1.5 as unknown as bigint), TypeError);
+  });
+
+  it("round-trips: every accepted value renders back to the same integer", () => {
+    for (const stroops of [
+      0n,
+      1n,
+      7n,
+      999_999n,
+      1_000_000n,
+      9_999_999n,
+      10_000_000n,
+      123_456_789_012_345_678n,
+      -42n,
+    ]) {
+      const rendered = formatFee(stroops);
+      const [whole = "", fraction = ""] = rendered.replace("-", "").split(".");
+      const back =
+        BigInt(whole) * STROOPS_PER_XLM +
+        (fraction === "" ? 0n : BigInt(fraction.padEnd(7, "0")));
+      assert.equal(rendered.startsWith("-") ? -back : back, stroops, `round-trip of ${stroops}`);
+    }
+  });
+});
+
+/**
+ * `checkWithCost` (issue #87): one simulation, both answers.
+ *
+ * The property worth pinning is the *count* of simulations, because that is the
+ * whole point of the API: `interceptor.check()` followed by
+ * `costChecker.check()` simulates the same call twice against two ledger
+ * snapshots, and the reported fee can then disagree with the enforced verdict.
+ */
+describe("CostPreChecker.checkWithCost", () => {
+  it("runs exactly one simulation for the combined verdict and cost", async () => {
+    let simulations = 0;
+    const interceptor = {
+      check: async (_call: ContractCall): Promise<PreFlightDecision> => {
+        simulations += 1;
+        return admissible(2_000n, 4);
+      },
+    };
+    const checker = new CostPreChecker({ interceptor });
+    const { decision, cost } = await checker.checkWithCost(CALL);
+
+    assert.equal(simulations, 1, "one enforced simulation, not two");
+    assert.equal(decision.kind, "admissible");
+    assert.equal(cost.kind, "within_budget");
+    assert.equal(cost.resourceFeeStroops, 2_000n);
+    assert.equal(cost.totalFeeStroops, 2_000n + BigInt(INCLUSION_FEE));
+    assert.equal(cost.footprintKeys, 4);
+  });
+
+  it("returns the interceptor's verdict itself, not a re-derived copy", async () => {
+    const verdict = admissible(1n, 1);
+    const checker = new CostPreChecker({ interceptor: { check: async () => verdict } });
+    const { decision } = await checker.checkWithCost(CALL);
+    assert.equal(decision, verdict);
+  });
+
+  it("keeps a refusal uncosted while still returning the verdict", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor({
+        allowed: false,
+        kind: "blocked",
+        reason: "paused",
+        explanation: "account paused",
+        detail: "simulation failed",
+        diagnosticEvents: [],
+      }),
+      maxFeeStroops: 1n, // a ceiling that would reject any price
+    });
+    const { decision, cost } = await checker.checkWithCost(CALL);
+    assert.equal(decision.kind, "blocked");
+    assert.equal(cost.kind, "blocked");
+    assert.equal(cost.totalFeeStroops, 0n);
+  });
+
+  it("implements check() on top of the one-simulation path", async () => {
+    let simulations = 0;
+    const interceptor = {
+      check: async (): Promise<PreFlightDecision> => {
+        simulations += 1;
+        return admissible(5_000n, 2);
+      },
+    };
+    const checker = new CostPreChecker({ interceptor, maxFeeStroops: 10_000n });
+    const combined = await checker.checkWithCost(CALL);
+    const plain = await checker.check(CALL);
+    assert.equal(simulations, 2, "one simulation per call, never two for one call");
+    assert.deepEqual(plain, combined.cost);
+  });
+});
+
+describe("precheckCostWithDecision", () => {
+  it("decides and prices from one simulation in the one-shot form", async () => {
+    let simulations = 0;
+    const interceptor = {
+      check: async (): Promise<PreFlightDecision> => {
+        simulations += 1;
+        return admissible(2_000n);
+      },
+    };
+    const { decision, cost } = await precheckCostWithDecision({ interceptor }, CALL);
+    assert.equal(simulations, 1);
+    assert.equal(decision.kind, "admissible");
+    assert.equal(cost.kind, "within_budget");
   });
 });
 
