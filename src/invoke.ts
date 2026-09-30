@@ -45,6 +45,68 @@ import {
   type SubmissionResult,
 } from "./tx.ts";
 
+/**
+ * Shared RPC configuration consumed by every surface that talks to Soroban RPC
+ * (`invoke`, `preflight`, `telemetry`).
+ *
+ * Exactly one of `server` or `url` must be supplied:
+ *
+ *  - `server` — a pre-built `rpc.Server` instance. It wins over `url` and is
+ *    used verbatim, so enterprise/agent deployments can route RPC through a
+ *    proxy (auth headers, mTLS, latency shielding) by configuring the instance
+ *    *before* handing it in. Deterministic tests can pass a fake Server object
+ *    and assert calls land on it, with no URL strings scattered through the
+ *    suite.
+ *  - `url` — a plain RPC endpoint URL. The SDK constructs a default
+ *    `rpc.Server` from it. This is the URL-only path that predates this option.
+ *
+ * Supplying both is a configuration error (the injected instance would be
+ * silently ignored); supplying neither leaves the SDK with no endpoint at all.
+ * Both cases raise a typed {@link RpcConfigError}.
+ */
+export interface RpcConfig {
+  /** Pre-built RPC server instance. Mutually exclusive with `url`. */
+  server?: rpc.Server | undefined;
+  /** RPC endpoint URL. Mutually exclusive with `server`. */
+  url?: string | undefined;
+}
+
+/**
+ * Raised when an {@link RpcConfig} is neither a usable server nor a usable URL.
+ *
+ * A dedicated error type lets callers branch on misconfiguration with
+ * `instanceof` instead of matching on message text.
+ */
+export class RpcConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RpcConfigError";
+  }
+}
+
+/**
+ * Resolve an {@link RpcConfig} to a concrete `rpc.Server`.
+ *
+ * An injected `server` is returned unchanged — never wrapped, never rebuilt —
+ * so a caller's proxy configuration and a test's fake object both survive
+ * verbatim. When only `url` is given, a default `rpc.Server` is constructed
+ * from it. Both-present and neither-present are typed errors.
+ */
+export function resolveServer(config: RpcConfig): rpc.Server {
+  const hasServer = config.server !== undefined && config.server !== null;
+  const hasUrl = config.url !== undefined && config.url !== null && config.url !== "";
+  if (hasServer && hasUrl) {
+    throw new RpcConfigError(
+      "RpcConfig received both `server` and `url`; supply exactly one (the injected `server` would be ignored)",
+    );
+  }
+  if (hasServer) return config.server as rpc.Server;
+  if (hasUrl) return new rpc.Server(config.url as string);
+  throw new RpcConfigError(
+    "RpcConfig requires either a pre-built `server` instance or a `url`; received neither",
+  );
+}
+
 /** How the guard's authorization is produced for a call that needs it. */
 export interface GuardAuthorization {
   guard: string;
@@ -242,8 +304,16 @@ export interface InvokePollOptions {
   pollIntervalMs?: number;
 }
 
-export interface InvokeParams {
-  server: rpc.Server;
+export interface InvokeParams extends RpcConfig {
+  /**
+   * Pre-built RPC server instance. Mutually exclusive with `url`; when both
+   * are supplied, `resolveServer` raises a typed {@link RpcConfigError}.
+   *
+   * @deprecated Prefer the inherited {@link RpcConfig} shape — `server` is
+   * still accepted here for backwards compatibility, but new code should pass
+   * either `server` or `url`, not both.
+   */
+  server?: rpc.Server | undefined;
   /** Classic account that pays the fee and supplies the sequence number. */
   source: Keypair | AdminSigner;
   call: ContractCall;
@@ -674,15 +744,16 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   // serialize against the account queue.
   if (params.dryRun) return invokeDryRun(params);
 
+  const server = resolveServer(params);
   const sourceKey = await params.source.publicKey();
-  return withAccountQueue(params.server, sourceKey, async () => {
+  return withAccountQueue(server, sourceKey, async () => {
     const retry = resolveRetryOptions(params.retry);
     let attempts = 0;
 
     while (true) {
       attempts += 1;
       // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
-      const outcome = await invokePipeline(params, attempts - 1);
+      const outcome = await invokePipeline({ ...params, server }, attempts - 1);
 
       if (outcome.kind !== "error" || outcome.retryable === undefined) {
         return outcome;
@@ -705,11 +776,13 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
  * are local to this function: classifying the guard's answer, and pricing it.
  */
 async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
+  const server = resolveServer(params);
   const steps: InvokePipelineStep[] = [];
   const observer = params.onStep;
   const enforced = await enforceCall(
     {
       ...params,
+      server,
       onStep: (event) => {
         // A dry run can never reach broadcast, so a broadcast stage is a bug
         // rather than a stage to report. Dropping it here keeps that guarantee
@@ -949,7 +1022,8 @@ export async function enforceCall(
   params: InvokeParams,
   attempt: number = 0,
 ): Promise<EnforcementOutcome> {
-  const { server, source, call, networkPassphrase } = params;
+  const server = resolveServer(params);
+  const { source, call, networkPassphrase } = params;
 
   let operation: xdr.Operation;
   let expiration: number;

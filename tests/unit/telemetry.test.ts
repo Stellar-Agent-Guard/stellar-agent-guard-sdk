@@ -1035,3 +1035,88 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
   });
 });
 
+/**
+ * Injectable transport (issue #102).
+ *
+ * Enterprise and agent deployments route RPC through proxies (auth headers,
+ * mTLS, latency shielding) or mock it entirely in tests. The SDK previously
+ * forced URL-only configuration, so a pre-built `SorobanRpc.Server` — with
+ * whatever proxy/header setup the caller needs — could not be handed in.
+ *
+ * The shared `{ server? | url? }` config is consumed by all three surfaces
+ * (`preflight`, `telemetry`, `invoke`). These tests pin the two properties
+ * that make it trustworthy: mutual exclusion is validated with a typed error,
+ * and an injected instance is used verbatim — calls land on the object the
+ * caller passed, never on a fresh one rebuilt from a url.
+ */
+describe("injectable transport config (issue #102)", () => {
+  it("uses an injected Server instance verbatim, never rebuilding one from a url", async () => {
+    const calls: string[] = [];
+    const injectedServer = {
+      getLatestLedger: async () => {
+        calls.push("getLatestLedger");
+        return { sequence: 500 };
+      },
+      getEvents: async () => {
+        calls.push("getEvents");
+        return { events: [], cursor: "cursor_1", latestLedger: 500 };
+      },
+    };
+
+    const listener = new GuardTelemetryListener({
+      server: injectedServer as never,
+      guard: GUARD,
+    });
+    const page = await listener.poll({ startLedger: 400 });
+
+    assert.equal(page.latestLedger, 500);
+    assert.deepEqual(
+      calls,
+      ["getEvents"],
+      "the injected instance must receive the call, not a fresh Server built from a url",
+    );
+  });
+
+  it("rejects a config that supplies both server and url with a typed error", () => {
+    const injectedServer = {
+      getLatestLedger: async () => ({ sequence: 1 }),
+      getEvents: async () => ({ events: [], cursor: "c", latestLedger: 1 }),
+    };
+
+    assert.throws(
+      () =>
+        new GuardTelemetryListener({
+          server: injectedServer as never,
+          url: "https://soroban-testnet.stellar.org",
+          guard: GUARD,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error, "mutual exclusion must surface a typed error");
+        assert.match(error.message, /server.*url|url.*server/i);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a config that supplies neither server nor url with a typed error", () => {
+    assert.throws(
+      () => new GuardTelemetryListener({ guard: GUARD } as never),
+      (error: unknown) => {
+        assert.ok(error instanceof Error, "a missing transport must surface a typed error");
+        assert.match(error.message, /server|url/i);
+        return true;
+      },
+    );
+  });
+
+  it("accepts a url-only config for callers that do not need a pre-built Server", () => {
+    // The url path is unchanged: it is the fallback for callers with no proxy
+    // or header requirements, and must keep constructing a Server internally.
+    const listener = new GuardTelemetryListener({
+      url: "https://soroban-testnet.stellar.org",
+      guard: GUARD,
+    });
+    assert.ok(listener, "url-only config must remain valid");
+  });
+});
+

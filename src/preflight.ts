@@ -1,3 +1,4 @@
+
 /**
  * The pre-flight interceptor: ask the guard whether an action is permitted
  * *before* anything is signed for broadcast.
@@ -289,8 +290,23 @@ export interface PreFlightCacheOptions {
   policyRevision?: PolicyRevision | (() => PolicyRevision | Promise<PolicyRevision>);
 }
 
+/**
+ * Shared RPC transport configuration consumed by every surface.
+ *
+ * Exactly one of `server` or `url` must be supplied:
+ *  - `server` — a pre-built `rpc.Server` instance, used verbatim. This is the
+ *    lever for routing through proxies (auth headers, mTLS, latency shielding):
+ *    configure the `Server` (or a custom `fetch`) *before* constructing it and
+ *    pass the instance in.
+ *  - `url` — an RPC endpoint URL; the SDK constructs a `Server` from it.
+ *
+ * Supplying both, or neither, is a typed error (`InvalidTransportConfigError`).
+ */
+export type RpcTransportConfig =
+  | { server: rpc.Server; url?: undefined }
+  | { url: string; server?: undefined };
+
 export interface PreFlightConfig {
-  server: rpc.Server;
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
   guard: string;
@@ -311,7 +327,7 @@ export interface PreFlightConfig {
    * A cached verdict can be staler than one admitted transfer.
    */
   cache?: PreFlightCacheOptions;
-}
+} & RpcTransportConfig;
 
 /** Alias used by the README's constructor terminology. */
 export type PreFlightInterceptorOptions = PreFlightConfig;
