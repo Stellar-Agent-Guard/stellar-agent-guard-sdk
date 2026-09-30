@@ -22,8 +22,10 @@ import {
   policyFromScVal,
   policyToScVal,
   validateGuardPolicy,
+  freezePolicy,
   unsafeContractAddress,
   unsafeAccountAddress,
+  type ContractAddress,
   type GuardStatus,
   type PolicyConfig,
 } from "../../src/policy.ts";
@@ -848,5 +850,55 @@ describe("validateGuardPolicy (SPEC §8)", () => {
       assert.ok(ruleIds.has("self_as_recipient"));
       assert.ok(ruleIds.has("active_window_inverted"));
     });
+  });
+});
+
+describe("freezePolicy", () => {
+  it("returns the same object reference (no copy)", () => {
+    const policy = samplePolicy();
+    const frozen = freezePolicy(policy);
+    assert.equal(frozen, policy as unknown);
+  });
+
+  it("freezes the top-level object — mutation throws in strict mode (ESM = strict)", () => {
+    const frozen = freezePolicy(samplePolicy());
+    assert.throws(() => {
+      (frozen as { per_tx_cap: bigint }).per_tx_cap = 9999n;
+    }, TypeError);
+  });
+
+  it("freezes the assets array — push throws", () => {
+    const frozen = freezePolicy(samplePolicy());
+    assert.throws(() => {
+      (frozen.assets as ContractAddress[]).push(TOKEN);
+    }, TypeError);
+  });
+
+  it("freezes protocol rule objects and their fns arrays", () => {
+    const policy = samplePolicy({
+      protocols: [{ contract: TOKEN, fns: ["transfer"] }],
+    });
+    const frozen = freezePolicy(policy);
+    assert.throws(() => {
+      (frozen.protocols[0]!.fns as string[]).push("swap");
+    }, TypeError);
+    assert.throws(() => {
+      (frozen.protocols[0] as { contract: string }).contract = TOKEN;
+    }, TypeError);
+  });
+
+  it("still encodes correctly after freeze", () => {
+    const frozen = freezePolicy(samplePolicy());
+    assert.doesNotThrow(() => policyToScVal(frozen));
+  });
+
+  // Compile-time regression guard: if per_tx_cap ever becomes mutable again
+  // the @ts-expect-error below will be "unused" and tsc will fail the build.
+  it("ReadonlyPolicyConfig rejects mutation at the type level", () => {
+    const frozen = freezePolicy(samplePolicy());
+    assert.throws(() => {
+      // @ts-expect-error — per_tx_cap must be readonly
+      frozen.per_tx_cap = 1n;
+    }, TypeError);
   });
 });
