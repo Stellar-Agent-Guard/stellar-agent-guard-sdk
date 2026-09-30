@@ -56,7 +56,7 @@ function loadReplayFixture(name: string): ReplayFixture {
 function extractVerdict(
   simulation: rpc.Api.SimulateTransactionResponse,
   guardContract: string,
-): { verdict: "admissible" | "blocked" | "undetermined"; reason?: string } {
+): { verdict: "admissible" | "blocked" | "undetermined"; reason?: string | undefined } {
   if (rpc.Api.isSimulationError(simulation)) {
     return { verdict: "undetermined" };
   }
