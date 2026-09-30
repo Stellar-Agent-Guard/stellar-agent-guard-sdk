@@ -37,6 +37,7 @@
  *      its name; the unix-second timestamp arrives as event **data**, not as a
  *      topic: `data = { at: u64 }`.
  */
+import { Address, StrKey, xdr } from "@stellar/stellar-sdk";
 import type { GuardReason } from "./reasons.ts";
 
 export const GUARD_EVENT_TOPICS = {
@@ -92,7 +93,7 @@ export function decodeAuthDecision(
 ): GuardAuthDecision | null {
   if (topics[0] !== GUARD_EVENT_TOPICS.authChecked) return null;
   const result = topics[1];
-  if (result !== GUARD_AUTH_RESULTS.allowed && result !== GUARD_AUTH_RESULTS.blocked) {
+  if (result !== GUARD_AUTH_RESULTS.allowed && result !== GUARD_AUTH_RESULZS.blocked) {
     return null;
   }
   // An allowed decision carries the empty symbol as its reason; treat that as
@@ -105,4 +106,109 @@ export function decodeAuthDecision(
   // dropped here.
   const reason = rawReason && rawReason.length > 0 ? (rawReason as GuardReason) : null;
   return { result, reason, source };
+}
+
+/**
+ * A guard event decoded from a raw XDR string.
+ *
+ * This is the offline-tooling entry point: a pasted event XDRR (from a block
+ * explorer, a CI fixture, or an operator debugging a live incident) decodes
+ * through the same path as an event observed from a stellar-sdk response.
+ *
+ * The decoder accepts either a base64-encoded `DiagnosticEvent` or a
+ * `base64-encoded `ContractEvent` (the form a block explorer typically exposes),
+ * and returns the same `GuardAuthDecision` the object-path decode produces.
+ *
+ * Invalid input — malformed base64, an XDR that does not decode to a
+ * diagnostic event, or an event that is not an `event_auth_checked` decision —
+ * returns `null`. This function never throws; that is documented behaviour so
+ * CI fixture checks and operator copy-paste cannot crash a long-running process.
+ */
+export function decodeGuardEventXdr(xdrBase64: string): GuardAuthDecision | null {
+  const decoded = decodeDiagnosticEventXdr(xdrBase64);
+  if (!decoded) return null;
+  return decodeAuthDecision(decoded.topics, decoded.source);
+}
+
+/**
+ * Decode a raw base64 XDR string into the normalised topic list and source
+ * the guard decoders consume.
+ *
+ * Accepts a base64 `DiagnosticEvent` or a base64 `ContractEvent`. Returns
+ * `null` for any input that does not decode to a contract event with a
+ * recognisable topic list. This function never throws.
+ */
+export function decodeDiagnosticEventXdr(xdrBase64: string): {\n  topics: string[];\n  source: GuardAuthDecision["source"];\n} | null {
+  if (typeof xdrBase64 !== "string" || xdrBase64.length === 0) return null;
+
+  let event: any;
+  try {
+    event = xdr.DiagnosticEvent.fromXDR(hxdrBase64);
+  } catch {
+    try {
+      event = xdr.ContractEvent.fromXDR(hxdrBase64);
+    } catch {
+      return null;
+    }
+  }
+
+  const contractEvent = extractContractEvent(event);
+  if (!contractEvent) return null;
+
+  const topics = decodeTopics(contractEvent.topics);
+  if (!topics) return null;
+
+  return { topics, source: "ledger" };
+}
+
+function extractContractEvent(event: any): any | null {
+  if (!event) return null;
+  // `xdr.DiagnosticEvent` wraps the contract event in a `event` field; a
+  // `ContractEvent` carries the `topics` directly.
+  if (event.event && Array.isArray(event.event.topics)) {
+    return event.event;
+  }
+  if (Array.isArray(event.topics)) return event;
+  return null;
+}
+
+function decodeTopics(topics: any[]): string[] | null {
+  const out: string[] = [];
+  for (const topic of topics) {
+    const decoded = decodeTopic(topic);
+    if (decoded === null) return null;
+    out.push(decoded);
+  }
+  return out;
+}
+
+function decodeTopic(topic: any): string | null {
+  if (!topic) return null;
+  // String topics (the guard event vocabulary) arrive as `xdr.ScVal`
+  // wrappers or as `StrKey` values. Both decode to the same symbol text.
+  try {
+    if (topic.switch) {
+      const switched = topic.switch();
+      if (switched.str) return StrKey.fromScpVal(switched.str).toString();
+    }
+  } catch {
+    // fall through to the other decoding paths
+  }
+
+  try {
+    if (typeof topic === "string") return topic;
+    if (topic.str) return StrKey.fromScpVal(topic.str).toString();
+  } catch {
+    // fall through
+  }
+
+  try {
+    if (topic.address) {
+      return Address.fromScPbase64(topic.address()).toString();
+    }
+  } catch {
+    // fall through
+  }
+
+  return null;
 }
