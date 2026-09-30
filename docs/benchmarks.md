@@ -65,8 +65,10 @@ Reading the numbers:
 ## Why there is no CI gate
 
 CI runs `npm run bench` informationally and never fails the build on wall-time
-(`.github/workflows/ci.yml`, the `decode-path benchmarks (informational)` step,
-`continue-on-error: true`). Shared GitHub runners have noisy, virtualised CPUs,
+(`.github/workflows/ci.yml`, the `decode-path benchmarks (informational)` job and
+its step of the same name, `continue-on-error: true` at both levels — it runs
+beside the required `ci` check as its own job, never inside it, so it can never
+gate a merge). Shared GitHub runners have noisy, virtualised CPUs,
 a shared L2 cache, and neighbours running unrelated work; a timing threshold
 derived from any committed baseline would flake on exactly the runner class CI
 uses. The honest use of a benchmark is a before/after comparison recorded in a
