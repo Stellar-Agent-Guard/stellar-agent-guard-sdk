@@ -20,6 +20,13 @@
  * A fourth target, `decodePolicy`, is included because it is the read-side
  * counterpart of target 1 and costs nothing to measure alongside it.
  *
+ * Each task is also run in a "hot loop" variant that repeats the operation
+ * `HOT_LOOP_ITERATIONS` times per sample, so per-op costs that are dominated by
+ * tinybench's own per-iteration bookkeeping (sub-microsecond decodes) still
+ * produce a stable, comparable number. The hot-loop numbers are what the
+ * optimization PRs in this issue cite; the single-shot numbers are kept for
+ * continuity with the baseline in `docs/benchmarks.md`.
+ *
  * This is a benchmark, not a test: it never asserts a wall-time threshold. CI
  * runs it informationally (see `.github/workflows/ci.yml`) and shared runners
  * are too noisy for a timing gate to mean anything. Compare numbers against the
@@ -41,6 +48,8 @@ const encodedPolicy = policyToScVal(policy);
 const payloads = verdictPayloads();
 const events = diagnosticEvents();
 
+const HOT_LOOP_ITERATIONS = 100;
+
 const bench = new Bench({ time: 1000, name: "stellar-agent-guard-sdk decode path" });
 
 bench.add(`policyToScVal (${LARGE_POLICY_ENTRIES}-entry allowlist)`, () => {
@@ -59,11 +68,33 @@ bench.add(`guardEventsFromDiagnostics (${events.length} diagnostic events)`, () 
   guardEventsFromDiagnostics(events, FIXTURE_GUARD);
 });
 
+bench.add(`policyToScVal hot loop x${HOT_LOOP_ITERATIONS}`, () => {
+  for (let i = 0; i < HOT_LOOP_ITERATIONS; i++) policyToScVal(policy);
+});
+
+bench.add(`decodePolicy hot loop x${HOT_LOOP_ITERATIONS}`, () => {
+  for (let i = 0; i < HOT_LOOP_ITERATIONS; i++) decodePolicy(encodedPolicy);
+});
+
+bench.add(`decodeCheckResult hot loop x${HOT_LOOP_ITERATIONS}`, () => {
+  for (let i = 0; i < HOT_LOOP_ITERATIONS; i++) {
+    for (const payload of payloads) decodeCheckResult(payload.raw);
+  }
+});
+
+bench.add(`guardEventsFromDiagnostics hot loop x${HOT_LOOP_ITERATIONS}`, () => {
+  for (let i = 0; i < HOT_LOOP_ITERATIONS; i++) guardEventsFromDiagnostics(events, FIXTURE_GUARD);
+});
+
 await bench.run();
 
 console.log("stellar-agent-guard-sdk decode-path benchmarks");
 console.log(
   "informational only: no wall-time gate (shared-runner noise makes a timing threshold meaningless)",
+);
+console.log("");
+console.log(
+  `hot-loop tasks repeat the operation ${HOT_LOOP_ITERATIONS}x per sample; divide median ms/op by ${HOT_LOOP_ITERATIONS} for per-op cost`,
 );
 console.log("");
 

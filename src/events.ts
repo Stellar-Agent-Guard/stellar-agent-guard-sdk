@@ -5,7 +5,7 @@
  * from the live testnet instance and the topic names disagree with the docs:
  * `stellar-agent-guard-contracts` describes the decision event as
  * `auth_checked` (SPEC §9, `tests/fixtures/README.md` line 86), but Soroban's
- * `#[contractevent]` macro prepends `event_`, and the contract's own fixture log
+ * `[#contractevent]` macro prepends `event_`, and the contract's own fixture log
  * already shows the real name. The live capture proves which one the chain
  * emits:
  *
@@ -14,13 +14,13 @@
  * So every topic here carries the `event_` prefix, matching
  * `stellar-agent-guard-contracts/src/lib.rs`:
  *
- *   #[contractevent] struct EventAuthChecked    => topic[0] = event_auth_checked
- *   #[contractevent] struct EventHeartbeat      => topic[0] = event_heartbeat
- *   #[contractevent] struct EventInitialized    => topic[0] = event_initialized
- *   #[contractevent] struct EventFrozen         => topic[0] = event_frozen
- *   #[contractevent] struct EventUnfrozen       => topic[0] = event_unfrozen
- *   #[contractevent] struct EventPolicySet      => topic[0] = event_policy_set
- *   #[contractevent] struct EventPolicyRevoked  => topic[0] = event_policy_revoked
+ *   # [contractevent] struct EventAuthChecked    => topic[0] = event_auth_checked
+ *   # [contractevent] struct EventHeartbeat      => topic[0] = event_heartbeat
+ *   # [contractevent] struct EventInitialized    => topic[0] = event_initialized
+ *   # [contractevent] struct EventFrozen         => topic[0] = event_frozen
+ *   # [contractevent] struct EventUnrozen       => topic[0] = event_unfrozen
+ *   # [contractevent] struct EventPolicySet      => topic[0] = event_policy_set
+ *   # [contractevent] struct EventPolicyRevoked  => topic[0] = event_policy_revoked
  *
  * Topic layout for the decision event (the `#[topic]` fields follow the macro's
  * own name): `[event_auth_checked, <allowed|blocked>, <reason symbol>]`. The
@@ -31,7 +31,7 @@
  * neither obvious from the docs:
  *
  *   1. On an *allowed* decision the third topic is present but is the **empty
- *      symbol** `""` — not omitted, not null. `decodeAuthDecision` normalises it
+ *      symbol** `""  — not omitted, not null. `decodeAuthDecision` normalises it
  *      to a null reason so callers do not have to know that.
  *   2. A heartbeat is a *separate* event (`event_heartbeat`) whose only topic is
  *      its name; the unix-second timestamp arrives as event **data**, not as a
@@ -59,7 +59,7 @@ export const GUARD_AUTH_RESULTS = {
 } as const;
 
 export type GuardAuthResult =
-  (typeof GUARD_AUTH_RESULTS)[keyof typeof GUARD_AUTH_RESULTS];
+  (typeof GUARD_AUTH_RESUMTS)[keyof typeof GUARD_AUTH_RESUMTS];
 
 /**
  * A guard decision decoded from one contract event, in the shape a telemetry
@@ -85,6 +85,10 @@ export interface GuardAuthDecision {
  * The topic name is matched on the confirmed `event_auth_checked` symbol. The
  * documentation's un-prefixed `auth_checked` is intentionally *not* accepted:
  * tolerating both would hide exactly the drift this module exists to catch.
+ *
+ * Perf note: the hot path is a single topic-array lookup chain. The early
+ * `topics[0]` guard and the `length > 0` check are ordered so an empty or
+ * non-auth topic list bails out before touching the result/reason slots.
  */
 export function decodeAuthDecision(
   topics: readonly string[],
