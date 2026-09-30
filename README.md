@@ -149,40 +149,38 @@ if (decision.kind === "admissible") {
 }
 ```
 
-#### Branded Address Types (v0.2.0+)
-
-This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
-
-**Type Guards:**
+### Cost Pre-Checking with Policy Context
 
 ```ts
-import { 
-  isContractAddress,    // Validates C... addresses
-  isAccountAddress,     // Validates G... addresses
-  isStrKeyAddress,      // Validates any StrKey (C... or G...)
-  isPublicKeyHex,       // Validates 64-char hex public keys
-} from "stellar-agent-guard-sdk";
+import { CostPreChecker } from "stellar-agent-guard-sdk";
 
-// Runtime validation before use
-if (!isContractAddress(userInput)) {
-  throw new Error("Expected contract address (C...)");
-}
+const checker = new CostPreChecker({
+  interceptor,
+  maxFeeStroops: 50_000n,
+  policySource: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44", // opt-in policy source
+});
+
+const result = await checker.check({
+  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  fn: "transfer",
+  args: [/* from, to, amount */],
+});
+
+console.log("Cost verdict:", result.kind); // within_budget | over_budget | blocked | undetermined
+console.log("Policy context:", result.policyContext);
 ```
 
-**Migration:** If upgrading from an earlier version, see [MIGRATION.md](./MIGRATION.md) for guidance on updating your code to use typed addresses.
+#### Policy Context Semantics
 
-#### Throw vs. Verdict Contract
+When an opt-in `policySource` (contract address or `GuardPolicy`/`PolicyConfig`) is configured in options, `CostPreCheckResult` exposes additive `policyContext`:
 
-Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
+- `perTxCapOk`: Whether the transaction fits within the policy's per-transaction cap (`true` if within cap, `false` if `per_tx_cap_exceeded`, or `null` if not determinable).
+- `windowRemainingEstimate`: Estimated remaining budget in the current rolling window. **Always `null` when the contract does not expose sufficient window state.**
+  > `null` means "not available / cannot be determined from the current contract state", not "zero remaining budget". The SDK never fabricates a zero budget.
+- `reason`: The contract's policy block reason (e.g. `"window_cap_exceeded"` or `"per_tx_cap_exceeded"`), or `null` when allowed.
+- When no policy source is configured in options, `policyContext` is `null` (no policy call is made).
 
-- **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
-- **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
-- Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
-
-### Optional simulation-result cache
-
-`PreFlightInterceptor` always performs a fresh simulation by default. For agent
-loops that repeatedly check the same call, caching can be enabled explicitly:
+### Framework Middleware (LangChain & ElizaOS)
 
 ```ts
 const interceptor = new PreFlightInterceptor({
@@ -573,77 +571,9 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
-  - `constructor(options: CostPreCheckerOptions)`
-  - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
-  - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
-
-#### Fee units: stroops and XLM
-
-`CostPreChecker` reports fees as exact integer stroops — the raw value is the
-source of truth, and it is what a `maxFeeStroops` ceiling is compared against.
-`formatFee()` renders the same number in XLM, the unit operators think in, using
-**integer math only** (XLM has 7 decimal places; float rounding on
-money-adjacent output in a security tool is not acceptable) and with no trailing
-zeros:
-
-```ts
-import { formatFee } from "stellar-agent-guard-sdk";
-
-cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
-formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
-
-formatFee(1n);             // "0.0000001" — one stroop
-formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
-```
-
-#### `CostPreChecker` resource breakdown
-
-Priced `within_budget` and `over_budget` results may include a `breakdown` parsed from the same Soroban simulation that produced `resourceFeeStroops`:
-
-```ts
-if (decision.kind === "within_budget" && decision.breakdown) {
-  console.log(decision.breakdown);
-  // {
-  //   instructions,       // SorobanResources.instructions
-  //   diskReadBytes,      // SorobanResources.diskReadBytes
-  //   writeBytes,         // SorobanResources.writeBytes
-  //   readOnlyEntries,    // footprint.readOnly.length
-  //   readWriteEntries,   // footprint.readWrite.length
-  //   storageEntries      // readOnlyEntries + readWriteEntries
-  // }
-}
-```
-
-`breakdown` is `undefined` when the simulation is undetermined, malformed, or missing any required resource field; the SDK never fabricates zero values. The stellar-sdk v17 Soroban resource payload has no `memBytes` field, so this API reports the actual `writeBytes`/disk resource fields rather than relabeling them as memory usage.
-
-#### One simulation per check: prefer `checkWithCost`
-
-`PreFlightInterceptor.check()` answers *may this proceed?* and
-`CostPreChecker.check()` answers *what will it cost?* — but calling both runs the
-enforced simulation **twice**, against two ledger snapshots. The extra RPC is the
-lesser problem: the fee reported for a call can then differ from the fee implied
-by the verdict that was actually enforced, so the price no longer corresponds to
-the approved decision.
-
-`CostPreChecker.checkWithCost()` returns both from a **single** simulation:
-
-```ts
-const { decision, cost } = await costChecker.checkWithCost(call);
-
-if (decision.kind === "blocked") {
-  console.log("refused:", decision.reason);        // nothing was charged
-} else if (cost.kind === "over_budget") {
-  console.log("too expensive:", formatFee(cost.totalFeeStroops), "XLM");
-} else if (decision.allowed) {
-  console.log("approved at", formatFee(cost.totalFeeStroops), "XLM");
-}
-```
-
-Prefer this over calling `interceptor.check(call)` and `costChecker.check(call)`
-in sequence. That two-call pattern still works and its types are unchanged, but
-it carries the fee-drift caveat above. `precheckCostWithDecision()` is the
-one-shot form.
+  - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
+  - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast.
 
 ### Telemetry & Helpers
 

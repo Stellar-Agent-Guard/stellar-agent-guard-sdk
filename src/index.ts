@@ -56,9 +56,10 @@ export type {
 } from "./reasons.ts";
 
 export {
+  POLICY_RULE_IDS,
+  deadManRemaining,
   decodeCheckResult,
   decodePolicy,
-  deadManRemaining,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -68,7 +69,6 @@ export {
   isDeadManFrozen,
   isPublicKeyHex,
   isStrKeyAddress,
-  POLICY_RULE_IDS,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
@@ -83,7 +83,7 @@ export type {
   AccountAddress,
   CheckResult,
   ContractAddress,
-  DeepReadonly,
+  GuardPolicy,
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
@@ -176,8 +176,11 @@ export {
 export type {
   CostDecision,
   CostPreCheckConfig,
+  CostPreCheckOptions,
+  CostPreCheckResult,
   CostWithDecision,
   FeeBreakdown,
+  PolicyContext,
   ResourceBreakdown,
 } from "./cost.ts";
 
