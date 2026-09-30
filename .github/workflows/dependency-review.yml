@@ -1,0 +1,42 @@
+name: Dependency Review
+
+# PR-time supply-chain gate.
+# This implements the gate chosen in the security-posture issue inventory
+# decision (GitHub dependency-review-action at PR time, advisory-based).
+# See: docs/security-posture.md for the bidirectional link and severity policy.
+#
+# Severity policy (block / warn tiers):
+#   - Block: critical and high severity vulnerabilities that are NEWLY INTRODUCED by
+#     this PR (i.e. not present on the base ref). These fail the job.
+#   - Warn: moderate and low severity newly-introduced vulnerabilities are reported
+#     but do not fail the job.
+#   - Pre-existing vulnerabilities are out of scope for this PR-time gate and are
+#     covered by the scheduled `npm audit --omit=dev` workflow (informational).
+#
+# Advisory source: GitHub Advisory Database, managed and updated by GitHub.
+# Update cadence is GitHub-managed; this workflow does not pin an advisory snapshot.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Block tier: fail the job on newly-introduced critical or high advisories.
+          fail-on-severity: high
+          # Warn tier: surface moderate and low advisories without failing the job.
+          warn-on-severity: moderate
+          # Only gate dependencies newly introduced by this PR.
+          deny-licenses: nothing
+          comment-summary-in-pr-review: true

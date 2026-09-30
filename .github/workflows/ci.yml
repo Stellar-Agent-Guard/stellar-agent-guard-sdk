@@ -1,3 +1,4 @@
+# Supply-chain gate: dependency-review-action on PRs (advisory-based).
 # The repo's branch-protection ruleset requires a status check named exactly
 # `ci`. The job below is named `ci` — both the job name and its `name:` key — so
 # the check this workflow reports is the one the ruleset gates on.
@@ -14,6 +15,9 @@
 #
 # A green `ci` means the required checks ran. It does not mean the live suite ran
 # against this change — the evidence file it points at is the record for that.
+#
+# Severity policy (dependency-review): block on high/critical newly-introduced
+# vulnerable deps; warn (comment only) on moderate and below.
 name: ci
 
 on:
@@ -24,6 +28,8 @@ on:
 # Read-only: CI inspects the repo and runs tests; it never writes to it.
 permissions:
   contents: read
+  pull-requests: write
+  actions: read
 
 jobs:
   ci:
@@ -35,6 +41,16 @@ jobs:
         with:
           # Full history, so the evidence gate can diff the PR against its base.
           fetch-depth: 0
+
+      # PR-time supply-chain gate. Advisory source is GitHub-managed
+      # (github/advisory-database); update cadence is GitHub's, not ours.
+      # Blocks PRs that introduce new high/critical vulnerable dependencies.
+      - name: dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
 
       - uses: actions/setup-node@v7
         with:
@@ -52,6 +68,13 @@ jobs:
 
       - name: unit tests
         run: npm test
+
+      # Informational transitive-drift check between PRs. Never gates: the
+      # advisory DB moves independently of this repo, so a red here is a signal
+      # to open a follow-up, not to block an unrelated PR.
+      - name: npm audit (informational)
+        run: npm audit --omit=dev --audit-level=high
+        continue-on-error: true
 
       - name: build
         run: npm run build

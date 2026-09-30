@@ -20,5 +20,6 @@
 * [Testnet Verification](verification.md)
 * [Benchmarks](benchmarks.md)
 * [Enforcement Scope](enforcement-scope.md)
+* [Security Posture](security-posture.md)
 * [Contributing](contributing.md)
 * [FAQ](faq.md)
