@@ -26,7 +26,7 @@
  */
 import { createHash } from "node:crypto";
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, type GuardAuthDecision } from "./events.ts";
+import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
 import { topicSymbols } from "./invoke.ts";
 
 /** The event name topics this SDK knows how to interpret. */
@@ -261,7 +261,7 @@ function interpret(
     stream: streamFacts.source === "ledger" ? "committed" : "diagnostic",
     observedAt: observedAt ?? null,
     decision: decodeAuthDecision(topics, context.source),
-    data,
+    data: normalizeEventData(data),
   };
 }
 
