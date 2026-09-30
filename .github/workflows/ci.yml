@@ -53,6 +53,13 @@ jobs:
       - name: unit tests
         run: npm test
 
+      # Extract every ```ts block from README.md into temp files and typecheck
+      # them against src/ (single-file tsc per snippet, no emit). Blocks marked
+      # `no-check` are skipped per the CONTRIBUTING convention. Bash blocks are
+      # documented as manual and are not executed here.
+      - name: README snippet typecheck
+        run: npm run check:readme-snippets
+
       - name: build
         run: npm run build
 

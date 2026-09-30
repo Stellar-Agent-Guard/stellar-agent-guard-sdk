@@ -19,7 +19,7 @@ exactly one, every time.
 - Never bundle a source change with its test, and never bundle a doc update with the
   code it describes, even when they are logically one unit of work.
 - If a logical change genuinely requires edits to several files, that is several
-  sequential commits — **one file each** — pushed in order. Do not squash them
+  sequential commits — ** one file each** — pushed in order. Do not squash them
   together afterwards.
 - This is stricter than the earlier "one commit per logical unit" rule. It is now
   one commit per logical unit **per file**.
@@ -49,16 +49,16 @@ git show --stat HEAD
 
 Do not modify the ruleset to work around a required check that is legitimately blocked.
 
-CI reports **one required check**, plus a scheduled workflow that is deliberately not
+CI reports ** one required check**, plus a scheduled workflow that is deliberately not
 part of it:
 
-- **`ci`** — required, and the only check that gates a merge. Runs typecheck, lint, the
+- `ci` — required, and the only check that gates a merge. Runs typecheck, lint, the
   unit tests, and the **enforcement-path evidence gate**. It touches no secret, so
   nothing in it can silently mask a skip: every step either really runs or the job
   fails.
-- **`live-suite`** (`.github/workflows/live-suite.yml`) — **never run on a pull
+- `live-suite` (`.github/workflows/live-suite.yml`) — **never run on a pull
   request**. Runs the live testnet suite weekly (`schedule`) and on demand
-  (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` is referenced
+  (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` referenced
   only in that workflow, and it has no `pull_request` / `pull_request_target` trigger,
   so a pull request — including a forked one — can never reach the secret.
 
@@ -68,7 +68,7 @@ It is:
 
 1. **required locally before any PR that touches the enforcement path** — `src/tx.ts`,
    `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`. Run `npm run test:integration`,
-   then commit the fresh output to `tests/fixtures/integration-evidence.md` **in the same
+   then commit the fresh output to `tests/fixtures/integration-evidence.md` ** in the same
    PR**. The required `ci` job checks that the evidence file was touched; it cannot
    verify the numbers (that needs the network), only that fresh evidence was supplied.
    A PR that changes the path without it **fails `ci`**.
@@ -128,6 +128,40 @@ npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 ```
+
+## README snippet audit
+
+Every ```ts fenced code block in `README.md` is extracted and typechecked against the
+current `src/` by `scripts/check-readme-snippets.ts`. This is what keeps the published
+examples from drifting away from the actual API — a code block that no longer compiles
+fails `ci` instead of becoming a silent lie in the docs.
+
+Run it locally with:
+
+```bash
+npm run check:readme
+```
+
+The script extracts every fenced block whose info string is `ts` and compiles the
+combined snippets as a single TypeScript program with `tsc --noEmit`, with the repo's
+own `tsconfig.json` and `src/` in scope. One invocation keeps the runtime bounded; there is
+no incremental build cache to invalidate.
+
+Fenced blocks labeled `bash` are not typechecked — they are documentation for humans
+and are reviewed manually. The script reports them as skipped so a reviewer can see them
+in the log.
+
+To exclude a snippet from typechecking — for example, a deliberately broken example or a
+sketch of an unreleased API — add `no-check` to the info string and a comment on the
+line immediately above the fence explaining why:
+
+```ts
+// no-check: this example demonstrates the error a user sees when the guard rejects.
+const result = await guard.check(tx, { skipPreflight: true });
+```
+
+The justification comment is mandatory: a block marked `no-check` without one fails
+the audit. The convention is documented here so it is not reinvented per snippet.
 
 ## Cross-editor standardization
 
@@ -201,7 +235,7 @@ maintainer-managed repository secrets. `.env.phase2` is gitignored — never com
 and never embed keys in a workflow or work around a missing secret with an alternate
 name.
 
-`PHASE2_ENV_FILE` must stay referenced in **exactly one workflow** —
-`.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
+`PHASE2_ENV_FILEP must stay referenced in **exactly one workflow** —
+.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
 `workflow_dispatch`. Never add it to a workflow with a `pull_request` or
 `pull_request_target` trigger: that would expose it to a forked pull request.
