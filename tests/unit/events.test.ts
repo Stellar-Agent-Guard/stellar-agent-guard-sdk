@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision } from "../../src/events.ts";
+import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeU64 } from "../../src/events.ts";
 
 describe("guard event topics", () => {
   it("carries the event_ prefix the #[contractevent] macro adds", () => {
@@ -225,4 +225,20 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
       }
     });
   }
+});
+
+describe("normalizeU64", () => {
+  
+  it("normalizes a string of digits to a bigint", () => {
+    assert.equal(normalizeU64("1789393232"), 1789393232n);
+  });
+  
+  it("never loses precision for >2^53", () => {
+    const large = "9007199254740993"; // Number.MAX_SAFE_INTEGER + 2
+    assert.equal(normalizeU64(large), 9007199254740993n);
+  });
+
+  it("preserves non-digit strings", () => {
+    assert.equal(normalizeU64("2023-11-20T12:00:00Z"), "2023-11-20T12:00:00Z");
+  });
 });

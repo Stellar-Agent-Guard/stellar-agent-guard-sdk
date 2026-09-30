@@ -40,6 +40,8 @@
     "transfer-from",
     "stellar-soroban",
     "agent-frameworks",
+    "langchain",
+    "elizaos",
     "integration-bridge",
     "dex",
     "lending",

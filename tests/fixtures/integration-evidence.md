@@ -3,6 +3,9 @@
 Record of the enforcement suite running against the real Phase 2 testnet
 instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
+**Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
+**Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
+
 ## Instance under test
 
 | | |

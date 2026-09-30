@@ -205,3 +205,77 @@ name.
 `.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
 `workflow_dispatch`. Never add it to a workflow with a `pull_request` or
 `pull_request_target` trigger: that would expose it to a forked pull request.
+## Deterministic time control in tests
+
+Time-dependent modules in the SDK (cache TTLs, transaction polling) support dependency injection of a `Clock` abstraction to make tests deterministic and fast.
+
+**For production code**, no action is needed: modules default to the system clock and behave normally.
+
+**For tests that need to control time**, inject a `FakeClock`:
+
+```ts
+import { FakeClock } from "stellar-agent-guard-sdk";
+
+const clock = new FakeClock(0); // Start at t=0ms
+const interceptor = new PreFlightInterceptor({
+  // ... other config ...
+  clock, // Pass the fake clock
+});
+
+// Time does not advance automatically; you control it
+await someAsyncWork();
+
+// Advance the clock deterministically, without real delays
+clock.advance(5000); // Skip to t=5000ms
+
+// Pending sleeps/delays complete instantly
+// No setTimeout waits; tests run fast and are reproducible
+```
+
+**Why it matters**: Multiple modules (cache expiration, transaction polling, telemetry intervals) each used to invent their own time sources (`Date.now()`, `setTimeout`). Without Clock injection, unit tests either:
+
+1. Used real sleeps (slow, flaky, wall-time dependent)
+2. Ad-hoc mocked each module separately (non-composable, tests fragile to module changes)
+
+The `Clock` interface allows tests to:
+- Simulate time passage synchronously
+- Eliminate real `setTimeout` waits
+- Test time-dependent boundary conditions deterministically
+- Verify cache expiration, retry backoff, and polling behavior without network latency
+
+**Key methods:**
+
+- `clock.now()` — returns current time (in milliseconds, like `Date.now()`)
+- `clock.sleep(ms)` — returns a promise that resolves after ms milliseconds
+- `clock.advance(ms)` — move the clock forward deterministically; resolves all pending sleeps
+- `clock.setTime(ms)` — set clock to an absolute time
+
+**Example: Cache TTL test**
+
+```ts
+import { FakeClock } from "stellar-agent-guard-sdk";
+
+test("cache entry expires after TTL", async () => {
+  const clock = new FakeClock(1000);
+  const interceptor = new PreFlightInterceptor({
+    server: mockServer,
+    cache: { ttlMs: 5000 },
+    clock,
+  });
+
+  // First check caches the result
+  const decision1 = await interceptor.check(call);
+
+  // Advance to just before expiry (t=5999ms)
+  clock.advance(4999);
+  const decision2 = await interceptor.check(call);
+  // Cache hit — same decision, no RPC call
+
+  // Advance past expiry (t=6000ms)
+  clock.advance(1);
+  const decision3 = await interceptor.check(call);
+  // Cache miss — fresh RPC call needed
+});
+```
+
+Always use `FakeClock` in unit tests and when testing cache/polling logic. Use real time only when testing live network interaction (integration tests with `.env.phase2`).

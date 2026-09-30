@@ -13,18 +13,120 @@
  * caps are `i128` and silently narrowing them to `number` would lose precision
  * on exactly the values a spend guard exists to compare.
  */
-import { Address, nativeToScVal, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
 import type { ContractCall } from "./tx.ts";
 
+/**
+ * Branded types for address validation at compile time.
+ * These use TypeScript's nominal typing (brand pattern) to distinguish
+ * between contract addresses (C...), account addresses (G...), and raw
+ * public key hex strings.
+ */
+
+/** A valid Stellar StrKey address (either G... or C...). */
+export type StrKeyAddress = string & { readonly __brand: "StrKeyAddress" };
+
+/** A valid Stellar contract address (C...). */
+export type ContractAddress = string & { readonly __brand: "ContractAddress" };
+
+/** A valid Stellar account address (G...). */
+export type AccountAddress = string & { readonly __brand: "AccountAddress" };
+
+/** A valid raw public key in hex format (64 characters). */
+export type PublicKeyHex = string & { readonly __brand: "PublicKeyHex" };
+
+/**
+ * Type guards for branded address types.
+ * These perform prefix and length validation according to Stellar StrKey format.
+ */
+
+/**
+ * Check if a value is a valid Stellar StrKey address (either G... or C...).
+ * @param value - The value to validate
+ * @returns True if valid, false otherwise
+ */
+export function isStrKeyAddress(value: unknown): value is StrKeyAddress {
+  if (typeof value !== "string") return false;
+  if (value.length !== 56) return false;
+  if (!value.match(/^[GC][A-Z2-7]{55}$/)) return false;
+  // Use SDK's StrKey validation for both account (G) and contract (C) addresses
+  return (
+    (value.startsWith("G") && StrKey.isValidEd25519PublicKey(value)) ||
+    (value.startsWith("C") && StrKey.isValidContract(value))
+  );
+}
+
+/**
+ * Check if a value is a valid Stellar contract address (C...).
+ * Validates prefix, length (56 characters), and StrKey checksum format.
+ * @param value - The value to validate
+ * @returns True if valid, false otherwise
+ */
+export function isContractAddress(value: unknown): value is ContractAddress {
+  if (typeof value !== "string") return false;
+  if (!value.startsWith("C")) return false;
+  if (value.length !== 56) return false;
+  if (!value.match(/^C[A-Z2-7]{55}$/)) return false;
+  return StrKey.isValidContract(value);
+}
+
+/**
+ * Check if a value is a valid Stellar account address (G...).
+ * Validates prefix, length (56 characters), and StrKey checksum format.
+ * @param value - The value to validate
+ * @returns True if valid, false otherwise
+ */
+export function isAccountAddress(value: unknown): value is AccountAddress {
+  if (typeof value !== "string") return false;
+  if (!value.startsWith("G")) return false;
+  if (value.length !== 56) return false;
+  if (!value.match(/^G[A-Z2-7]{55}$/)) return false;
+  return StrKey.isValidEd25519PublicKey(value);
+}
+
+/**
+ * Check if a value is a valid raw public key in hex format.
+ * @param value - The value to validate
+ * @returns True if valid (64 hex characters), false otherwise
+ */
+export function isPublicKeyHex(value: unknown): value is PublicKeyHex {
+  if (typeof value !== "string") return false;
+  if (value.length !== 64) return false;
+  return /^[0-9a-fA-F]{64}$/.test(value);
+}
+
+/**
+ * Unsafe cast helpers for test/fixture code.
+ * Use only when you're certain the value is valid (e.g., hardcoded test addresses).
+ * These bypass validation for convenience in tests.
+ *
+ * @internal For testing only
+ */
+export function unsafeContractAddress(value: string): ContractAddress {
+  return value as ContractAddress;
+}
+
+export function unsafeAccountAddress(value: string): AccountAddress {
+  return value as AccountAddress;
+}
+
+export function unsafeStrKeyAddress(value: string): StrKeyAddress {
+  return value as StrKeyAddress;
+}
+
+export function unsafePublicKeyHex(value: string): PublicKeyHex {
+  return value as PublicKeyHex;
+}
+
 export interface ProtocolRule {
-  contract: string;
+  contract: ContractAddress;
   /** `null` means "any function on this contract". */
   fns: string[] | null;
 }
 
 export interface RecipientWindowCap {
-  recipient: string;
+  recipient: AccountAddress;
   cap: bigint;
 }
 
@@ -32,16 +134,16 @@ export interface PolicyConfig {
   per_tx_cap: bigint;
   window_secs: bigint;
   window_cap: bigint;
-  assets: string[];
+  assets: ContractAddress[];
   protocols: ProtocolRule[];
-  recipients: string[];
+  recipients: AccountAddress[];
   allow_any_recipient: boolean;
   active_from: bigint;
   active_until: bigint;
   paused: boolean;
   dms_grace_secs: bigint;
   recipient_window_caps?: RecipientWindowCap[];
-  blocked_recipients?: string[];
+  blocked_recipients?: AccountAddress[];
 }
 
 /**
@@ -84,7 +186,7 @@ export interface PolicyFailure {
 
 export interface ValidatePolicyOptions {
   /** Guard contract address used to enforce self-address rejection rules. */
-  guardAddress?: string;
+  guardAddress?: ContractAddress | string;
   /** Maximum allowed recipient entries (default: 256 per SPEC §8). */
   maxRecipientEntries?: number;
 }
@@ -221,9 +323,9 @@ export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
         I128_MIN,
         I128_MAX,
       ),
-      assets: addressVector(fields.get("assets")!, "assets"),
+      assets: addressVector(fields.get("assets")!, "assets").map(a => a as ContractAddress),
       protocols: protocolRules(fields.get("protocols")!),
-      recipients: addressVector(fields.get("recipients")!, "recipients"),
+      recipients: addressVector(fields.get("recipients")!, "recipients").map(a => a as AccountAddress),
       allow_any_recipient: policyBoolean(
         fields.get("allow_any_recipient")!,
         "allow_any_recipient",
@@ -363,7 +465,23 @@ function policyAddress(scVal: xdr.ScVal, path: string): string {
 }
 
 function addressVector(scVal: xdr.ScVal, path: string): string[] {
-  return policyVec(scVal, path).map((item, index) => policyAddress(item, `${path}[${index}]`));
+  const addresses = policyVec(scVal, path).map((item, index) => policyAddress(item, `${path}[${index}]`));
+  // Cast each address based on context - caller is responsible for semantics
+  // For decodePolicy, the caller will know whether it's assets (ContractAddress) 
+  // or recipients (AccountAddress)
+  return addresses;
+}
+
+function protocolRules(scVal: xdr.ScVal): ProtocolRule[] {
+  return policyVec(scVal, "protocols").map((rule, index) => {
+    const path = `protocols[${index}]`;
+    const fields = symbolMap(rule, path, PROTOCOL_RULE_FIELDS);
+    const contractAddr = policyAddress(fields.get("contract")!, `${path}.contract`);
+    return {
+      contract: contractAddr as ContractAddress,
+      fns: functionSymbols(fields.get("fns")!, `${path}.fns`),
+    };
+  });
 }
 
 function functionSymbols(scVal: xdr.ScVal, path: string): string[] | null {
@@ -373,17 +491,6 @@ function functionSymbols(scVal: xdr.ScVal, path: string): string[] | null {
       throw policyDecodeFailure(`${path}[${index}]`, `expected Symbol, got ${item.type}`);
     }
     return String(scValToNative(item));
-  });
-}
-
-function protocolRules(scVal: xdr.ScVal): ProtocolRule[] {
-  return policyVec(scVal, "protocols").map((rule, index) => {
-    const path = `protocols[${index}]`;
-    const fields = symbolMap(rule, path, PROTOCOL_RULE_FIELDS);
-    return {
-      contract: policyAddress(fields.get("contract")!, `${path}.contract`),
-      fns: functionSymbols(fields.get("fns")!, `${path}.fns`),
-    };
   });
 }
 

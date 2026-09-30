@@ -14,7 +14,7 @@
  */
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { invoke, type InvokeOutcome } from "./invoke.ts";
-import { policyToScVal, type PolicyConfig } from "./policy.ts";
+import { policyToScVal, type ContractAddress, type PolicyConfig } from "./policy.ts";
 import type { AdminSigner, ContractCall } from "./tx.ts";
 
 export const DEFAULT_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -47,7 +47,7 @@ export function agentPubkeyToScVal(newAgent: string | Uint8Array | Keypair): xdr
 }
 
 /** Build a contract call for set_policy, reusing canonical policyToScVal. */
-export function buildSetPolicyCall(guard: string, policy: PolicyConfig): ContractCall {
+export function buildSetPolicyCall(guard: ContractAddress, policy: PolicyConfig): ContractCall {
   return {
     contract: guard,
     fn: "set_policy",
@@ -56,7 +56,7 @@ export function buildSetPolicyCall(guard: string, policy: PolicyConfig): Contrac
 }
 
 /** Build a contract call for freeze. */
-export function buildFreezeCall(guard: string): ContractCall {
+export function buildFreezeCall(guard: ContractAddress): ContractCall {
   return {
     contract: guard,
     fn: "freeze",
@@ -65,7 +65,7 @@ export function buildFreezeCall(guard: string): ContractCall {
 }
 
 /** Build a contract call for unfreeze. */
-export function buildUnfreezeCall(guard: string): ContractCall {
+export function buildUnfreezeCall(guard: ContractAddress): ContractCall {
   return {
     contract: guard,
     fn: "unfreeze",
@@ -75,7 +75,7 @@ export function buildUnfreezeCall(guard: string): ContractCall {
 
 /** Build a contract call for rotate_agent_key. */
 export function buildRotateAgentKeyCall(
-  guard: string,
+  guard: ContractAddress,
   newAgent: string | Uint8Array | Keypair,
 ): ContractCall {
   return {
@@ -87,7 +87,7 @@ export function buildRotateAgentKeyCall(
 
 export interface AdminOpParams {
   server: rpc.Server;
-  guard: string;
+  guard: ContractAddress;
   admin: Keypair | AdminSigner;
   source?: Keypair | AdminSigner | undefined;
   networkPassphrase?: string | undefined;
