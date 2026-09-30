@@ -734,37 +734,26 @@ export function isMinimumFeeBroadcastFailure(
 }
 
 /**
- * Thrown or returned when transaction submission fails and retry attempts are exhausted.
- * Specifically used when transaction fee bumping cannot satisfy the network's minimum fee.
+ * Was a submission rejected because the source account sequence was stale?
+ *
+ * `tx_bad_seq` is the canonical code, but RPC error payloads are not perfectly
+ * consistent across SDK and server versions. Keep the matching deliberately
+ * narrow so ordinary transaction failures are never retried with a new sequence.
  */
-export class BroadcastError extends Error {
-  readonly kind = "error" as const;
-  readonly attempts: number;
-  readonly lastFee: bigint;
-  readonly failure: NonNullable<SubmissionResult["failure"]>;
-  readonly detail: string;
-
-  constructor(params: {
-    attempts: number;
-    lastFee: bigint;
-    failure: NonNullable<SubmissionResult["failure"]>;
-    detail?: string;
-  }) {
-    const detail = params.detail ?? params.failure.message;
-    super(
-      `stellar-agent-guard broadcast failed: minimum fee not met after ${params.attempts} attempt(s) (last fee: ${params.lastFee} stroops)\n${detail}`,
-    );
-    this.name = "BroadcastError";
-    this.attempts = params.attempts;
-    this.lastFee = params.lastFee;
-    this.failure = params.failure;
-    this.detail = detail;
-  }
-
-  get error(): BroadcastError {
-    return this;
-  }
+export function isSequenceNumberFailure(
+  failure: NonNullable<SubmissionResult["failure"]>,
+): boolean {
+  const haystack = [
+    failure.message,
+    failure.resultCode ?? "",
+    ...failure.diagnosticEvents.map((event) => JSON.stringify(event)),
+  ].join("\n");
+  return /tx_bad_seq|bad[_ ]seq|sequence (?:number )?(?:is )?(?:too (?:low|high|small|large)|mismatch|does not match|already (?:been )?(?:used|spent))/i.test(
+    haystack,
+  );
 }
+
+export { BroadcastError } from "./errors.ts";
 
 /** Full, copy-pasteable rendering of a failed submission, for evidence. */
 export function describeSubmissionFailure(failure: NonNullable<SubmissionResult["failure"]>): string {

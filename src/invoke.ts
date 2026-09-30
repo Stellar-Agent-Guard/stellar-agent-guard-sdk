@@ -27,15 +27,15 @@ import {
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "./events.ts";
 import type { TraceStepName, TraceStepStatus } from "./trace.ts";
 import {
-  BroadcastError,
-  INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
   buildGuardAuthEntry,
   buildInitialEnvelope,
   describeSimulationResources,
   describeSubmissionFailure,
+  INCLUSION_FEE,
   isMinimumFeeBroadcastFailure,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   parseSimulationResourceFee,
   signAccountAuthEntry,
@@ -84,12 +84,14 @@ export type InvokeErrorCause =
  */
 export type RetryableInvokeFailure =
   | "stale_ledger_resource_limit"
-  | "sequence_number_collision";
+  | "sequence_number_collision"
+  | "min_fee";
 
 /** The coarse cause each retryable failure reports once the budget is spent. */
 const RETRYABLE_CAUSES = {
   stale_ledger_resource_limit: INVOKE_ERROR_CAUSES.staleLedgerResourceLimit,
   sequence_number_collision: INVOKE_ERROR_CAUSES.sequenceNumberCollision,
+  min_fee: INVOKE_ERROR_CAUSES.undetermined,
 } as const satisfies Record<RetryableInvokeFailure, InvokeErrorCause>;
 
 /** The error arm returned by one invocation attempt. */
@@ -104,6 +106,10 @@ export interface InvokeErrorOutcome {
   cause?: InvokeErrorCause;
   /** Set when a re-simulation against fresh state can fix the failure. */
   retryable?: RetryableInvokeFailure;
+  /** Fee of the transaction when broadcast was attempted. */
+  lastFee?: bigint | undefined;
+  /** Submission result when broadcast was attempted. */
+  submission?: SubmissionResult | undefined;
 }
 
 /**
@@ -192,36 +198,6 @@ export interface InvokeDryRunResult {
   steps: InvokePipelineStep[];
 }
 
-export type PipelineOutcome =
-  | { kind: "allowed"; submission: SubmissionResult }
-  | {
-      kind: "blocked";
-      /** Reason symbol from the contract's own event/topic vocabulary. */
-      reason: string | null;
-      detail: string;
-      /** Diagnostic events emitted by the contract during enforced simulation. */
-      diagnosticEvents: unknown[];
-      /** Present only when policy/account state changed and blocked after inclusion. */
-      transactionHash?: string;
-      /** True only for a post-broadcast refusal; absent for free preflight blocks. */
-      charged?: boolean;
-    }
-  | {
-      kind: "error";
-      detail: string;
-      /**
-       * Set when the failure is a stale-ledger resource declaration that a
-       * re-simulation can fix. See `isStaleLedgerResourceFailure` in `tx.ts`.
-       */
-      retryable?: "stale_ledger_resource_limit" | "min_fee" | undefined;
-      error?: BroadcastError | undefined;
-      lastFee?: bigint | undefined;
-      attempts?: number | undefined;
-      submission?: SubmissionResult | undefined;
-    };
-
-export type InvokeOutcome = PipelineOutcome | BroadcastError;
-
 /** Configuration for bounded fee bumping when broadcast fails due to minimum fee. */
 export interface FeeBumpConfig {
   /**
@@ -241,6 +217,62 @@ export interface FeeBumpConfig {
   initialInclusionFee?: bigint | undefined;
 }
 
+export type PipelineOutcome =
+  | { kind: "allowed"; submission: SubmissionResult }
+  | {
+      kind: "blocked";
+      /** Reason symbol from the contract's own event/topic vocabulary. */
+      reason: string | null;
+      detail: string;
+      /** Diagnostic events emitted by the contract during enforced simulation. */
+      diagnosticEvents: unknown[];
+      /** Present only when policy/account state changed and blocked after inclusion. */
+      transactionHash?: string;
+      /** True only for a post-broadcast refusal; absent for free preflight blocks. */
+      charged?: boolean;
+    }
+  | InvokeErrorOutcome
+  | InvokeRetryError;
+
+export type InvokeOutcome =
+  | InvokeDryRunResult
+  | PipelineOutcome
+  | BroadcastError;
+
+/** Defaults for the bounded stale-ledger retry policy. */
+export const DEFAULT_INVOKE_RETRY_OPTIONS = {
+  /** Total attempts, including the first attempt. */
+  maxAttempts: 3,
+  /** Upper bound used for the first full-jitter delay. */
+  baseDelayMs: 100,
+  /** Upper bound for every later full-jitter delay. */
+  maxDelayMs: 2_000,
+} as const;
+
+export interface InvokeRetryOptions {
+  /** Total attempts, including the first attempt. Default: 3. */
+  maxAttempts?: number;
+  /** Base full-jitter window in milliseconds. Default: 100. */
+  baseDelayMs?: number;
+  /** Maximum full-jitter window in milliseconds. Default: 2,000. */
+  maxDelayMs?: number;
+  /** RNG used for full jitter; it must return a value in [0, 1). */
+  random?: () => number;
+  /** Alias for `random`, useful when describing the jitter strategy. */
+  jitter?: () => number;
+  /** Sleep implementation, injectable for deterministic tests/custom clocks. */
+  sleep?: (delayMs: number) => Promise<void>;
+  /** Compatibility alias for `baseDelayMs`. */
+  initialDelayMs?: number;
+}
+
+export interface InvokePollOptions {
+  /** Number of ledger-status polls after a pending broadcast. */
+  pollAttempts?: number;
+  /** Delay between ledger-status polls. */
+  pollIntervalMs?: number;
+}
+
 export interface InvokeParams {
   server: rpc.Server;
   /** Classic account that pays the fee and supplies the sequence number. */
@@ -250,9 +282,15 @@ export interface InvokeParams {
   /** Present when the call requires the smart account's own authorization. */
   guardAuth?: GuardAuthorization | null | undefined;
   /** Extra classic-account authorizers available to sign (e.g. an admin). */
-  accountSigners?: Keypair[] | undefined;
+  accountSigners?: Array<Keypair | AdminSigner> | undefined;
   /** Skip broadcast even if the enforced simulation passes (dry run). */
   dryRun?: boolean | undefined;
+  /** Configure bounded full-jitter retries for stale ledger resource limits. */
+  retry?: InvokeRetryOptions | undefined;
+  pollAttempts?: number | undefined;
+  pollIntervalMs?: number | undefined;
+  /** Options controlling polling interval and attempts after submission. */
+  pollOptions?: { pollAttempts?: number; pollIntervalMs?: number } | undefined;
   /**
    * Optional configuration for fee-bump retry when broadcast hits min-fee.
    * If omitted, defaults to 3 attempts with a 2x fee multiplier.
@@ -263,8 +301,17 @@ export interface InvokeParams {
    * total attempts across all triggers.
    */
   maxRetries?: number | undefined;
-  /** Options controlling polling interval and attempts after submission. */
-  pollOptions?: { pollAttempts?: number; pollIntervalMs?: number } | undefined;
+  /** Custom inclusion fee (used internally during fee-bump retries). */
+  fee?: bigint | string | undefined;
+  /**
+   * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
+   * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
+   * including every attempt of the built-in stale-ledger retry. Omitting it
+   * leaves `invoke()` exactly as it was before this hook existed — the SDK
+   * itself never logs and takes no logger dependency; what a consumer does
+   * with the events is entirely the consumer's business.
+   */
+  onStep?: ((step: InvokeStepEvent) => void) | undefined;
 }
 
 /**
@@ -571,87 +618,258 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
  * decide whether a block is an expected outcome (agents hitting a guardrail) or
  * a failure worth surfacing.
  *
- * ## Bounded Retries
+ * The whole invocation, submission included, is serialized per source account
+ * so two concurrent calls can never build from the same account sequence.
  *
- * Two specific, measurable network failure modes are handled with bounded retry:
+ * With `dryRun`, the pipeline stops after the enforced simulation and returns a
+ * structured {@link InvokeDryRunResult} instead of an `invoke()` outcome: no
+ * transaction is ever assembled, signed for broadcast, or submitted, so there is
+ * no hash to report and nothing was charged.
  *
- * 1. **Stale ledger resource limits (`scecExceededLimit`)**: If simulation prices
- *    gas against a ledger snapshot one write behind, the declared write budget
- *    may fall short. Safe to re-simulate against the advanced ledger (one retry).
- *
- * 2. **Minimum-fee / tx too cheap (`tx_insufficient_fee`)**: If fee-market conditions
- *    change between prepare-time and broadcast, core rejects the transaction.
- *    The SDK re-prepares with an increased inclusion fee (multiplied by `feeMultiplier`),
- *    **re-simulates**, **re-checks guard/policy**, and attempts broadcast again.
- *    Every attempt runs full simulation and policy enforcement — a policy block
- *    is never bypassed.
- *
- * Retries share a unified bounded budget (`maxAttempts`, default: 3). If fee bump
- * retries are exhausted without success, a typed `BroadcastError` is returned
- * containing the attempt count and last attempted fee.
+ * Stale-ledger resource failures and sequence-number collisions are retried
+ * with bounded full-jitter backoff. Every attempt starts a fresh invocation
+ * pipeline, including discovery and enforced simulation, so the resource
+ * declaration is always priced against current ledger state. Non-retryable
+ * outcomes return immediately and never sleep. When the budget is exhausted,
+ * the returned `InvokeRetryError` carries the attempt count and the last retry
+ * cause.
  */
-export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
-  const configuredMax =
-    params.feeBump?.maxAttempts ??
-    (params.maxRetries !== undefined ? params.maxRetries + 1 : 3);
-  const maxAttempts = Math.max(1, configuredMax);
-  const feeMultiplier = params.feeBump?.feeMultiplier ?? 2;
-  let currentInclusionFee = params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE);
-  let attempt = 0;
-  let staleLedgerRetried = false;
+type AccountState = {
+  queue: Promise<void>;
+  lastReservedSequence?: bigint;
+};
 
-  while (attempt < maxAttempts) {
-    attempt++;
-    const outcome = await invokePipeline(params, { inclusionFee: currentInclusionFee });
+const accountStates = new WeakMap<object, Map<string, AccountState>>();
 
-    // Success, policy block, or dry-run -> return immediately!
-    if (outcome.kind !== "error" || params.dryRun) {
-      return outcome;
-    }
-
-    // Trigger class 1: stale ledger resource limit
-    if (outcome.retryable === "stale_ledger_resource_limit") {
-      if (!staleLedgerRetried && attempt < maxAttempts) {
-        staleLedgerRetried = true;
-        continue;
-      }
-      return {
-        ...outcome,
-        detail: `retried after a stale-ledger resource rejection; still failed\n${outcome.detail}`,
-      };
-    }
-
-    // Trigger class 2: minimum fee / tx too cheap
-    if (outcome.retryable === "min_fee") {
-      if (attempt < maxAttempts) {
-        // Increase fee and retry
-        const bumped = BigInt(Math.ceil(Number(currentInclusionFee) * feeMultiplier));
-        currentInclusionFee = bumped > currentInclusionFee ? bumped : currentInclusionFee + 100n;
-        continue;
-      }
-
-      // Retry budget exhausted -> return typed BroadcastError
-      const broadcastError = new BroadcastError({
-        attempts: attempt,
-        lastFee: outcome.lastFee ?? currentInclusionFee,
-        failure: outcome.submission?.failure ?? {
-          resultXdr: null,
-          resultCode: "result=txInsufficientFee",
-          message: outcome.detail,
-          diagnosticEvents: [],
-        },
-        detail: outcome.detail,
-      });
-      return broadcastError;
-    }
-
-    // Unrelated error (e.g. sequence, auth, contract trap) -> do not retry
-    return outcome;
+function accountStateFor(server: rpc.Server, publicKey: string): AccountState {
+  let states = accountStates.get(server);
+  if (!states) {
+    states = new Map<string, AccountState>();
+    accountStates.set(server, states);
   }
+  let state = states.get(publicKey);
+  if (!state) {
+    state = { queue: Promise.resolve() };
+    states.set(publicKey, state);
+  }
+  return state;
+}
+
+/**
+ * Serialize invoke() for one source account, including its submission.
+ *
+ * The queue is scoped to the RPC server object as well as the account key: the
+ * same account can have an unrelated sequence on a different network/server.
+ * A rejected task releases the queue in `finally`, so one failed transaction
+ * cannot strand all later calls.
+ */
+async function withAccountQueue<T>(
+  server: rpc.Server,
+  publicKey: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const state = accountStateFor(server, publicKey);
+  const previous = state.queue;
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  state.queue = current;
+  await previous;
+  try {
+    return await task();
+  } finally {
+    release();
+    if (state.queue === current) state.queue = Promise.resolve();
+  }
+}
+
+/**
+ * Reserve a sequence number for an account.
+ *
+ * The RPC snapshot can remain one transaction behind immediately after a
+ * successful broadcast (and test doubles commonly do). Remember the last
+ * reservation and advance past it when the next fetch is not newer. This also
+ * makes the reservation safe when `enforceCall` is used directly, while the
+ * invoke queue still guarantees fetch → build → submit ordering.
+ */
+function reserveNextSequence(
+  server: rpc.Server,
+  publicKey: string,
+  fetchedSequence: string,
+): string {
+  const state = accountStateFor(server, publicKey);
+  const fetched = BigInt(fetchedSequence);
+  const next =
+    state.lastReservedSequence !== undefined && state.lastReservedSequence >= fetched
+      ? state.lastReservedSequence + 1n
+      : fetched;
+  state.lastReservedSequence = next;
+  return next.toString();
+}
+
+export function invoke(params: InvokeParams & { dryRun: true }): Promise<InvokeDryRunResult>;
+export function invoke(
+  params: InvokeParams & { dryRun?: false },
+): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
+export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
+export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+  // A dry run performs exactly one pass: it never reaches broadcast, so there
+  // is no stale-ledger rejection to retry, no sleep to justify, and nothing to
+  // serialize against the account queue.
+  if (params.dryRun) return invokeDryRun(params);
+
+  const sourceKey = await params.source.publicKey();
+  return withAccountQueue(params.server, sourceKey, async () => {
+    const retry = resolveRetryOptions(params.retry);
+
+    const configuredFeeMax =
+      params.feeBump?.maxAttempts ??
+      (params.maxRetries !== undefined ? params.maxRetries + 1 : 3);
+    const maxFeeAttempts = Math.max(1, configuredFeeMax);
+    const feeMultiplier = params.feeBump?.feeMultiplier ?? 2;
+    let currentInclusionFee = params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE);
+
+    let feeAttempt = 0;
+    let generalAttempt = 0;
+
+    while (true) {
+      generalAttempt += 1;
+      feeAttempt += 1;
+      // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
+      const outcome = await invokePipeline(params, generalAttempt - 1, {
+        inclusionFee: currentInclusionFee,
+      });
+
+      if (outcome.kind !== "error" || outcome.retryable === undefined) {
+        return outcome;
+      }
+
+      if (outcome.retryable === "min_fee") {
+        if (feeAttempt < maxFeeAttempts) {
+          const bumped = BigInt(Math.ceil(Number(currentInclusionFee) * feeMultiplier));
+          currentInclusionFee = bumped > currentInclusionFee ? bumped : currentInclusionFee + 100n;
+          continue;
+        }
+
+        const broadcastError = new BroadcastError({
+          attempts: feeAttempt,
+          lastFee: outcome.lastFee ?? currentInclusionFee,
+          failure: outcome.submission?.failure ?? {
+            resultXdr: null,
+            resultCode: "result=txInsufficientFee",
+            message: outcome.detail,
+            diagnosticEvents: [],
+          },
+          detail: outcome.detail,
+        });
+        return broadcastError;
+      }
+
+      if (generalAttempt >= retry.maxAttempts) {
+        return new InvokeRetryError({ attempts: generalAttempt, lastOutcome: outcome });
+      }
+
+      await retry.sleep(fullJitterDelay(generalAttempt, retry));
+    }
+  });
+}
+
+/**
+ * `probe → sign → simulate → verdict → fees`, then stop before assembly.
+ *
+ * The first three stages are the real pipeline, instrumented through the same
+ * `onStep` hook an ordinary invocation uses, so a dry run's trace and a live
+ * invocation's trace are the same measurement of the same code. The last two
+ * are local to this function: classifying the guard's answer, and pricing it.
+ */
+async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
+  const steps: InvokePipelineStep[] = [];
+  const observer = params.onStep;
+  const enforced = await enforceCall(
+    {
+      ...params,
+      onStep: (event) => {
+        // A dry run can never reach broadcast, so a broadcast stage is a bug
+        // rather than a stage to report. Dropping it here keeps that guarantee
+        // in the trace itself, not just in the control flow.
+        if (event.status !== "start" && event.name !== "broadcast") {
+          steps.push({
+            name: event.name,
+            durationMs: event.durationMs,
+            ok: event.status === "ok",
+          });
+        }
+        observer?.(event);
+      },
+    },
+    0,
+  );
+  const verdictStartedAt = performance.now();
+
+  let verdict: InvokeDryRunVerdict =
+    enforced.kind === "admissible" ? "admissible" : enforced.kind === "blocked" ? "blocked" : "undetermined";
+  const reason: string | null = enforced.kind === "blocked" ? enforced.reason : null;
+  let detail: string | null =
+    enforced.kind === "error" || enforced.kind === "blocked" ? enforced.detail : null;
+  let error: GuardError | null = enforced.kind === "error" ? enforced.error : null;
+  const diagnostics: unknown[] =
+    enforced.kind === "blocked" || enforced.kind === "error"
+      ? enforced.diagnosticEvents
+      : diagnosticEventsOf(enforced.simulation);
+  let resourceFee = 0n;
+  let feesOk = true;
+
+  if (enforced.kind === "admissible") {
+    try {
+      resourceFee = parseSimulationResourceFee(enforced.simulation.minResourceFee);
+    } catch (cause) {
+      // The guard approved, but the network's own price for it is unusable.
+      // Reporting `admissible` here would hand the caller a fee figure that
+      // never came from the host, so the verdict degrades to undetermined.
+      verdict = "undetermined";
+      detail = `enforced simulation succeeded but returned an invalid resource fee: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`;
+      error =
+        cause instanceof GuardError
+          ? cause
+          : new SimulationError("enforced simulation returned an invalid resource fee", {
+              stage: "simulate",
+              cause,
+            });
+      feesOk = false;
+    }
+  }
+  const verdictDurationMs = Math.max(0, performance.now() - verdictStartedAt);
+
+  const feesStartedAt = performance.now();
+  const fees: FeeBreakdown =
+    verdict === "admissible"
+      ? feeBreakdown(resourceFee)
+      : {
+          resourceFeeStroops: 0n,
+          inclusionFeeStroops: 0n,
+          totalFeeStroops: 0n,
+        };
+  const feesDurationMs = Math.max(0, performance.now() - feesStartedAt);
+  // The pipeline stages above are the three `enforceCall` produced; append the
+  // two local ones so all five stages are in one ordered trace.
+  steps.push(
+    { name: "verdict", durationMs: verdictDurationMs, ok: enforced.kind !== "error" },
+    { name: "fees", durationMs: feesDurationMs, ok: feesOk },
+  );
 
   return {
-    kind: "error",
-    detail: `retry budget exhausted after ${attempt} attempts`,
+    kind: "dry_run",
+    admissible: verdict === "admissible",
+    verdict,
+    reason,
+    detail,
+    error,
+    fees,
+    diagnostics,
+    steps,
   };
 }
 
@@ -689,13 +907,26 @@ export type EnforcementOutcome =
 /** One attempt: simulate → sign → enforce → submit. No retry logic lives here. */
 async function invokePipeline(
   params: InvokeParams,
+  attempt: number,
   options?: { inclusionFee?: bigint | undefined },
 ): Promise<PipelineOutcome> {
   const { server } = params;
-  const enforced = await enforceCall({
-    ...params,
-    ...(options?.inclusionFee !== undefined ? { fee: options.inclusionFee } : {}),
-  });
+  const enforced = await enforceCall(
+    {
+      ...params,
+      ...(options?.inclusionFee !== undefined ? { fee: options.inclusionFee } : {}),
+    },
+    attempt,
+  );
+  if (enforced.kind === "error") {
+    // The guard never made a decision, so this is `undetermined` and not
+    // `blocked`. Classify it here, at the point the failure is produced, so
+    // every consumer sees a cause without having to re-derive it.
+    return {
+      ...enforced,
+      cause: INVOKE_ERROR_CAUSES.undetermined,
+    };
+  }
   if (enforced.kind !== "admissible") return enforced;
 
   // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
@@ -711,6 +942,7 @@ async function invokePipeline(
       operation: enforced.operation,
       networkPassphrase: params.networkPassphrase,
       guard: params.guardAuth?.guard ?? null,
+      ...(options?.inclusionFee !== undefined ? { inclusionFee: options.inclusionFee } : {}),
     });
   } catch (cause) {
     // The enforced simulation passed, so a failure to turn its result into a
@@ -727,28 +959,36 @@ async function invokePipeline(
     };
   }
 
-  // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
-  const assembled = assembleFromSimulation({
-    simulation: enforced.simulation,
-    // A fresh `Account` per build: `TransactionBuilder` advances the sequence of
-    // the instance it is handed, so sharing one across builds silently produces
-    // `tx_bad_seq`.
-    source: new Account(params.source.publicKey(), enforced.nextSeq),
-    operation: enforced.operation,
-    networkPassphrase: params.networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-    ...(options?.inclusionFee !== undefined ? { inclusionFee: options.inclusionFee } : {}),
-  });
+  let submission: SubmissionResult;
+  const pollAttempts = params.pollOptions?.pollAttempts ?? params.pollAttempts;
+  const pollIntervalMs = params.pollOptions?.pollIntervalMs ?? params.pollIntervalMs;
+  const signers: Array<Keypair | AdminSigner> = [
+    params.source,
+    ...(params.accountSigners ?? []),
+  ];
 
-  const submission = await submitAndPoll(
-    server,
-    assembled.transaction,
-    [params.source],
-    params.pollOptions,
-  );
+  try {
+    submission = await withStepTiming(
+      params.onStep,
+      { name: "broadcast", attempt },
+      () =>
+        submitAndPoll(server, assembled.transaction, signers, {
+          pollAttempts,
+          pollIntervalMs,
+        }),
+      (result) => result.failure !== null,
+    );
+  } catch (error) {
+    const typed =
+      error instanceof GuardError ? error : new BroadcastError(String(error), { cause: error });
+    return {
+      kind: "error",
+      detail: typed.message,
+      error: typed,
+      diagnosticEvents: [],
+    };
+  }
   if (submission.failure) {
-    const isMinFee = isMinimumFeeBroadcastFailure(submission.failure);
-    const isStaleLedger = isStaleLedgerResourceFailure(submission.failure);
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
     // construction (sequence, fee, footprint) or a contract trap — never a
@@ -770,16 +1010,29 @@ async function invokePipeline(
         charged: true,
       };
     }
-    const staleLedger = isStaleLedgerResourceFailure(submission.failure);
+    const isMinFee = isMinimumFeeBroadcastFailure(submission.failure);
+    const staleLedger = !isMinFee && isStaleLedgerResourceFailure(submission.failure);
     // A sequence collision is only expected when something outside this queue
     // broadcasts for the same account; inside the queue it means the RPC
     // snapshot lagged further than the per-account reservation assumed.
-    const sequenceCollision = !staleLedger && isSequenceNumberFailure(submission.failure);
+    const sequenceCollision = !isMinFee && !staleLedger && isSequenceNumberFailure(submission.failure);
     return {
       kind: "error",
-      detail: `tx ${submission.hash} ${describeSubmissionFailure(submission.failure)}`,
-      ...(isStaleLedger ? { retryable: "stale_ledger_resource_limit" as const } : {}),
-      ...(isMinFee ? { retryable: "min_fee" as const } : {}),
+      detail,
+      error: new BroadcastError(detail, { transactionHash: submission.hash }),
+      diagnosticEvents: events,
+      cause: staleLedger
+        ? INVOKE_ERROR_CAUSES.staleLedgerResourceLimit
+        : sequenceCollision
+          ? INVOKE_ERROR_CAUSES.sequenceNumberCollision
+          : INVOKE_ERROR_CAUSES.undetermined,
+      ...(staleLedger
+        ? { retryable: "stale_ledger_resource_limit" as const }
+        : sequenceCollision
+          ? { retryable: "sequence_number_collision" as const }
+          : isMinFee
+            ? { retryable: "min_fee" as const }
+            : {}),
       lastFee: BigInt(assembled.transaction.fee),
       submission,
     };
@@ -795,29 +1048,67 @@ async function invokePipeline(
  * Nothing here mutates the ledger, which is what makes a refusal free.
  */
 export async function enforceCall(
-  params: InvokeParams & { fee?: bigint | string | undefined },
+  params: InvokeParams,
+  attempt: number = 0,
 ): Promise<EnforcementOutcome> {
   const { server, source, call, networkPassphrase } = params;
 
-  const sourceAccount = await server.getAccount(source.publicKey());
-  const latest = await server.getLatestLedger();
-  const expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
-  // `TransactionBuilder` advances the sequence of the `Account` it is handed,
-  // so every build in this function gets its own instance built from the same
-  // base sequence. Sharing one would silently build the second transaction on
-  // sequence N+2 and the network would reject it with `tx_bad_seq`.
-  const nextSeq = sourceAccount.sequenceNumber();
-  const freshAccount = () => new Account(source.publicKey(), nextSeq);
+  let operation: xdr.Operation;
+  let expiration: number;
+  let nextSeq: string;
+  let freshAccount: () => Account;
+  let first: rpc.Api.SimulateTransactionResponse;
 
-  // ── Step 1: discover required authorizations ──────────────────────────
-  const probe = buildInitialEnvelope({
-    source: freshAccount(),
-    operation,
-    networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-    ...(params.fee !== undefined ? { fee: params.fee } : {}),
-  });
-  const first = await server.simulateTransaction(probe);
+  try {
+    operation = Operation.invokeContractFunction({
+      contract: call.contract,
+      function: call.fn,
+      args: call.args,
+    });
+    // `publicKey()` may be async: an `AdminSigner` is allowed to resolve its
+    // identity late (a remote or threshold signer).
+    const sourcePubKey = await source.publicKey();
+    const sourceAccount = await server.getAccount(sourcePubKey);
+    const latest = await server.getLatestLedger();
+    expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
+    // `TransactionBuilder` advances the sequence of the `Account` it is handed,
+    // so every build in this function gets its own instance built from the same
+    // base sequence. Sharing one would silently build the second transaction on
+    // sequence N+2 and the network would reject it with `tx_bad_seq`. The
+    // per-account reservation also advances past an RPC snapshot that has not
+    // yet observed the preceding submission.
+    nextSeq = reserveNextSequence(server, sourcePubKey, sourceAccount.sequenceNumber());
+    freshAccount = () => new Account(sourcePubKey, nextSeq);
+
+    // ── Step 1: discover required authorizations ──────────────────────────
+    const probe = buildInitialEnvelope({
+      source: freshAccount(),
+      operation,
+      networkPassphrase,
+      guard: params.guardAuth?.guard ?? null,
+      fee: params.fee,
+    });
+    first = await withStepTiming(
+      params.onStep,
+      { name: "probe", attempt },
+      () => server.simulateTransaction(probe),
+      (response) => rpc.Api.isSimulationError(response),
+    );
+  } catch (error) {
+    // Ledger lookup or transport failure: the guard was never asked, so this is
+    // `undetermined` rather than a refusal. The original error is kept as the
+    // typed cause — it is the only thing that explains *why* the probe failed.
+    return {
+      kind: "error",
+      detail: `probe failed: ${error instanceof Error ? error.message : String(error)}`,
+      error: new SimulationError("authorization probe failed", {
+        stage: "probe",
+        cause: error,
+      }),
+      diagnosticEvents: [],
+    };
+  }
+
   if (rpc.Api.isSimulationError(first)) {
     // The discovery simulation runs in recording mode, so it can fail for
     // reasons that have nothing to do with policy (a contract trap, a missing
@@ -990,20 +1281,49 @@ export async function enforceCall(
   }
 
   // ── Step 3: enforced simulation — this is where policy is applied ─────
-  const signedOperation = Operation.invokeContractFunction({
-    contract: call.contract,
-    function: call.fn,
-    args: call.args,
-    auth: signedAuth,
-  });
-  const enforcingTx = buildInitialEnvelope({
-    source: freshAccount(),
-    operation: signedOperation,
-    networkPassphrase,
-    guard: params.guardAuth?.guard ?? null,
-    ...(params.fee !== undefined ? { fee: params.fee } : {}),
-  });
-  const enforced = await server.simulateTransaction(enforcingTx);
+  // Building the signed envelope and running the enforced simulation are one
+  // timed stage: from a tracer's point of view they are the same question
+  // ("did the guard approve?"), and a build failure is a stage failure exactly
+  // like a transport failure.
+  let signedOperation: xdr.Operation;
+  let enforced: rpc.Api.SimulateTransactionResponse;
+  try {
+    const simulated = await withStepTiming(
+      params.onStep,
+      { name: "simulate", attempt },
+      async () => {
+        const authorized = Operation.invokeContractFunction({
+          contract: call.contract,
+          function: call.fn,
+          args: call.args,
+          auth: signedAuth,
+        });
+        const enforcingTx = buildInitialEnvelope({
+          source: freshAccount(),
+          operation: authorized,
+          networkPassphrase,
+          guard: params.guardAuth?.guard ?? null,
+          fee: params.fee,
+        });
+        return { operation: authorized, response: await server.simulateTransaction(enforcingTx) };
+      },
+      (value) => rpc.Api.isSimulationError(value.response),
+    );
+    signedOperation = simulated.operation;
+    enforced = simulated.response;
+  } catch (cause) {
+    return {
+      kind: "error",
+      detail: `enforced simulation could not be prepared or run: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+      error: new SimulationError("enforced simulation could not be prepared or run", {
+        stage: "simulate",
+        cause,
+      }),
+      diagnosticEvents: [],
+    };
+  }
   if (process.env["SAG_DEBUG_RESOURCES"] === "1") {
     console.log(`[debug] enforced simulation:\n${describeSimulationResources(enforced, params.guardAuth?.guard ?? null)}`);
   }

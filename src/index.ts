@@ -210,9 +210,17 @@ export {
 } from "./telemetry.ts";
 
 export {
-  BroadcastError,
   GUARD_STORAGE_KEYS,
+  INCLUSION_FEE,
+  SIG_EXPIRATION_LEDGERS,
+  assembleFromSimulation,
+  buildGuardAuthEntry,
+  buildInitialEnvelope,
+  describeSimulationResources,
+  describeSubmissionFailure,
+  describeTransactionResult,
   isMinimumFeeBroadcastFailure,
+  isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
