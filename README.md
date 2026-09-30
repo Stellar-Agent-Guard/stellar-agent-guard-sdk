@@ -1,3 +1,4 @@
+<!-- npm keywords: stellar, soroban, ai-agents, guardrails, stellar-sdk, policy, firewall, langchain, elizaos, non-custodial, smart-account, custom-account-abstraction, spend-limits, allowlist, telemetry, typescript, web3, blockchain-security -->
 <p align="center">
 <img src="Gemini_Generated_Image_mvimg2mvimg2mvim.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
@@ -114,18 +115,27 @@ committable); never commit the filled-in copy.
 
 ```ts
 import { Keypair, rpc } from "@stellar/stellar-sdk";
-import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
+import { PreFlightInterceptor, isContractAddress, type ContractAddress } from "stellar-agent-guard-sdk";
+
+// Validate contract address from environment
+const guardAddress = process.env.GUARD_ADDRESS;
+if (!isContractAddress(guardAddress)) {
+  throw new Error(`Invalid guard contract address: ${guardAddress}`);
+}
+
+// For known hardcoded addresses, use type assertion
+const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB" as ContractAddress;
 
 const interceptor = new PreFlightInterceptor({
   server: new rpc.Server("https://soroban-testnet.stellar.org"),
   networkPassphrase: "Test SDF Network ; September 2015",
-  guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  guard: guardAddress, // Type-safe: validated as ContractAddress
   agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
   source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
 });
 
 const decision = await interceptor.check({
-  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  contract: contractAddress,
   fn: "transfer",
   args: [/* from, to, amount */],
 });
@@ -205,6 +215,46 @@ window can change after a simulation while a cached result is still being
 reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
+
+### Deterministic time control in tests (Clock injection)
+
+Time-dependent operations (cache TTL, transaction polling) support optional `Clock` injection for deterministic testing without real delays.
+
+**For tests**, use `FakeClock` to control time:
+
+```ts
+import { FakeClock, PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+test("cache entry expires", async () => {
+  const clock = new FakeClock(0);
+  const interceptor = new PreFlightInterceptor({
+    server,
+    guard,
+    agent,
+    source,
+    cache: { ttlMs: 5000 },
+    clock, // Inject the fake clock
+  });
+
+  const decision1 = await interceptor.check(call);
+
+  // Advance clock without real delays
+  clock.advance(6000); // Skip to t=6000ms (past the 5000ms TTL)
+
+  const decision2 = await interceptor.check(call); // Cache expired, fresh lookup
+});
+```
+
+**For production**, no action is needed: modules default to the system clock. The `Clock` interface is purely optional and for testing.
+
+Key methods on `FakeClock`:
+
+- `now()` — returns current time in milliseconds
+- `sleep(ms)` — returns a promise (resolves instantly when time allows)
+- `advance(ms)` — move the clock forward deterministically
+- `setTime(ms)` — set clock to an absolute time
+
+Time-dependent modules (preflight cache, transaction polling) accept an optional `clock` parameter. When omitted, they use the system clock (`Date.now()`, real `setTimeout`). Tests pass a `FakeClock` to eliminate real waits and make timing deterministic. For full guidance, see [CONTRIBUTING.md](CONTRIBUTING.md) under "Deterministic time control in tests".
 
 ### Pipeline step observability (`onStep`)
 
@@ -314,6 +364,48 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
 
 - **LangChain**: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
 - **ElizaOS**: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
+
+### Policy validation before broadcast (validateGuardPolicy)
+
+Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
+This provides a **fail-before-broadcast** safety rail that catches configuration errors before burning transaction fees or facing on-chain contract rejections.
+
+Unlike fail-fast validators, `validateGuardPolicy` returns **all** failures at once (`PolicyFailure[]`), which is critical for dashboard form UX where an operator needs to see all field-level issues simultaneously. The failure `rule` identifiers align with SPEC §8 rules:
+
+```ts
+import {
+  validateGuardPolicy,
+  type PolicyConfig,
+  type PolicyFailure,
+} from "stellar-agent-guard-sdk";
+
+const draftPolicy: PolicyConfig = {
+  per_tx_cap: 10_000n,
+  window_secs: 0n,         // Incompatible with window_cap > 0
+  window_cap: 50_000n,
+  assets: [],              // Empty assets vector is a no-op
+  protocols: [],
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  allow_any_recipient: false,
+  active_from: 1000n,
+  active_until: 500n,      // Inverted active window (active_until <= active_from)
+  paused: false,
+  dms_grace_secs: 0n,
+};
+
+const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
+  guardAddress: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+});
+
+if (failures.length > 0) {
+  for (const failure of failures) {
+    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+  }
+  // Safe-exit before encode or broadcast
+} else {
+  // Proceed with policyToScVal(draftPolicy) and broadcast
+}
+```
 
 ### Policy encode/decode round trip
 
@@ -489,6 +581,9 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)`
   - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover).
+  - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
+- `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX.
+- `POLICY_RULE_IDS` — Canonical array of SPEC §8 validation rule identifiers.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct.
 - `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
 - `policyFromScVal(scVal)` — Alias for callers using the issue's original function name.
@@ -501,6 +596,27 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
+
+#### Dashboard-style snapshot (issue #68)
+
+A consumer that wants "the last N decisions, right now" — a dashboard panel, an agent status endpoint — can opt into a bounded in-memory window instead of maintaining its own store:
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD_ID,
+  buffer: { max: 200 }, // opt-in; omitted → no buffer is allocated
+});
+
+// ...drive it with listener.watch() or listener.watchAll(), then read on demand:
+const lastBlocked = listener.recent({ stream: "diagnostic" });
+const capRefusals = listener.recent({ reason: "per_tx_cap_exceeded" });
+const recentWindow = listener.recent({ fromLedger: 4_700_000 });
+```
+
+`recent(filter?)` returns the retained events oldest-first, filtered by any of `stream`, `reason`, `fromLedger`, `toLedger`. The buffer is FIFO and non-durable: it holds only what this listener decoded in this process, and a restart empties it. Persistence across restarts is a cursor store (tracked separately), not something this buffer pretends to provide.
 
 ## Architecture
 
@@ -546,6 +662,20 @@ Proven against a real deployed instance on Stellar testnet (protocol 28, `Test S
 - **SAC Token**: `CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB`
 - **WASM bytecode hash**: `f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63` (identical to Phase 1 artifact)
 
+Verify a downloaded artifact against the pinned hash before deploying — the same constant the dashboard checks, so there is one source of truth rather than a copy per consumer:
+
+```ts
+import { readFileSync } from "node:fs";
+import { verifyGuardWasm } from "stellar-agent-guard-sdk";
+
+const result = await verifyGuardWasm(readFileSync("guard.wasm"));
+if (!result.ok) {
+  throw new Error(`WASM mismatch: got ${result.actual}, expected ${result.expected}`);
+}
+```
+
+`verifyGuardWasm` hashes with WebCrypto (`crypto.subtle`), so the identical call runs in Node and in the browser and needs no extra dependency. It is async, because `crypto.subtle.digest` is. `GUARD_WASM_HASH` is exported if you need the constant on its own.
+
 ### 5/5 Live Enforcement Scenarios
 
 | Scenario | Condition | Result | Evidence |
@@ -570,6 +700,11 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.
 
 This boundary is an inherent property of the platform (the auth context does not expose arbitrary call arguments generically), not a gap this project hides or overclaims. The classification that produces this boundary (`AssetTransfer` vs `Protocol` vs `Unknown` default-deny) is spelled out in SPEC §6.
+
+## Topics
+
+`stellar`, `soroban`, `ai-agents`, `guardrails`, `custom-account`, `pre-flight`,
+`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `telemetry`, `typescript`
 
 ## Maintainers
 
