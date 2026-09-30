@@ -38,6 +38,7 @@ import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
+import { RpcTimeoutError, withAbortAndTimeout } from "./rpc.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -271,6 +272,20 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  */
 export interface PreFlightCheckOptions {
   onStep?: (step: InvokeStepEvent) => void;
+  /**
+   * Caller-supplied cancellation signal. When aborted, the check resolves
+   * promptly with an `undetermined(cause: 'aborted')` verdict rather than
+   * hanging on a partitioned RPC. Cancellation is local-only: the underlying
+   * HTTP request may continue server-side.
+   */
+  signal?: AbortSignal;
+  /**
+   * Wall-clock budget in milliseconds for the entire check. On expiry the
+   * check resolves with `undetermined(cause: 'timeout')`. Defaults to
+   * `DEFAULT_RPC_TIMEOUT_MS` (30_000) — a bounded halt is a decision; an
+   * unbounded one is a hang.
+   */
+  timeoutMs?: number;
 }
 
 export interface PreFlightCacheOptions {
@@ -312,6 +327,14 @@ export interface PreFlightConfig {
    */
   cache?: PreFlightCacheOptions;
 }
+
+/**
+ * Default wall-clock budget applied to check/invoke/cost RPC entry points when
+ * the caller does not supply `timeoutMs`. Chosen to be generous enough for a
+ * congested ledger close but short enough that a partitioned RPC cannot stall
+ * an agent's tool-loop indefinitely.
+ */
+export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
 
 /** Alias used by the README's constructor terminology. */
 export type PreFlightInterceptorOptions = PreFlightConfig;
@@ -371,11 +394,19 @@ export class PreFlightInterceptor {
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
 
+  /**
+   * Default timeout applied when a per-call `timeoutMs` is not supplied.
+   * `null` disables the default (opt-out for callers that manage their own
+   * budget).
+   */
+  private readonly defaultTimeoutMs: number | null;
+
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
+    this.defaultTimeoutMs = DEFAULT_RPC_TIMEOUT_MS;
   }
 
   private validateCacheOptions(): void {
@@ -455,9 +486,33 @@ export class PreFlightInterceptor {
    * Accepts per-call `options` (e.g. `onStep` observability) without any
    * effect on the verdict itself; existing single-argument callers are
    * unaffected.
+   *
+   * Cancellation and timeouts are reported as `undetermined` verdicts (not
+   * thrown) because `check()` answers a verdict question: "may this proceed?"
+   * A hung RPC is not a policy refusal, so it must not be reported as
+   * `blocked`; but it also must not be reported as `admissible`. The
+   * `undetermined` kind already carries that meaning, and callers that want a
+   * throw use `assertAllowed`, which converts it to `PreFlightUndeterminedError`.
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
+
+    const timeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs ?? undefined;
+    const signal = options?.signal;
+
+    // Fast path: an already-aborted signal must not dispatch any RPC call.
+    if (signal?.aborted) {
+      return {
+        allowed: false,
+        kind: "undetermined",
+        detail: "pre-flight check aborted before RPC dispatch",
+        error: new RpcTimeoutError({
+          stage: "preflight",
+          cause: "aborted",
+          timeoutMs,
+        }),
+      };
+    }
 
     const context = await this.cacheContext(call);
     if (context) {
@@ -470,15 +525,33 @@ export class PreFlightInterceptor {
         this.cache.delete(context.key);
       }
     }
-    const outcome = await enforceCall({
-      server: this.config.server,
-      source: this.config.source,
-      call,
-      networkPassphrase: this.config.networkPassphrase,
-      guardAuth: { guard: this.config.guard, agent: this.config.agent },
-      ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-      ...(options?.onStep ? { onStep: options.onStep } : {}),
-    });
+    let outcome: Awaited<ReturnType<typeof enforceCall>>;
+    try {
+      outcome = await withAbortAndTimeout(
+        (innerSignal) =>
+          enforceCall({
+            server: this.config.server,
+            source: this.config.source,
+            call,
+            networkPassphrase: this.config.networkPassphrase,
+            guardAuth: { guard: this.config.guard, agent: this.config.agent },
+            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+            ...(options?.onStep ? { onStep: options.onStep } : {}),
+            signal: innerSignal,
+          }),
+        { signal, timeoutMs },
+      );
+    } catch (cause) {
+      if (cause instanceof RpcTimeoutError) {
+        return {
+          allowed: false,
+          kind: "undetermined",
+          detail: cause.message,
+          error: cause,
+        };
+      }
+      throw cause;
+    }
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
@@ -573,6 +646,11 @@ export class PreFlightInterceptor {
    * When contract-side `check_batch` lands in `stellar-agent-guard-contracts`, `checkBatch`
    * will route to that entrypoint for atomic on-chain simulation, and this sequential
    * staging implementation will serve as the fallback for contracts on earlier ABI versions.
+   *
+   * Cancellation/timeout: `checkBatch` accepts `signal` and `timeoutMs` and
+   * applies them per-call. A batch is not atomic off-chain, so a mid-batch
+   * abort/timeout yields `undetermined` for the remaining calls and the
+   * overall batch is not admissible.
    */
   async checkBatch(
     calls: ContractCall[],
@@ -612,7 +690,7 @@ export class PreFlightInterceptor {
     const verdicts: PreFlightDecision[] = [];
 
     for (const call of calls) {
-      const decision = await this.check(call);
+      const decision = await this.check(call, options);
 
       if (decision.kind === "admissible") {
         const amount = extractTransferAmount(call);
@@ -660,9 +738,18 @@ export class PreFlightInterceptor {
    * Throws `GuardBlockedError` for both `blocked` and `undetermined` — an
    * interceptor that returned happily on `undetermined` would hand an agent a
    * green light the chain never gave.
+   *
+   * Unlike `check()`, which reports cancellation/timeout as an `undetermined`
+   * verdict, `assertAllowed` throws. The asymmetry is deliberate: `check()`
+   * answers a verdict question and must keep verdicts distinct; `assertAllowed`
+   * is a pipeline gate, and a pipeline that cannot obtain a verdict must fail
+   * loudly rather than silently continue.
    */
-  async assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }> {
-    const decision = await this.check(call);
+  async assertAllowed(
+    call: ContractCall,
+    options?: PreFlightCheckOptions,
+  ): Promise<PreFlightDecision & { allowed: true }> {
+    const decision = await this.check(call, options);
     if (decision.allowed) return decision;
     if (decision.kind === "blocked") {
       const rawEvent = decision.diagnosticEvents?.[0];
@@ -706,8 +793,12 @@ export class PreFlightInterceptor {
 }
 
 /** One-shot form, for callers that do not want to hold an interceptor. */
-export function preflight(config: PreFlightConfig, call: ContractCall): Promise<PreFlightDecision> {
-  return new PreFlightInterceptor(config).check(call);
+export function preflight(
+  config: PreFlightConfig,
+  call: ContractCall,
+  options?: PreFlightCheckOptions,
+): Promise<PreFlightDecision> {
+  return new PreFlightInterceptor(config).check(call, options);
 }
 
 /** One-shot form for batch pre-flight checks. */

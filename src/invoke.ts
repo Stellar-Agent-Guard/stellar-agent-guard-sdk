@@ -58,6 +58,133 @@ export interface GuardAuthorization {
 }
 
 /**
+ * Default RPC timeout applied when a caller supplies neither `timeoutMs` nor
+ * its own `signal`. A hung Soroban RPC (network partition, black-holed
+ * connection) would otherwise leave `check()`/`invoke()` pending forever, which
+ * turns a fail-closed guardrail into an unbounded hang — not a decision. A
+ * bounded default is the safer posture: an agent that cannot reach the network
+ * gets a typed `RpcTimeoutError` and can fail closed on its own terms.
+ *
+ * 30s is generous enough for a slow-but-live RPC (a full enforced simulation
+ * against a busy ledger) while still bounding the worst case. Callers that
+ * need a different budget pass `timeoutMs` explicitly; callers that need no
+ * bound at all pass `timeoutMs: 0` (documented below).
+ */
+export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
+
+/**
+ * Raised when an RPC call is aborted or exceeds its timeout.
+ *
+ * The underlying HTTP request is *not* cancelled at the transport layer:
+ * `stellar-sdk` 17's `Server` methods do not accept an `AbortSignal`, so this
+ * SDK races the in-flight promise against the signal/timeout. The request
+ * therefore continues server-side until it completes or the connection times
+ * out; cancellation here is local-only. That is an honest limitation, not a
+ * bug — the caller's decision (fail closed) is what matters, and it is made
+ * promptly.
+ */
+export class RpcTimeoutError extends Error {
+  readonly kind = "timeout" as const;
+  /** Which pipeline stage was in flight when the bound fired. */
+  readonly stage: string;
+  /** True when the caller's own `AbortSignal` fired; false for a timeout. */
+  readonly aborted: boolean;
+  override readonly cause?: unknown;
+
+  constructor(params: {
+    stage: string;
+    aborted: boolean;
+    timeoutMs?: number;
+    cause?: unknown;
+  }) {
+    const reason = params.aborted
+      ? "aborted by caller signal"
+      : `exceeded timeout of ${params.timeoutMs}ms`;
+    super(`RPC call during '${params.stage}' ${reason}`);
+    this.name = "RpcTimeoutError";
+    this.stage = params.stage;
+    this.aborted = params.aborted;
+    if (params.cause !== undefined) this.cause = params.cause;
+  }
+}
+
+/**
+ * Shared plumbing for every RPC call the pipeline makes.
+ *
+ * One implementation, used by `getAccount`, `getLatestLedger`,
+ * `simulateTransaction` (both probe and enforced), and `submitAndPoll` — so
+ * abort/timeout semantics cannot drift between stages. The rules:
+ *
+ *  - An already-aborted signal short-circuits *before* `run()` is invoked, so
+ *    no RPC call is made at all (the acceptance criterion: "already-aborted
+ *    signal returns without RPC call").
+ *  - A mid-flight abort or a fired timeout rejects promptly with
+ *    `RpcTimeoutError`, even though the underlying request keeps running.
+ *  - `timeoutMs: 0` disables the timeout entirely (opt-out for callers that
+ *    manage their own bound); `undefined` uses `DEFAULT_RPC_TIMEOUT_MS`.
+ *  - The signal/timeout listeners are always removed, so a long-lived signal
+ *    shared across many calls does not accumulate listeners.
+ */
+export async function withRpcAbort<T>(
+  params: {
+    stage: string;
+    signal?: AbortSignal | undefined;
+    timeoutMs?: number | undefined;
+  },
+  run: () => Promise<T>,
+): Promise<T> {
+  const { stage, signal } = params;
+  const timeoutMs = params.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
+
+  if (signal?.aborted) {
+    throw new RpcTimeoutError({ stage, aborted: true, cause: signal.reason });
+  }
+
+  if (timeoutMs <= 0 && !signal) return run();
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new RpcTimeoutError({ stage, aborted: true, cause: signal?.reason }));
+    };
+
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(new RpcTimeoutError({ stage, aborted: false, timeoutMs }));
+      }, timeoutMs);
+    }
+
+    run().then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+/**
  * Machine-readable causes attached to non-policy `invoke()` failures.
  *
  * `undetermined` deliberately covers errors for which the guard did not make a
@@ -258,6 +385,20 @@ export interface InvokeParams {
   retry?: InvokeRetryOptions | undefined;
   pollAttempts?: number | undefined;
   pollIntervalMs?: number | undefined;
+  /**
+   * Caller-owned cancellation. When aborted, the pipeline stops at the next
+   * RPC boundary and returns an `undetermined` outcome carrying an
+   * `RpcTimeoutError` (see `RpcTimeoutError` for the local-only cancellation
+   * caveat). An already-aborted signal short-circuits before any RPC call.
+   */
+  signal?: AbortSignal | undefined;
+  /**
+   * Bound on each individual RPC call, in milliseconds. Defaults to
+   * `DEFAULT_RPC_TIMEOUT_MS` (30s); pass `0` to disable the timeout and rely
+   * solely on `signal`. A fired timeout produces the same `RpcTimeoutError`
+   * outcome as an abort.
+   */
+  timeoutMs?: number | undefined;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -1262,5 +1403,25 @@ export async function enforceCall(
     simulation: enforced as rpc.Api.SimulateTransactionSuccessResponse,
     operation: signedOperation,
     nextSeq,
+  };
+}
+
+/**
+ * Wrap an `EnforcementOutcome` so a timeout/abort surfaces as the pipeline's
+ * `undetermined` error arm rather than an exception.
+ *
+ * The asymmetry with `invoke()` is deliberate and documented in the README:
+ * `check()`/`cost()` answer a *verdict* question, so a timeout is reported as
+ * `undetermined(cause: 'timeout')` — the guard made no decision, and the
+ * caller's fail-closed policy takes over. `invoke()` drives a *pipeline* that
+ * has already committed to broadcasting, so a timeout there is a typed throw
+ * (`RpcTimeoutError`) the caller must handle explicitly.
+ */
+export function timeoutOutcome(error: RpcTimeoutError): EnforcementOutcome {
+  return {
+    kind: "error",
+    detail: error.message,
+    error: new SimulationError(error.message, { stage: "probe", cause: error }),
+    diagnosticEvents: [],
   };
 }
