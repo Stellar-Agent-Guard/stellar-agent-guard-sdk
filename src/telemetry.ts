@@ -1050,6 +1050,113 @@ export function isAllowedDecision(decision: GuardAuthDecision | null): boolean {
   return decision?.result === GUARD_AUTH_RESULTS.allowed;
 }
 
+/**
+ * The top-level key order `serializeEvent()` emits, pinned to the `GuardEvent`
+ * field reference in `docs/event-schema.md`: the identity fields first, then the
+ * stream facts, then the decoded decision and data.
+ *
+ * This is an explicit, frozen projection rather than an object spread, so adding
+ * a field to `GuardEvent` cannot silently change the serialized shape (or its
+ * key order) — a new field must be added here deliberately, and its addition is
+ * a visible golden-string diff in `tests/unit/serialize-event.test.ts`.
+ */
+const EVENT_KEY_ORDER = [
+  "id",
+  "kind",
+  "topic",
+  "source",
+  "stream",
+  "contractId",
+  "ledger",
+  "ledgerClosedAt",
+  "observedAt",
+  "transactionHash",
+  "decision",
+  "data",
+] as const;
+
+/** The nested key order `serializeEvent()` emits for `decision`. */
+const DECISION_KEY_ORDER = ["result", "reason", "source"] as const;
+
+/**
+ * Recursively project a decoded value into the JSON-safe shape `serializeEvent()`
+ * ships, matching the repo's normalization policy (`normalizeEventData` +
+ * `stableStringify`):
+ *
+ * - `undefined` is **dropped** from objects (the documented empty-field policy)
+ *   and rendered as `null` inside arrays, so indices stay stable;
+ * - `null` is kept — it is a real value on stream-dependent fields, not absence;
+ * - `bigint` becomes a decimal **string** (no `n` suffix), because `JSON.stringify`
+ *   throws on a bigint and a logger needs a value `JSON.parse` can read back;
+ * - a `Uint8Array`/`Buffer` becomes `bytes:<hex>`, the rendering `stableStringify`
+ *   already uses for hashing.
+ */
+function toJsonSafe(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (
+    typeof value === "boolean" ||
+    typeof value === "number" ||
+    typeof value === "string"
+  ) {
+    return value;
+  }
+  if (value instanceof Uint8Array) return `bytes:${Buffer.from(value).toString("hex")}`;
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const normalized = toJsonSafe(item);
+      return normalized === undefined ? null : normalized;
+    });
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const normalized = toJsonSafe(item);
+    if (normalized !== undefined) out[key] = normalized;
+  }
+  return out;
+}
+
+/**
+ * Canonical one-line JSON for a `GuardEvent`, for deterministic JSON-lines log
+ * shipping (issue #130).
+ *
+ * The output is a stable serialization, not a debugging convenience:
+ *
+ * - **Key order is fixed** (see `EVENT_KEY_ORDER`), so the same event always
+ *   renders byte-for-byte identically and a log line can be diffed.
+ * - **`undefined` fields are dropped; `null` is kept.** Absence is expressed by
+ *   the key not being present, while `null` remains a real value on the
+ *   stream-dependent fields (`ledger`, `transactionHash`, …).
+ * - **`bigint` is rendered as a decimal string.** `JSON.stringify` throws on a
+ *   bigint, so the decoded `data.at` (a u64 `bigint`) must be converted; decimal
+ *   is used over the hashing form `…n` so `JSON.parse` reads a normal string.
+ * - **Round-trip:** `JSON.parse(serializeEvent(e))` is shape-equal to `e` modulo
+ *   those normalizations (`bigint` → decimal string, `Uint8Array` → `bytes:…`,
+ *   `undefined` → absent).
+ *
+ * The exact contract — order and policies — is documented in
+ * `docs/event-schema.md` under "Canonical JSON serialization".
+ */
+export function serializeEvent(event: GuardEvent): string {
+  const projected: Record<string, unknown> = {};
+  for (const key of EVENT_KEY_ORDER) {
+    const value = event[key];
+    if (value === undefined) continue;
+    projected[key] = value;
+  }
+  if (event.decision !== undefined && event.decision !== null) {
+    const decision: Record<string, unknown> = {};
+    for (const key of DECISION_KEY_ORDER) {
+      const value = event.decision[key];
+      if (value === undefined) continue;
+      decision[key] = value;
+    }
+    projected.decision = decision;
+  }
+  return JSON.stringify(toJsonSafe(projected));
+}
+
 /** A compact one-line rendering of a guard event, for logs. */
 export function describeGuardEvent(event: GuardEvent): string {
   const where = event.source === "ledger" ? `ledger ${event.ledger ?? "?"}` : "pre-broadcast";
