@@ -5,7 +5,7 @@
  * the same `(runtime, message, state, options)` triple the handler receives and
  * admits the action to the eligible set only when it returns truthy. Composing
  * the guard into `validate` therefore stops the handler from ever running — see
- * `docs/integration-hooks.md` §2 for the source-pinned signatures and the three
+ * `docs/integration-hooks.md` ¦2 for the source-pinned signatures and the three
  * call sites that enforce it.
  *
  * Wrapping `handler` instead would be weaker: by the time a handler runs, the
@@ -13,6 +13,15 @@
  * there is a failure rather than a refusal.
  *
  * Written structurally, so `@elizaos/core` is not a dependency of this SDK.
+ *
+ * ### Undetermined handling
+ *
+ * The guard fails closed. An `undetermined` verdict is not a pass: the
+ * validator returns `false` and the action is dropped from the eligible set,
+ * exactly as for a `blocked` verdict. The difference between the two is
+ * observable through `onDecision` (and `onBlocked`, which is called for both),
+ * not through the return value. This is the documented contract the shared
+ * verdict-fixture harness asserts against.
  */
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
@@ -71,6 +80,8 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
     options.onDecision?.(decision);
     if (decision.allowed) return true;
 
+    // `blocked` and `undetermined` both fail closed: the action is dropped.
+    // The distinction is visible to `onDecision`/`onBlocked`, not the return.
     options.onBlocked?.(decision);
     return false;
   };
@@ -82,10 +93,9 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
  * The returned `validate` is deliberately typed as the full `ElizaValidator`, not
  * as the wrapped action's own (possibly narrower) signature. An action authored
  * with `validate: async () => boolean` is assignable to `ElizaValidator` — extra
- * parameters are allowed to be ignored — but the *wrapped* validator genuinely
- * accepts all four arguments and forwards them to the base, so reporting the
- * narrower type would both misdescribe it and prevent a caller from invoking the
- * action the way the runtime does.
+ * parameters are allowed to be ignored — but the *wrapped* validator genuinely accepts all four arguments and forwards them to the base, so reporting the
+ * narrower type would both misdescribe it and prevent a caller from invoking
+ * the action the way the runtime does.
  */
 export function guardAction<T extends ElizaActionLike>(
   action: T,
