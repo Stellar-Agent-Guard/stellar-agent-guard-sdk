@@ -1,0 +1,32 @@
+{
+  "header": {
+    "source": "live Soroban RPC replay capture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "capturedAt": "2026-09-30T10:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Blocked: rolling window cap exceeded (cumulative spend)"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "Transfer would push cumulative spend over window_cap"
+  },
+  "simulationResponse": {
+    "transactionData": "AAAAAgAAAAIAAAABAAAAAwAAAAYAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAAQAAAAAQAAAAEAAAAPAAAAC0FkbWluRnJvemVuAAAAAAEAAAAGAAAAAR4BmIrnfxOpvI4rRg0zKccjfj08SQc1S8K+wqhdsUjXAAAAEAAAAAEAAAABAAAADwAAAA1MYXN0SGVhcnRiZWF0AAAAAAABAAAAAA==",
+    "events": [
+      "AAAAAQAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAMAAAAPAAAAEWV2ZW50X2F1dGhfY2hlY2tlZAAAAAAAAA8AAAAHYmxvY2tlZAAAAAAPAAAAFHdpbmRvd19jYXBfZXhjZWVkZWQAAAARAAAAAAA="
+    ],
+    "minResourceFee": "95000",
+    "results": [
+      {
+        "auth": [],
+        "xdr": "AAAAEAAAAAEAAAABAAAADwAAABR3aW5kb3dfY2FwX2V4Y2VlZGVkAAAAAAAAAAAA"
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "blocked",
+    "reason": "window_cap_exceeded",
+    "explanation": "The transfer would push cumulative spend over the rolling-window cap."
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "header": {
+    "source": "live Soroban RPC replay capture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "capturedAt": "2026-09-30T10:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Blocked: per-transaction cap exceeded (1001 > 1000)"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "Transfer of 1001 exceeds per_tx_cap of 1000"
+  },
+  "simulationResponse": {
+    "transactionData": "AAAAAgAAAAIAAAABAAAAAwAAAAYAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAAQAAAAAQAAAAEAAAAPAAAAC0FkbWluRnJvemVuAAAAAAEAAAAGAAAAAR4BmIrnfxOpvI4rRg0zKccjfj08SQc1S8K+wqhdsUjXAAAAEAAAAAEAAAABAAAADwAAAA1MYXN0SGVhcnRiZWF0AAAAAAABAAAAAA==",
+    "events": [
+      "AAAAAQAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAMAAAAPAAAAEWV2ZW50X2F1dGhfY2hlY2tlZAAAAAAAAA8AAAAHYmxvY2tlZAAAAAAPAAAAE3Blcl90eF9jYXBfZXhjZWVkZWQAAAAAEQAAAAA="
+    ],
+    "minResourceFee": "95000",
+    "results": [
+      {
+        "auth": [],
+        "xdr": "AAAAEAAAAAEAAAABAAAADwAAABNwZXJfdHhfY2FwX2V4Y2VlZGVkAAAAAAAAAAAA"
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "blocked",
+    "reason": "per_tx_cap_exceeded",
+    "explanation": "The transfer amount exceeds the policy's per-transaction cap."
+  }
+}

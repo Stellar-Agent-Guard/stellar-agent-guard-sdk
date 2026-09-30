@@ -1,0 +1,30 @@
+{
+  "header": {
+    "source": "live Soroban RPC replay capture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "capturedAt": "2026-09-30T10:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Admissible transfer: within both per-tx and window caps, to allowlisted recipient"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "Transfer of 50 from guard to allowlisted recipient"
+  },
+  "simulationResponse": {
+    "transactionData": "AAAAAgAAAAIAAAABAAAAAwAAAAYAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAAQAAAAAQAAAAEAAAAPAAAAC0FkbWluRnJvemVuAAAAAAEAAAAGAAAAAR4BmIrnfxOpvI4rRg0zKccjfj08SQc1S8K+wqhdsUjXAAAAEAAAAAEAAAABAAAADwAAAA1MYXN0SGVhcnRiZWF0AAAAAAABAAAAAA==",
+    "events": [
+      "AAAAAQAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAMAAAAPAAAAEWV2ZW50X2F1dGhfY2hlY2tlZAAAAAAAAA8AAAAHYWxsb3dlZAAAAA8AAAADAAAADwAAAANmb28AAAAAAA8AAAADYmFyAAAAAA8AAAADYmF6AAAAAA=="
+    ],
+    "minResourceFee": "95000",
+    "results": [
+      {
+        "auth": [],
+        "xdr": "AAAAEQAAAAEAAAAFAAAADwAAAAxhZG1pbl9mcm96ZW4AAAAAAAAAAAAAAA8AAAAKaGFzX3BvbGljeQAAAAAAAAAAAAEAAAAPAAAAEWhlYXJ0YmVhdF9leHBpcmVkAAAAAAAAAAAAAAAAAAAPAAAADmxhc3RfaGVhcnRiZWF0AAAAAAAFAAAAAGqqVYgAAAAPAAAAA25vdwAAAAAFAAAAAGq5KKs="
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "admissible"
+  }
+}

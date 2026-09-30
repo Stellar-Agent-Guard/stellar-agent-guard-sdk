@@ -1,0 +1,23 @@
+{
+  "header": {
+    "source": "live Soroban RPC replay capture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "capturedAt": "2026-09-30T10:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Undetermined: simulation error with no guard event in diagnostics"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "Simulation failed before guard could publish verdict"
+  },
+  "simulationResponse": {
+    "error": "Error(WasmVm, InvalidAction)",
+    "events": [
+      "AAAAAQAAAAAAAAAAAAAAAgAAAAAAAAADAAAADwAAAAdmbl9jYWxsAAAAAA0AAAAgHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAAPAAAACHRyYW5zZmVyAAAAAAAA"
+    ]
+  },
+  "expected": {
+    "verdict": "undetermined"
+  }
+}

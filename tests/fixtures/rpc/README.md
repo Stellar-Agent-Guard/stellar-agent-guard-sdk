@@ -25,6 +25,21 @@ instance.
 | `simulate-success-status.json` | `simulateTransaction` (success) | A real successful read-only simulation of `guard.status()`: transaction footprint (`transactionData`), `minResourceFee`, `result` and `stateChanges`. |
 | `simulate-error-wrong-agent.json` | `simulateTransaction` (failure) | A real enforced-simulation failure. The guard's auth entry is signed with a throwaway key, so the on-chain `__check_auth` rejects the credential before the contract can publish a block event — the diagnostics are host noise. Used to prove the decoder never fabricates a guard event from a host failure. |
 
+### Replay fixtures (offline enforcement verdict replay)
+
+| File | Verdict | What it replays |
+| --- | --- | --- |
+| `replay-admissible.json` | admissible | Transfer within both per-tx and window caps, to allowlisted recipient |
+| `replay-blocked-per-tx-cap.json` | blocked (per_tx_cap_exceeded) | Transfer amount exceeds per-transaction cap |
+| `replay-blocked-recipient-not-allowed.json` | blocked (recipient_not_allowed) | Transfer to recipient not in allowlist |
+| `replay-blocked-window-cap.json` | blocked (window_cap_exceeded) | Transfer pushes cumulative spend over rolling window cap |
+| `replay-blocked-paused.json` | blocked (paused) | Account-state refusal: policy paused |
+| `replay-undetermined-malformed.json` | undetermined | Simulation error before guard verdict (host trap) |
+
+Replay fixtures carry recorded simulation request+response pairs and the expected verdict/reason.
+They prove the SDK decode pipeline still extracts correct verdicts from historical evidence without
+touching the network. Complements live-suite enforcement proofs and the evidence-checker.
+
 ### Provenance
 
 Every fixture's header records: `source`, `method`, `contractId`, `network`,
@@ -48,6 +63,8 @@ in [`../../docs/event-schema.md`](../../../docs/event-schema.md).
 
 ## Capturing / refreshing
 
+### Basic RPC fixtures
+
 ```bash
 npm run capture:rpc-fixtures
 ```
@@ -61,3 +78,24 @@ Refresh when you touch `src/telemetry.ts`, `src/invoke.ts`, or upgrade
 `@stellar/stellar-sdk`; otherwise the scheduled `live-suite` workflow is the
 canary. Provenance (`stellarSdkVersion`) tells you which SDK a fixture was
 recorded against.
+
+### Replay fixtures
+
+Replay fixtures (`replay-*.json`) should be captured from actual live enforcement
+runs when the integration suite runs. Each fixture carries:
+
+- Header provenance (source, method, network, capturedAt, SDK version, note)
+- Guard contract ID
+- Simulation request context (note field)
+- Raw simulation response (base64 XDR diagnostics)
+- Expected verdict (admissible/blocked/undetermined) and reason
+
+To capture a new replay fixture from a live run:
+
+1. Run the integration suite and observe the enforcement scenario
+2. Extract the simulation response from the diagnostic output
+3. Create a new `replay-<scenario>.json` file with the structure above
+4. Verify the fixture passes `npm run test:unit` (replay.test.ts)
+
+Replay fixtures are hermetic: they assert semantic decoding of captured payloads
+without issuing any RPC calls. The transport mock absence proves network isolation.

@@ -1,0 +1,32 @@
+{
+  "header": {
+    "source": "live Soroban RPC replay capture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "capturedAt": "2026-09-30T10:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Blocked: account paused (account-state refusal)"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "Transfer attempted while policy paused"
+  },
+  "simulationResponse": {
+    "transactionData": "AAAAAgAAAAIAAAABAAAAAwAAAAYAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAAQAAAAAQAAAAEAAAAPAAAAC0FkbWluRnJvemVuAAAAAAEAAAAGAAAAAR4BmIrnfxOpvI4rRg0zKccjfj08SQc1S8K+wqhdsUjXAAAAEAAAAAEAAAABAAAADwAAAA1MYXN0SGVhcnRiZWF0AAAAAAABAAAAAA==",
+    "events": [
+      "AAAAAQAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAMAAAAPAAAAEWV2ZW50X2F1dGhfY2hlY2tlZAAAAAAAAA8AAAAHYmxvY2tlZAAAAAAPAAAABnBhdXNlZAAAAAAA"
+    ],
+    "minResourceFee": "95000",
+    "results": [
+      {
+        "auth": [],
+        "xdr": "AAAAEAAAAAEAAAABAAAADwAAAAZwYXVzZWQAAAAAAAAAAAAAAA=="
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "blocked",
+    "reason": "paused",
+    "explanation": "The policy's admin kill switch is engaged."
+  }
+}
