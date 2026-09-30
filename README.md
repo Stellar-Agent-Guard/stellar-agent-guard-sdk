@@ -48,6 +48,10 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 
 ## Quick Start
 
+> **A verdict is a prediction, not a settlement guarantee.** Before relying on a
+> pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
+> known gaps in simulation fidelity, and what the SDK does about each.
+
 ### Installation
 
 ```bash
@@ -178,6 +182,26 @@ Pre-flight policy interception makes an intentional asymmetric distinction betwe
 - **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
 - **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
 - Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+
+### Fidelity & limits
+
+Pre-flight simulation is a prediction made against one ledger snapshot, not a settlement guarantee. These are the four known limitations of that prediction, each with the mitigation the SDK applies and the residual risk that remains. Every claim is pinned to the function that implements it so a reviewer can check it rather than trust it.
+
+1. **Window state can move between `check` and broadcast (concurrent spenders).**
+   - *Mitigation:* `PreFlightInterceptor.check()` never broadcasts; it calls `enforceCall()` (`src/invoke.ts`) to run the guard's real `__check_auth` against live ledger state, which is what makes a refusal free. Under `invoke()`, `withAccountQueue()` (`src/invoke.ts`) serializes fetch → build → submit per source account, and the committed contract re-evaluates the rolling window atomically. If the window moved anyway, the post-inclusion refusal is still reported as `blocked` with `charged: true` (`src/invoke.ts`).
+   - *Residual risk:* a spender that does not route through this SDK's queue, or that uses a different source account, can consume the window after an `admissible` verdict; the transfer can then be refused on-chain and, when it reaches inclusion, charged. The optional cache reuses verdicts within one ledger, so a cached `admissible` can be staler than one admitted transfer (`src/preflight.ts`).
+
+2. **The fee market can move (fee-bump).**
+   - *Mitigation:* `CostPreChecker.checkWithCost()` and `costOf()` (`src/cost.ts`) derive the quote from the same enforced simulation that produced the verdict, so price and verdict never describe two snapshots, and `feeBreakdown()` uses the same `INCLUSION_FEE` the submitted envelope declares (`src/tx.ts`).
+   - *Residual risk:* Soroban fees are dynamic and the SDK does not implement fee-bump handling. A fee-bump or an inclusion/base-fee change between simulation and broadcast can move the real price. `maxFeeStroops` in `CostPreChecker` is a pre-flight ceiling, not a network guarantee.
+
+3. **Simulation does not execute — return-value-dependent effects are invisible.**
+   - *Mitigation:* the enforced simulation runs the real `__check_auth` (Step 3 of `enforceCall()`, `src/invoke.ts`), and refusals are recovered from simulation diagnostics by `reasonFromDiagnosticEvents()` (`src/invoke.ts`) and `decodeAuthDecision()` (`src/events.ts`) even though a rolled-back block never commits to a ledger.
+   - *Residual risk:* simulation rolls back its writes; it cannot reveal effects that depend on a return value or on state another call would produce (an oracle price, a swap quote, a balance read mid-transaction). Such a call can be `admissible` pre-flight and still behave differently on-chain. Telemetry `telemetryFromDecision()` (`src/telemetry.ts`) observes the decision event, not the call's return value.
+
+4. **Multi-context batch semantics are approximated (batch).**
+   - *Mitigation:* `PreFlightInterceptor.checkBatch()` and `preflightBatch()` (`src/preflight.ts`) simulate each call in sequence with staged window accounting, so a call that passes in isolation but pushes cumulative spend past `window_cap` is reported `blocked` with `window_cap_exceeded`.
+   - *Residual risk:* it is sequential single-call simulation, not atomic batch simulation. State mutations between calls other than guard window spend are not observed, intra-batch window expiry is not modelled, and `totalEstimatedResourceFee` is the sum of per-call estimates rather than one envelope's fee (`src/preflight.ts:571`). The intended fix is to route to a contract-side `check_batch` once it lands, keeping this sequential staging as the fallback.
 
 ### Optional simulation-result cache
 
@@ -764,6 +788,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
+- **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
 
 ## Enforcement scope — read this before relying on the caps
 
