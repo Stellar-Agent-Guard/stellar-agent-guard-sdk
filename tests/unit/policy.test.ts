@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import { Address, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
+import { CheckResult } from "../../src/policy.ts";
 import {
   decodeCheckResult,
   decodePolicy,
@@ -357,8 +358,107 @@ describe("decodeCheckResult", () => {
     });
   });
 
-  it("throws on an unexpected payload instead of guessing", () => {
-    assert.throws(() => decodeCheckResult({ SomethingElse: 1 }), /unexpected CheckResult/);
+  it("decodes each known Blocked reason via fixture", () => {
+    const knownReasons: Array<CheckResult["reason"]> = [
+      "recipient_not_allowed",
+      "asset_not_allowed",
+      "protocol_not_allowed",
+      "per_tx_cap_exceeded",
+      "window_cap_exceeded",
+      "recipient_window_cap_exceeded",
+      "paused",
+      "not_active",
+      "expired",
+      "dead_man_frozen",
+    ];
+    for (const reason of knownReasons) {
+      assert.deepEqual(decodeCheckResult({ Blocked: reason }), {
+        kind: "blocked",
+        reason,
+      });
+    }
+  });
+
+  it("falls back to undetermined on an unknown enum tag (documented)", () => {
+    // A future contract may add a variant. The interceptor must fail-closed
+    // to `undetermined` rather than throwing into the agent loop.
+    assert.deepEqual(decodeCheckResult({ SomethingElse: 1 }), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult({ Blocked: "future_reason" }), { kind: "undetermined" });
+  });
+
+  it("falls back to undetermined on an empty ScVec", () => {
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvVec([])), { kind: "undetermined" });
+  });
+
+  it("falls back to undetermined on a non-ScVec input", () => {
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvVoid()), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvBool(true)), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvU32(0)), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvString("Allowed")), { kind: "undetermined" });
+  });
+
+  it("falls back to undetermined on a malformed ScVec (wrong length)", () => {
+    assert.deepEqual(
+      decodeCheckResult(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed"), xdr.ScVal.scvSymbol("extra")])),
+      { kind: "undetermined" },
+    );
+  });
+
+  it("falls back to undetermined on a non-symbol Blocked reason", () => {
+    assert.deepEqual(
+      decodeCheckResult(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvU32(1)])),
+      { kind: "undetermined" },
+    );
+  });
+
+  // Property (fuzz-lite): no decode input can produce an uncaught throw.
+  // Table of malformed ScVals built with stellar-sdk xdr builders.
+  it("never throws on any malformed ScVal input (fuzz-lite table)", () => {
+    const hostile: xdr.ScVal[] = [
+      xdr.ScVal.scvVoid(),
+      xdr.ScVal.scvBool(true),
+      xdr.ScVal.scvBool(false),
+      xdr.ScVal.scvU32(0),
+      xdr.ScVal.scvU32(0xffffffff),
+      xdr.ScVal.scvI32(-1),
+      xdr.ScVal.scvU64(0n),
+      xdr.ScVal.scvU64(2n ** 64n - 1n),
+      xdr.ScVal.scvI64(-1n),
+      xdr.ScVal.scvU128({ hi: 0n, lo: 0n }),
+      xdr.ScVal.scvI128({ hi: 0n, lo: 0n }),
+      xdr.ScVal.scvString(""),
+      xdr.ScVal.scvString("Allowed"),
+      xdr.ScVal.scvString("Blocked"),
+      xdr.ScVal.scvSymbol(""),
+      xdr.ScVal.scvSymbol("Allowed"),
+      xdr.ScVal.scvSymbol("Blocked"),
+      xdr.ScVal.scvSymbol("Unknown"),
+      xdr.ScVal.scvBytes(Buffer.from([])),
+      xdr.ScVal.scvBytes(Buffer.from([0x00, 0x01, 0x02])),
+      xdr.ScVal.scvVec([]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvSymbol("reason")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvU32(1)]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvString("reason")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Unknown"), xdr.ScVal.scvSymbol("reason")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed"), xdr.ScVal.scvSymbol("extra")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvVec([])]),
+      xdr.ScVal.scvMap([]),
+      xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("Allowed"), val: xdr.ScVal.scvVoid() }),
+      ]),
+    ];
+    for (const val of hostile) {
+      let result: unknown;
+      assert.doesNotThrow(() => {
+        result = decodeCheckResult(val);
+      }, `decodeCheckResult threw on ${JSON.stringify(val.toXDR("base64"))}`);
+      assert.ok(
+        result !== undefined && result !== null,
+        `decodeCheckResult returned nullish on ${JSON.stringify(val.toXDR("base64"))}`,
+      );
+    }
   });
 });
 
