@@ -194,6 +194,33 @@ code or the SDK beneath them changes:
   `@stellar/stellar-sdk`. Provenance and capture details:
   `tests/fixtures/rpc/README.md`.
 
+## Coverage
+
+Unit coverage is reported by `c8`, which understands the `tsx` loader and maps
+its numbers back to the TypeScript source:
+
+```bash
+npm run test:coverage        # full report over src/ — informational, no gate
+npm run test:coverage:floor  # enforce the floor on the verdict-critical path
+```
+
+The floor applies **per file** to the three verdict-critical modules —
+`src/preflight.ts`, `src/policy.ts`, `src/invoke.ts` — and lives in
+[`.c8rc.json`](.c8rc.json), not in the workflow. It starts at the measured
+baseline for those files (line 90 / branch 71 / function 92, measured
+2026-09-29), so it is honest rather than aspirational: it fails only on a real
+regression. `ci` runs the floor.
+
+**Ratchet rule:** raise the floor only in a deliberate PR that raises the tests
+first — measure the new number (`npm run test:coverage:floor`), then bump the
+matching key in `.c8rc.json` and state the old and new numbers in the PR. Never
+lower a threshold to make a red build green; that is the one change the floor
+exists to prevent.
+
+This is a standalone subsection because the test-tier documentation issue had
+not landed when the coverage floor was added; fold it into that section if it
+lands later.
+
 ## Secrets
 
 `PHASE2_ENV_FILE` (live testnet signing keys) and `NPM_TOKEN` (publish) are

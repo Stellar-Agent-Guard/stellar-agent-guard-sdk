@@ -1,0 +1,7 @@
+{
+  "per-file": true,
+  "lines": 90,
+  "branches": 71,
+  "functions": 92,
+  "_note": "Enforcement floor for the verdict-critical path (src/preflight.ts, src/policy.ts, src/invoke.ts), measured 2026-09-29 from the unit suite: preflight 96.36/85.06/92, policy 90.64/71.92/100, invoke 92.91/84.02/100 (lines/branches/functions). Each threshold is the lowest measured value across the three files, so the floor is honest rather than aspirational. Raise it only in a deliberate PR that also raises the tests: measure first, then bump this number. Enforced by `npm run test:coverage:floor` (which passes --check-coverage) and by the `ci` workflow; `npm run test:coverage` reports without gating."
+}
