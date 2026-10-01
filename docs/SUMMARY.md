@@ -22,4 +22,6 @@
 * [Enforcement Scope](enforcement-scope.md)
 * [Examples](examples/)
 * [Contributing](contributing.md)
+* [Releasing](releasing.md)
+* [API Deprecations](deprecations.md)
 * [FAQ](faq.md)
