@@ -15,9 +15,12 @@ npm users actually rely on:
 > promise that breaking changes move to major bumps.
 
 Until `1.0.0`, the minor version is the compatibility boundary; pin your
-dependency range accordingly (for example `"~0.2.0"`). This sentence is linked
-from the README's API-reference intro so consumers see it without reading this
-file.
+dependency range accordingly (for example `"~0.2.0"`). Within any minor series
+(such as `0.1.x`), the SDK guarantees an **additive-only** contract: existing
+exports, types, and behavioral contracts keep working across patches without
+breaking changes. For full details on the deprecation lifecycle, TS-native
+JSDoc warnings, runtime logger channels, and the tracking table, see
+[`docs/deprecations.md`](deprecations.md).
 
 ## Who releases
 
@@ -51,9 +54,18 @@ Checklist:
       must already be merged, and the CI run on the release commit must include
       the `enforcement-path evidence gate` passing. Link the CI run of the
       release commit in the release notes.
-- [ ] Changelog decision made: release notes are drafted from the commits since
-      the last tag (the repo has no CHANGELOG.md file yet; if one is added, that
-      becomes the source — coordinate before introducing it, see issue #6).
+- [ ] API deprecations and removals verified: if releasing a minor bump (e.g.,
+      `0.2.0`), verify any removed exports were announced with `@deprecated`
+      for at least one minor cycle per [`docs/deprecations.md`](deprecations.md)
+      and update the deprecation tracking table. If releasing a patch (`0.x.Z`),
+      confirm changes are additive-only (or carry the mandatory
+      `[SECURITY OVERRIDE]` callout).
+- [ ] Release notes match the changelog: `[Unreleased]` in
+      [`CHANGELOG.md`](../CHANGELOG.md) was moved under this version's heading (with
+      the date), and the GitHub Release body drafted from
+      [`RELEASE_TEMPLATE.md`](../.github/RELEASE_TEMPLATE.md) agrees with it — the
+      changelog is the cross-version source, the release body the per-tag record
+      (issue #6 decided "yes"; executed in issue #81).
 - [ ] `package.json` version bumped with the command, not by hand:
 
   ```bash
@@ -102,4 +114,7 @@ tarball.
 Because 0.x minors may break, every minor release's notes must open with a
 **Breaking changes** section (or state "none") and, for each break, the old
 shape, the new shape, and the one-line migration. The README's
-"Typed errors and 0.1.x migration" section is the model.
+"Typed errors and 0.1.x migration" section is the model. If an urgent
+verdict-correctness fix required a breaking change in a patch release, it must
+be designated with the `[SECURITY OVERRIDE]` callout defined in
+[`docs/deprecations.md`](deprecations.md).
