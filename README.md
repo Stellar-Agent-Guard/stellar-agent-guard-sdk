@@ -828,7 +828,9 @@ Licensed under [MIT](LICENSE). This is unaudited security tooling that gates rea
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR process, and
-project structure — including the strict one-commit-per-logical-unit rule.
+project structure — including the strict one-commit-per-logical-unit rule and the
+[TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
+(`npm run check:strict-ratchet`).
 
 Looking for something to work on? The
 [issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
