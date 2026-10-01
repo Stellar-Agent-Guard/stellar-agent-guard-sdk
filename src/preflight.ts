@@ -625,6 +625,7 @@ export class PreFlightInterceptor {
 
     for (let i = 0; i < calls.length; i++) {
       const call = calls[i];
+      if (!call) continue;
       const decision = await this.check(call);
 
       if (decision.kind === "admissible") {
