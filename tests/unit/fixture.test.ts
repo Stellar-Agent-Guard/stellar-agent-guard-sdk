@@ -12,6 +12,7 @@ import {
   assertPreconditions,
   type Phase2Config,
 } from "../integration/harness.ts";
+import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
 
 const FIXTURE_PATH = resolve(process.cwd(), "tests/fixtures/phase2-instance.json");
 
@@ -39,7 +40,7 @@ describe("fixture instance schema validation", () => {
       rpcUrl: "https://soroban-testnet.stellar.org",
       networkPassphrase: "Test SDF Network ; September 2015",
       phase2EnforcementInstance: {
-        guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+        guard: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
       },
     };
 
@@ -60,12 +61,12 @@ describe("fixture instance schema validation", () => {
       rpcUrl: "https://soroban-testnet.stellar.org",
       networkPassphrase: "Test SDF Network ; September 2015",
       phase2EnforcementInstance: {
-        guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
-        token: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
-        tokenIssuer: "GCE5SDY44O23HRRN4XRTOZ2DJRAKN3WKYMUGIMYCS7RB7OG27MKN5ZPO",
+        guard: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
+        token: unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"),
+        tokenIssuer: unsafeAccountAddress("GCE5SDY44O23HRRN4XRTOZ2DJRAKN3WKYMUGIMYCS7RB7OG27MKN5ZPO"),
         wasmHashLedger: "f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63",
         addresses: {
-          admin: "GDCPT4Z3MBH7X6IX6A6BHIENUL7DRZ44O2SL2V72QJVOEJHJROP3PQDG",
+          admin: unsafeAccountAddress("GDCPT4Z3MBH7X6IX6A6BHIENUL7DRZ44O2SL2V72QJVOEJHJROP3PQDG"),
         },
         transactions: {},
         mints: [],
@@ -88,8 +89,8 @@ describe("fixture instance schema validation", () => {
 });
 
 describe("assertPreconditions live suite preflight checks", () => {
-  const guard = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-  const token = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+  const guard = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+  const token = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
   const admin = Keypair.random();
   const agent = Keypair.random();
 

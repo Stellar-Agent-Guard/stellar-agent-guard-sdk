@@ -21,4 +21,6 @@
 * [Benchmarks](benchmarks.md)
 * [Enforcement Scope](enforcement-scope.md)
 * [Contributing](contributing.md)
+* [Releasing](releasing.md)
+* [API Deprecations](deprecations.md)
 * [FAQ](faq.md)

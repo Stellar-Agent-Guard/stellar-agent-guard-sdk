@@ -62,6 +62,8 @@ import {
   SigningError,
   SimulationError,
 } from "./errors.ts";
+import { systemClock, type Clock } from "./clock.ts";
+import type { ContractAddress } from "./policy.ts";
 
 /** Extra ledger validity granted to a guard auth entry when it is signed. */
 const SIG_EXPIRATION_LEDGERS = 10_000;
@@ -142,7 +144,7 @@ export async function withRpcDeadline<T>(
 
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
-  contract: string;
+  contract: ContractAddress;
   /** Function name as it appears in the contract spec. */
   fn: string;
   args: xdr.ScVal[];
@@ -811,10 +813,13 @@ export async function submitAndPoll(
   options: {
     pollAttempts?: number | undefined;
     pollIntervalMs?: number | undefined;
+    clock?: Clock | undefined;
     signal?: AbortSignal | undefined;
     timeoutMs?: number | undefined;
   } = {},
 ): Promise<SubmissionResult> {
+  const clock = options.clock ?? systemClock;
+
   for (const signer of signers) {
     if ("signTransaction" in signer && typeof signer.signTransaction === "function") {
       const signed = await signer.signTransaction(transaction, {
@@ -857,7 +862,7 @@ export async function submitAndPoll(
   const attempts = options.pollAttempts ?? 20;
   const interval = options.pollIntervalMs ?? 3_000;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, interval));
+    await clock.sleep(interval);
     let result: Awaited<ReturnType<rpc.Server["getTransaction"]>>;
     try {
       result = await withRpcDeadline(() => server.getTransaction(sent.hash), {
