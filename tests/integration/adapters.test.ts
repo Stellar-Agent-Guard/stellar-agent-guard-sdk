@@ -21,6 +21,7 @@ import { PreFlightInterceptor } from "../../src/preflight.ts";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
 import { createGuardValidator, guardAction } from "../../src/adapters/elizaos.ts";
 import { GuardError } from "../../src/index.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 import { loadPhase2Config, installPolicy, type Phase2Config } from "./harness.ts";
 
 let config: Phase2Config;
@@ -33,7 +34,7 @@ before(async () => {
   interceptor = new PreFlightInterceptor({
     server,
     networkPassphrase: "Test SDF Network ; September 2015",
-    guard: config.guard,
+    guard: unsafeContractAddress(config.guard),
     agent: config.keys.agent,
     source: config.keys.agent,
   });
@@ -43,7 +44,7 @@ before(async () => {
 function toContractCall(args: { to?: unknown; amount?: unknown }) {
   if (typeof args.to !== "string" || args.amount === undefined) return null;
   return {
-    contract: config.token,
+    contract: unsafeContractAddress(config.token),
     fn: "transfer",
     args: [
       new Address(config.guard).toScVal(),
@@ -167,7 +168,7 @@ describe("ElizaOS Action.validate adapter against the live guard", () => {
       {
         interceptor,
         toContractCall: () => ({
-          contract: config.token,
+          contract: unsafeContractAddress(config.token),
           fn: "transfer",
           args: [
             new Address(config.guard).toScVal(),
