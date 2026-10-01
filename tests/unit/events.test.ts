@@ -226,5 +226,4 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
     });
   }
 });
- main
 });
