@@ -1,4 +1,3 @@
-
 /**
  * The pre-flight interceptor: ask the guard whether an action is permitted
  * *before* anything is signed for broadcast.
@@ -33,12 +32,14 @@ import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.
 import {
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
-  type PolicyConfig,
+  type ContractAddress,
+  type ReadonlyPolicyConfig,
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
+import { systemClock, type Clock } from "./clock.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -221,7 +222,7 @@ export interface CheckBatchOptions {
    * Policy configuration to enforce against during batch staging.
    * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
    */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
 
   /**
    * Initial committed amount already spent in the current rolling window.
@@ -309,7 +310,7 @@ export type RpcTransportConfig =
 export interface PreFlightConfig {
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
-  guard: string;
+  guard: ContractAddress;
   /**
    * The key registered as the account's agent, used to sign the auth entry: an
    * `AgentSigner` for any signing setup, or a plain Ed25519 `Keypair` for the
@@ -321,12 +322,17 @@ export interface PreFlightConfig {
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
   accountSigners?: Keypair[];
   /** Optional policy to use for batch staging (otherwise fetched from ledger). */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
    */
   cache?: PreFlightCacheOptions;
+  /**
+   * Inject a custom clock for time-dependent operations (cache TTL, etc.).
+   * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
+   */
+  clock?: Clock;
 } & RpcTransportConfig;
 
 /** Alias used by the README's constructor terminology. */
@@ -386,10 +392,12 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  private readonly clock: Clock;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
+    this.clock = config.clock ?? systemClock;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
   }
@@ -440,7 +448,7 @@ export class PreFlightInterceptor {
       return null;
     }
 
-    const now = Date.now();
+    const now = this.clock.now();
     for (const [key, entry] of this.cache) {
       if (entry.ledger !== ledger || entry.expiresAt <= now) this.cache.delete(key);
     }
@@ -479,7 +487,7 @@ export class PreFlightInterceptor {
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {
-        const now = Date.now();
+        const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
           return cached.decision;
         }
@@ -605,7 +613,7 @@ export class PreFlightInterceptor {
     }
 
     // Resolve policy and initial window spend for staging
-    let policy: PolicyConfig | null = options?.policy ?? this.config.policy ?? null;
+    let policy: ReadonlyPolicyConfig | null = options?.policy ?? this.config.policy ?? null;
     let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
 
     if (policy === null || options?.initialWindowSpent === undefined) {
@@ -734,4 +742,3 @@ export function preflightBatch(
 ): Promise<PreFlightBatchDecision> {
   return new PreFlightInterceptor(config).checkBatch(calls, options);
 }
-

@@ -18,10 +18,11 @@ import {
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
+import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
 
-const VALID_GUARD = "CAPADGEK457RHKN4RYVUmDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-const VALID_TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3NINCK34KF6GU2BGC7Z6MB";
-const RECIPIENT = "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH";
+const VALID_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+const VALID_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
 
 function validTransferCall(amount: bigint = 100n): ContractCall {
   return {
@@ -90,7 +91,7 @@ describe("validateContractCall validator unit tests", () => {
   describe("contract format validation", () => {
     it("rejects missing or empty contract string", () => {
       assert.throws(
-        () => validateContractCall({ contract: "", fn: "transfer", args: [] }),
+        () => validateContractCall({ contract: unsafeContractAddress(""), fn: "transfer", args: [] }),
         (err: unknown) => {
           assert(err instanceof InvalidInputError);
           assert.equal(err.field, "contract");
@@ -103,7 +104,7 @@ describe("validateContractCall validator unit tests", () => {
     it("rejects non-StrKey or malformed contract IDs", () => {
       for (const bad of ["invalid-contract", "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH", "C1234"]) {
         assert.throws(
-          () => validateContractCall({ contract: bad, fn: "transfer", args: [] }),
+          () => validateContractCall({ contract: unsafeContractAddress(bad), fn: "transfer", args: [] }),
           (err: unknown) => {
             assert(err instanceof InvalidInputError);
             assert.equal(err.field, "contract");
@@ -284,7 +285,7 @@ describe("interceptor.check() input validation and zero RPC round-trips", () => 
     const interceptor = createTestInterceptor(mockServer);
 
     await assert.rejects(
-      async () => interceptor.check({ contract: "not-a-contract", fn: "transfer", args: [] }),
+      async () => interceptor.check({ contract: unsafeContractAddress("not-a-contract"), fn: "transfer", args: [] }),
       (err: unknown) => {
         assert(err instanceof InvalidInputError);
         assert.equal(err.field, "contract");
@@ -383,6 +384,43 @@ describe("injectable transport: pre-built rpc.Server instance", () => {
     assert(mockServer.requestCount > 0, "calls must land on the injected Server");
   });
 
+  it("policy refusal (blocked) returns a verdict without throwing", async () => {
+    // Simulate a guard policy block (diagnostic event carries event_auth_checked, blocked, per_tx_cap_exceeded)
+    const blockedErrorResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+
+    const mockServer = createMockServer({ enforcedSimulateResponse: blockedErrorResponse });
+    const interceptor = createTestInterceptor(mockServer);
+
+    const call = validTransferCall(5000n);
+    // check() does NOT throw: returns kind: "blocked"
+    const decision = await interceptor.check(call);
+    assert.equal(decision.allowed, false);
+    assert.equal(decision.kind, "blocked");
+    if (decision.kind === "blocked") {
+      assert.equal(decision.reason, "per_tx_cap_exceeded");
+      assert(decision.explanation.length > 0);
+    }
+  });
+
   it("rejects configuration that supplies both server and url", () => {
     const mockServer = createMockServer();
     assert.throws(
@@ -416,6 +454,245 @@ describe("injectable transport: pre-built rpc.Server instance", () => {
         return true;
       },
     );
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*             Unit tests for opt-in pre-flight simulation cache              */
+/* -------------------------------------------------------------------------- */
+
+const CONTRACT = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+const OTHER_CONTRACT = unsafeContractAddress(Address.contract(Buffer.alloc(32)).toString());
+const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+const CALL: ContractCall = { contract: CONTRACT, fn: "noop", args: [] };
+
+function makeHarness() {
+  let simulations = 0;
+  let latestLedgerCalls = 0;
+  let ledger = 100;
+  const source = Keypair.random();
+  const server = {
+    getAccount: async () => new Account(source.publicKey(), "1"),
+    getLatestLedger: async () => {
+      latestLedgerCalls += 1;
+      return { sequence: ledger };
+    },
+    simulateTransaction: async () => {
+      simulations += 1;
+      return {
+        result: { auth: [] },
+        minResourceFee: "17",
+        transactionData: {
+          getReadOnly: () => [],
+          getReadWrite: () => [{}],
+        },
+      };
+    },
+  } as unknown as rpc.Server;
+
+  return {
+    server,
+    source,
+    call: CALL,
+    get simulations() {
+      return simulations;
+    },
+    get latestLedgerCalls() {
+      return latestLedgerCalls;
+    },
+    advanceLedger() {
+      ledger += 1;
+    },
+  };
+}
+
+function makeInterceptor(
+  harness: ReturnType<typeof makeHarness>,
+  options: { cache?: PreFlightCacheOptions } = {},
+): PreFlightInterceptor {
+  return new PreFlightInterceptor({
+    server: harness.server,
+    networkPassphrase: NETWORK_PASSPHRASE,
+    guard: CONTRACT,
+    agent: harness.source,
+    source: harness.source,
+    ...(options.cache ? { cache: options.cache } : {}),
+  });
+}
+
+describe("PreFlightInterceptor simulation cache", () => {
+  it("does not cache unless explicitly enabled", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness);
+
+    await interceptor.check(harness.call);
+    await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 4);
+    // No cache-context ledger lookup is added to the default path.
+    assert.equal(harness.latestLedgerCalls, 2);
+  });
+
+  it("returns a hit for the same call within the ledger window", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    const first = await interceptor.check(harness.call);
+    const second = await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 2);
+    assert.equal(harness.latestLedgerCalls, 3);
+    assert.equal(second, first);
+  });
+
+  it("supports ledger-based TTL configuration", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlLedgers: 1 } });
+
+    await interceptor.check(harness.call);
+    await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 2);
+  });
+
+  it("does not reuse a verdict after its TTL expires", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 1 } });
+
+    await interceptor.check(harness.call);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("invalidates the complete cache explicitly", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    await interceptor.check(harness.call);
+    interceptor.invalidate();
+    await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("invalidates only the requested call when one is supplied", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+    const otherCall: ContractCall = {
+      contract: CONTRACT,
+      fn: "noop",
+      args: [nativeToScVal(1n, { type: "i128" })],
+    };
+
+    await interceptor.check(harness.call);
+    await interceptor.check(otherCall);
+    interceptor.invalidate(harness.call);
+    await interceptor.check(harness.call);
+    await interceptor.check(otherCall);
+
+    assert.equal(harness.simulations, 6);
+  });
+
+  it("invalidates when the ledger advances", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    await interceptor.check(harness.call);
+    harness.advanceLedger();
+    await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("invalidates when the policy revision changes", async () => {
+    const harness = makeHarness();
+    let revision = 1;
+    const interceptor = makeInterceptor(harness, {
+      cache: { ttlMs: 5_000, policyRevision: () => revision },
+    });
+
+    await interceptor.check(harness.call);
+    revision = 2;
+    await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("bypasses the cache when a supplied policy revision is unreadable", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, {
+      cache: { ttlMs: 5_000, policyRevision: () => undefined },
+    });
+
+    await interceptor.check(harness.call);
+    await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("uses different keys for different arguments", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+    const otherCall: ContractCall = {
+      contract: CONTRACT,
+      fn: "noop",
+      args: [nativeToScVal(1n, { type: "i128" })],
+    };
+
+    await interceptor.check(harness.call);
+    await interceptor.check(otherCall);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("uses different keys for different functions", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+    const otherCall: ContractCall = { ...harness.call, fn: "other" };
+
+    await interceptor.check(harness.call);
+    await interceptor.check(otherCall);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("uses different keys for different contracts", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+    const otherCall: ContractCall = { ...harness.call, contract: OTHER_CONTRACT };
+
+    await interceptor.check(harness.call);
+    await interceptor.check(otherCall);
+
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("does not cache an undetermined result", async () => {
+    const source = Keypair.random();
+    let simulations = 0;
+    const server = {
+      getAccount: async () => new Account(source.publicKey(), "1"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        return { error: "HostError: trap" };
+      },
+    } as unknown as rpc.Server;
+    const interceptor = new PreFlightInterceptor({
+      server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: source,
+      source,
+      cache: { ttlMs: 5_000 },
+    });
+
+    await interceptor.check(CALL);
+    await interceptor.check(CALL);
+
+    assert.equal(simulations, 2);
   });
 });
 

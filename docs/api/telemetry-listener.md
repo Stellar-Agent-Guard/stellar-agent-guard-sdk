@@ -12,8 +12,18 @@ constructor(options: GuardTelemetryListenerOptions)
 
 - `server: rpc.Server` — Soroban RPC server
 - `guard: string` — Guard contract address
+- `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
 
 ## Methods
+
+### `recent(filter?): GuardEvent[]`
+
+The retained window of most-recent decoded events, oldest first, empty unless a
+`buffer` was configured. `filter` narrows by `stream`, `reason`, `fromLedger`, or
+`toLedger`; a ledger-less diagnostic event is excluded from a ledger range rather
+than treated as inside it. Non-durable: the window lives in process memory and a
+restart empties it. Only events this listener decoded are retained — committed
+events via `poll()`/`watch()`, and diagnostic events via `watchAll()`.
 
 ### `watch(params?): AsyncIterable<GuardEventPage>`
 
