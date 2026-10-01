@@ -1,21 +1,19 @@
 {
   "header": {
-    "source": "live Soroban RPC replay capture",
+    "source": "synthetic XDR replay fixture",
     "method": "simulateTransaction (enforced)",
     "network": "testnet",
-    "capturedAt": "2026-09-30T10:00:00.000Z",
+    "createdAt": "2026-10-01T00:00:00.000Z",
     "stellarSdkVersion": "17.0.1",
-    "note": "Undetermined: simulation error with no guard event in diagnostics"
+    "note": "Malformed diagnostics contain no decodable guard decision"
   },
   "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
   "simulationRequest": {
-    "note": "Simulation failed before guard could publish verdict"
+    "note": "Simulation fails before a guard decision can be decoded"
   },
   "simulationResponse": {
     "error": "Error(WasmVm, InvalidAction)",
-    "events": [
-      "AAAAAQAAAAAAAAAAAAAAAgAAAAAAAAADAAAADwAAAAdmbl9jYWxsAAAAAA0AAAAgHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAAPAAAACHRyYW5zZmVyAAAAAAAA"
-    ]
+    "events": ["not-valid-xdr"]
   },
   "expected": {
     "verdict": "undetermined"
