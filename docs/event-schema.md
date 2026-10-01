@@ -55,9 +55,9 @@ behaves:
 | `ledgerClosedAt` | stream | **Best-effort** | Host-formatted timestamp; `null` on the diagnostic stream. |
 | `observedAt` | SDK (unified stream) | **Best-effort** | ISO-8601 time `watchAll()` observed a diagnostic batch; `null` on the committed stream. Additive (issue #67). |
 | `transactionHash` | stream | **Best-effort** | Always `null` on the diagnostic stream — a refusal has no transaction. |
-| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Semantics are stable; the decoded JS rendering is for display. |
+| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Delivered as a string in JSON, normalised to `bigint` by the SDK to prevent >2^53 precision loss. |
 | `data.by` (admin events) | contract payload | **Stable** | The acting admin address, for `event_initialized` / `event_frozen` / `event_unfrozen` / `event_policy_set` / `event_policy_revoked`. |
-| `data` — any other key | contract / host | **Best-effort** | Not under SDK control; ignore rather than infer. |
+| `data` — any other key | contract / host | **Best-effort** | Not under SDK control. Normalised: strings of pure digits become `bigint`; other strings (e.g. ISO dates) are preserved. |
 | Raw topic list (undecoded XDR / `ScVal` objects) | RPC | **Best-effort** | Host-shaped. Decode with `topicSymbols()` / `decodeAuthDecision()`. |
 | `contractEventsXdr` grouping | RPC | **Best-effort** | An array of *groups*, one per contract — reading it as a flat list silently loses events (see "The capture"). |
 | `GUARD_EVENT_TOPICS` values | contract | **Stable** | The name-topic vocabulary. |
