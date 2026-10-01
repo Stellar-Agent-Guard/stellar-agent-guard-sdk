@@ -125,6 +125,12 @@ scheme has to be renamed later.
 Anything still open when a phase closes gets an issue, not just a note in a pull request or a
 chat log.
 
+## Releasing
+
+Version bumps, tags, npm publish, and the 0.x breaking-change policy are
+documented in [`docs/releasing.md`](docs/releasing.md) — publishing itself is
+maintainer-only (npm 2FA/automation token, outside this repo).
+
 ## Local gates before pushing
 
 ```bash
@@ -132,6 +138,7 @@ npm run typecheck
 npm run lint
 npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
+npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 ```
 
