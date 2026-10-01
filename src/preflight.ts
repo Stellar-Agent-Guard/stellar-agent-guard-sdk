@@ -358,7 +358,7 @@ function callFingerprint(call: ContractCall): string {
   hashPart(hash, call.contract);
   hashPart(hash, call.fn);
   const args = call.args;
-  for (let i = 0; i < args.length; i++) hashPart(hash, args[i].toXDR());
+  for (const arg of args) hashPart(hash, arg.toXDR());
   return hash.digest("hex");
 }
 
