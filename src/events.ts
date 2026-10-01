@@ -106,3 +106,36 @@ export function decodeAuthDecision(
   const reason = rawReason && rawReason.length > 0 ? (rawReason as GuardReason) : null;
   return { result, reason, source };
 }
+
+
+/**
+ * Normalise a numeric value delivered as a string in an event payload.
+ *
+ * u64 values arrive as strings in JSON payloads. This centralizes the decision
+ * to parse them as BigInt (which never loses precision for >2^53) if they consist
+ * entirely of digits, while leaving other strings (like ISO timestamps) intact.
+ */
+export function normalizeU64(value: string): bigint | string {
+  if (/^\d+$/.test(value)) {
+    return BigInt(value);
+  }
+  return value;
+}
+
+/** Recursively normalise u64 strings in event data. */
+export function normalizeEventData(data: unknown): unknown {
+  if (typeof data === "string") {
+    return normalizeU64(data);
+  }
+  if (Array.isArray(data)) {
+    return data.map(normalizeEventData);
+  }
+  if (data !== null && typeof data === "object") {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data)) {
+      result[key] = normalizeEventData(value);
+    }
+    return result;
+  }
+  return data;
+}
