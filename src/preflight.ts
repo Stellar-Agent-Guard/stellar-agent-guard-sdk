@@ -369,8 +369,7 @@ function configFingerprint(config: PreFlightConfig): string {
   hashPart(hash, config.source.publicKey());
   hashPart(hash, toAgentSigner(config.agent).publicKey);
   const signers = (config.accountSigners ?? []).map((keypair) => keypair.publicKey()).sort();
-  for (let i = 0; i < signers.length; i++) {
-    const signer = signers[i];
+  for (const signer of signers) {
     hashPart(hash, signer);
   }
   return hash.digest("hex");
