@@ -19,7 +19,7 @@ import { join, resolve } from 'node:path';
 import ts from 'typescript';
 
 const ROOT = resolve(import.meta.dirname, '..');
-const README = join(ROOT, 'README'.md');
+const README = join(ROOT, 'README.md');
 const SRC = join(ROOT, 'src');
 
 interface Snippet {
