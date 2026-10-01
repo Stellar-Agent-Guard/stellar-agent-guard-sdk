@@ -706,6 +706,7 @@ export class PreFlightInterceptor {
     const verdicts = decision.verdicts;
     for (let i = 0; i < verdicts.length; i++) {
       const verdict = verdicts[i];
+      if (!verdict) continue;
       if (verdict.kind === "blocked") {
         throw new GuardBlockedError({
           reason: verdict.reason,
