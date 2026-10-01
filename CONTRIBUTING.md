@@ -11,6 +11,12 @@ Commits use [Conventional Commits](https://www.conventionalcommits.org/):
 Types in use in this repo: `feat`, `fix`, `docs`, `chore`, `ci`, `test`. The existing
 history is the reference — match its shape rather than inventing a new one.
 
+## Changelog
+
+User-facing changes need an **Unreleased** row in [`CHANGELOG.md`](CHANGELOG.md),
+added in the same PR as the change; changes no user can observe (CI, tests, internal
+docs) need none.
+
 ## One commit per logical unit, **per file** — the hard rule
 
 Every commit **and every push** must touch **exactly one file**. Not "on average" —
