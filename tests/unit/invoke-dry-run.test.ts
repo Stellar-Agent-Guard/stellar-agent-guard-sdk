@@ -32,10 +32,11 @@ import {
 import { invoke, type InvokeParams } from "../../src/invoke.ts";
 import { CostPreChecker } from "../../src/cost.ts";
 import { PreFlightInterceptor } from "../../src/preflight.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
 const NETWORK = "Test SDF Network ; September 2015";
-const TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
-const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 
 function simulationSuccess(resourceFee: unknown = "777", auth: xdr.SorobanAuthorizationEntry[] = []): object {
   return {

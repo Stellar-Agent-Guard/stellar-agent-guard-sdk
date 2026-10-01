@@ -26,10 +26,11 @@ import {
   type AgentSigner,
   type ContractCall,
 } from "../../src/tx.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
-const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 const CALL: ContractCall = {
-  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  contract: unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"),
   fn: "transfer",
   args: [],
 };
@@ -237,7 +238,7 @@ describe("describeSimulationResources", () => {
   });
 
   it("names each guard storage key and whether it is declared read-write", () => {
-    const guard = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+    const guard = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
     const data = new SorobanDataBuilder().setResources(1, 2, 3);
     const text = describeSimulationResources({ transactionData: data, minResourceFee: "0" }, guard);
     assert.match(text, /guard key Policy: NOT in the footprint/);
