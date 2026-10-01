@@ -1,4 +1,4 @@
-/*
+/**
  * Cost pre-checking: what will this call cost, asked *before* it is submitted.
  *
  * ## Why this is in-process and simulation-priced
@@ -23,7 +23,8 @@
  * saw. It is not a promise about the final charged amount if the ledger moves
  * under the submission — `invoke.ts` documents that case and retries it once —
  * and it does not include any future surge pricing. It is reported as an
- * estimate, with the inclusion fee shown separately so the two are never conflated.
+ * estimate, with the inclusion fee shown separately so the two are never
+ * conflated.
  *
  * ## A block is not a cost overrun
  *
@@ -42,7 +43,7 @@ import type { ContractCall } from "./tx.ts";
  * Stroops in one XLM. Stellar defines 10^7 stroops per lumen, fixed by the
  * protocol — not a display choice.
  */
-export const STROOPS_PER_XLM = 10_000_000n || 10_000_000;
+export const STROOPS_PER_XLM = 10_000_000n;
 
 /**
  * Render a fee in stroops as an XLM decimal string, using **integer arithmetic
@@ -67,7 +68,7 @@ export const STROOPS_PER_XLM = 10_000_000n || 10_000_000;
  * separator: `10_000_000` → `"1"`, `1_000_000` → `"0.1"` (not `"0.1000000"`),
  * `0` → `"0"`, `1` → `"0.0000001"`. The alternative, a fixed 7-dp pad, adds
  * zeros that imply precision the fee does not have; the minimal form is exact
- * in both directions, so `formatFee(parse(x)) === x` for every value this
+ * in both directions, so `formatFee(parse(x)) === x` holds for every value this
  * function accepts.
  *
  * Input is `bigint` (exact, and the only way to express values above 2^53) or a
@@ -233,12 +234,6 @@ interface CostResultBreakdown {
   breakdown?: ResourceBreakdown;
 }
 
-/**
- * Constructor options for a cost pre-check.
- *
- * See the README "CostPreCheckerOptions" table for the canonical list of
- * every option, its type, default, and semantics.
- */
 export interface CostPreCheckConfig {
   /**
    * The pre-flight interceptor whose `check` produces the network's own price.
@@ -246,19 +241,11 @@ export interface CostPreCheckConfig {
    * Typed structurally so a caller can supply the real `PreFlightInterceptor`
    * (the normal case) or a stand-in — the budget arithmetic is pure and worth
    * testing without a network.
-   *
-   * **Required**. No default: a cost pre-check without a source of prices
-   * would have to invent one, and invented prices are not prices.
    */
   interceptor: Pick<PreFlightInterceptor, "check">;
   /**
    * Refuse (as `over_budget`) when the estimated *total* fee exceeds this many
    * stroops. Omitted means "price it, never object to the price".
-   *
-   * **Default:** `undefined` (no ceiling). Setting it is a *cost* guard, not
-   * a safety guard: an over-budget call is still considered allowed by the
-   * guard itself, and the decision is reported as `over_budget` with
-   * `allowed: false`. Omitting it does not weaken any authorization check.
    */
   maxFeeStroops?: bigint;
 }
@@ -297,7 +284,188 @@ export type CostDecision =
       explanation: string;
       detail: string;
       /** Zero by construction: a refusal precedes broadcast, so nothing is charged. */
-      resourceFeeStroops: 0n;
-      inclusionFeeStroops: 0n;
-      totalFeeStroops: 0n;
+      resourceFeeStroops: bigint;
+      inclusionFeeStroops: bigint;
+      totalFeeStroops: bigint;
+    } & CostResultBreakdown
+  | {
+      kind: "undetermined";
+      /** Enforcement could not reach a decision; treated as not-allowed. */
+      allowed: false;
+      detail: string;
+      resourceFeeStroops: bigint;
+      inclusionFeeStroops: bigint;
+      totalFeeStroops: bigint;
+    } & CostResultBreakdown;
+
+/**
+ * One interceptor verdict and the cost of the exact simulation that produced it.
+ *
+ * `cost` is derived from `decision`, never from a second simulation, so the two
+ * always describe the same ledger snapshot. See `checkWithCost`.
+ */
+export interface CostWithDecision {
+  /** The verdict, exactly as `PreFlightInterceptor.check` returns it. */
+  decision: PreFlightDecision;
+  /** The cost view of that same verdict. */
+  cost: CostDecision;
+}
+
+/**
+ * Split a simulation's resource fee into the two components a caller is charged.
+ *
+ * Pure: no network, no configuration. The inclusion fee is the SDK's own
+ * declared floor for a single-operation transaction (`INCLUSION_FEE` in `tx.ts`),
+ * which is the same value the built envelope uses, so this cannot drift from what
+ * is actually submitted.
+ */
+export function feeBreakdown(resourceFeeStroops: bigint): FeeBreakdown {
+  const inclusionFeeStroops = BigInt(INCLUSION_FEE);
+  return {
+    resourceFeeStroops,
+    inclusionFeeStroops,
+    totalFeeStroops: resourceFeeStroops + inclusionFeeStroops,
+  };
+}
+
+/**
+ * Is the estimated total over the caller's ceiling?
+ *
+ * A missing ceiling is not a zero ceiling: `null`/`undefined` means "no
+ * objection", never "refuse everything that costs anything".
+ */
+export function exceedsCeiling(
+  totalFeeStroops: bigint,
+  ceilingStroops: bigint | null | undefined,
+): boolean {
+  if (ceilingStroops === null || ceilingStroops === undefined) return false;
+  return totalFeeStroops > ceilingStroops;
+}
+
+/** A compact, log-friendly rendering of a cost decision. */
+export function describeCostDecision(decision: CostDecision): string {
+  switch (decision.kind) {
+    case "within_budget": {
+      const ceiling =
+        decision.feeCeilingStroops === null
+          ? "no ceiling"
+          : `ceiling ${decision.feeCeilingStroops}`;
+      return `within budget: ${decision.totalFeeStroops} stroops (${decision.resourceFeeStroops} resource + ${decision.inclusionFeeStroops} inclusion), ${ceiling}`;
+    }
+    case "over_budget":
+      return `over budget: ${decision.totalFeeStroops} stroops exceeds ceiling ${decision.feeCeilingStroops}`;
+    case "blocked":
+      return `blocked before broadcast (${decision.reason}): 0 stroops charged`;
+    case "undetermined":
+      return "undetermined: not priced, not executed";
+  }
+}
+
+/**
+ * Price a call, and optionally object to the price.
+ *
+ * Runs the same enforcement question the pre-flight interceptor runs — one
+ * simulation of the real `__check_auth` — and reports the result in cost terms.
+ * Nothing is broadcast, so calling this repeatedly costs only RPC time.
+ */
+export class CostPreChecker {
+  private readonly config: CostPreCheckConfig;
+
+  constructor(config: CostPreCheckConfig) {
+    this.config = config;
+  }
+
+  /** Price a call. Equivalent to `(await this.checkWithCost(call)).cost`. */
+  async check(call: ContractCall): Promise<CostDecision> {
+    return (await this.checkWithCost(call)).cost;
+  }
+
+  /**
+   * Price a call **and** return the interceptor's verdict, from one enforced
+   * simulation.
+   *
+   * ## Why this exists — and why not to call `check()` twice
+   *
+   * The obvious consumer flow is `interceptor.check(call)` for the policy
+   * verdict, then `costChecker.check(call)` for the price. Those are two
+   * simulations of the same call, and the problem is not only the extra RPC: the
+   * two simulations see two ledger snapshots, so the fee the caller is *told* can
+   * differ from the fee implied by the verdict that was actually enforced. A
+   * price that no longer corresponds to the approved decision is a correctness
+   * bug in a security tool, not a performance one — so this method asks the
+   * interceptor once and derives both results from that one verdict.
+   *
+   * Additive: `check()`, `precheckCost()` and `PreFlightInterceptor.check()` are
+   * unchanged.
+   */
+  async checkWithCost(call: ContractCall): Promise<CostWithDecision> {
+    const decision = await this.config.interceptor.check(call);
+    return { decision, cost: this.costOf(decision) };
+  }
+
+  /** The pure cost view of an already-obtained verdict. No network, no state. */
+  private costOf(decision: PreFlightDecision): CostDecision {
+    if (decision.kind === "blocked") {
+      return {
+        kind: "blocked",
+        allowed: false,
+        reason: decision.reason,
+        explanation: decision.explanation,
+        detail: decision.detail,
+        resourceFeeStroops: 0n,
+        inclusionFeeStroops: 0n,
+        totalFeeStroops: 0n,
+      };
+    }
+    if (decision.kind === "undetermined") {
+      return {
+        kind: "undetermined",
+        allowed: false,
+        detail: decision.detail,
+        resourceFeeStroops: 0n,
+        inclusionFeeStroops: 0n,
+        totalFeeStroops: 0n,
+      };
+    }
+
+    const fees = feeBreakdown(decision.estimatedResourceFee);
+    const ceiling = this.config.maxFeeStroops ?? null;
+    if (exceedsCeiling(fees.totalFeeStroops, ceiling)) {
+      return {
+        kind: "over_budget",
+        allowed: false,
+        ...fees,
+        footprintKeys: decision.footprintKeys,
+        feeCeilingStroops: ceiling as bigint,
+        ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
+      };
+    }
+    return {
+      kind: "within_budget",
+      allowed: true,
+      ...fees,
+      footprintKeys: decision.footprintKeys,
+      feeCeilingStroops: ceiling,
+      ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
     };
+  }
+}
+
+/** One-shot form, for callers that do not want to hold a pre-checker. */
+export function precheckCost(
+  config: CostPreCheckConfig,
+  call: ContractCall,
+): Promise<CostDecision> {
+  return new CostPreChecker(config).check(call);
+}
+
+/**
+ * One-shot form of `checkWithCost`: one simulation, both the verdict and the
+ * price. Prefer this over a `preflight()` + `precheckCost()` pair.
+ */
+export function precheckCostWithDecision(
+  config: CostPreCheckConfig,
+  call: ContractCall,
+): Promise<CostWithDecision> {
+  return new CostPreChecker(config).checkWithCost(call);
+}
