@@ -307,7 +307,6 @@ const POLICY_FIELDS = [
   "window_secs",
 ] as const;
 const PROTOCOL_RULE_FIELDS = ["contract", "fns"] as const;
-const DECIMAL_INTEGER_RE = /^[+-]?\d+$/;
 const I128_MIN = -(2n ** 127n);
 const I128_MAX = 2n ** 127n - 1n;
 const U64_MAX = 2n ** 64n - 1n;
@@ -460,7 +459,7 @@ function policyInteger(
       throw policyDecodeFailure(path, `number ${native} cannot be represented safely`);
     }
     value = BigInt(native);
-  } else if (typeof native === "string" && DECIMAL_INTEGER_RE.test(native)) {
+  } else if (typeof native === "string" && /^[+-]?\d+$/.test(native)) {
     value = BigInt(native);
   } else {
     throw policyDecodeFailure(path, "value is not a base-10 integer");
