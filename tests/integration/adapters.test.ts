@@ -143,7 +143,7 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
       let toolEntered = false;
       const middleware = createLangChainGuardMiddleware({
         interceptor,
-        toContractCall: (request) => {
+        toContractCall: () => {
           const args = resolveArgs(row);
           if (args === null) return null;
           return toContractCall(args);
