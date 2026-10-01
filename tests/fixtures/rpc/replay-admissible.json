@@ -1,28 +1,19 @@
 {
   "header": {
-    "source": "live Soroban RPC replay capture",
+    "source": "synthetic XDR replay fixture",
     "method": "simulateTransaction (enforced)",
     "network": "testnet",
-    "capturedAt": "2026-09-30T10:00:00.000Z",
+    "createdAt": "2026-10-01T00:00:00.000Z",
     "stellarSdkVersion": "17.0.1",
-    "note": "Admissible transfer: within both per-tx and window caps, to allowlisted recipient"
+    "note": "Successful simulation with an explicit guard allowed decision"
   },
   "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
   "simulationRequest": {
-    "note": "Transfer of 50 from guard to allowlisted recipient"
+    "note": "A call whose guard authorization returned allowed"
   },
   "simulationResponse": {
-    "transactionData": "AAAAAQAAAAIAAAAAAAAAAQAAAAMAAAAGAAAAAR4BmIrnfxOpvI4rRg0zKccjfj08SQc1S8K+wqhdsUjXAAAAEAAAAAEAAAABAAAADwAAAAtBZG1pbkZyb3plbgAAAAABAAAABgAAAAEeAZiK538TqbyOK0YNMynHI349PEkHNUvCvsKoXbFI1wAAABAAAAABAAAAAQAAAA8AAAANTGFzdEhlYXJ0YmVhdAAAAAAAAAEAAAAGAAAAAR4BmIrnfxOpvI4rRg0zKccjfj08SQc1S8K+wqhdsUjXAAAAEAAAAAEAAAABAAAADwAAAAZQb2xpY3kAAAAAAAEAAAACAAAABgAAAAEeAZiK538TqbyOK0YNMynHI349PEkHNUvCvsKoXbFI1wAAABQAAAABAAAAB/R5GfkueP3QNINqphlV/DON1WohjESMN98YZ6jD2g9jAGeNjQAAnIQAAJyEAAAAAAbiF2U=",
     "events": [
-      "AAAAAQAAAAAAAAAAAAAAAgAAAAAAAAADAAAADwAAAAdmbl9jYWxsAAAAAA0AAAAgHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAAPAAAABnN0YXR1cwAAAAAAAQ==",
-      "AAAAAQAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAIAAAAPAAAACWZuX3JldHVybgAAAAAAAA8AAAAGc3RhdHVzAAAAAAARAAAAAQAAAAUAAAAPAAAADGFkbWluX2Zyb3plbgAAAAAAAAAAAAAADwAAAApoYXNfcG9saWN5AAAAAAAAAAAAAQAAAA8AAAARaGVhcnRiZWF0X2V4cGlyZWQAAAAAAAAAAAAAAAAAAA8AAAAObGFzdF9oZWFydGJlYXQAAAAAAAUAAAAAaqpViAAAAA8AAAADbm93AAAAAAUAAAAAarkoqw=="
-    ],
-    "minResourceFee": "115480421",
-    "results": [
-      {
-        "auth": [],
-        "xdr": "AAAAEQAAAAEAAAAFAAAADwAAAAxhZG1pbl9mcm96ZW4AAAAAAAAAAAAAAA8AAAAKaGFzX3BvbGljeQAAAAAAAAAAAAEAAAAPAAAAEWhlYXJ0YmVhdF9leHBpcmVkAAAAAAAAAAAAAAAAAAAPAAAADmxhc3RfaGVhcnRiZWF0AAAAAAAFAAAAAGqqVYgAAAAPAAAAA25vdwAAAAAFAAAAAGq5KKs="
-      }
+      "AAAAAQAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAMAAAAPAAAAEmV2ZW50X2F1dGhfY2hlY2tlZAAAAAAADwAAAAdhbGxvd2VkAAAAAA8AAAAAAAAAAQ=="
     ]
   },
   "expected": {
