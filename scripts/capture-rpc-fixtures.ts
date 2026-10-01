@@ -57,14 +57,17 @@ import {
   buildInitialEnvelope,
   type GuardCredentialType,
 } from "../src/tx.ts";
+import { unsafeContractAddress, unsafeAccountAddress } from "../src/policy.ts";
 
 const RPC_URL = process.env["PHASE2_RPC_URL"] ?? "https://soroban-testnet.stellar.org";
-const GUARD =
-  process.env["PHASE2_GUARD"] ?? "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-const TOKEN =
-  process.env["PHASE2_TOKEN"] ?? "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+const GUARD = unsafeContractAddress(
+  process.env["PHASE2_GUARD"] ?? "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"
+);
+const TOKEN = unsafeContractAddress(
+  process.env["PHASE2_TOKEN"] ?? "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"
+);
 /** The allowlisted recipient recorded in `tests/fixtures/phase2-instance.json`. */
-const RECIPIENT = "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH";
+const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
 const NETWORK_PASSPHRASE = Networks.TESTNET;
 const OUT_DIR = resolve(process.cwd(), "tests/fixtures/rpc");
 
