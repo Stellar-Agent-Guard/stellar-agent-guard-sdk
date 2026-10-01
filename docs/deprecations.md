@@ -86,7 +86,7 @@ In security and fund-safety middleware, correctness of authorization verdicts st
 When this override is invoked, it is handled with complete transparency:
 1. **Never silent**: Breaking security fixes are never disguised as ordinary bug fixes.
 2. **Release notes callout**: The release notes must carry an explicit `[SECURITY OVERRIDE]` banner at the very top (referencing the release notes template in issue [#154](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/154)).
-3. **Changelog & history entry**: The change is recorded in the project's historical record (see issue [#6](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/6) and [`docs/publishing-history.md`](publishing-history.md)), detailing:
+3. **Changelog & history entry**: The change is recorded in [`CHANGELOG.md`](../CHANGELOG.md) (the project's historical record, added when issue [#6](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/6) resolved "yes" — cross-referenced with [`docs/publishing-history.md`](publishing-history.md)), detailing:
    - The nature of the vulnerability or verdict-correctness failure.
    - The prior (flawed) behavior vs. the new (safe) behavior.
    - Exact migration instructions for affected callers.

@@ -97,6 +97,22 @@ export type {
 } from "./policy.ts";
 
 export {
+  POLICY_SCHEMA_PATH,
+  SCHEMA_DIALECT,
+  SCHEMA_RULE_ID_ANNOTATION,
+  SCHEMA_VS_CODE_RULES,
+  ruleFromAnnotation,
+  ruleForKeyword,
+  validateGuardPolicyAgainstSchema,
+} from "./policy-schema.ts";
+
+export type {
+  SchemaKeyword,
+  SchemaPolicyFailure,
+  SchemaValidationOptions,
+} from "./policy-schema.ts";
+
+export {
   decodeAuthDecision,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
