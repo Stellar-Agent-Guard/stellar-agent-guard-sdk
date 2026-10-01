@@ -1,4 +1,38 @@
+/**
+ * stellar-agent-guard-sdk — the public surface.
+ *
+ * An integration bridge between AI agent frameworks and `stellar-agent-guard`
+ * smart accounts: pre-flight policy interception, agent-auth transaction
+ * signing, and on-chain event telemetry.
+ *
+ * **Enforcement scope, stated where the capability is claimed:** full
+ * recipient/amount enforcement — spend caps, allowlists, per-transaction limits
+ * — is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
+ * since these are the calls whose arguments the Soroban auth context exposes for
+ * inspection. For other Soroban contract calls made by the guarded account
+ * (arbitrary DEX/lending/protocol calls), the policy engine still enforces window
+ * and pause state, but per-call amount/recipient limits are not yet enforced —
+ * extending fine-grained enforcement to arbitrary calls is tracked as a v2 item,
+ * not implied as already covered.
+ *
+ * This sentence is copied verbatim from the contracts repo's
+ * `docs/enforcement-scope.md` ("The confirmed scope"), not paraphrased: the
+ * boundary is a property of the platform, and stating it in one shared wording
+ * is what keeps the two repos from drifting apart on it.
+ */
+export {
+  BroadcastError,
+  ContractResponseError,
+  GuardError,
+  PolicyDecodeError,
+  SigningError,
+  SimulationError,
+} from "./errors.ts";
 
+export {
+  FakeClock,
+  systemClock,
+} from "./clock.ts";
 
 export type {
   Clock,
