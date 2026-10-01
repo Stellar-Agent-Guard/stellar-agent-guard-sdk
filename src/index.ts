@@ -31,6 +31,15 @@ export {
 } from "./errors.ts";
 
 export {
+  FakeClock,
+  systemClock,
+} from "./clock.ts";
+
+export type {
+  Clock,
+} from "./clock.ts";
+
+export {
   GuardBlockedError,
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
@@ -39,9 +48,12 @@ export {
   isGuardReason,
   reasonName,
   reasonNameFromCode,
-  type GuardBlockedErrorParams,
-  type GuardReason,
-  type GuardReasonName,
+} from "./reasons.ts";
+
+export type {
+  GuardBlockedErrorParams,
+  GuardReason,
+  GuardReasonName,
 } from "./reasons.ts";
 
 export {
@@ -51,28 +63,49 @@ export {
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
+  freezePolicy,
+  isAccountAddress,
+  isContractAddress,
   isDeadManFrozen,
+  isPublicKeyHex,
+  isStrKeyAddress,
   POLICY_RULE_IDS,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
+  unsafeAccountAddress,
+  unsafeContractAddress,
+  unsafePublicKeyHex,
+  unsafeStrKeyAddress,
   validateGuardPolicy,
-  type CheckResult,
-  type GuardStatus,
-  type PolicyConfig,
-  type PolicyFailure,
-  type PolicyRuleId,
-  type ProtocolRule,
-  type RecipientWindowCap,
-  type ValidatePolicyOptions,
+} from "./policy.ts";
+
+export type {
+  AccountAddress,
+  CheckResult,
+  ContractAddress,
+  DeepReadonly,
+  GuardStatus,
+  PolicyConfig,
+  PolicyFailure,
+  PolicyRuleId,
+  ProtocolRule,
+  PublicKeyHex,
+  ReadonlyPolicyConfig,
+  RecipientWindowCap,
+  StrKeyAddress,
+  ValidatePolicyOptions,
 } from "./policy.ts";
 
 export {
   decodeAuthDecision,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
-  type GuardAuthDecision,
-  type GuardAuthResult,
+} from "./events.ts";
+
+export type {
+  GuardAuthDecision,
+  GuardAuthResult,
 } from "./events.ts";
 
 export {
@@ -82,25 +115,31 @@ export {
   InvokeRetryError,
   invoke,
   topicSymbols,
-  type EnforcementOutcome,
-  type GuardAuthorization,
-  type InvokeDryRunResult,
-  type InvokeDryRunStepName,
-  type InvokeDryRunVerdict,
-  type InvokeErrorCause,
-  type InvokeErrorOutcome,
-  type InvokeOptions,
-  type InvokeOutcome,
-  type InvokePipelineStep,
-  type InvokeParams,
-  type InvokeStepEvent,
-  type RetryableInvokeFailure,
+} from "./invoke.ts";
+
+export type {
+  EnforcementOutcome,
+  GuardAuthorization,
+  InvokeDryRunResult,
+  InvokeDryRunStepName,
+  InvokeDryRunVerdict,
+  InvokeErrorCause,
+  InvokeErrorOutcome,
+  InvokeOptions,
+  InvokeOutcome,
+  InvokePipelineStep,
+  InvokeParams,
+  InvokeStepEvent,
+  RetryableInvokeFailure,
 } from "./invoke.ts";
 
 export {
   TRACE_STEP_NAMES,
-  type TraceStepName,
-  type TraceStepStatus,
+} from "./trace.ts";
+
+export type {
+  TraceStepName,
+  TraceStepStatus,
 } from "./trace.ts";
 
 export {
@@ -110,14 +149,17 @@ export {
   preflight,
   preflightBatch,
   validateContractCall,
-  type CheckBatchOptions,
-  type PolicyRevision,
-  type PreFlightBatchDecision,
-  type PreFlightCacheOptions,
-  type PreFlightCheckOptions,
-  type PreFlightConfig,
-  type PreFlightDecision,
-  type PreFlightInterceptorOptions,
+} from "./preflight.ts";
+
+export type {
+  CheckBatchOptions,
+  PolicyRevision,
+  PreFlightBatchDecision,
+  PreFlightCacheOptions,
+  PreFlightCheckOptions,
+  PreFlightConfig,
+  PreFlightDecision,
+  PreFlightInterceptorOptions,
 } from "./preflight.ts";
 
 export {
@@ -130,15 +172,19 @@ export {
   precheckCost,
   precheckCostWithDecision,
   resourceBreakdownFromSimulation,
-  type CostDecision,
-  type CostPreCheckConfig,
-  type CostWithDecision,
-  type FeeBreakdown,
-  type ResourceBreakdown,
+} from "./cost.ts";
+
+export type {
+  CostDecision,
+  CostPreCheckConfig,
+  CostWithDecision,
+  FeeBreakdown,
+  ResourceBreakdown,
 } from "./cost.ts";
 
 export {
   DEFAULT_JITTER_FRACTION,
+  GuardEventRingBuffer,
   GuardTelemetryListener,
   computePollDelay,
   describeGuardEvent,
@@ -150,6 +196,7 @@ export {
   telemetryFromDecision,
   type GuardDiagnosticBatch,
   type GuardEvent,
+  type GuardEventBufferOptions,
   type GuardEventContext,
   type GuardEventIdentityInput,
   type GuardEventKind,
@@ -161,6 +208,7 @@ export {
   type GuardTelemetryWatchParams,
   type PollResult,
   type PollSleep,
+  type RecentEventFilter,
   type TelemetryJitter,
 } from "./telemetry.ts";
 
@@ -179,12 +227,15 @@ export {
   keypairAgentSigner,
   toAgentSigner,
   verifyAgentSignature,
-  type AdminSigner,
-  type AgentSigner,
-  type ContractCall,
-  type GuardCredentialType,
-  type SimulationOutcome,
-  type SubmissionResult,
+} from "./tx.ts";
+
+export type {
+  AdminSigner,
+  AgentSigner,
+  ContractCall,
+  GuardCredentialType,
+  SimulationOutcome,
+  SubmissionResult,
 } from "./tx.ts";
 
 export {
@@ -198,24 +249,41 @@ export {
   submitRotateAgentKey,
   submitSetPolicy,
   submitUnfreeze,
-  type AdminOpParams,
-  type RotateAgentKeyParams,
-  type SetPolicyParams,
 } from "./admin.ts";
+
+export type {
+  AdminOpParams,
+  RotateAgentKeyParams,
+  SetPolicyParams,
+} from "./admin.ts";
+
+export {
+  GUARD_WASM_HASH,
+  sha256Hex,
+  toHex,
+  verifyGuardWasm,
+  type GuardWasmVerification,
+} from "./wasm.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
 export {
   createLangChainGuardMiddleware,
-  type LangChainGuardOptions,
-  type LangChainToolCallRequest,
-  type LangChainToolMessage,
+} from "./adapters/langchain.ts";
+
+export type {
+  LangChainGuardOptions,
+  LangChainToolCallRequest,
+  LangChainToolMessage,
 } from "./adapters/langchain.ts";
 
 export {
   createGuardValidator,
   guardAction,
-  type ElizaActionLike,
-  type ElizaGuardOptions,
-  type ElizaValidator,
+} from "./adapters/elizaos.ts";
+
+export type {
+  ElizaActionLike,
+  ElizaGuardOptions,
+  ElizaValidator,
 } from "./adapters/elizaos.ts";
