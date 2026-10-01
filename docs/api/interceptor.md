@@ -13,7 +13,7 @@ constructor(options: PreFlightInterceptorOptions)
 | Option | Type | Default | Semantics |
 | --- | --- | --- | --- |
 | `server` | `rpc.Server` | required | Soroban RPC server instance used for simulation. |
-| `networkPassphrase` | `string` | required | Stellar network passphrase (e.g. `TESTNETWORK_PASSHRASE`). |
+| `networkPassphrase` | `string` | required | Stellar network passphrase (testnet: `"Test SDF Network ; September 2015"`). |
 | `guard` | `string` | required | Custom account contract address (`C...`). |
 | `agent` | `Keypair` | required | Keypair registered as the agent in the guard. |
 | `source` | `Keypair` | required | Keypair paying for transaction fees. |
