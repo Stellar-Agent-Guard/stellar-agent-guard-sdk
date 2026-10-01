@@ -107,6 +107,4 @@ export function decodeAuthDecision(
   const reason = rawReason && rawReason.length > 0 ? (rawReason as GuardReason) : null;
   return { result, reason, source };
 }
-
- main
 }
