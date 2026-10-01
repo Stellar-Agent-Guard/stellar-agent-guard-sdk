@@ -1,11 +1,11 @@
 {
   "name": "stellar-agent-guard-sdk",
   "version": "0.1.1",
-  "description": "Integration bridge between AI agent frameworks and stellar-agent-guard smart accounts: pre-flight policy interception, agent-auth transaction signing, cost pre-checks, and on-chain event telemetry. Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (transfer/transfer_from), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.",
+  "description": "Pre-flight policy interception and guardrails for AI agents on Stellar Soroban smart accounts.",
   "type": "module",
   "license": "MIT",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=24"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -26,8 +26,41 @@
     "ai-agents",
     "guardrails",
     "spend-limits",
-    "custom-account"
+    "custom-account",
+    "smart-accounts",
+    "policy-engine",
+    "pre-flight",
+    "agent-auth",
+    "transaction-signing",
+    "cost-pre-checks",
+    "on-chain-telemetry",
+    "allowlist",
+    "per-transaction-limits",
+    "sac-token",
+    "transfer-from",
+    "stellar-soroban",
+    "agent-frameworks",
+    "langchain",
+    "elizaos",
+    "integration-bridge",
+    "dex",
+    "lending",
+    "protocol-calls",
+    "window-enforcement",
+    "pause-state",
+    "auth-context",
+    "typescript",
+    "esm",
+    "node-24"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stellar-agent-guard/stellar-agent-guard-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/stellar-agent-guard/stellar-agent-guard-sdk/issues"
+  },
+  "homepage": "https://github.com/stellar-agent-guard/stellar-agent-guard-sdk#README",
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
