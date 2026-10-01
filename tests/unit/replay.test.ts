@@ -1,20 +1,9 @@
-/**
- * Fixture-driven replay tests: offline enforcement verdict replay.
- *
- * Live suite proves enforcement on testnet but only runs weekly/on-demand. Its
- * recorded diagnostics (evidence files, captured payloads) can replay forever
- * offline: given recorded simulation request+response pairs, assert the decode
- * pipeline still extracts the right verdicts/reasons — catching SDK refactors
- * that break historical-evidence interpretation without touching the network.
- *
- * Complements evidence-checker (checks file presence/format); this checks
- * semantic decoding of captured payloads.
- */
+/** Fixture-driven replay tests for offline enforcement verdict decoding. */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
-import { rpc } from "@stellar/stellar-sdk";
+import { rpc, xdr } from "@stellar/stellar-sdk";
 import { guardEventsFromDiagnostics } from "../../src/telemetry.ts";
 import type { GuardReason } from "../../src/reasons.ts";
 
@@ -24,7 +13,7 @@ interface ReplayFixtureHeader {
   source: string;
   method: string;
   network: string;
-  capturedAt: string;
+  createdAt: string;
   stellarSdkVersion: string;
   note: string;
 }
@@ -32,14 +21,11 @@ interface ReplayFixtureHeader {
 interface ReplayFixture {
   header: ReplayFixtureHeader;
   guardContractId: string;
-  simulationRequest: {
-    note: string;
-  };
+  simulationRequest: { note: string };
   simulationResponse: rpc.Api.RawSimulateTransactionResponse;
   expected: {
     verdict: "admissible" | "blocked" | "undetermined";
     reason?: GuardReason;
-    explanation?: string;
   };
 }
 
@@ -48,43 +34,35 @@ function loadReplayFixture(name: string): ReplayFixture {
   return raw as ReplayFixture;
 }
 
-/**
- * Extract verdict from raw simulation response diagnostics.
- * Works directly on RawSimulateTransactionResponse to avoid XDR parsing.
- */
 function extractVerdict(
   rawSimulation: rpc.Api.RawSimulateTransactionResponse,
   guardContract: string,
 ): { verdict: "admissible" | "blocked" | "undetermined"; reason?: string | undefined } {
-  // Check if it's an error response
-  if ("error" in rawSimulation) {
-    return { verdict: "undetermined" };
+  const failed = "error" in rawSimulation;
+  const diagnostics = (rawSimulation.events ?? []).flatMap((rawEvent) => {
+    try {
+      return [xdr.DiagnosticEvent.fromXDR(rawEvent, "base64").event];
+    } catch {
+      return [];
+    }
+  });
+  const decision = guardEventsFromDiagnostics(diagnostics, guardContract).find(
+    (event) => event.decision !== null,
+  )?.decision;
+
+  if (failed) {
+    return decision?.result === "blocked"
+      ? { verdict: "blocked", reason: decision.reason ?? undefined }
+      : { verdict: "undetermined" };
   }
 
-  // Extract events from the raw response
-  const events = rawSimulation.events ?? [];
-  const guardEvents = guardEventsFromDiagnostics(events, guardContract);
-
-  if (guardEvents.length === 0) {
-    return { verdict: "undetermined" };
-  }
-
-  const event = guardEvents[0];
-  if (!event || !event.decision) {
-    return { verdict: "undetermined" };
-  }
-
-  if (event.decision.result === "allowed") {
-    return { verdict: "admissible" };
-  } else if (event.decision.result === "blocked") {
-    return { verdict: "blocked", reason: event.decision.reason ?? undefined };
-  }
-
-  return { verdict: "undetermined" };
+  return decision?.result === "allowed"
+    ? { verdict: "admissible" }
+    : { verdict: "undetermined" };
 }
 
 describe("offline enforcement replay", () => {
-  const REPLAY_FIXTURES = [
+  const replayFixtures = [
     "replay-admissible.json",
     "replay-blocked-per-tx-cap.json",
     "replay-blocked-recipient-not-allowed.json",
@@ -93,49 +71,39 @@ describe("offline enforcement replay", () => {
     "replay-undetermined-malformed.json",
   ] as const;
 
-  for (const fixtureName of REPLAY_FIXTURES) {
-    it(`replays ${fixtureName} and extracts expected verdict`, () => {
+  for (const fixtureName of replayFixtures) {
+    it(`replays ${fixtureName} and extracts its expected verdict`, () => {
       const fixture = loadReplayFixture(fixtureName);
 
-      // Validate provenance header
       assert.ok(fixture.header.source, `${fixtureName} missing provenance source`);
-      assert.ok(fixture.header.capturedAt, `${fixtureName} missing capturedAt`);
-      assert.match(fixture.header.capturedAt, /^\d{4}-\d{2}-\d{2}T/);
+      assert.ok(fixture.header.createdAt, `${fixtureName} missing createdAt`);
+      assert.match(fixture.header.createdAt, /^\d{4}-\d{2}-\d{2}T/);
       assert.equal(fixture.header.network, "testnet");
       assert.ok(fixture.guardContractId, `${fixtureName} missing guardContractId`);
 
-      // Extract verdict directly from raw simulation (no XDR parsing needed)
       const actual = extractVerdict(fixture.simulationResponse, fixture.guardContractId);
-
-      // Assert expected verdict
-      assert.equal(
-        actual.verdict,
-        fixture.expected.verdict,
-        `${fixtureName}: verdict mismatch`,
-      );
+      assert.equal(actual.verdict, fixture.expected.verdict, `${fixtureName}: verdict mismatch`);
 
       if (fixture.expected.verdict === "blocked") {
         assert.ok(actual.reason, `${fixtureName}: blocked verdict must carry reason`);
-        assert.equal(
-          actual.reason,
-          fixture.expected.reason,
-          `${fixtureName}: reason mismatch`,
-        );
+        assert.equal(actual.reason, fixture.expected.reason, `${fixtureName}: reason mismatch`);
       }
     });
   }
 
-  it("asserts fixture provenance prevents hand-written payloads", () => {
-    for (const name of REPLAY_FIXTURES) {
+  it("does not infer approval from a successful simulation without an allowed event", () => {
+    const fixture = loadReplayFixture("replay-admissible.json");
+    const response = { ...fixture.simulationResponse, events: [] };
+    assert.equal(extractVerdict(response, fixture.guardContractId).verdict, "undetermined");
+  });
+
+  it("records fixture provenance and the request/response pair", () => {
+    for (const name of replayFixtures) {
       const fixture = loadReplayFixture(name);
-      assert.ok(fixture.header.source);
       assert.ok(fixture.header.method);
-      assert.ok(fixture.header.network);
-      assert.ok(fixture.header.capturedAt);
       assert.ok(fixture.header.stellarSdkVersion);
       assert.ok(fixture.header.note);
-      assert.ok(fixture.guardContractId);
-      assert.ok(fixture.simulationRequest);
+      assert.ok(fixture.simulationRequest.note);
       assert.ok(fixture.simulationResponse);
       assert.ok(fixture.expected);
     }
