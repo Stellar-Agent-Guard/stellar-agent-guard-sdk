@@ -66,6 +66,15 @@ jobs:
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
 
+      # Browser-consumer bundle-size canary (issue #145): the dashboard imports
+      # the SDK client-side, so this number ships to every operator's browser.
+      # esbuild is already in the dev tree (tsx's binary), so this adds no new
+      # package; the budget lives in scripts/bundle-size.budget.json with the
+      # headroom rationale, and a breach fails this job with the re-baseline
+      # protocol in the error text.
+      - name: bundle-size canary (dashboard import shape)
+        run: npm run check:bundle-size
+
       # Informational only, never gating: shared runners are too noisy for a
       # wall-time threshold to mean anything. The committed baseline lives in
       # docs/benchmarks.md; compare changes on a developer machine, not here.

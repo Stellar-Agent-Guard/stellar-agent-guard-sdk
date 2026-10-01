@@ -37,14 +37,14 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke } from "../src/invoke.ts";
-import { policyToScVal, type PolicyConfig } from "../src/policy.ts";
+import { policyToScVal, unsafeAccountAddress, unsafeContractAddress, type PolicyConfig } from "../src/policy.ts";
 import { summarizeDiagnosticEvents } from "../src/tx.ts";
 import { assertFixtureSchema } from "../tests/integration/harness.ts";
 import { json, parseArgs, verifyWasmIdentity } from "./inspect-deployment.ts";
 
 /** The Phase 1 artifact — the same bytes must be deployed for Phase 2. */
 const PHASE1_WASM_HASH = "f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63";
-const PHASE1_GUARD = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7";
+const PHASE1_GUARD = unsafeContractAddress("CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7");
 const TESTNET_RPC = "https://soroban-testnet.stellar.org";
 const TESTNET_PASSPHRASE = Networks.TESTNET;
 const ENV_PATH = ".env.phase2";
@@ -73,9 +73,9 @@ function enforcementPolicy(token: string, recipient: string): PolicyConfig {
     per_tx_cap: 1_000n,
     window_secs: 60n,
     window_cap: 150n,
-    assets: [token],
+    assets: [unsafeContractAddress(token)],
     protocols: [],
-    recipients: [recipient],
+    recipients: [unsafeAccountAddress(recipient)],
     allow_any_recipient: false,
     active_from: 0n,
     active_until: 0n,
@@ -605,7 +605,7 @@ async function main(): Promise<void> {
       server,
       source: keys.admin,
       call: {
-        contract: guard,
+        contract: unsafeContractAddress(guard),
         fn: "initialize",
         args: [
           new Address(keys.admin.publicKey()).toScVal(),
@@ -670,7 +670,7 @@ async function main(): Promise<void> {
       server,
       source: keys.issuer,
       call: {
-        contract: token,
+        contract: unsafeContractAddress(token),
         fn: "mint",
         args: [new Address(guard).toScVal(), nativeToScVal(MINT_AMOUNT, { type: "i128" })],
       },
@@ -706,7 +706,7 @@ async function main(): Promise<void> {
     const outcome = await invoke({
       server,
       source: keys.admin,
-      call: { contract: guard, fn: "set_policy", args: [policyToScVal(policy)] },
+      call: { contract: unsafeContractAddress(guard), fn: "set_policy", args: [policyToScVal(policy)] },
       networkPassphrase: TESTNET_PASSPHRASE,
       accountSigners: [keys.admin],
     });
