@@ -29,7 +29,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke, type InvokeOutcome } from "../../src/invoke.ts";
-import { policyToScVal, type PolicyConfig } from "../../src/policy.ts";
+import { policyToScVal, unsafeContractAddress, unsafeAccountAddress, type PolicyConfig } from "../../src/policy.ts";
 import { readPersistentEntry } from "../../scripts/inspect-deployment.ts";
 
 export const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -203,9 +203,9 @@ export async function loadPhase2Config(): Promise<Phase2Config> {
     per_tx_cap: 1000n,
     window_secs: 60n,
     window_cap: 150n,
-    assets: [token],
+    assets: [unsafeContractAddress(token)],
     protocols: [],
-    recipients: [keys.recipient.publicKey()],
+    recipients: [unsafeAccountAddress(keys.recipient.publicKey())],
     allow_any_recipient: false,
     active_from: 0n,
     active_until: 0n,
@@ -260,7 +260,7 @@ export async function installPolicy(
     server,
     source: config.keys.admin,
     call: {
-      contract: config.guard,
+      contract: unsafeContractAddress(config.guard),
       fn: "set_policy",
       args: [policyToScVal(policy)],
     },
@@ -283,7 +283,7 @@ export async function transfer(
     server,
     source: config.keys.agent,
     call: {
-      contract: config.token,
+      contract: unsafeContractAddress(config.token),
       fn: "transfer",
       args: [
         new Address(config.guard).toScVal(),
