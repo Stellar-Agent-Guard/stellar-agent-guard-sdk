@@ -1,4 +1,3 @@
-const SYMBOL_SHAPE_RE = /^[a-zA-Z0-9_]+$/;
 /**
  * The pre-flight interceptor: ask the guard whether an action is permitted
  * *before* anything is signed for broadcast.
@@ -93,7 +92,7 @@ export function validateContractCall(call: ContractCall): void {
   if (typeof call.fn !== "string" || call.fn.trim() === "") {
     throw new InvalidInputError("fn", "required", "method name is required and must be non-empty");
   }
-  if (call.fn.length > 32 || !SYMBOL_SHAPE_RE.test(call.fn)) {
+  if (call.fn.length > 32 || !/^[a-zA-Z0-9_]+$/.test(call.fn)) {
     throw new InvalidInputError(
       "fn",
       "symbol_shape",
@@ -357,8 +356,7 @@ function callFingerprint(call: ContractCall): string {
   const hash = createHash("sha256");
   hashPart(hash, call.contract);
   hashPart(hash, call.fn);
-  const args = call.args;
-  for (const arg of args) hashPart(hash, arg.toXDR());
+  for (const arg of call.args) hashPart(hash, arg.toXDR());
   return hash.digest("hex");
 }
 
@@ -368,8 +366,7 @@ function configFingerprint(config: PreFlightConfig): string {
   hashPart(hash, config.guard);
   hashPart(hash, config.source.publicKey());
   hashPart(hash, toAgentSigner(config.agent).publicKey);
-  const signers = (config.accountSigners ?? []).map((keypair) => keypair.publicKey()).sort();
-  for (const signer of signers) {
+  for (const signer of (config.accountSigners ?? []).map((keypair) => keypair.publicKey()).sort()) {
     hashPart(hash, signer);
   }
   return hash.digest("hex");
@@ -623,9 +620,7 @@ export class PreFlightInterceptor {
     let totalEstimatedResourceFee = 0n;
     const verdicts: PreFlightDecision[] = [];
 
-    for (let i = 0; i < calls.length; i++) {
-      const call = calls[i];
-      if (!call) continue;
+    for (const call of calls) {
       const decision = await this.check(call);
 
       if (decision.kind === "admissible") {
@@ -703,10 +698,7 @@ export class PreFlightInterceptor {
   ): Promise<PreFlightBatchDecision & { admissible: true }> {
     const decision = await this.checkBatch(calls, options);
     if (decision.admissible) return decision as PreFlightBatchDecision & { admissible: true };
-    const verdicts = decision.verdicts;
-    for (let i = 0; i < verdicts.length; i++) {
-      const verdict = verdicts[i];
-      if (!verdict) continue;
+    for (const verdict of decision.verdicts) {
       if (verdict.kind === "blocked") {
         throw new GuardBlockedError({
           reason: verdict.reason,
