@@ -1,0 +1,16 @@
+{
+  "_comment": "Bundle-size budget for the browser-consumer canary (issue #145). The dashboard imports the SDK client-side, so this number ships to every operator's browser. The check bundles scripts/bundle-size-entry.ts (the stable dashboard-shaped import) with esbuild (minify, ESM, browser platform, node:* external — each consumer's bundler supplies its own Node polyfills; the budget measures the SDK's own contribution), gzips the result, and fails CI over either limit. On breach: do NOT raise the budget in the same commit as the change that caused it — re-measure, justify the delta in the PR, and commit the new baseline separately (same protocol as the contracts repo's wasm-size issue).",
+  "_headroom": "Gzip headroom is 15% of the baseline (198,288 B -> 228,031 B): large enough that a normal feature commit (a decoder, a helper, a docblock-heavy module) does not churn CI, small enough that an accidental new dependency (+50 kB gzip for a mid-sized pure-JS lib) trips it loudly. Raw headroom is 10% (874,886 -> 962,374 B): raw grows more mechanically than gzip, so it gets less slack.",
+  "entry": "scripts/bundle-size-entry.ts",
+  "tool": "esbuild (devDependency, already in the tree via tsx) — bundle, minify, format=esm, platform=browser, external=[node:*]",
+  "baseline": {
+    "sourceCommit": "18a6ba64d797e2f99a3726913213f9e6372724f0",
+    "measuredAt": "2026-09-30T00:00:00.000Z",
+    "rawBytes": 874886,
+    "gzipBytes": 198288
+  },
+  "budget": {
+    "rawBytes": 962374,
+    "gzipBytes": 228031
+  }
+}
