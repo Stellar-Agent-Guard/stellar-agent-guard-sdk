@@ -111,11 +111,9 @@ export function reasonName(reason: number | string): GuardReason | string {
   return reason;
 }
 
-const EXPLANATION_PREFIX = "Unrecognised guard reason: ";
-
 export function explainReason(reason: number | string): string {
   const name = reasonName(reason);
-  return EXPLANATIONS[name as GuardReason] ?? EXPLANATION_PREFIX + String(reason);
+  return EXPLANATIONS[name as GuardReason] ?? `Unrecognised guard reason: ${String(reason)}`;
 }
 
 import type { ContractCall } from "./tx.ts";
