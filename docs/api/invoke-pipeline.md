@@ -1,6 +1,6 @@
 # Invoke Pipeline API
 
-## ``invoke(params: InvokeParams): Promise<InvokeOutcome>``
+## `invoke(params: InvokeParams): Promise<InvokeOutcome>`
 
 Executes an end-to-end transaction through the guard:
 1. Runs probe simulation to collect required authorization entries.
@@ -19,7 +19,7 @@ Every retry calls the entire pipeline again, so the account sequence, required a
 | `server` | `rpc.Server` | required | Soroban RPC server used for simulation and submission. |
 | `networkPassphrase` | `string` | required | Stellar network passphrase. |
 | `guard` | `string` | required | Guard contract address (`C...`). |
-| `agent` | `AgentSigner | `Keypair` | required | Signer for authorization entries. |
+| `agent` | `AgentSigner` \| `Keypair` | required | Signer for authorization entries. |
 | `source` | `Keypair` | required | Keypair paying for transaction fees. |
 | `invoke` | `ContractCall` | required | The contract call to execute. |
 | `retry` | `RetryOptions` | undefined (defaults below) | Bounded full-jitter retry policy for stale-ledger rejections. |
@@ -36,4 +36,4 @@ Pass `retry` on `InvokeParams`:
 | `random` | `Math.random` | RNG injection point. |
 | `sleep` | `setTimeout` | Async sleep injection point. |
 
-The delay for retry `n` is `random() × min(maxDelayMs, baseDelayMs × 2¾(n-1))`, which is full jitter rather than a fixed sleep. When the retry budget is exhausted, the result is an `InvokeRetryError` with `attempts`, `lastCause`, `cause`, and `lastOutcome`. `InvokeOptions` is an alias for `InvokeParams` for compatibility with the README.
+The delay for retry `n` is `random() × min(maxDelayMs, baseDelayMs × 2^(n-1))`, which is full jitter rather than a fixed sleep. When the retry budget is exhausted, the result is an `InvokeRetryError` with `attempts`, `lastCause`, `cause`, and `lastOutcome`. `InvokeOptions` is an alias for `InvokeParams` for compatibility with the README.
