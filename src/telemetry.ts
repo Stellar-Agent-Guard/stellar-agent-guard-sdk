@@ -1030,45 +1030,19 @@ export class GuardTelemetryListener {
 }
 
 /**
- * Options for `telemetryFromDecision`.
+ * Convenience: interpret one `PreFlightDecision`'s diagnostics into events.
  *
- * | Option | Type | Default | Semantics |
- * | --- | --- | --- | --- |
- * | `guard` | `string \| undefined` | `null` | The guard contract address to attribute the event to. When omitted, `contractId` is `null`. |
- * | `decision` | `GuardAuthDecision` | required | The decoded auth decision to represent as a `GuardEvent`. |
- */
-export interface TelemetryFromDecisionOptions {
-  /** The guard contract address to attribute the event to. */
-  guard?: string;
-  /** The decoded auth decision to represent as a `GuardEvent`. */
-  decision: GuardAuthDecision;
-}
-
-/**
- * Build a `GuardEvent` from an already-decoded auth decision.
- *
- * This is the single entry point for consumers that already have a decoded
- * decision and want to represent it in the unified event model.
+ * Accepts a preflight or simulation decision object, and extracts GuardEvents
+ * from its `diagnosticEvents` array if the decision outcome was `blocked`.
+ * Distinct from `guardEventsFromDiagnostics` which operates on raw diagnostic
+ * event arrays directly; both delegate to canonical `diagnosticsToEvents`.
  */
 export function telemetryFromDecision(
-  options: TelemetryFromDecisionOptions,
-): GuardEvent {
-  const { guard, decision } = options;
-  const topic = GUARD_EVENT_TOPICS.authChecked;
-  const topics = [topic];
-  const data = { decision };
-  const decoded = interpret(topics, data, {
-    source: "diagnostic",
-    contractId: guard ?? null,
-    ledger: null,
-    ledgerClosedAt: null,
-    transactionHash: null,
-    simulationIndex: 0,
-  });
-  if (!decoded) {
-    throw new Error("telemetryFromDecision: failed to interpret decision as a GuardEvent");
-  }
-  return decoded;
+  decision: { kind: string; diagnosticEvents?: unknown[]; reason?: string },
+  guard: string,
+): GuardEvent[] {
+  if (decision.kind !== "blocked" || !decision.diagnosticEvents) return [];
+  return diagnosticsToEvents(decision.diagnosticEvents, guard);
 }
 
 /** True when a decoded decision means the guard permitted the action. */
