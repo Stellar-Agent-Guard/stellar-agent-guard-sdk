@@ -22,6 +22,7 @@ import {
   reasonNameFromCode,
   type GuardReason,
 } from "../../src/reasons.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
 describe("reason code table", () => {
   it("matches the contract's Error enum exactly", () => {
@@ -157,7 +158,7 @@ describe("GuardBlockedError", () => {
 
   it("carries offending call and raw diagnostic event when provided", () => {
     const dummyCall = {
-      contract: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      contract: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
       fn: "transfer",
       args: [],
     };
@@ -186,7 +187,7 @@ describe("GuardBlockedError", () => {
 
   it("serializes to a structured, logging-friendly JSON object via toJSON()", () => {
     const dummyCall = {
-      contract: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      contract: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
       fn: "transfer",
       args: [],
     };
@@ -208,7 +209,7 @@ describe("GuardBlockedError", () => {
     assert.equal(json["charged"], false);
     assert.equal(json["detail"], "limit exceeded");
     assert.deepEqual(json["call"], {
-      contract: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      contract: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
       fn: "transfer",
       argsCount: 0,
     });

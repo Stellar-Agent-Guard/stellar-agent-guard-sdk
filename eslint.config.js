@@ -29,4 +29,10 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Plain-JS Node scripts have no tsconfig coverage, so `no-undef` cannot be
+    // resolved by a type checker and needs the environment declared instead.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: { globals: { process: "readonly", console: "readonly" } },
+  },
 );
