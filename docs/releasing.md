@@ -60,9 +60,12 @@ Checklist:
       and update the deprecation tracking table. If releasing a patch (`0.x.Z`),
       confirm changes are additive-only (or carry the mandatory
       `[SECURITY OVERRIDE]` callout).
-- [ ] Changelog decision made: release notes are drafted from the commits since
-      the last tag (the repo has no CHANGELOG.md file yet; if one is added, that
-      becomes the source — coordinate before introducing it, see issue #6).
+- [ ] Release notes match the changelog: `[Unreleased]` in
+      [`CHANGELOG.md`](../CHANGELOG.md) was moved under this version's heading (with
+      the date), and the GitHub Release body drafted from
+      [`RELEASE_TEMPLATE.md`](../.github/RELEASE_TEMPLATE.md) agrees with it — the
+      changelog is the cross-version source, the release body the per-tag record
+      (issue #6 decided "yes"; executed in issue #81).
 - [ ] `package.json` version bumped with the command, not by hand:
 
   ```bash
