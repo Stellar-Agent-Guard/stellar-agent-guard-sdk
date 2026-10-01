@@ -59,7 +59,7 @@ export const GUARD_AUTH_RESULTS = {
 } as const;
 
 export type GuardAuthResult =
-  (typeof GUARD_AUTH_RESUMTS)[keyof typeof GUARD_AUTH_RESUMTS];
+  (typeof GUARD_AUTH_RESULTS)[keyof typeof GUARD_AUTH_RESULTS];
 
 /**
  * A guard decision decoded from one contract event, in the shape a telemetry
