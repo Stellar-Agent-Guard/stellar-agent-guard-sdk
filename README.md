@@ -10,20 +10,20 @@
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"/>
 </a>
 <a href="https://nodejs.org/">
-<img src="https://img.shields.io/badge/node-24%2B-blue" alt="Node 24+"/>
+<img src="https://img.shields.io/badge/node-24%2B%e2%80%93blue" alt="Node 24+"/>
 </a>
 <!-- docs: <a href="#"><img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/></a> (added in P2 once GitBook URL is confirmed live) -->
 </p>
 
-# Stellar Agent Guard — SDK
+# Stellar Agent Guard — Developer SDK
 
-<!-- 📚 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) -->
+<!-- 🚀 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) -->
 
 **Non-custodial TypeScript SDK and pre-flight policy interception firewall for AI agents on Stellar.**
 
 An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
 
-**Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
+**Status: Phase 2 complete — and the package is published.** [`/stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
 
 ## 🎯 What makes this different
 
@@ -32,7 +32,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 - **Pre-flight simulation without broadcast**: The SDK evaluates guard approval against Soroban RPC before a single byte hits the network. If the transaction violates policy, it is rejected client-side with the contract's own reason code, incurring zero network fees.
 - **Dual-stream telemetry**: Blocked decisions never commit to the ledger because Soroban rolls back failed authorizations. A listener that only tails committed ledger events sees a guard that appears to approve everything. The SDK extracts `event_auth_checked` from simulation diagnostics as well as committed blocks.
 - **In-process simulation pricing**: `CostPreChecker` computes network resource and inclusion fees directly from the enforced simulation, avoiding dependencies on external profiling tools.
-- **Framework middleware**: Plug-and-play middleware for LangChain and validators for ElizaOS halt execution before external tool calls run.
+- **Framework middleware**: Plug-and-play middleware for LangChain and validators for ElizaAOS halt execution before external tool calls run.
 
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do not deploy to mainnet without an independent audit. See the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md).
 
@@ -43,9 +43,9 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 - **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
 - **Framework adapters**:
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
-  - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
+- `createGuardValidator`: ElizaAOS action validator returning boolean verdicts before actions run.
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
-- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes. Opt-in sliding-window counters expose agent self-monitoring via `stats()`.
 
 ## Quick Start
 
@@ -56,13 +56,12 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 ### Installation
 
 ```bash
-npm install stellar-agent-guard-sdk
-```
+npm install stellar-agent-guard-sdkJ```
 
 > **Module Format & Environment Note:**
 > `stellar-agent-guard-sdk` is published strictly as **pure ESM** (`"type": "module"`) targeting **Node.js >= 24.0.0** (declared in `engines`).
->
-> If your project or toolchain runs in CommonJS (e.g. legacy LangChain setups, Jest configs, or `.cjs` scripts), load the SDK using the dynamic `await import()` pattern:
+>¾
+¾ **If your project or toolchain runs in CommonJS (e.g. legacy LangChain setups, Jest configs, or `.cjs` scripts), load the SDK using the dynamic `await import()` pattern:
 >
 > ```javascript
 > // CommonJS (.cjs or package without "type": "module")
@@ -72,13 +71,12 @@ npm install stellar-agent-guard-sdk
 > }
 > ```
 
-*(Or build locally from source with Node 24+)*
+*$Or build locally from source with Node 24+)*
 
 ```bash
 git clone https://github.com/aigbagbobila/stellar-agent-guard-sdk.git
-cd stellar-agent-guard-sdk
-npm ci
-npm run build
+cd stellar-agent-guard-sdk&&npm ci
+$&npm run build
 ```
 
 ### Live testnet suite (`.env.phase2`)
@@ -95,7 +93,7 @@ npm run deploy:phase2                # or provision a fresh instance and write i
 npm run test:integration
 ```
 
-`tests/integration/harness.ts` validates the file up front. When it is
+`tests/integration/harness.ts` validates the file up front. When it ir
 incomplete it fails once with **every** missing key named — not one key per run,
 which would make setup a guessing game of five round trips:
 
@@ -206,7 +204,7 @@ Pre-flight simulation is a prediction made against one ledger snapshot, not a se
 
 ### Optional simulation-result cache
 
-`PreFlightInterceptor` always performs a fresh simulation by default. For agent
+preFlightInterceptor` always performs a fresh simulation by default. For agent
 loops that repeatedly check the same call, caching can be enabled explicitly:
 
 ```ts
@@ -225,7 +223,7 @@ const interceptor = new PreFlightInterceptor({
 const first = await interceptor.check(call);
 const second = await interceptor.check(call); // may reuse the first verdict
 interceptor.invalidate();                       // clear all entries
-interceptor.invalidate(call);                  // clear one call's entries
+interceptor.invalidate(call);                   // clear one call's entries
 ```
 
 The cache is **disabled unless `cache` is supplied**. It stores only actual
@@ -310,268 +308,52 @@ Event shape (`InvokeStepEvent`):
 |---|---|
 | `name` | Pipeline stage: `probe` → `sign` → `simulate` → `broadcast` (the shared `TRACE_STEP_NAMES` vocabulary). |
 | `status` | `start` (emitted immediately before the stage runs), then `ok` or `fail`. |
-| `durationMs` | Elapsed time of **this stage attempt** in milliseconds — not the total `invoke()` duration. Always `0` on `start`. |
+| `durationMs` | Elapsed time of ***this stage attempt*** in milliseconds — not the total `invoke()` duration. Always `0` on `start`. |
 | `attempt` | 0-based retry index. `0` for the first pass; `1` on the built-in stale-ledger re-run. Always present. |
 
-The callback is optional, receives every stage attempt (a retried invoke emits
-a full `probe → sign → simulate → broadcast` sequence per attempt, each tagged
-with its `attempt` index), and **callback exceptions are isolated**: a throwing
-`onStep` never breaks the pipeline, never turns a successful invoke into a
-failure, and never masks the original pipeline error — callback errors are
-swallowed silently, since the SDK is logger-agnostic and has no sink to report
-them to. Step names come from the same shared vocabulary the dry-run trace
-uses (`TRACE_STEP_NAMES`), so consumers of either see identical stage names.
+### Monitor your guard hit-rate (sliding-window counters)
 
-The LangChain adapter exposes the same capability:
+Agents that can't see their own block rate can't notice when they've been
+misconfigured — a sudden spike in blocked decisions is often the first signal
+that a prompt-injection is driving the agent into disallowed actions.
+Telemetry counters are **opt-in** and default to off — no buffers are
 
 ```ts
-const middleware = createLangChainGuardMiddleware({
-  interceptor,
-  toContractCall: (request) => (/* ... */),
-  onStep(step) {
-    // enforcement-stage events (probe → sign → simulate; never broadcast)
-  },
-});
-```
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
 
-### Framework Middleware (LangChain & ElizaOS)
-
-When deploying fleets of hundreds or thousands of autonomous agents derived from identical templates or scheduled loops, fixed poll intervals (e.g. exactly every 5s) cause all instances to poll RPC nodes in lockstep phase. This creates synchronized traffic spikes (thundering herds) against public Soroban RPC endpoints, triggering aggressive HTTP 429 rate limits and cascade backpressure errors.
-
-`GuardTelemetryListener.watch()` defaults to `jitter: 'full'`, which uniformly randomizes each poll delay in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2` (a 20% variance window). This breaks lockstep fleet synchronization while keeping polling responsive and bounded. Deterministic fixed interval cadence can be restored when needed by specifying `jitter: 'none'`.
-
-```ts
-// Follow event telemetry with full jitter (default)
-for await (const events of listener.watch({
-  pollIntervalMs: 5_000,
-  jitter: "full", // uniformly distributed in [4000ms, 5000ms]
-})) {
-  console.log(`Received ${events.length} guard event(s)`);
-}
-```
-
-### Aborting a watch: what cancellation does and does not cover
-
-`watch({ signal })` ends the stream — aborting is a normal exit, never a throw.
-Abort is honoured at **loop boundaries**: before the first request (an
-already-aborted listener issues no RPC call at all, not even the
-`getLatestLedger` probe that resolves a default `startLedger`), before each
-poll, and during the delay between polls. The default delay's timer is cleared
-on abort, so a stopped listener leaves no open handle behind for a Node process
-or a test suite to hang on.
-
-```ts
-const controller = new AbortController();
-for await (const events of listener.watch({ signal: controller.signal })) {
-  handle(events);
-}
-// Runtime teardown, a new tool call, or a shutdown hook:
-controller.abort(); // the loop ends, and no further getEvents is issued
-```
-
-**One limitation, stated rather than papered over: a request already in flight
-is not cancelled.** `@stellar/stellar-sdk` ^17 (the version this package
-depends on, `dependencies` in `package.json`) declares
-`getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, and
-its internal JSON-RPC `postObject` helper takes no per-request config, so there
-is no supported way to plumb a signal through to the socket. The listener
-consequently stops *issuing* requests immediately but cannot cancel one already
-sent: the worst case between `signal.abort()` and the iterator ending is **one
-request duration** — never a whole poll interval. The rejection of that
-in-flight request (or of an abort-aware `sleep`) is swallowed as teardown, so an
-aborted watch ends quietly in a `for await` loop instead of surfacing an
-`AbortError` or an unhandled rejection.
-
-Revisit this when the SDK adds per-request signals to `getEvents`; until then,
-read `signal` as *stop soon and stop asking*, not *cancel the socket*.
-
-### Framework Middleware (LangChain & ElizaOS)
-
-Plug-and-play middleware intercepts agent actions before tools are executed:
-
-- **Framework adapters**:
-  - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
-  - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
-  - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency.
-
-### Policy validation before broadcast (validateGuardPolicy)
-
-Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
-This provides a **fail-before-broadcast** safety rail that catches configuration errors before burning transaction fees or facing on-chain contract rejections.
-
-Unlike fail-fast validators, `validateGuardPolicy` returns **all** failures at once (`PolicyFailure[]`), which is critical for dashboard form UX where an operator needs to see all field-level issues simultaneously. The failure `rule` identifiers align with SPEC §8 rules:
-
-```ts
-import {
-  validateGuardPolicy,
-  type PolicyConfig,
-  type PolicyFailure,
-} from "stellar-agent-guard-sdk";
-
-const draftPolicy: PolicyConfig = {
-  per_tx_cap: 10_000n,
-  window_secs: 0n,         // Incompatible with window_cap > 0
-  window_cap: 50_000n,
-  assets: [],              // Empty assets vector is a no-op
-  protocols: [],
-  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
-  allow_any_recipient: false,
-  active_from: 1000n,
-  active_until: 500n,      // Inverted active window (active_until <= active_from)
-  paused: false,
-  dms_grace_secs: 0n,
-};
-
-const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
-  guardAddress: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
-});
-
-if (failures.length > 0) {
-  for (const failure of failures) {
-    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
-  }
-  // Safe-exit before encode or broadcast
-} else {
-  // Proceed with policyToScVal(draftPolicy) and broadcast
-}
-```
-
-### Policy encode/decode round trip
-
-`decodePolicy` is the canonical read-side counterpart to `policyToScVal`. It returns
-`bigint` for every integer field, keeps `ProtocolRule.fns: null` distinct from an empty
-array, normalizes Stellar addresses, and rejects missing, duplicate, unknown, unsorted, or
-wrongly typed fields with a path-bearing `PolicyDecodeError`.
-
-```ts
-import {
-  decodePolicy,
-  policyToScVal,
-  type PolicyConfig,
-} from "stellar-agent-guard-sdk";
-
-const policy: PolicyConfig = {
-  per_tx_cap: 1_000n,
-  window_secs: 60n,
-  window_cap: 150n,
-  assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
-  protocols: [
-    {
-      contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
-      fns: ["transfer"],
-    },
-  ],
-  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
-  allow_any_recipient: false,
-  active_from: 0n,
-  active_until: 0n,
-  paused: false,
-  dms_grace_secs: 0n,
-};
-
-const encoded = policyToScVal(policy);
-const decoded = decodePolicy(encoded); // exactly equal to policy
-```
-
-The decoder accepts the direct `ScVal::Map` returned by the deployed `policy()` read and
-also the one-element `Vec` representation used by some RPC/host surfaces for
-`Some(PolicyConfig)`. `ScVal::Void` means no policy is installed and therefore throws
-rather than fabricating a default-deny config. Canonical u64/i128 variants are range
-checked exactly; base-10 `ScVal::String` integers are accepted as a deliberate
-compatibility path for stringly-typed RPC/telemetry payloads and normalized to `bigint`.
-
-### Debug a blocked transfer with `invoke({ dryRun: true })`
-
-Dry run executes the real probe, authorization signing, and enforced-simulation path,
-then returns the verdict, diagnostics, network-derived fees, and per-stage timings. It
-stops before final transaction assembly and cannot call `sendTransaction`, so its result
-has no transaction hash or submission object.
-
-```ts
-import { invoke } from "stellar-agent-guard-sdk";
-
-const debug = await invoke({
+const listener = new GuardTelemetryListener({
   server,
-  source,
-  call: blockedTransferCall,
-  networkPassphrase,
-  guardAuth: { guard, agent },
-  dryRun: true,
+  guard,
+  // Count the last 500 decisions. Use `windowMs` for a time-based window.
+  counters: { windowEvents: 500 },
 });
 
-if (debug.kind === "dry_run") {
-  console.log({
-    admissible: debug.admissible,
-    verdict: debug.verdict,
-    reason: debug.reason,
-    fees: debug.fees,
-  });
-  console.table(debug.steps);
-}
-```
+listener.start();
 
-A blocked or undetermined dry run reports an explicit all-zero **charged** fee breakdown;
-an admissible dry run reports the simulation's resource fee plus the SDK's 100-stroop
-inclusion floor. Missing, negative, malformed, unsafe-number, or out-of-u64-range fee
-payloads are `ContractResponseError` failures and remain undetermined—never free.
-`steps[].ok` describes whether a stage completed, not whether policy approved the call;
-the separate `verdict` field is the policy answer. The `probe → sign → simulate` stages
-are measured through the same `onStep` hook a live invocation uses, so a dry-run trace
-and an `onStep` trace are the same measurement of the same code.
-
-### Troubleshooting agent authentication
-
-`verifyAgentSignature` lets an agent runtime check that a signature belongs to the key it
-believes is registered before entering an agent loop. The helper is verify-only: it never
-accepts, signs with, stores, or derives a private key. Other SDK APIs continue to accept
-caller-created `Keypair` objects for transaction/authorization signing as before.
-
-```ts
-import { verifyAgentSignature } from "stellar-agent-guard-sdk";
-
-function signerMatches(
-  registeredPublicKey: string | Uint8Array,
-  hostSignaturePayload: Uint8Array,
-  signature: Uint8Array,
-): boolean {
-  return verifyAgentSignature(
-    registeredPublicKey,
-    hostSignaturePayload,
-    signature,
-  );
-}
-```
-
-`hostSignaturePayload` must be the exact 32-byte host digest covered by the signature;
-the helper verifies those bytes without re-hashing and is not SEP-53 message signing. A
-successful result proves only the key/payload/signature relationship—it does not validate
-network ID, invocation, nonce, expiration ledger, or transaction freshness.
-
-### Typed errors and 0.1.x migration
-
-All SDK-owned errors now share a `GuardError` base. `invoke()` remains result-oriented:
-inspect `outcome.error` with `instanceof` when `outcome.kind === "error"`.
-
-```ts
-import {
-  BroadcastError,
-  GuardError,
-  SigningError,
-  SimulationError,
-} from "stellar-agent-guard-sdk";
-
-if (outcome.kind === "error") {
-  if (outcome.error instanceof SigningError) {
-    console.error("agent signer is wrong or unavailable");
-  } else if (outcome.error instanceof SimulationError) {
-    console.error("enforcement could not be determined");
-  } else if (outcome.error instanceof BroadcastError) {
-    console.error("submission failed", outcome.error.transactionHash);
-  } else if (outcome.error instanceof GuardError) {
-    console.error(outcome.error.message);
+// Snapshot — never mutated by callers. Null when counters are off.
+const stats = listener.stats();
+if (stats) {
+  const blockedRate = stats.blocked / (stats.allowed + stats.blocked || 1);
+  if (blockedRate > 0.25) {
+    // Alerting hook: blocked rate spike = agent misconfigured
+    console.warn("Guard block rate spike:", stats.byReason);
   }
 }
 ```
+
+`stats()` returns a frozen snapshot of the current window:
+
+| Field | Meaning |
+|---|---|
+| `allowed` | Number of `admissible` decisions in the window. |
+| `blocked` | Number of `blocked` decisions in the window. |
+| `byReason` | `Record<reason, n>` breakdown of blocked decisions by contract reason code. |
+| `windowStart` | Timestamp (ms) of the oldest event still in the window. |
+
+Counters are updated on every event flowing through the listener's unified
+stream, so blocked decisions that only appear in simulation diagnostics are
+counted alike. With `windowEvents`, old events age out by count; with
+`windowMs`, they age out by time.
 
 A pipeline stage that throws — a dropped RPC connection, say — is reported the same way:
 as `kind: "error"` carrying the original error as the typed error's `cause`, never as a
