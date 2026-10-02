@@ -33,7 +33,7 @@ import {
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
   type ContractAddress,
-  type PolicyConfig,
+  type ReadonlyPolicyConfig,
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
@@ -222,7 +222,7 @@ export interface CheckBatchOptions {
    * Policy configuration to enforce against during batch staging.
    * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
    */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
 
   /**
    * Initial committed amount already spent in the current rolling window.
@@ -307,7 +307,7 @@ export interface PreFlightConfig {
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
   accountSigners?: Keypair[];
   /** Optional policy to use for batch staging (otherwise fetched from ledger). */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
@@ -598,7 +598,7 @@ export class PreFlightInterceptor {
     }
 
     // Resolve policy and initial window spend for staging
-    let policy: PolicyConfig | null = options?.policy ?? this.config.policy ?? null;
+    let policy: ReadonlyPolicyConfig | null = options?.policy ?? this.config.policy ?? null;
     let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
 
     if (policy === null || options?.initialWindowSpent === undefined) {
