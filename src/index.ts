@@ -114,6 +114,7 @@ export type {
 
 export {
   decodeAuthDecision,
+  decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
 } from "./events.ts";
