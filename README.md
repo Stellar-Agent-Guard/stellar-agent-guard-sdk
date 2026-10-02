@@ -345,6 +345,7 @@ When deploying fleets of hundreds or thousands of autonomous agents derived from
 for await (const events of listener.watch({
   pollIntervalMs: 5_000,
   jitter: "full", // uniformly distributed in [4000ms, 5000ms]
+  startFrom: "latest", // clean watch start: only new events from now
 })) {
   console.log(`Received ${events.length} guard event(s)`);
 }
@@ -680,6 +681,7 @@ one-shot form.
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)`
   - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover).
+  - `watch(params?: GuardTelemetryWatchParams)` also accepts `params.startFrom?: { ledger: number } | 'latest' | 'oldest-available'` to control the initial cursor: `{ ledger }` backfills from a specific ledger, `'latest'` starts from the current tip without replaying history, and `'oldest-available'` starts from the oldest ledger the RPC retains. An explicit `startFrom` overrides any stored cursor (a log-line note is emitted); omit it to resume from the cursor store.
   - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
   - `serializeEvent(event: GuardEvent): string` — Canonical single-line JSON for deterministic JSON-lines log shipping. Fixed key order, drops `undefined`, keeps `null`, renders `bigint` as a decimal string. Contract: [`docs/event-schema.md`](docs/event-schema.md#canonical-json-serialization--serializeevent).
 - `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX.
