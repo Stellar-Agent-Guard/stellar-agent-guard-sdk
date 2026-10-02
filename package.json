@@ -65,6 +65,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "check:strict-ratchet": "node scripts/check-strict-ratchet.mjs",
     "lint": "eslint .",
     "test": "node --import tsx scripts/run-tests.ts unit",
     "test:unit": "node --import tsx scripts/run-tests.ts unit",
