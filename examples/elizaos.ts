@@ -1,4 +1,13 @@
 /**
+ * @example elizaos
+ * @expected-output
+ *   === ElizaOS Validator Example Run ===
+ *   [Run 1: Allowed] Validation verdict (true => eligible): true
+ *   [Run 2: Blocked] Validation verdict (false => dropped): false
+ *   [Run 2: Blocked] Reason: per_tx_cap_exceeded
+ *   [Run 2: Blocked] Explanation: <human-readable refusal detail>
+ */
+/**
  * ElizaOS Action Validator Example — Full runnable demonstration with action wiring.
  *
  * Demonstrates:

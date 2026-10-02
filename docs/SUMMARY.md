@@ -20,6 +20,7 @@
 * [Testnet Verification](verification.md)
 * [Benchmarks](benchmarks.md)
 * [Enforcement Scope](enforcement-scope.md)
+* [Examples](examples/)
 * [Contributing](contributing.md)
 * [Releasing](releasing.md)
 * [API Deprecations](deprecations.md)
