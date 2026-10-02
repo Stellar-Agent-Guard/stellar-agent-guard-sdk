@@ -214,6 +214,7 @@ export {
   guardEventsFromDiagnostics,
   isAllowedDecision,
   mergeGuardEventStreams,
+  serializeEvent,
   telemetryFromDecision,
   type GuardDiagnosticBatch,
   type GuardEvent,
