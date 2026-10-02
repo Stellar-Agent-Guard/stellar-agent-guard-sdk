@@ -710,3 +710,32 @@ No network, no credentials.
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this
 addendum with the fresh run output if desired.
 
+## Live enforcement through the LangChain middleware chain (2026-09-27)
+
+Added a live scenario to `tests/integration/adapters.test.ts` that drives a
+policy-violating transfer through the *real* middleware → interceptor → RPC chain,
+rather than a mock interceptor with a verdict fixture. The wrapped tool is invoked
+with a transfer that exceeds the live policy's `per_tx_cap`, and the test asserts
+(a) the tool result halts with the expected reason, and (b) the account sequence
+number and SAC balance are identical before and after the attempted call.
+
+The assertion is a read-compare of two exact values read from the RPC:
+
+```
+before: account.sequenceNumber = <seq>, SAC balance = <bal>
+after:  account.sequenceNumber = <seq>, SAC balance = <bal>
+```
+
+The sequence number is the strongest available assertion: any broadcast,
+even a failed one, would bump the sequence number. A change in either value would
+mean a transaction was submitted, which the pre-flight path guarantees cannot
+happen. There is no transaction hash to record because the block occurred in
+enforced simulation, prior to broadcast — the absence of a hash is the point,
+not a gap in the evidence. The evidence recorded instead is the
+simulation diagnostics (`event_auth_checked, blocked, per_tx_cap_exceeded`)
+plus the before/after reads above.
+
+No fresh live run is claimed here: `.env.phase2` is absent from this checkout,
+so the live scenario skips gracefully and the unit suite remains unaffected. The
+test name and path are added to the existing integration suite without changing
+the existing test names or paths that the evidence-freshness diff logic depends on.
