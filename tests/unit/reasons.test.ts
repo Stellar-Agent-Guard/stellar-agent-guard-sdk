@@ -8,15 +8,21 @@
  * refusal.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import {
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
+  GUARD_REASONS,
   GuardBlockedError,
   explainReason,
+  isGuardReason,
   reasonName,
   reasonNameFromCode,
+  type GuardReason,
 } from "../../src/reasons.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
 describe("reason code table", () => {
   it("matches the contract's Error enum exactly", () => {
@@ -58,6 +64,45 @@ describe("reason code table", () => {
 
   it("returns undefined for a code the contract does not define", () => {
     assert.equal(reasonNameFromCode(999), undefined);
+  });
+});
+
+describe("GuardReason vocabulary", () => {
+  it("derives GUARD_REASONS from the single reason table", () => {
+    assert.deepEqual(Object.keys(GUARD_REASONS).sort(), Object.keys(GUARD_REASON_CODES).sort());
+    for (const reason of Object.values(GUARD_REASONS)) {
+      assert.equal(GUARD_REASONS[reason], reason);
+    }
+  });
+
+  it("keeps GUARD_REASONS and the vendored contract fixture in lockstep, both ways", () => {
+    const fixturePath = resolve(process.cwd(), "tests/fixtures/contract-fixtures.json");
+    const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
+      entries: Array<{ result: string; reason: string; code: number | null }>;
+    };
+    const fixtureReasons = fixture.entries
+      .filter((entry) => entry.result === "blocked")
+      .map((entry) => entry.reason)
+      .sort();
+    // deepEqual on sorted arrays is bidirectional: a reason present in only one
+    // of the SDK vocabulary and the fixture fails in either direction.
+    assert.deepEqual(Object.keys(GUARD_REASONS).sort(), fixtureReasons);
+    for (const entry of fixture.entries) {
+      if (entry.result !== "blocked") continue;
+      assert.equal(GUARD_REASON_CODES[entry.reason as GuardReason], entry.code);
+    }
+  });
+
+  it("recognises only the known vocabulary", () => {
+    assert.equal(isGuardReason("paused"), true);
+    assert.equal(isGuardReason("not_a_reason"), false);
+    assert.equal(isGuardReason(22), false);
+  });
+
+  it("rejects an unknown reason at compile time", () => {
+    // @ts-expect-error `drain_the_account` is not part of the guard vocabulary
+    const notAReason: GuardReason = "drain_the_account";
+    assert.equal(notAReason, "drain_the_account");
   });
 });
 
@@ -109,6 +154,68 @@ describe("GuardBlockedError", () => {
     });
     assert.equal(error.charged, true);
     assert.equal(error.name, "GuardBlockedError");
+  });
+
+  it("carries offending call and raw diagnostic event when provided", () => {
+    const dummyCall = {
+      contract: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
+      fn: "transfer",
+      args: [],
+    };
+    const dummyEvent = { topics: ["event_auth_checked", "blocked", "paused"] };
+
+    const error = new GuardBlockedError({
+      reason: "paused",
+      stage: "preflight",
+      detail: "simulation refused",
+      call: dummyCall,
+      rawEvent: dummyEvent,
+    });
+
+    assert.equal(error.reason, "paused");
+    assert.equal(error.code, 13);
+    assert.equal(error.stage, "preflight");
+    assert.equal(error.charged, false);
+    assert.equal(error.detail, "simulation refused");
+    assert.deepEqual(error.call, dummyCall);
+    assert.deepEqual(error.rawEvent, dummyEvent);
+    assert.match(error.message, /paused/);
+    assert.match(error.message, /CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44/);
+    assert.ok(error instanceof Error);
+    assert.ok(error instanceof GuardBlockedError);
+  });
+
+  it("serializes to a structured, logging-friendly JSON object via toJSON()", () => {
+    const dummyCall = {
+      contract: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
+      fn: "transfer",
+      args: [],
+    };
+    const dummyEvent = { type: "diagnostic", topics: ["event_auth_checked"] };
+
+    const error = new GuardBlockedError({
+      reason: "per_tx_cap_exceeded",
+      stage: "preflight",
+      detail: "limit exceeded",
+      call: dummyCall,
+      rawEvent: dummyEvent,
+    });
+
+    const json = error.toJSON();
+    assert.equal(json["name"], "GuardBlockedError");
+    assert.equal(json["reason"], "per_tx_cap_exceeded");
+    assert.equal(json["code"], 22);
+    assert.equal(json["stage"], "preflight");
+    assert.equal(json["charged"], false);
+    assert.equal(json["detail"], "limit exceeded");
+    assert.deepEqual(json["call"], {
+      contract: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
+      fn: "transfer",
+      argsCount: 0,
+    });
+    assert.deepEqual(json["rawEvent"], dummyEvent);
+    assert.equal(typeof json["message"], "string");
+    assert.equal(typeof json["explanation"], "string");
   });
 });
 

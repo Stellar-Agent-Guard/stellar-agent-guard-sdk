@@ -41,6 +41,7 @@
  *    updating allowlists or adjusting caps) must be performed out-of-band via the
  *    operator dashboard, never through autonomous model trial-and-error.
  */
+import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import { explainReason } from "../reasons.ts";
 import type { ContractCall } from "../tx.ts";
@@ -74,6 +75,14 @@ export interface LangChainGuardOptions {
   name?: string;
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (request: LangChainToolCallRequest, decision: PreFlightDecision) => void;
+  /**
+   * Optional per-call observability, forwarded to the interceptor's
+   * `check()`: one event per enforcement-stage attempt (probe → sign →
+   * simulate) with timing, on the same shared step vocabulary and event shape
+   * as `invoke()`'s `onStep`. The adapter never broadcasts, so no `broadcast`
+   * events can appear here. Omitting it changes nothing.
+   */
+  onStep?: (step: InvokeStepEvent) => void;
 }
 
 /** Standard guidance returned to autonomous models when an action is blocked. */
@@ -217,7 +226,9 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
         return handler(request);
       }
 
-      const decision = await options.interceptor.check(call);
+      const decision = await options.interceptor.check(call, {
+        ...(options.onStep ? { onStep: options.onStep } : {}),
+      });
       options.onDecision?.(request, decision);
       if (decision.allowed) return handler(request);
 

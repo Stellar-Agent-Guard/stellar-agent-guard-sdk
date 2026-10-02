@@ -1,0 +1,18 @@
+{
+  "source": "live Soroban RPC",
+  "contractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "network": "testnet",
+  "rpcUrl": "https://soroban-testnet.stellar.org",
+  "capturedAt": "2026-09-27T14:30:52.548Z",
+  "stellarSdkVersion": "17.0.1",
+  "method": "getEvents",
+  "note": "Raw getEvents response exactly as the RPC returned it (base64 XDR). The guard has no events in the retained window on a quiet network, so `events` may be empty; the retention fields and cursor are real.",
+  "response": {
+    "events": [],
+    "cursor": "0021041796402380799-4294967295",
+    "latestLedger": 4899174,
+    "oldestLedger": 4778215,
+    "latestLedgerCloseTime": "1790519457",
+    "oldestLedgerCloseTime": "1789914662"
+  }
+}
