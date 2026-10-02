@@ -1,3 +1,4 @@
+import { Address, nativeToScVal, rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 /**
  * Guards against drift between this SDK and the deployed contract's types.
  *
@@ -13,7 +14,6 @@
  * caps are `i128` and silently narrowing them to `number` would lose precision
  * on exactly the values a spend guard exists to compare.
  */
-import { Address, nativeToScVal, rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
 import type { ContractCall } from "./tx.ts";
 
@@ -238,10 +238,20 @@ export interface GuardStatus {
  * `CheckResult` is a Rust enum over the wire; `scValToNative` decodes the unit
  * variant `Allowed` to the string `"Allowed"` and `Blocked(Symbol)` to an
  * object like `{ Blocked: "recipient_not_allowed" }`.
+ *
+ * `decodeCheckResult` is deliberately total: it never throws, so a hostile or
+ * future contract payload cannot escape into the interceptor's verdict path.
+ * Callers observe a typed fallback instead of an exception:
+ *
+ * - `Allowed` → `{ kind: "allowed" }`
+ * - `Blocked(reason)` → `{ kind: "blocked", reason }`
+ * - anything else (unknown enum tag, malformed shape, non-ScVal) →
+ *   `{ kind: "undetermined" }` (fail-closed; the caller treats it as not-allowed)
  */
 export type CheckResult =
   | { kind: "allowed" }
-  | { kind: "blocked"; reason: string };
+  | { kind: "blocked"; reason: string }
+  | { kind: "undetermined" };
 
 /**
  * Encode a `PolicyConfig` as the `ScVal::Map` the contract's `set_policy`
@@ -552,15 +562,18 @@ function sortedScMap(entries: Array<{ key: string; val: xdr.ScVal }>): xdr.ScVal
 }
 
 export function decodeCheckResult(raw: unknown): CheckResult {
-  if (raw === "Allowed") return { kind: "allowed" };
-  if (raw && typeof raw === "object" && "Blocked" in (raw as Record<string, unknown>)) {
-    const reason = (raw as { Blocked: unknown }).Blocked;
-    return { kind: "blocked", reason: typeof reason === "string" ? reason : String(reason) };
+  try {
+    if (raw === "Allowed") return { kind: "allowed" };
+    if (raw && typeof raw === "object" && "Blocked" in (raw as Record<string, unknown>)) {
+      const reason = (raw as { Blocked: unknown }).Blocked;
+      if (typeof reason === "string") return { kind: "blocked", reason };
+    }
+  } catch {
+    // fall through to the fail-closed verdict below
   }
-  throw new ContractResponseError(
-    `unexpected CheckResult payload from the guard: ${JSON.stringify(raw)}`,
-    { field: "CheckResult" },
-  );
+  // Unknown enum tag, malformed shape, or non-ScVal input: fail closed rather
+  // than throwing into the interceptor's verdict path.
+  return { kind: "undetermined" };
 }
 
 /**
@@ -1285,4 +1298,3 @@ export function validateGuardPolicy(
 
   return failures;
 }
-
