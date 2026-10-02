@@ -98,7 +98,24 @@ export type {
 } from "./policy.ts";
 
 export {
+  POLICY_SCHEMA_PATH,
+  SCHEMA_DIALECT,
+  SCHEMA_RULE_ID_ANNOTATION,
+  SCHEMA_VS_CODE_RULES,
+  ruleFromAnnotation,
+  ruleForKeyword,
+  validateGuardPolicyAgainstSchema,
+} from "./policy-schema.ts";
+
+export type {
+  SchemaKeyword,
+  SchemaPolicyFailure,
+  SchemaValidationOptions,
+} from "./policy-schema.ts";
+
+export {
   decodeAuthDecision,
+  decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
 } from "./events.ts";
@@ -297,7 +314,6 @@ export type {
   ElizaGuardOptions,
   ElizaValidator,
 } from "./adapters/elizaos.ts";
-
 export {
   throwAdapterConfigError,
   validateInterceptor,
@@ -305,3 +321,11 @@ export {
   validateRequiredFunction,
   type AdapterConfigIssue,
 } from "./adapters/validate.ts";
+
+export {
+  createVercelAIGuard,
+  wrapToolWithGuard,
+  type VercelAIGuardOptions,
+  type VercelAIToolCallInput,
+  type VercelAIToolLike,
+} from "./adapters/vercelai.ts";
