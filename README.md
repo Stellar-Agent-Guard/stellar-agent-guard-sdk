@@ -47,6 +47,16 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
 - **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
 
+> ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
+> guardrail — it reports what the simulation predicts the guard will do, and it
+> can be wrong if the RPC lies. It does **not** replace the contract: every
+> authorized call is enforced on broadcast by `__check_auth`, and a malicious
+> RPC can feed a fake pre-flight verdict but cannot forge the agent's signature
+> or the guard's own decision event. See
+> [`docs/threat-model.md`](docs/threat-model.md) for the full threat model
+> (verdict-inversion, stale-cache verdicts, compromised runtime, fake-RPC
+> simulation, single-dependency supply chain).
+
 ## Quick Start
 
 > **A verdict is a prediction, not a settlement guarantee.** Before relying on a
