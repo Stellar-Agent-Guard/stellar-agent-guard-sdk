@@ -113,10 +113,17 @@ function run(): void {
     // 2. Pack the package and confirm the tarball carries every declared target.
     const packDir = join(workDir, "pack");
     mkdirSync(packDir);
-    const packOutput = execFileSync("npm", ["pack", "--json", "--pack-destination", packDir], {
+    const execNpm = (args: string[], opts: Parameters<typeof execFileSync>[2] = {}) => {
+      if (process.platform === "win32") {
+        return execFileSync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "npm", ...args], opts);
+      }
+      return execFileSync("npm", args, opts);
+    };
+
+    const packOutput = execNpm(["pack", "--json", "--pack-destination", packDir], {
       cwd: ROOT,
       encoding: "utf8",
-    });
+    }) as string;
     const packed = JSON.parse(packOutput) as Array<{
       filename: string;
       files?: Array<{ path: string }>;
@@ -139,11 +146,10 @@ function run(): void {
       join(consumerDir, "package.json"),
       JSON.stringify({ name: "export-map-consumer", private: true, type: "module" }, null, 2),
     );
-    execFileSync(
-      "npm",
-      ["install", "--no-audit", "--no-fund", "--prefer-offline", join(packDir, first.filename)],
-      { cwd: consumerDir, stdio: "inherit" },
-    );
+    execNpm(["install", "--no-audit", "--no-fund", "--prefer-offline", join(packDir, first.filename)], {
+      cwd: consumerDir,
+      stdio: "inherit",
+    });
 
     const negativeSpecifiers = UNDECLARED_SUFFIXES.map((suffix) => `${manifest.name}${suffix}`);
     const consumerScript = [

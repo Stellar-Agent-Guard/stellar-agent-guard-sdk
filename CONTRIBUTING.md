@@ -11,6 +11,12 @@ Commits use [Conventional Commits](https://www.conventionalcommits.org/):
 Types in use in this repo: `feat`, `fix`, `docs`, `chore`, `ci`, `test`. The existing
 history is the reference — match its shape rather than inventing a new one.
 
+## Changelog
+
+User-facing changes need an **Unreleased** row in [`CHANGELOG.md`](CHANGELOG.md),
+added in the same PR as the change; changes no user can observe (CI, tests, internal
+docs) need none.
+
 ## One commit per logical unit, **per file** — the hard rule
 
 Every commit **and every push** must touch **exactly one file**. Not "on average" —
@@ -119,6 +125,12 @@ scheme has to be renamed later.
 Anything still open when a phase closes gets an issue, not just a note in a pull request or a
 chat log.
 
+## Releasing
+
+Version bumps, tags, npm publish, and the 0.x breaking-change policy are
+documented in [`docs/releasing.md`](docs/releasing.md) — publishing itself is
+maintainer-only (npm 2FA/automation token, outside this repo).
+
 ## Local gates before pushing
 
 ```bash
@@ -126,8 +138,27 @@ npm run typecheck
 npm run lint
 npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
+npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
+node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
 ```
+
+## TypeScript strictness ratchet
+
+`tsconfig.json` enables `strict`, `noUncheckedIndexedAccess` and
+`exactOptionalPropertyTypes`, and they stay on. `noUncheckedIndexedAccess` makes
+an indexed read yield `T | undefined` — the TypeScript-side mirror of the
+contract's `parse_call` bounds checks — and `exactOptionalPropertyTypes` stops an
+omitted optional property and an explicitly-`undefined` one from being
+interchangeable, which is where options-object footguns hide.
+
+Turning a flag off makes `npm run typecheck` *easier* to pass, so typecheck alone
+cannot stop a regression. `npm run check:strict-ratchet` (`scripts/check-strict-ratchet.mjs`)
+is the ratchet: it resolves `tsconfig.json` and `tsconfig.build.json` through
+`extends` and exits non-zero, naming the file and flag, if any of the three is not
+exactly `true`. It runs as a step of the required `ci` check, so a config edit
+that disables one is caught before merge. Fix the call site; do not turn the flag
+back off.
 
 ## Cross-editor standardization
 
@@ -205,3 +236,77 @@ name.
 `.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
 `workflow_dispatch`. Never add it to a workflow with a `pull_request` or
 `pull_request_target` trigger: that would expose it to a forked pull request.
+## Deterministic time control in tests
+
+Time-dependent modules in the SDK (cache TTLs, transaction polling) support dependency injection of a `Clock` abstraction to make tests deterministic and fast.
+
+**For production code**, no action is needed: modules default to the system clock and behave normally.
+
+**For tests that need to control time**, inject a `FakeClock`:
+
+```ts
+import { FakeClock } from "stellar-agent-guard-sdk";
+
+const clock = new FakeClock(0); // Start at t=0ms
+const interceptor = new PreFlightInterceptor({
+  // ... other config ...
+  clock, // Pass the fake clock
+});
+
+// Time does not advance automatically; you control it
+await someAsyncWork();
+
+// Advance the clock deterministically, without real delays
+clock.advance(5000); // Skip to t=5000ms
+
+// Pending sleeps/delays complete instantly
+// No setTimeout waits; tests run fast and are reproducible
+```
+
+**Why it matters**: Multiple modules (cache expiration, transaction polling, telemetry intervals) each used to invent their own time sources (`Date.now()`, `setTimeout`). Without Clock injection, unit tests either:
+
+1. Used real sleeps (slow, flaky, wall-time dependent)
+2. Ad-hoc mocked each module separately (non-composable, tests fragile to module changes)
+
+The `Clock` interface allows tests to:
+- Simulate time passage synchronously
+- Eliminate real `setTimeout` waits
+- Test time-dependent boundary conditions deterministically
+- Verify cache expiration, retry backoff, and polling behavior without network latency
+
+**Key methods:**
+
+- `clock.now()` — returns current time (in milliseconds, like `Date.now()`)
+- `clock.sleep(ms)` — returns a promise that resolves after ms milliseconds
+- `clock.advance(ms)` — move the clock forward deterministically; resolves all pending sleeps
+- `clock.setTime(ms)` — set clock to an absolute time
+
+**Example: Cache TTL test**
+
+```ts
+import { FakeClock } from "stellar-agent-guard-sdk";
+
+test("cache entry expires after TTL", async () => {
+  const clock = new FakeClock(1000);
+  const interceptor = new PreFlightInterceptor({
+    server: mockServer,
+    cache: { ttlMs: 5000 },
+    clock,
+  });
+
+  // First check caches the result
+  const decision1 = await interceptor.check(call);
+
+  // Advance to just before expiry (t=5999ms)
+  clock.advance(4999);
+  const decision2 = await interceptor.check(call);
+  // Cache hit — same decision, no RPC call
+
+  // Advance past expiry (t=6000ms)
+  clock.advance(1);
+  const decision3 = await interceptor.check(call);
+  // Cache miss — fresh RPC call needed
+});
+```
+
+Always use `FakeClock` in unit tests and when testing cache/polling logic. Use real time only when testing live network interaction (integration tests with `.env.phase2`).
