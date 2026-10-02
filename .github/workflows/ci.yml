@@ -14,6 +14,36 @@
 #
 # A green `ci` means the required checks ran. It does not mean the live suite ran
 # against this change — the evidence file it points at is the record for that.
+#
+# ---------------------------------------------------------------------------
+# Pipeline shape (issue #101) — why two jobs, and why not more:
+#
+#   * `npm ci` runs once per job, and `actions/setup-node` restores the npm
+#     cache keyed on `package-lock.json` (`cache: npm`), so the second job's
+#     install is a cache hit. There is deliberately no fan-out for
+#     typecheck/lint/test/build: splitting those would pay the ~5s install and
+#     ~3s node setup again in every job for no parallel win, because each already
+#     runs in a couple of seconds.
+#   * The one split is the informational benchmark, and it is a *latency* split.
+#     `decode-path benchmarks (informational)` is `continue-on-error: true`, is
+#     never a gate, and at ~16s it was the largest single step in the required
+#     job (~29% of a ~55s run; see the five linked runs on issue #101). Running
+#     it in a parallel `bench` job keeps it running on every push and PR — so
+#     `docs/benchmarks.md` stays accurate — while taking it off the critical
+#     path of the check that actually blocks merges. This is the issue's
+#     "justified split with shared cache": the parallel saving (~16s off the
+#     required check) exceeds the extra parallel work (~8s of setup + install).
+#   * Steps inside `ci` are ordered cheapest-first — typecheck, lint and build
+#     are ~2s each — so a broken change fails fast instead of after the ~14s test
+#     suite. `build` precedes `unit tests` because the smoke and export-map steps
+#     consume `dist/`, so a compile error surfaces before the slower gates run.
+#
+# Every gate is still enforced; none is dropped, and none moved out of `ci`:
+#   typecheck -> `typecheck`        lint      -> `lint`
+#   test      -> `unit tests`       build     -> `build`
+#   (plus `smoke test export resolution`, `export-map resolution (pack + install
+#    + import)`, `evidence structure check`, and `enforcement-path evidence gate`.)
+# ---------------------------------------------------------------------------
 name: ci
 
 on:
@@ -44,6 +74,8 @@ jobs:
       - name: install
         run: npm ci
 
+      # Cheapest static gates first (~2s each): a typo or lint error should fail
+      # the run before the ~14s test suite or the ~6s pack/install step starts.
       - name: typecheck
         run: npm run typecheck
 
@@ -59,11 +91,11 @@ jobs:
       - name: lint
         run: npm run lint
 
-      - name: unit tests
-        run: npm test
-
       - name: build
         run: npm run build
+
+      - name: unit tests
+        run: npm test
 
       - name: smoke test export resolution
         run: npm run test:smoke
@@ -108,3 +140,32 @@ jobs:
         run: |
           git fetch --no-tags origin "$BASE_REF"
           node scripts/check-enforcement-evidence.ts "origin/$BASE_REF" HEAD
+
+  # Informational only, never gating — and deliberately a separate job so it does
+  # not lengthen the required `ci` check (see the header comment). It runs on
+  # every push and PR. The npm cache is shared with `ci` via the same
+  # setup-node `cache: npm` key (same lockfile), so this job's install is a
+  # cache hit.
+  bench:
+    name: bench (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      # Informational only, never gating: shared runners are too noisy for a
+      # wall-time threshold to mean anything. The committed baseline lives in
+      # docs/benchmarks.md; compare changes on a developer machine, not here.
+      # `continue-on-error` keeps a noisy run from reddening the workflow for a
+      # number that is never a gate.
+      - name: decode-path benchmarks (informational)
+        run: npm run bench
+        continue-on-error: true
