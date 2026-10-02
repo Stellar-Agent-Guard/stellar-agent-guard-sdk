@@ -42,8 +42,9 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
 - **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
 - **Framework adapters**:
-  - **createLangChainGuardMiddleware**: Halts tool execution if the interceptor blocks the planned action.
-  - **createGuardValidator**: ElizaOS action validator returning boolean verdicts before actions run.
+- **createLangChainGuardMiddleware**: Halts tool execution if the interceptor blocks the planned action.
+- **createGuardValidator**: ElizaOS action validator returning boolean verdicts before actions run.
+- **createVercelAIGuard**: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
 - **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
 
 ## Quick Start
@@ -411,8 +412,10 @@ read `signal` as *stop soon and stop asking*, not *cancel the socket*.
 
 Plug-and-play middleware intercepts agent actions before tools are executed:
 
-- **LangChain**: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
-- **ElizaOS**: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
+- **Framework adapters**:
+  - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
+  - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
+  - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency.
 
 ### Policy validation before broadcast (validateGuardPolicy)
 
@@ -711,6 +714,7 @@ one-shot form.
 - `GuardError`, `SimulationError`, `SigningError`, `BroadcastError`, `PolicyDecodeError`, and `ContractResponseError` — Typed failure hierarchy.
 - `decodeCheckResult(raw): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
+- `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
 - `isDeadManFrozen(status: GuardStatus): boolean`

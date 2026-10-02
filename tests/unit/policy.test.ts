@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
-import { Address, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
 import {
   decodeCheckResult,
@@ -26,9 +26,11 @@ import {
   freezePolicy,
   unsafeContractAddress,
   unsafeAccountAddress,
+  type AccountAddress,
   type ContractAddress,
   type GuardStatus,
   type PolicyConfig,
+  type ProtocolRule,
 } from "../../src/policy.ts";
 
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
@@ -487,3 +489,94 @@ describe("freezePolicy", () => {
     }, TypeError);
   });
 });
+
+/**
+ * Seeded property tests for `policyToScVal` against arbitrary valid policies
+ * (issue #48).
+ *
+ * 1000 generated policies run through each assertion below, driven by a
+ * deterministic `mulberry32` PRNG (seed `0x5eedc0de`) so a red CI run replays
+ * identically locally. Every failure message prints the seed and the offending
+ * policy as bigint-safe JSON, so the counterexample can be dropped straight
+ * back into `policyToScVal` without a bisect.
+ *
+ * The generators only ever emit values the contract's types accept — u64/i128
+ * bigints inside their bounds, StrKey-encoded contract/account addresses derived
+ * from deterministic 32-byte payloads, distinct protocol contracts, and
+ * function-name sets de-duplicated within a rule — so a failure here is encoder
+ * drift, not a bad input.
+ */
+const PROPERTY_SEED = 0x5eedc0de;
+const PROPERTY_ITERATIONS = 1000;
+const I128_MAX = 2n ** 127n - 1n;
+const U64_MAX = 2n ** 64n - 1n;
+
+/**
+ * The committed `PolicyConfig` field list, spelled out deliberately rather than
+ * derived: this is the assertion that catches a field added to the type but
+ * omitted from the encoder.
+ */
+const POLICY_FIELD_LIST = [
+  "active_from",
+  "active_until",
+  "allow_any_recipient",
+  "assets",
+  "dms_grace_secs",
+  "paused",
+  "per_tx_cap",
+  "protocols",
+  "recipients",
+  "window_cap",
+  "window_secs",
+] as const;
+
+const PROTOCOL_FN_POOL = [
+  "transfer",
+  "transfer_from",
+  "approve",
+  "swap",
+  "mint",
+  "burn",
+  "deposit",
+  "withdraw",
+] as const;
+
+/** Deterministic PRNG — same stream on every CI run and every local replay. */
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function randomBytes(rand: () => number, length: number): Buffer {
+  const bytes = Buffer.allocUnsafe(length);
+  for (let index = 0; index < length; index += 1) {
+    bytes[index] = Math.floor(rand() * 256);
+  }
+  return bytes;
+}
+
+/** A `bits`-wide unsigned bigint drawn from `rand`, exactly in `[0, 2**bits - 1]`. */
+function randomUint(rand: () => number, bits: number): bigint {
+  let value = 0n;
+  for (let remaining = bits; remaining > 0; remaining -= 32) {
+    value = (value << 32n) | BigInt(Math.floor(rand() * 0x1_0000_0000));
+  }
+  const excess = (32 - (bits % 32)) % 32;
+  return excess === 0 ? value : value >> BigInt(excess);
+}
+
+/** An i128 amount in `[0, 2**127 - 1]`, occasionally pinned to its boundary. */
+function randomAmount(rand: () => number): bigint {
+  const roll = rand();
+  if (roll < 0.1) return 0n;
+  if (roll < 0.2) return I128_MAX;
+  return randomUint(rand, 127);
+}
+
+/** A u64 value, occasionally pinned to 0 (disabled) or `U64_MAX`. */
+function randomSeconds(rand: () => number): big
