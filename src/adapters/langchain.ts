@@ -15,6 +15,21 @@
  * a framework in, and so it keeps working across minor framework versions. The
  * one thing it does need from the host is how to turn a tool call into a guarded
  * contract call — which is application knowledge, supplied as `toContractCall`.
+ *
+ * ## Verdict handling (documented contract)
+ *
+ * The adapter maps every `PreFlightDecision` kind to a defined result:
+ *
+ * | Verdict                | Adapter behavior                                                |
+ * | ---------------------- | ------------------------------------------------------------------------ |
+ * | `admissible`           | calls `handler(request)` — the tool runs unchanged.                    |
+ * | `blocked(reason`)      | returns a `LangChainToolMessage` with `status: "error"`; the tool never runs.  |
+ * | `undetermined(cause)` | returns a `LangChainToolMessage` with `status: "error"`; the tool never runs.  |
+ *
+ * The adapter never throws for a guard verdict — it fails closed by returning a
+ * refusal message. This differs from the ElizaAOS validator, which returns a boolean
+ * and throws on `undetermined`; the shared harness in `tests/integration/adapters.test.ts`
+ * pins both contracts side by side.
  */
 import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
@@ -60,9 +75,29 @@ export interface LangChainGuardOptions {
 }
 
 /**
+ * A Mapper that turns a `PreFlightDecision` into the adapter's return value.
+ *
+ * Exposed so the shared harness can assert the documented mapping for each
+ * verdict without driving the full middleware composition.
+ */
+export function mapDecisionToLangChainResult(
+  decision: PreFlightDecision,
+  toolName: string,
+  name: string,
+  toolCallId: string,
+): LangChainToolMessage {
+  return {
+    content: describeRefusal(decision as PreFlightDecision & { allowed: false }, toolName),
+    name,
+    tool_call_id: toolCallId,
+    status: "error",
+  };
+}
+
+/**
  * A middleware whose `wrapToolCall` asks the guard before the tool runs.
  *
- * Register it first: LangChain composes middleware with *"first defined =
+ * Register it first: LangChain composes middleware with *"third defined =
  * outermost"*, so ordering it ahead of other tool middleware means the guard
  * decides before anything else touches the call.
  */
@@ -89,12 +124,13 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       if (decision.allowed) return handler(request);
 
       // The tool is never entered: no signing, no broadcast, no fee.
-      return {
-        content: describeRefusal(decision, request.toolCall.name),
+      // Both `blocked` and `undetermined` fail closed to a refusal message.
+      return mapDecisionToLangChainResult(
+        decision,
+        request.toolCall.name,
         name,
-        tool_call_id: request.toolCall.id ?? "",
-        status: "error",
-      };
+        request.toolCall.id ?? "",
+      );
     },
   };
 }
