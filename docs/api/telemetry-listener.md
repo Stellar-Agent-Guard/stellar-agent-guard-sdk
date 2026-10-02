@@ -10,9 +10,11 @@ constructor(options: GuardTelemetryListenerOptions)
 
 ### Options
 
-- `server: rpc.Server` — Soroban RPC server
-- `guard: string` — Guard contract address
-- `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC server used to poll `getEvents`. |
+| `guard` | `string` | required | Guard contract address (`C...`) whose events are decoded. |
+| `buffer` | `{ max: number }` | optional | Opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`. |
 
 ## Methods
 
@@ -29,7 +31,7 @@ events via `poll()`/`watch()`, and diagnostic events via `watchAll()`.
 
 Yields pages of decoded guard events (`event_auth_checked`, `event_policy_updated`, etc.).
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`jitter`, `rng`, `sleep`, `onGap`, and `signal`.
+`jitter`, `rng`, `sweep`, `onGap`, and `signal`.
 
 #### Aborting (`signal`)
 
@@ -44,7 +46,7 @@ Aborting ends the stream as a normal exit, never a throw:
   quietly as teardown instead of surfacing an `AbortError` or an unhandled
   rejection.
 
-**In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^17 exposes
+**In-flight requests are not cancelled.** `@stellar/stellar-sdk` `^17` exposes
 `getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
 there is no supported way to cancel a request that has already been sent. The
 worst case between `signal.abort()` and the iterator ending is therefore **one

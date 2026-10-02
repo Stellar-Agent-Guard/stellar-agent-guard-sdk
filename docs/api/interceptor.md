@@ -10,12 +10,14 @@ constructor(options: PreFlightInterceptorOptions)
 
 ### Options
 
-- `server: rpc.Server` — Soroban RPC server instance
-- `networkPassphrase: string` — Stellar network passphrase
-- `guard: string` — Custom account contract address (`C...`)
-- `agent: Keypair` — Keypair registered as the agent in the guard
-- `source: Keypair` — Keypair paying for transaction fees
-- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC server instance used for simulation. |
+| `networkPassphrase` | `string` | required | Stellar network passphrase (testnet: `"Test SDF Network ; September 2015"`). |
+| `guard` | `string` | required | Custom account contract address (`C...`). |
+| `agent` | `Keypair` | required | Keypair registered as the agent in the guard. |
+| `source` | `Keypair` | required | Keypair paying for transaction fees. |
+| `cache` | `PreFlightCacheOptions` | undefined (disabled) | Optional short-lived verdict cache. ⚠ Enabling the cache means a verdict may be stale relative to the current ledger/policy state. |
 
 ### Optional cache
 

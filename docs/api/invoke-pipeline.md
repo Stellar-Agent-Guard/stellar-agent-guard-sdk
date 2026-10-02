@@ -12,6 +12,18 @@ Executes an end-to-end transaction through the guard:
 
 Every retry calls the entire pipeline again, so the account sequence, required authorizations, resource declaration, and guard policy decision are refreshed from current ledger state. Non-retryable errors, including invalid input and guard blocks, return immediately without sleeping.
 
+### Options
+
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC server used for simulation and submission. |
+| `networkPassphrase` | `string` | required | Stellar network passphrase. |
+| `guard` | `string` | required | Guard contract address (`C...`). |
+| `agent` | `AgentSigner` \| `Keypair` | required | Signer for authorization entries. |
+| `source` | `Keypair` | required | Keypair paying for transaction fees. |
+| `invoke` | `ContractCall` | required | The contract call to execute. |
+| `retry` | `RetryOptions` | undefined (defaults below) | Bounded full-jitter retry policy for stale-ledger rejections. |
+
 ### Retry options
 
 Pass `retry` on `InvokeParams`:

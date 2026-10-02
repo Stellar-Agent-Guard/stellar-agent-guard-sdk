@@ -10,8 +10,10 @@ constructor(options: CostPreCheckerOptions)
 
 ### Options
 
-- `interceptor: PreFlightInterceptor` — Configured interceptor instance
-- `maxFeeStroops?: bigint` — Maximum allowable total fee in stroops
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `interceptor` | `PreFlightInterceptor` | required | Configured interceptor instance whose `check` produces the network's own price. |
+| `maxFeeStroops` | `bigint` | undefined (no ceiling) | Refuse (as `over_budget`) when the estimated total fee exceeds this many stroops. Omitted means "price it, never object to the price". |
 
 ## Methods
 
