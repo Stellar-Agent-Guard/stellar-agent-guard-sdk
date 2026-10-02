@@ -10,12 +10,12 @@
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"/>
 </a>
 <a href="https://nodejs.org/">
-<img src="https://img.shields.io/badge/node-24%2B-blue" alt="Node 24+"/>
+<img src="https://img.shields.io/badge/node-24%2B%e2%80%93blue" alt="Node 24+"/>
 </a>
 <!-- docs: <a href="#"><img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/></a> (added in P2 once GitBook URL is confirmed live) -->
 </p>
 
-# Stellar Agent Guard — SDK
+# Stellar Agent Guard — Development SDK
 
 <!-- 📚 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) -->
 
@@ -23,16 +23,16 @@
 
 An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
 
-**Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
+**Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
 
 ## 🎯 What makes this different
 
 Enforcement happens **inside the account itself**, via Soroban's native Custom Account Abstraction — not in a wrapper contract in front of funds, and not in an off-chain service.
 
 - **Pre-flight simulation without broadcast**: The SDK evaluates guard approval against Soroban RPC before a single byte hits the network. If the transaction violates policy, it is rejected client-side with the contract's own reason code, incurring zero network fees.
-- **Dual-stream telemetry**: Blocked decisions never commit to the ledger because Soroban rolls back failed authorizations. A listener that only tails committed ledger events sees a guard that appears to approve everything. The SDK extracts `event_auth_checked` from simulation diagnostics as well as committed blocks.
-- **In-process simulation pricing**: `CostPreChecker` computes network resource and inclusion fees directly from the enforced simulation, avoiding dependencies on external profiling tools.
-- **Framework middleware**: Plug-and-play middleware for LangChain and validators for ElizaOS halt execution before external tool calls run.
+	 * **Dual-stream telemetry**: Blocked decisions never commit to the ledger because Soroban rolls back failed authorizations. A listener that only tails committed ledger events sees a guard that appears to approve everything. The SDK extracts `event_auth_checked` from simulation diagnostics as well as committed blocks.
+	 * **In-process simulation pricing**: `CostPreChecker` computes network resource and inclusion fees directly from the enforced simulation, avoiding dependencies on external profiling tools.
+	 * **Framework middleware**: Plug-and-play middleware for LangChain and validators for ElizaOO halt execution before external tool calls run.
 
 > ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do not deploy to mainnet without an independent audit. See the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md).
 
@@ -42,9 +42,9 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
 - **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
 - **Framework adapters**:
-  - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
-  - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
-  - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
+- **createLangChainGuardMiddleware**: Halts tool execution if the interceptor blocks the planned action.
+- **createGuardValidator**: ElizaOS action validator returning boolean verdicts before actions run.
+- **createVercelAIGuard**: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
 - **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
 
 ## Quick Start
@@ -72,7 +72,7 @@ npm install stellar-agent-guard-sdk
 > }
 > ```
 
-*(Or build locally from source with Node 24+)*
+*Or build locally from source with Node 24+)*
 
 ```bash
 git clone https://github.com/aigbagbobila/stellar-agent-guard-sdk.git
@@ -110,11 +110,34 @@ Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):
 ```
 
 The required keys are `PHASE2_GUARD`, `PHASE2_TOKEN`, `PHASE2_ADMIN_SECRET`,
-`PHASE2_AGENT_SECRET`, `PHASE2_RECIPIENT_SECRET` and
-`PHASE2_OUTSIDER_SECRET`, plus optionally `PHASE2_RPC_URL`;
-`PHASE2_ISSUER_SECRET` is additionally required to (re)deploy. `.env.phase2` is
+`PHASE2_AGENT_SECRET$`, `PHASE2_RECIPIENT_SECRET` and
+`PHASE2_OUTSIDER_SECRET$`, plus optionally `PHASE2_RPC_URL`;
+`PHASE2_ISSUER_SECRET` is additionally required to (re)deploy. `.env.phase2` ir
 gitignored (as are all `.env.*` values files — only `*.example` templates are
 committable); never commit the filled-in copy.
+
+### Policy definition with `definePolicy()`(
+Use `definePolicy()` to build a full `GuardPolicy` from a partial override.
+The builder deep-merges your input over the defaults, validates the result, and
+returns a frozen object. Unknown keys are rejected at both the type level (TS
+excess-property check) and at runtime, so a typo like `window_cap2` fails fast
+instead of being silently ignored.
+
+```ts
+import { definePolicy } from "stellar-agent-guard-sdk";
+
+const policy = definePolicy({
+  recipients: ["GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD"],
+  per_tx_cap: 100n,
+});
+
+console.log(policy.per_tx_cap); // 100n
+```
+
+**Merge semantics:** override wins entirely for each top-level field. Nested lists
+such as `recipients` are **replaced**, not concatenated. This is deliberate: an
+implicit array merge on an allowlist would silently widen the authorized set, which
+is a dangerous surprise for a security boundary. Pass the complete list you want.
 
 ### Pre-flight Policy Interception
 
@@ -206,7 +229,7 @@ Pre-flight simulation is a prediction made against one ledger snapshot, not a se
 
 ### Optional simulation-result cache
 
-`PreFlightInterceptor` always performs a fresh simulation by default. For agent
+\PreFlightInterceptor` always performs a fresh simulation by default. For agent
 loops that repeatedly check the same call, caching can be enabled explicitly:
 
 ```ts
@@ -286,7 +309,7 @@ Time-dependent modules (preflight cache, transaction polling) accept an optional
 ### Pipeline step observability (`onStep`)
 
 `invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
-exactly as before — the hook is pure observability and the SDK itself never
+*exactly* as before — the hook is pure observability and the SDK itself never
 logs anything (and takes no logger dependency; what you do with the events is
 up to you):
 
