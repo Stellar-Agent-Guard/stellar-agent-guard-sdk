@@ -80,6 +80,11 @@ export {
   validateGuardPolicy,
 } from "./policy.ts";
 
+export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
+export { policyDiff } from "./policy-diff.ts";
+export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
+export type { DmsUrgency } from "./dms.ts";
+
 export type {
   AccountAddress,
   CheckResult,
@@ -98,7 +103,24 @@ export type {
 } from "./policy.ts";
 
 export {
+  POLICY_SCHEMA_PATH,
+  SCHEMA_DIALECT,
+  SCHEMA_RULE_ID_ANNOTATION,
+  SCHEMA_VS_CODE_RULES,
+  ruleFromAnnotation,
+  ruleForKeyword,
+  validateGuardPolicyAgainstSchema,
+} from "./policy-schema.ts";
+
+export type {
+  SchemaKeyword,
+  SchemaPolicyFailure,
+  SchemaValidationOptions,
+} from "./policy-schema.ts";
+
+export {
   decodeAuthDecision,
+  decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
 } from "./events.ts";
@@ -193,6 +215,7 @@ export {
   guardEventsFromDiagnostics,
   isAllowedDecision,
   mergeGuardEventStreams,
+  serializeEvent,
   telemetryFromDecision,
   type GuardDiagnosticBatch,
   type GuardEvent,
@@ -287,3 +310,11 @@ export type {
   ElizaGuardOptions,
   ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+export {
+  createVercelAIGuard,
+  wrapToolWithGuard,
+  type VercelAIGuardOptions,
+  type VercelAIToolCallInput,
+  type VercelAIToolLike,
+} from "./adapters/vercelai.ts";

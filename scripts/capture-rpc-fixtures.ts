@@ -244,6 +244,8 @@ async function main(): Promise<void> {
   );
 
   console.log(`\nCaptured 3 fixtures into tests/fixtures/rpc/ (sdk ${version})`);
+  console.log("\nNote: Replay fixtures (replay-*.json) should be captured from live");
+  console.log("enforcement runs. See tests/fixtures/rpc/README.md for the procedure.");
 }
 
 main().catch((error: unknown) => {

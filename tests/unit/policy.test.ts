@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
-import { Address, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
 import {
   decodeCheckResult,
@@ -25,9 +25,11 @@ import {
   freezePolicy,
   unsafeContractAddress,
   unsafeAccountAddress,
+  type AccountAddress,
   type ContractAddress,
   type GuardStatus,
   type PolicyConfig,
+  type ProtocolRule,
 } from "../../src/policy.ts";
 
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
@@ -900,5 +902,256 @@ describe("freezePolicy", () => {
       // @ts-expect-error — per_tx_cap must be readonly
       frozen.per_tx_cap = 1n;
     }, TypeError);
+  });
+});
+
+/**
+ * Seeded property tests for `policyToScVal` against arbitrary valid policies
+ * (issue #48).
+ *
+ * 1000 generated policies run through each assertion below, driven by a
+ * deterministic `mulberry32` PRNG (seed `0x5eedc0de`) so a red CI run replays
+ * identically locally. Every failure message prints the seed and the offending
+ * policy as bigint-safe JSON, so the counterexample can be dropped straight
+ * back into `policyToScVal` without a bisect.
+ *
+ * The generators only ever emit values the contract's types accept — u64/i128
+ * bigints inside their bounds, StrKey-encoded contract/account addresses derived
+ * from deterministic 32-byte payloads, distinct protocol contracts, and
+ * function-name sets de-duplicated within a rule — so a failure here is encoder
+ * drift, not a bad input.
+ */
+const PROPERTY_SEED = 0x5eedc0de;
+const PROPERTY_ITERATIONS = 1000;
+const I128_MAX = 2n ** 127n - 1n;
+const U64_MAX = 2n ** 64n - 1n;
+
+/**
+ * The committed `PolicyConfig` field list, spelled out deliberately rather than
+ * derived: this is the assertion that catches a field added to the type but
+ * omitted from the encoder.
+ */
+const POLICY_FIELD_LIST = [
+  "active_from",
+  "active_until",
+  "allow_any_recipient",
+  "assets",
+  "dms_grace_secs",
+  "paused",
+  "per_tx_cap",
+  "protocols",
+  "recipients",
+  "window_cap",
+  "window_secs",
+] as const;
+
+const PROTOCOL_FN_POOL = [
+  "transfer",
+  "transfer_from",
+  "approve",
+  "swap",
+  "mint",
+  "burn",
+  "deposit",
+  "withdraw",
+] as const;
+
+/** Deterministic PRNG — same stream on every CI run and every local replay. */
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function randomBytes(rand: () => number, length: number): Buffer {
+  const bytes = Buffer.allocUnsafe(length);
+  for (let index = 0; index < length; index += 1) {
+    bytes[index] = Math.floor(rand() * 256);
+  }
+  return bytes;
+}
+
+/** A `bits`-wide unsigned bigint drawn from `rand`, exactly in `[0, 2**bits - 1]`. */
+function randomUint(rand: () => number, bits: number): bigint {
+  let value = 0n;
+  for (let remaining = bits; remaining > 0; remaining -= 32) {
+    value = (value << 32n) | BigInt(Math.floor(rand() * 0x1_0000_0000));
+  }
+  const excess = (32 - (bits % 32)) % 32;
+  return excess === 0 ? value : value >> BigInt(excess);
+}
+
+/** An i128 amount in `[0, 2**127 - 1]`, occasionally pinned to its boundary. */
+function randomAmount(rand: () => number): bigint {
+  const roll = rand();
+  if (roll < 0.1) return 0n;
+  if (roll < 0.2) return I128_MAX;
+  return randomUint(rand, 127);
+}
+
+/** A u64 value, occasionally pinned to 0 (disabled) or `U64_MAX`. */
+function randomSeconds(rand: () => number): bigint {
+  const roll = rand();
+  if (roll < 0.1) return 0n;
+  if (roll < 0.2) return U64_MAX;
+  return randomUint(rand, 64);
+}
+
+function randomContractAddresses(rand: () => number, count: number): ContractAddress[] {
+  const seen = new Set<string>();
+  while (seen.size < count) seen.add(StrKey.encodeContract(randomBytes(rand, 32)));
+  return [...seen].map(unsafeContractAddress);
+}
+
+function randomAccountAddresses(rand: () => number, count: number): AccountAddress[] {
+  const seen = new Set<string>();
+  while (seen.size < count) seen.add(StrKey.encodeEd25519PublicKey(randomBytes(rand, 32)));
+  return [...seen].map(unsafeAccountAddress);
+}
+
+/** `null` (any function) and de-duplicated non-empty pools are both generated. */
+function randomProtocolFns(rand: () => number): string[] | null {
+  if (rand() < 0.25) return null;
+  const count = 1 + Math.floor(rand() * PROTOCOL_FN_POOL.length);
+  const picked = new Set<string>();
+  while (picked.size < count) {
+    picked.add(PROTOCOL_FN_POOL[Math.floor(rand() * PROTOCOL_FN_POOL.length)]!);
+  }
+  return [...picked];
+}
+
+function randomProtocols(rand: () => number): ProtocolRule[] {
+  const count = Math.floor(rand() * 4);
+  const rules: ProtocolRule[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < count; index += 1) {
+    let contract = StrKey.encodeContract(randomBytes(rand, 32));
+    let guard = 0;
+    while (seen.has(contract) && guard < 16) {
+      contract = StrKey.encodeContract(randomBytes(rand, 32));
+      guard += 1;
+    }
+    seen.add(contract);
+    rules.push({ contract: unsafeContractAddress(contract), fns: randomProtocolFns(rand) });
+  }
+  return rules;
+}
+
+/** `0` (no expiry) or a value strictly after `active_from`, never overflowing u64. */
+function randomActiveUntil(rand: () => number, activeFrom: bigint): bigint {
+  if (rand() < 0.3) return 0n;
+  const until = randomSeconds(rand);
+  if (until > activeFrom) return until;
+  return activeFrom === U64_MAX ? U64_MAX : activeFrom + 1n;
+}
+
+function randomPolicy(rand: () => number): PolicyConfig {
+  const windowSecs = randomSeconds(rand);
+  const activeFrom = randomSeconds(rand);
+  return {
+    // A non-zero window cap requires a non-zero window length (SPEC §8), so a
+    // disabled window always carries a zero cap.
+    per_tx_cap: randomAmount(rand),
+    window_secs: windowSecs,
+    window_cap: windowSecs === 0n ? 0n : randomAmount(rand),
+    assets: randomContractAddresses(rand, 1 + Math.floor(rand() * 3)),
+    protocols: randomProtocols(rand),
+    recipients: randomAccountAddresses(rand, 1 + Math.floor(rand() * 3)),
+    allow_any_recipient: rand() < 0.5,
+    active_from: activeFrom,
+    active_until: randomActiveUntil(rand, activeFrom),
+    paused: rand() < 0.5,
+    dms_grace_secs: randomSeconds(rand),
+  };
+}
+
+/** Seed + reproducible, bigint-safe policy JSON for a failing iteration. */
+function replayContext(assertion: string, iteration: number, policy: PolicyConfig): string {
+  const json = JSON.stringify(policy, (_key, value) =>
+    typeof value === "bigint" ? value.toString() : value,
+  );
+  return `property ${assertion} failed at seed 0x${PROPERTY_SEED.toString(16)} iteration ${iteration}\npolicy: ${json}`;
+}
+
+function failAt(assertion: string, iteration: number, policy: PolicyConfig, error: unknown): never {
+  const detail = error instanceof Error ? error.message : String(error);
+  assert.fail(`${replayContext(assertion, iteration, policy)}\n${detail}`);
+}
+
+describe("policyToScVal property tests (seeded, issue #48)", () => {
+  it("encodes exactly the committed field set, sorted, with well-formed rule maps", () => {
+    const rand = mulberry32(PROPERTY_SEED);
+    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+      const policy = randomPolicy(rand);
+      try {
+        const entries = mapEntries(policyToScVal(policy));
+        const keys = entries.map((entry) => String(scValToNative(entry.key)));
+
+        assert.deepEqual(keys, [...POLICY_FIELD_LIST], "encoded key set must equal the committed field list");
+        assert.deepEqual(keys, [...keys].sort(), "encoded keys must be sorted for host struct conversion");
+
+        for (const entry of entries) {
+          const name = String(scValToNative(entry.key));
+          assert.equal(entry.key.type, "scvSymbol", `${name} key must be a symbol`);
+          if (name !== "protocols") {
+            assert.notEqual(entry.val.type, "scvVoid", `${name} must not encode as Void`);
+          }
+        }
+
+        const protocolsEntry = entries.find((entry) => String(scValToNative(entry.key)) === "protocols")!;
+        const rules = (protocolsEntry.val as unknown as { vec?: xdr.ScVal[] }).vec ?? [];
+        assert.equal(rules.length, policy.protocols.length, "every protocol rule must be encoded");
+        rules.forEach((rule, index) => {
+          const ruleEntries = mapEntries(rule);
+          const ruleKeys = ruleEntries.map((entry) => String(scValToNative(entry.key)));
+          assert.deepEqual(ruleKeys, ["contract", "fns"], `protocols[${index}] rule shape`);
+
+          const contract = ruleEntries.find((entry) => String(scValToNative(entry.key)) === "contract")!;
+          const fns = ruleEntries.find((entry) => String(scValToNative(entry.key)) === "fns")!;
+          assert.equal(contract.val.type, "scvAddress", `protocols[${index}].contract must be an address`);
+
+          if (policy.protocols[index]!.fns === null) {
+            assert.equal(fns.val.type, "scvVoid", `protocols[${index}].fns null must encode as Void`);
+          } else {
+            assert.equal(fns.val.type, "scvVec", `protocols[${index}].fns must be a vector`);
+            for (const fn of (fns.val as unknown as { vec?: xdr.ScVal[] }).vec ?? []) {
+              assert.equal(fn.type, "scvSymbol", `protocols[${index}] function name must be a symbol`);
+            }
+          }
+        });
+      } catch (error) {
+        failAt("structural assertions", iteration, policy, error);
+      }
+    }
+  });
+
+  it("round-trips every policy through decodePolicy without loss", () => {
+    const rand = mulberry32(PROPERTY_SEED);
+    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+      const policy = randomPolicy(rand);
+      try {
+        assert.deepEqual(decodePolicy(policyToScVal(policy)), policy);
+      } catch (error) {
+        failAt("round-trip", iteration, policy, error);
+      }
+    }
+  });
+
+  it("re-encodes a decoded policy to identical XDR", () => {
+    const rand = mulberry32(PROPERTY_SEED);
+    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+      const policy = randomPolicy(rand);
+      try {
+        const encoded = policyToScVal(policy);
+        const reencoded = policyToScVal(decodePolicy(encoded));
+        assert.equal(reencoded.toXDR("base64"), encoded.toXDR("base64"));
+      } catch (error) {
+        failAt("re-encode", iteration, policy, error);
+      }
+    }
   });
 });
