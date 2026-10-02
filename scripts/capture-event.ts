@@ -25,6 +25,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke } from "../src/invoke.ts";
+import { unsafeContractAddress } from "../src/policy.ts";
 import { GUARD_EVENT_TOPICS } from "../src/events.ts";
 import { json, parseArgs } from "./inspect-deployment.ts";
 import { summarizeDiagnosticEvents } from "../src/tx.ts";
@@ -134,9 +135,9 @@ async function main(): Promise<void> {
   const heartbeat = await invoke({
     server,
     source: agent,
-    call: { contract: guard, fn: "heartbeat", args: [] },
+    call: { contract: unsafeContractAddress(guard), fn: "heartbeat", args: [] },
     networkPassphrase: TESTNET_PASSPHRASE,
-    guardAuth: { guard, agent },
+    guardAuth: { guard: unsafeContractAddress(guard), agent },
   });
   if (heartbeat.kind !== "allowed") {
     throw new Error(`heartbeat was not allowed: ${json(heartbeat)}`);
@@ -172,7 +173,7 @@ async function main(): Promise<void> {
     server,
     source: agent,
     call: {
-      contract: token,
+      contract: unsafeContractAddress(token),
       fn: "transfer",
       args: [
         new Address(guard).toScVal(),
@@ -181,7 +182,7 @@ async function main(): Promise<void> {
       ],
     },
     networkPassphrase: TESTNET_PASSPHRASE,
-    guardAuth: { guard, agent },
+    guardAuth: { guard: unsafeContractAddress(guard), agent },
   });
   if (blocked.kind !== "blocked") {
     throw new Error(`expected a pre-broadcast block, got: ${json(blocked)}`);

@@ -3,6 +3,10 @@
 Record of the enforcement suite running against the real Phase 2 testnet
 instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
+**Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
+**Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
+**Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
+
 ## Instance under test
 
 | | |
@@ -665,3 +669,44 @@ claim they do.
 this branch before merge** and replace this addendum with the fresh run output.
 No credentials, deployment or policy change are needed beyond what the suite
 already does.
+
+## Addendum — 2026-09-29 (PR #206 / Issue #161: `validateGuardPolicy` structured failures aligned to SPEC §8)
+
+Recorded because this PR touches the enforcement path (`src/policy.ts`) and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
+this contributor checkout, so `npm run test:integration` cannot execute here.
+
+### Summary of changes to the enforcement path
+
+- `src/policy.ts`: adds `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]`
+  providing client-side policy validation against all 10 bullets of SPEC §8 rules prior to encoding or broadcast.
+- Accumulates all failures at once (`PolicyFailure[]`) for form UX rather than failing fast on the first error.
+- Defines and exports `POLICY_RULE_IDS` (21 rule identifiers covering type guards, non-negative bounds, window constraints,
+  duplicate vectors, self-address collisions, and recipient conflicts), verified for parity against vendored fixture `tests/fixtures/policy-rule-ids.json`.
+
+Unchanged, deliberately: the existing policy encode/decode functions (`policyToScVal`, `decodePolicy`, `policyFromScVal`),
+`__check_auth` signing, pre-flight simulation, transaction submission, and all on-chain enforcement logic. `validateGuardPolicy`
+is pure client-side validation additive to the policy lifecycle.
+
+### What did run locally
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 362 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # passes
+npm run test:exports                     # all 88 exports resolve via the ESM export map
+node scripts/check-enforcement-evidence.ts main HEAD
+                                         # pass; evidence file detected as updated and structure valid
+```
+
+The new coverage for this change is `tests/unit/policy.test.ts` with 37 tests covering non-object inputs, invalid field types,
+invalid addresses, all SPEC §8 rules (bullets 1–10), duplicate detection, self-address rejection, and multiple failure accumulation.
+No network, no credentials.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this
+addendum with the fresh run output if desired.
+
