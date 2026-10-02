@@ -140,6 +140,7 @@ npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
+node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
 ```
 
 ## Cross-editor standardization
