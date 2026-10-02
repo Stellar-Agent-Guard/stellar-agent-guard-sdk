@@ -1,3 +1,4 @@
+# Supply-chain gate: dependency-review-action on PRs (advisory-based).
 # The repo's branch-protection ruleset requires a status check named exactly
 # `ci`. The job below is named `ci` — both the job name and its `name:` key — so
 # the check this workflow reports is the one the ruleset gates on.
@@ -54,6 +55,8 @@ on:
 # Read-only: CI inspects the repo and runs tests; it never writes to it.
 permissions:
   contents: read
+  pull-requests: write
+  actions: read
 
 jobs:
   ci:
@@ -65,6 +68,16 @@ jobs:
         with:
           # Full history, so the evidence gate can diff the PR against its base.
           fetch-depth: 0
+
+      # PR-time supply-chain gate. Advisory source is GitHub-managed
+      # (github/advisory-database); update cadence is GitHub's, not ours.
+      # Blocks PRs that introduce new high/critical vulnerable dependencies.
+      - name: dependency review
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          comment-summary-in-pr: on-failure
 
       - uses: actions/setup-node@v7
         with:
