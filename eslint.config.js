@@ -37,7 +37,7 @@ export default tseslint.config(
       ],
     },
   },
-  // Determinism ratchet: no wall-clock or `bare randomness in `src/`.
+// Determinism ratchet: no wall-clock or `bare randomness in `src/`.
   // The allowlist is the inline `eslint-disable-next-line no-restricted-globals`
   // comment in `src/clock.ts` (the default clock implementation). Reintroducing
   // `Date.now()`, `new Date()`, or `Math.random()` anywhere else in `src/` fails
@@ -59,5 +59,11 @@ export default tseslint.config(
         },
       ],
     },
+  },
+  {
+    // Plain-JS Node scripts have no tsconfig coverage, so `no-undef` cannot be
+    // resolved by a type checker and needs the environment declared instead.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: { globals: { process: "readonly", console: "readonly" } },
   },
 );

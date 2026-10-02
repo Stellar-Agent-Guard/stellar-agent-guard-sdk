@@ -37,6 +37,7 @@
  *      its name; the unix-second timestamp arrives as event **data**, not as a
  *      topic: `data = { at: u64 }`.
  */
+import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import type { GuardReason } from "./reasons.ts";
 
 export const GUARD_EVENT_TOPICS = {
@@ -138,4 +139,94 @@ export function normalizeEventData(data: unknown): unknown {
     return result;
   }
   return data;
+}
+
+/**
+ * Decode one topic of a contract event into its symbol text.
+ *
+ * Topics reach this module in two shapes depending on the caller: as a
+ * base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
+ * `getEvents` over JSON hands over) or as an already-decoded `xdr.ScVal`. Both
+ * go through `scValToNative` so the text is identical either way.
+ *
+ * Returns `null` for anything that does not decode, rather than throwing, so a
+ * single unrecognised topic rejects the event instead of killing the caller.
+ */
+function topicToSymbol(topic: unknown): string | null {
+  try {
+    if (typeof topic === "string") {
+      return String(scValToNative(xdr.ScVal.fromXDR(topic, "base64")));
+    }
+    return String(scValToNative(topic as xdr.ScVal));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pull the topic list out of a decoded `xdr.ContractEvent` or
+ * `xdr.DiagnosticEvent`.
+ *
+ * A `DiagnosticEvent` wraps the contract event in its `event` field; a
+ * `ContractEvent` carries `body.v0.topics` directly.
+ */
+function topicsFromEvent(event: unknown): string[] | null {
+  const wrapper = event as {
+    event?: { body?: unknown };
+    body?: { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } };
+  } | null;
+  const body = (wrapper?.event?.body ?? wrapper?.body) as
+    | { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } }
+    | undefined;
+  const topics = body?.v0?.topics ?? body?.value?.v0?.topics;
+  if (!Array.isArray(topics)) return null;
+
+  const out: string[] = [];
+  for (const topic of topics) {
+    const symbol = topicToSymbol(topic);
+    if (symbol === null) return null;
+    out.push(symbol);
+  }
+  return out;
+}
+
+/**
+ * Decode a guard decision from a raw base64 XDR string.
+ *
+ * This is the offline-tooling entry point: an event XDR pasted from a block
+ * explorer, committed as a CI fixture, or dumped while debugging a live
+ * incident goes through the same decision decoder as an event observed from a
+ * stellar-sdk response, so the two can never drift apart.
+ *
+ * Accepts either a base64 `DiagnosticEvent` (what `server.getEvents()` and a
+ * simulation error carry) or a base64 `ContractEvent` (what a block explorer
+ * exposes). The returned `source` therefore defaults to `diagnostic`, since
+ * that is the shape the enforced-simulation path produces; pass `"ledger"` when
+ * the payload was read from a committed ledger.
+ *
+ * Returns `null` — never throws — for a malformed base64 string, an XDR that is
+ * not a contract event, or an event that is not an `event_auth_checked`
+ * decision. That is documented behaviour: fixture checks and operator
+ * copy-paste must not be able to crash a long-running process.
+ */
+export function decodeGuardEventXdr(
+  xdrBase64: string,
+  source: GuardAuthDecision["source"] = "diagnostic",
+): GuardAuthDecision | null {
+  if (typeof xdrBase64 !== "string" || xdrBase64.length === 0) return null;
+
+  let event: unknown;
+  try {
+    event = xdr.DiagnosticEvent.fromXDR(xdrBase64, "base64");
+  } catch {
+    try {
+      event = xdr.ContractEvent.fromXDR(xdrBase64, "base64");
+    } catch {
+      return null;
+    }
+  }
+
+  const topics = topicsFromEvent(event);
+  if (!topics) return null;
+  return decodeAuthDecision(topics, source);
 }
