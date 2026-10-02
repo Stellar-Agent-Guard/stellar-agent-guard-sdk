@@ -79,6 +79,11 @@ export {
   validateGuardPolicy,
 } from "./policy.ts";
 
+export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
+export { policyDiff } from "./policy-diff.ts";
+export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
+export type { DmsUrgency } from "./dms.ts";
+
 export type {
   AccountAddress,
   CheckResult,
