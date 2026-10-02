@@ -83,7 +83,8 @@
     "vendor:refresh": "node --import tsx scripts/vendor-fixtures.ts",
     "policy-schema:bootstrap": "node --import tsx -e \"import { bootstrapAheadOfUpstream } from './scripts/vendor-fixtures.ts'; import { readFileSync } from 'node:fs'; const r = bootstrapAheadOfUpstream(readFileSync('scripts/policy-schema.bootstrap.json', 'utf8')); console.log('vendored', r.artifact.outputPath, 'sha256:' + r.digest);\"",
     "capture:rpc-fixtures": "node --import tsx scripts/capture-rpc-fixtures.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "check:readme-snippets": "node --import tsx scripts/check-readme-snippets.ts"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^17.0.1"

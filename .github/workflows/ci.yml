@@ -53,6 +53,13 @@ jobs:
       - name: unit tests
         run: npm test
 
+      # Every fenced ```ts block in README.md is compiled against src/, so a
+      # published example that no longer matches the API fails here instead of
+      # lying in the docs. Blocks marked `no-check` are skipped by convention
+      # (see CONTRIBUTING.md); the script prints each skip and its reason.
+      - name: README snippet typecheck
+        run: npm run check:readme-snippets
+
       - name: build
         run: npm run build
 
