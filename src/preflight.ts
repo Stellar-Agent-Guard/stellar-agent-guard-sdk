@@ -291,8 +291,23 @@ export interface PreFlightCacheOptions {
   policyRevision?: PolicyRevision | (() => PolicyRevision | Promise<PolicyRevision>);
 }
 
+/**
+ * Shared RPC transport configuration consumed by every surface.
+ *
+ * Exactly one of `server` or `url` must be supplied:
+ *  - `server` — a pre-built `rpc.Server` instance, used verbatim. This is the
+ *    lever for routing through proxies (auth headers, mTLS, latency shielding):
+ *    configure the `Server` (or a custom `fetch`) *before* constructing it and
+ *    pass the instance in.
+ *  - `url` — an RPC endpoint URL; the SDK constructs a `Server` from it.
+ *
+ * Supplying both, or neither, is a typed error (`InvalidTransportConfigError`).
+ */
+export type RpcTransportConfig =
+  | { server: rpc.Server; url?: undefined }
+  | { url: string; server?: undefined };
+
 export interface PreFlightConfig {
-  server: rpc.Server;
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
   guard: ContractAddress;
@@ -318,7 +333,7 @@ export interface PreFlightConfig {
    * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
    */
   clock?: Clock;
-}
+} & RpcTransportConfig;
 
 /** Alias used by the README's constructor terminology. */
 export type PreFlightInterceptorOptions = PreFlightConfig;
@@ -727,4 +742,3 @@ export function preflightBatch(
 ): Promise<PreFlightBatchDecision> {
   return new PreFlightInterceptor(config).checkBatch(calls, options);
 }
-

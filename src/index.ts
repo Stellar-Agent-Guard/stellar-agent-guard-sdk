@@ -281,6 +281,12 @@ export {
   type GuardWasmVerification,
 } from "./wasm.ts";
 
+export {
+  resolveSorobanServer,
+  type SorobanServerConfig,
+  type SorobanServerOptions,
+} from "./server.ts";
+
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
 export {

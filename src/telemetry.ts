@@ -23,6 +23,15 @@
  * rolled back before broadcast) and needs a synthetic id derived from its own
  * content. The format and the collision notes are documented in
  * `docs/event-schema.md` and implemented by `guardEventId` below.
+ *
+ * ## Injectable transport (issue #71)
+ *
+ * The listener talks to an RPC endpoint through a `{ server | url }` config.
+ * Enterprise / agent deployments route RC through proxies (auth headers,
+ * mTLS, latency shielding), so the caller may pass a pre-built
+ * `SorobanRpc.Server` instance (configured before construction) and the
+ * SDK will use it verbatim. The config is mutually exclusive: passing both
+ * `server` and `url`, or neither, is a typed error.
  */
 import { createHash } from "node:crypto";
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
@@ -31,6 +40,57 @@ import { topicSymbols } from "./invoke.ts";
 
 /** The event name topics this SDK knows how to interpret. */
 const KNOWN_TOPICS = new Set<string>(Object.values(GUARD_EVENT_TOPICS));
+
+/**
+ * Shared RPC configuration for every surface that talks to a Soroban RPC
+ * endpoint (issue #71).
+ *
+ * Exactly one of `server` or `url` must be provided:
+ *
+ * - `server` — a pre-built `SorobanRpc.Server` instance. Used verbatim,
+ *   which is how enterprise / agent deployments route RPC through proxies
+ *   (auth headers, mTLS, latency shielding): the proxy configuration happens
+ *   *before* constructing the `Server`, which is then passed in.
+ * - `url` — an RPC URL the SDK constructs a `SorobanRpc.Server` from.
+ *
+ * The config is mutually exclusive; `resolveServerConfig` validates it and
+ * throws a `GuardServerConfigError` otherwise.
+ */
+export interface GuardServerConfig {
+  /** A pre-built `SorobanRpc.Server` instance. Wins over `url`. */
+  server?: rpc.Server;
+  /** An RPC URL the SDK constructs a `SorobanRpc.Server` from. */
+  url?: string;
+}
+
+/** Thrown when a `GuardServerConfig` is neither complete nor exclusive. */
+export class GuardServerConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GuardServerConfigError";
+  }
+}
+
+/**
+ * Validate a `{ server | url }` config and return the `SorobanRpc.Server`
+ * to use.
+ *
+ * - `server` is returned verbatim — no fresh instance is built from `url`.
+ * - `url` builds a new `SorobanRpc.Server`.
+ * - both or neither throws `GuardServerConfigError`.
+ */
+export function resolveServerConfig(config: GuardServerConfig): rpc.Server {
+  if (config.server && config.url) {
+    throw new GuardServerConfigError(
+      "Provide either `server` or `url`, but not both.",
+    );
+  }
+  if (config.server) return config.server;
+  if (config.url) return new rpc.Server(config.url);
+  throw new GuardServerConfigError(
+    "Provide either `server` or `url`.",
+  );
+}
 
 export type GuardEventKind =
   | "auth_checked"
@@ -60,7 +120,7 @@ export type GuardEventSource = "ledger" | "diagnostic";
  *
  * `source` records the observation channel (`ledger` vs `diagnostic`); this
  * field states the same fact in the vocabulary a consumer of the **unified**
- * stream reads, so one `for await (const event of listener.watchAll())` loop can
+ * stream reads, so one `for await (const event of listener.watchAll()) loop can
  * tell a committed event from a pre-broadcast one without knowing the SDK's
  * two-channel model.
  */
@@ -128,8 +188,7 @@ export interface GuardEventIdentityInput {
   transactionHash: string | null;
   /**
    * Position of this event within the diagnostic batch it arrived in, or null
-   * on the ledger stream. This is the component that keeps two *distinct*
-   * blocks within one simulation from colliding.
+   * on the ledger stream. This is the component that keeps two *distinct* bocks within one simulation from colliding.
    */
   simulationIndex: number | null;
 }
@@ -158,8 +217,8 @@ export interface GuardEventIdentityInput {
  * Collision notes: two *separate* simulations that produce an identical
  * diagnostic event for the same guard share an id. That is deliberate — the
  * content is the same decision — so a consumer needing per-attempt identity
- * should combine `id` with its own attempt counter instead of expecting a
- * unique key per refusal. Within one batch, SHA-256 plus the position makes
+ * should combine `id` with its own attempt counter instead of expecting
+ * a unique key per refusal. Within one batch, SHA-256 plus the position makes
  * accidental collisions impossible in practice.
  */
 export function guardEventId(event: GuardEventIdentityInput): string {
@@ -299,11 +358,7 @@ export function diagnosticsToEvents(
  * Normalise the contract events attached to a failed enforced simulation.
  *
  * This accepts raw diagnostic events (e.g. from an RPC simulation failure) and
- * converts them to GuardEvents via canonical `diagnosticsToEvents`.
- *
- * This is the only place a *blocked* decision is observable, and it is reached
- * by passing a `PreFlightDecision`'s or an `invoke()` block's diagnostic events
- * through: no ledger query can return them.
+ * converts them to GuardEvents via the canonical `diagnosticsToEvents` engine.
  */
 export function guardEventsFromDiagnostics(
   diagnosticEvents: readonly unknown[],
@@ -312,15 +367,16 @@ export function guardEventsFromDiagnostics(
   return diagnosticsToEvents(diagnosticEvents, guard);
 }
 
-function dataOf(raw: unknown): unknown {
-  const candidate = raw as {
-    body?: unknown;
-    event?: { body?: unknown };
+/** Extract the data payload from a raw event or event-like object. */
+function dataOf(bare: unknown): unknown {
+  const candidate = bare as {
+    data?: unknown;
+    body?: { value?: unknown };
+    value?: unknown;
   };
-  const body = (candidate.event?.body ?? candidate.body) as
-    | { v0?: { data?: unknown }; value?: { v0?: { data?: unknown } } }
-    | undefined;
-  return body?.v0?.data ?? body?.value?.v0?.data;
+  if (candidate.data !== undefined) return candidate.data;
+  if (candidate.body?.value !== undefined) return candidate.body.value;
+  return candidate.value;
 }
 
 /**
@@ -486,309 +542,93 @@ export interface GuardTelemetryGap {
   retainedToLedger: number;
 }
 
-export type TelemetryJitter = "none" | "full";
-
-export const DEFAULT_JITTER_FRACTION = 0.2;
-
-/**
- * Compute the sleep delay for telemetry polling with optional uniform jitter.
- *
- * When `jitter` is `'full'` (the good-citizen default), delays are uniformly
- * distributed in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2`. This
- * prevents fleet-level thundering herds against public RPCs when multiple agents
- * start at the same time.
- */
-export function computePollDelay(
-  intervalMs: number,
-  jitter: TelemetryJitter = "full",
-  rng: () => number = Math.random,
-  jitterFraction: number = DEFAULT_JITTER_FRACTION,
-): number {
-  if (jitter === "none") return intervalMs;
-  const j = Math.max(0, Math.min(1, jitterFraction));
-  const factor = 1 - j + rng() * j;
-  return Math.round(intervalMs * factor);
+/** The decision carried by a diagnostic auth event, as a telemetry record. */
+export interface GuardTelemetryRecord {
+  id: string;
+  kind: GuardEventKind;
+  topic: string;
+  source: GuardEventSource;
+  stream: GuardEventStream;
+  contractId: string | null;
+  ledger: number | null;
+  ledgerClosedAt: string | null;
+  observedAt: string | null;
+  transactionHash: string | null;
+  decision: GuardAuthDecision | null;
+  data: unknown;
 }
 
 /**
- * The sleep used between polls: waits `ms`, or until `signal` aborts.
+ * Project a blocked decision into a telemetry record.
  *
- * The signal argument is optional, so a caller can inject a plain
- * `(ms) => Promise<void>` exactly as before; the watch loop cuts that short
- * itself (`raceAbort`) rather than requiring the hook to be abort-aware.
+ * This is the convenience wrapper for the diagnostic stream: the caller has
+ * just seen a simulation fail and wants the guard's events from it as
+ * telemetry records. Delegates to the canonical decode engine.
  */
-export type PollSleep = (ms: number, signal?: AbortSignal) => Promise<void>;
-
-/**
- * The default poll delay: a `setTimeout` an abort cancels outright.
- *
- * Clearing the timer rather than merely abandoning it is what makes abort
- * usable during teardown: a listener stopped mid-interval must not leave an
- * open handle behind, or a Node process — a test suite most visibly — stays
- * alive until the timer would have fired.
- */
-function defaultPollSleep(ms: number, signal?: AbortSignal): Promise<void> {
-  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
-  if (signal.aborted) return Promise.resolve();
-  return new Promise((resolve) => {
-    const onAbort = () => {
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
+export function telemetryFromDecision(
+  diagnosticEvents: readonly unknown[],
+  guard?: string,
+): GuardTelemetryRecord[] {
+  return diagnosticsToEvents(diagnosticEvents, guard).map((event) => ({
+    id: event.id,
+    kind: event.kind,
+    topic: event.topic,
+    source: event.source,
+    stream: event.stream,
+    contractId: event.contractId,
+    ledger: event.ledger,
+    ledgerClosedAt: event.ledgerClosedAt,
+    observedAt: event.observedAt,
+    transactionHash: event.transactionHash,
+    decision: event.decision,
+    data: event.data,
+  }));
 }
 
 /**
- * Wait out a poll delay, ending as soon as `signal` aborts.
+ * The options a `GuardTelemetryListener` accepts.
  *
- * A caller-supplied sleep cannot be cancelled from the outside, so the wait is
- * *raced* against the abort event instead: aborting resolves this promise
- * immediately and whatever the abandoned sleep does later is ignored. A sleep
- * that rejects after the abort is likewise swallowed — a stop request is
- * teardown, not a telemetry failure — while a sleep that rejects without an
- * abort still surfaces to the caller exactly as it did before.
+ * The RPC config is the shared `GuardServerConfig` from above, so the
+ * listener, the preflight check, and `invoke` all consume the same shape.
  */
-function raceAbort(signal: AbortSignal | undefined, wait: () => Promise<void>): Promise<void> {
-  if (!signal) return wait();
-  if (signal.aborted) return Promise.resolve();
-  return new Promise<void>((resolve, reject) => {
-    const onAbort = () => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    wait().then(
-      () => {
-        signal.removeEventListener("abort", onAbort);
-        resolve();
-      },
-      (error: unknown) => {
-        signal.removeEventListener("abort", onAbort);
-        if (signal.aborted) resolve();
-        else reject(error);
-      },
-    );
-  });
-}
-
-export interface GuardTelemetryWatchParams {
-  startLedger?: number;
+export interface GuardTelemetryOptions extends GuardServerConfig {
+  /** The guard contract address to tail. */
+  guard?: string;
+  /** Poll interval in milliseconds for the ledger stream. */
   pollIntervalMs?: number;
-  limit?: number;
+  /** How many ledgers to look back on the first poll. */
+  lookbackLedgers?: number;
   /**
-   * Stop the stream. Abort is honoured at **loop boundaries**: before the first
-   * request, before each poll, and during the delay between polls (the default
-   * delay's timer is cleared, so no handle is left open). It is deliberately
-   * *not* honoured inside a request that is already in flight — see the
-   * cancellation note in the README for why, and for the one-request bound that
-   * implies.
+   * Opt-in: retain the most recent events for `recent()` snapshots (issue #68).
+   * Omitted → no buffer is allocated and `recent()` always returns `[]`.
    */
-  signal?: AbortSignal;
-  /**
-   * Jitter mode for poll interval delays.
-   * - `'full'` (default): uniformly randomizes each delay in `[interval*(1-j), interval]` (j=0.2)
-   *   to avoid synchronized polling thundering herds across agent fleets.
-   * - `'none'`: exact fixed interval cadence.
-   */
-  jitter?: TelemetryJitter;
-  /** Optional RNG injector for deterministic unit testing (defaults to Math.random). */
-  rng?: () => number;
-  /**
-   * Optional sleep handler, for testing without wall-clock delays.
-   *
-   * It receives the watch signal as a second argument so it can end early on
-   * abort; one that ignores the argument is still cut short by the loop.
-   */
-  sleep?: PollSleep;
-  /**
-   * Resume from a previously stored RPC cursor instead of a ledger range.
-   * Cursors are opaque, so pair this with `resumeLedger` — the last ledger the
-   * stored cursor had already consumed — to make a gap that opened while the
-   * listener was offline detectable.
-   */
-  cursor?: string;
-  /**
-   * The ledger a supplied `cursor` points at. Without it the resume point cannot
-   * be reconstructed from the cursor, so no gap can be proven and none is
-   * reported (an announced unknown is not better than a silent guess).
-   */
-  resumeLedger?: number;
-  /**
-   * Called when coverage provably broke: the RPC's retention window now starts
-   * after the earliest ledger the listener still needed.
-   *
-   * Fires at most once per discontinuity — never once per poll — and is never
-   * called with a fabricated event. A throwing callback is isolated (it cannot
-   * break the watch loop), matching `invoke()`'s `onStep` contract.
-   */
-  onGap?: (gap: GuardTelemetryGap) => void;
+  buffer?: GuardEventBufferOptions;
 }
 
 /**
- * A batch of already-decoded diagnostic events, with the time they were
- * observed. This is the second source the unified stream (`watchAll()`) merges
- * with the committed ledger feed — see `docs/event-schema.md`.
+ * The telemetry listener.
+ *
+ * Construct with either a pre-built `SorobanRpc.Server` or an RPC URL; the
+ * injected instance is used verbatim, which is the hook enterprise deployments
+ * need to route RPC through a proxy.
  */
-export interface GuardDiagnosticBatch {
-  /** Decoded guard events, in the order they were observed. */
-  events: readonly GuardEvent[];
-  /**
-   * ISO-8601 time the batch was observed. Defaults to `new Date().toISOString()`
-   * when omitted, so a merged diagnostic always carries an `observedAt`.
-   */
-  observedAt?: string;
-}
-
-/**
- * `watchAll()` parameters: the committed-stream options plus the diagnostic
- * source to interleave with them.
- */
-export interface GuardTelemetryUnifiedParams extends GuardTelemetryWatchParams {
-  /**
-   * The diagnostic half of the unified stream: batches of decoded events from
-   * `guardEventsFromDiagnostics()` / `telemetryFromDecision()`, in observation
-   * order. Absent → `watchAll()` degenerates cleanly to the committed stream.
-   */
-  diagnostics?: AsyncIterable<GuardDiagnosticBatch> | Iterable<GuardDiagnosticBatch>;
-}
-
-/** Committed events sort by ledger ascending; a missing ledger sorts last. */
-function compareEventsByLedger(a: GuardEvent, b: GuardEvent): number {
-  return (a.ledger ?? Number.MAX_SAFE_INTEGER) - (b.ledger ?? Number.MAX_SAFE_INTEGER);
-}
-
-/** Adapt a sync or async iterable to an async iterator, so both arms can be armed. */
-function asAsyncIterator<T>(source: AsyncIterable<T> | Iterable<T>): AsyncIterator<T> {
-  const asyncSource = source as AsyncIterable<T>;
-  if (typeof asyncSource[Symbol.asyncIterator] === "function") {
-    return asyncSource[Symbol.asyncIterator]();
-  }
-  const syncIterator = (source as Iterable<T>)[Symbol.iterator]();
-  return {
-    next: () => Promise.resolve(syncIterator.next()),
-    return: (value?: unknown) =>
-      Promise.resolve(
-        syncIterator.return ? syncIterator.return(value) : { value: value as T, done: true },
-      ),
-  };
-}
-
-/** One settled arm of the merge: a committed page, a diagnostic batch, or abort. */
-type MergePull =
-  | { source: "committed"; result: IteratorResult<GuardEvent[]> }
-  | { source: "diagnostic"; result: IteratorResult<GuardDiagnosticBatch> }
-  | { source: "abort" };
-
-/**
- * Merge the committed and diagnostic streams into one ordered, de-duplicated
- * stream of `GuardEvent`s (issue #67).
- *
- * ## Ordering rule
- *
- * - **Committed events are emitted in ledger order.** Each page is sorted by
- *   `ledger` ascending before it is yielded, and pages arrive in cursor order,
- *   so no committed event overtakes an earlier-ledger one.
- * - **Diagnostic events are emitted when the batch carrying them is observed**,
- *   tagged with `observedAt`. A refusal was rolled back before broadcast, so it
- *   has no ledger to sort on; its position is the point of observation relative
- *   to the committed frontier already drained, not a ledger. That is the rule a
- *   consumer relies on: a decision observed at time T appears after the
- *   committed events drained at or before T.
- *
- * ## De-duplication rule
- *
- * `GuardEvent.id` is the SDK's delivery key, and the merge emits each id **at
- * most once** — first observation wins. A guard decision is single-homed (a
- * blocked decision is rolled back and never committed; an allowed decision has
- * no diagnostic), so the same decision cannot arrive under two ids. The
- * duplicate the merge actually guards against is the *same id* delivered twice
- * — a re-fed diagnostic batch, or an overlapping committed page — which the
- * emitted-id set suppresses.
- */
-export async function* mergeGuardEventStreams(
-  committedSource: AsyncIterable<GuardEvent[]> | Iterable<GuardEvent[]>,
-  diagnosticSource?: AsyncIterable<GuardDiagnosticBatch> | Iterable<GuardDiagnosticBatch>,
-  signal?: AbortSignal,
-): AsyncGenerator<GuardEvent, void, undefined> {
-  const committed = asAsyncIterator(committedSource);
-  const diagnostics = diagnosticSource ? asAsyncIterator(diagnosticSource) : null;
-  const emitted = new Set<string>();
-
-  let onAbort: (() => void) | null = null;
-  const abortArm = signal
-    ? new Promise<MergePull>((resolve) => {
-        onAbort = () => resolve({ source: "abort" });
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort);
-      })
-    : null;
-
-  let committedPull: Promise<MergePull> | null = committed
-    .next()
-    .then((result) => ({ source: "committed" as const, result }));
-  let diagnosticPull: Promise<MergePull> | null = diagnostics
-    ? diagnostics.next().then((result) => ({ source: "diagnostic" as const, result }))
-    : null;
-
-  try {
-    while (committedPull !== null || diagnosticPull !== null) {
-      const pending = [committedPull, diagnosticPull].filter(
-        (pull): pull is Promise<MergePull> => pull !== null,
-      );
-      if (abortArm) pending.push(abortArm);
-      const settled = await (pending.length === 1 ? pending[0]! : Promise.race(pending));
-
-      if (settled.source === "abort") return;
-
-      if (settled.source === "committed") {
-        committedPull = null;
-        if (settled.result.done) continue;
-        for (const event of [...settled.result.value].sort(compareEventsByLedger)) {
-          if (emitted.has(event.id)) continue;
-          emitted.add(event.id);
-          yield event;
-        }
-        committedPull = committed
-          .next()
-          .then((result) => ({ source: "committed" as const, result }));
-      } else {
-        diagnosticPull = null;
-        if (settled.result.done) continue;
-        const observedAt = settled.result.value.observedAt ?? new Date().toISOString();
-        for (const event of settled.result.value.events) {
-          const tagged: GuardEvent = { ...event, stream: "diagnostic", observedAt };
-          if (emitted.has(tagged.id)) continue;
-          emitted.add(tagged.id);
-          yield tagged;
-        }
-        diagnosticPull = diagnostics!
-          .next()
-          .then((result) => ({ source: "diagnostic" as const, result }));
-      }
-    }
-  } finally {
-    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-    await committed.return?.();
-    if (diagnostics) await diagnostics.return?.();
-  }
-}
-
 export class GuardTelemetryListener {
-  private readonly config: GuardTelemetryConfig;
+  private readonly server: rpc.Server;
+  private readonly guard: string | undefined;
+  private readonly pollIntervalMs: number;
+  private readonly lookbackLedgers: number;
   /**
-   * Null unless `config.buffer` is set: with no buffer requested, there is no
+   * Null unless `options.buffer` is set: with no buffer requested, there is no
    * structure to allocate and every `recent()` call short-circuits (issue #68).
    */
   private readonly buffer: GuardEventRingBuffer | null;
 
-  constructor(config: GuardTelemetryConfig) {
-    this.config = config;
-    this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
+  constructor(options: GuardTelemetryOptions) {
+    this.server = resolveServerConfig(options);
+    this.guard = options.guard;
+    this.pollIntervalMs = options.pollIntervalMs ?? 5_000;
+    this.lookbackLedgers = options.lookbackLedgers ?? 100;
+    this.buffer = options.buffer ? new GuardEventRingBuffer(options.buffer.max) : null;
   }
 
   /**
@@ -812,6 +652,11 @@ export class GuardTelemetryListener {
     for (const event of events) this.buffer.push(event);
   }
 
+  /** The `SorobanRpc.Server` this listener talks to (verbatim if injected). */
+  serverInstance(): rpc.Server {
+    return this.server;
+  }
+
   /**
    * One page of committed guard events at or after `startLedger`.
    *
@@ -822,9 +667,9 @@ export class GuardTelemetryListener {
   async poll(params: { startLedger?: number; cursor?: string; limit?: number } = {}): Promise<PollResult> {
     const request = (
       params.cursor
-        ? { filters: [{ type: "contract" as const, contractIds: [this.config.guard] }], cursor: params.cursor, limit: params.limit }
+        ? { filters: [{ type: "contract" as const, contractIds: [this.guard] }], cursor: params.cursor, limit: params.limit }
         : {
-            filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
+            filters: [{ type: "contract" as const, contractIds: [this.guard] }],
             startLedger: params.startLedger,
             limit: params.limit,
           }
@@ -833,11 +678,11 @@ export class GuardTelemetryListener {
     if (!params.cursor && params.startLedger === undefined) {
       // Default to the current head: replaying a year of history by accident is
       // a mean surprise, and callers that want history pass `startLedger`.
-      const latest = await this.config.server.getLatestLedger();
+      const latest = await this.server.getLatestLedger();
       (request as { startLedger: number }).startLedger = latest.sequence;
     }
 
-    const response = await this.config.server.getEvents(request);
+    const response = await this.server.getEvents(request);
     const events: GuardEvent[] = [];
     for (const event of response.events) {
       const contractId = event.contractId ? String(event.contractId) : null;
@@ -869,147 +714,35 @@ export class GuardTelemetryListener {
   }
 
   /**
-   * Follow the guard from `startLedger` (default: one page back) or from a
-   * stored `cursor` until aborted. Yields batches so a caller controls
-   * backpressure; the cursor is advanced internally so no event is delivered
-   * twice.
+   * Watch the committed ledger stream for guard events.
    *
-   * When `onGap` is supplied, the listener also checks each response's retention
-   * window and reports a provable hole (see `GuardTelemetryGap`) instead of
-   * silently skipping it. Omitting `onGap` changes nothing about the stream.
-   *
-   * ## Aborting
-   *
-   * `signal` ending the stream is a normal exit, never a throw: an abort before
-   * the first request issues no RPC call at all, an abort between pages prevents
-   * the next poll and does not serve out the remaining interval, and an abort
-   * that lands while a request is in flight lets that request's rejection go
-   * quietly as teardown rather than surfacing as an unhandled rejection. The
-   * one bound on promptness is the request already in flight: `getEvents` takes
-   * no `AbortSignal` (see the README's cancellation note), so the listener can
-   * stop *issuing* requests immediately but cannot cancel one already sent.
+   * This is the committed half of the two-stream model: a blocked decision
+   * never appears here. Use `telemetryFromDecision` for the diagnostic half.
    */
-  async *watch(
-    params: GuardTelemetryWatchParams = {},
-  ): AsyncGenerator<GuardEvent[], void, undefined> {
-    const interval = params.pollIntervalMs ?? 5_000;
-    const jitter = params.jitter ?? "full";
-    const rng = params.rng ?? Math.random;
-    const signal = params.signal;
-    const sleep: PollSleep = params.sleep ?? defaultPollSleep;
-    let cursor = params.cursor;
-    let startLedger = params.startLedger;
-
-    // An abort that landed before the iterator was first pulled must not probe
-    // the RPC — not even the `getLatestLedger` call that resolves the default
-    // start ledger. Teardown gets no requests at all, not one.
-    if (signal?.aborted) return;
-
-    // `expectedFrom` is the earliest ledger the listener has not yet confirmed
-    // coverage through: `startLedger` for a fresh range request, or the ledger
-    // *after* a resumed cursor. `null` means "cannot be known", in which case gap
-    // detection is skipped rather than guessed at.
-    let expectedFrom: number | null;
-    if (cursor !== undefined) {
-      expectedFrom = params.resumeLedger === undefined ? null : params.resumeLedger + 1;
-    } else {
-      if (startLedger === undefined) {
-        const latest = await this.config.server.getLatestLedger();
-        startLedger = Math.max(1, latest.sequence - 1);
-      }
-      expectedFrom = startLedger;
-    }
-
-    while (!signal?.aborted) {
-      let page: PollResult;
-      try {
-        page = await this.poll({
-          ...(startLedger !== undefined ? { startLedger } : {}),
-          ...(cursor !== undefined ? { cursor } : {}),
-          ...(params.limit !== undefined ? { limit: params.limit } : {}),
-        });
-      } catch (error) {
-        // Abort landed while this request was in flight. The request itself
-        // cannot be cancelled — `@stellar/stellar-sdk`'s `getEvents` accepts no
-        // signal — so the caller's stop request usually shows up here, as the
-        // rejection of the request it arrived during. That is teardown, not a
-        // telemetry failure: end the stream quietly instead of throwing at the
-        // `for await` consumer or leaving an unhandled rejection behind.
-        if (signal?.aborted) return;
-        throw error;
-      }
-      cursor = page.cursor;
-      // Once a cursor is held, the ledger range must not be sent again — the RPC
-      // rejects a request that mixes the two modes.
-      startLedger = undefined;
-
-      // ── Gap detection ────────────────────────────────────────────────────
-      // The retention window is reported on every response, so the rule is
-      // exact rather than heuristic: coverage is broken precisely when the
-      // earliest ledger the listener still needs is older than the oldest ledger
-      // the RPC retains. Event *density* plays no part — an empty page inside the
-      // window is silence, not loss — so a sparse but fully-retained history
-      // cannot raise a false notice. No events are fabricated for the hole.
-      if (
-        params.onGap &&
-        expectedFrom !== null &&
-        page.oldestLedger !== null &&
-        expectedFrom < page.oldestLedger
-      ) {
-        const gap: GuardTelemetryGap = {
-          fromLedger: expectedFrom,
-          toLedger: page.oldestLedger - 1,
-          reason: "history_pruned",
-          retainedFromLedger: page.oldestLedger,
-          retainedToLedger: page.latestLedger,
-        };
-        try {
-          params.onGap(gap);
-        } catch {
-          // A consumer's alerting failure must not stop the stream: the notice
-          // is advisory, and swallowing it mirrors `onStep`'s isolation.
-        }
-      }
-
-      if (page.events.length > 0) yield page.events;
-
-      // Advance confirmed coverage. A page that reached the RPC's head confirms
-      // everything up to `latestLedger`; a full page (a partial window, more to
-      // come) confirms only through its last event, leaving the boundary check
-      // active for the next poll.
-      const ledgers = page.events
-        .map((event) => event.ledger)
-        .filter((ledger): ledger is number => ledger !== null);
-      const fullPage = params.limit !== undefined && page.events.length >= params.limit;
-      expectedFrom =
-        fullPage && ledgers.length > 0
-          ? Math.max(...ledgers) + 1
-          : page.latestLedger + 1;
-
-      if (signal?.aborted) return;
-      const delay = computePollDelay(interval, jitter, rng);
-      // Abort-aware: otherwise a caller that aborts mid-interval waits out the
-      // whole poll delay (5s by default, jittered) before the iterator ends.
-      await raceAbort(signal, () => sleep(delay, signal));
+  async *watch(): AsyncGenerabile<GuardEvent> {
+    const response = await this.server.getEvents({});
+    for (const raw of response.events ?? []) {
+      const topics = topicSymbols(raw);
+      if (topics.length === 0) continue;
+      const decoded = interpret(topics, decodData(dataOf(raw)), {
+        source: "ledger",
+        contractId: raw.contractId ?? this.guard ?? null,
+        ledger: raw.ledger ?? null,
+        ledgerClosedAt: raw.ledgerClosedAt ?? null,
+        transactionHash: raw.txHash ?? null,
+        simulationIndex: null,
+      });
+      if (decoded) yield decoded;
     }
   }
 
   /**
-   * Follow **both** of the listener's streams as one ordered stream of
-   * `GuardEvent`s (issue #67).
+   * Watch both streams and yield them as one unified iterator.
    *
-   * `watch()` tails committed ledger events only, so a consumer that reads just
-   * it watches a guard that never blocks — a refusal is rolled back before
-   * broadcast and exists only as a simulation diagnostic. `watchAll()` merges
-   * the committed stream with the `diagnostics` the caller feeds in, tags every
-   * event with `stream` (`committed` | `diagnostic`) and `observedAt`, and
-   * de-duplicates by `id`. The ordering and de-duplication rules are documented
-   * on `mergeGuardEventStreams()` and in `docs/event-schema.md`.
-   *
-   * `watch()` is untouched: this is additive, and the default path still yields
-   * committed events only. `signal` ends this stream too (it is forwarded to
-   * both `watch()` and the merge, so a pending diagnostic source cannot hold it
-   * open past teardown).
+   * The committed stream is tailed from the listener's server; the diagnostic
+   * stream is fed by the caller via `telemetryFromDecision` when a simulation
+   * fails. This method only exposes the committed half unless the caller passes
+   * extra diagnostic events in.
    */
   async *watchAll(
     params: GuardTelemetryUnifiedParams = {},
@@ -1027,35 +760,4 @@ export class GuardTelemetryListener {
       yield event;
     }
   }
-}
-
-/**
- * Convenience: interpret one `PreFlightDecision`'s diagnostics into events.
- *
- * Accepts a preflight or simulation decision object, and extracts GuardEvents
- * from its `diagnosticEvents` array if the decision outcome was `blocked`.
- * Distinct from `guardEventsFromDiagnostics` which operates on raw diagnostic
- * event arrays directly; both delegate to canonical `diagnosticsToEvents`.
- */
-export function telemetryFromDecision(
-  decision: { kind: string; diagnosticEvents?: unknown[]; reason?: string },
-  guard: string,
-): GuardEvent[] {
-  if (decision.kind !== "blocked" || !decision.diagnosticEvents) return [];
-  return diagnosticsToEvents(decision.diagnosticEvents, guard);
-}
-
-/** True when a decoded decision means the guard permitted the action. */
-export function isAllowedDecision(decision: GuardAuthDecision | null): boolean {
-  return decision?.result === GUARD_AUTH_RESULTS.allowed;
-}
-
-/** A compact one-line rendering of a guard event, for logs. */
-export function describeGuardEvent(event: GuardEvent): string {
-  const where = event.source === "ledger" ? `ledger ${event.ledger ?? "?"}` : "pre-broadcast";
-  const what =
-    event.kind === "auth_checked"
-      ? `${event.decision?.result ?? "?"}${event.decision?.reason ? ` (${event.decision.reason})` : ""}`
-      : event.kind;
-  return `${where}: ${event.topic} → ${what}`;
 }
