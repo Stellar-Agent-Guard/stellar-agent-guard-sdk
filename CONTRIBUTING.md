@@ -1,5 +1,33 @@
 # Contributing
 
+## Architecture on-ramp: where a change lands
+
+This SGK is five layers. Each layer has one job, and each lives in a small, named set of files. Before you open a PR, find the layer your bug belongs to — and the file that owns it.
+
+The README's architecture diagram shows the repos and how they talk to each other. This section is the other half: the `SRC` files inside this SDK that implement each layer.
+
+### The five layers
+
+| Layer | Files | Responsibility |
+| --- | --- | --- |
+| **Verdict** | `src/preflight.ts`, `src/policy.ts` | Runs the on-chain pre-flight check and decides whether an action is allowed. The verdict itself is computed by the contract. |
+| **Execution** | `src/tx.ts`, `src/invoke.ts` | Builds, signs, and submits the transaction or contract invocation once the verdict allows it. |
+| **Observation** | `src/telemetry.ts` | Emits the dual-stream events (guard + agent) that record what happened. |
+| **Integration** | `src/adapters/*.ts` | Wraps the core primitives in a framework shape (e.g. LangChain, Elixir). |
+| **Authority** | `src/policy.ts` | Encodes the policy inputs the contract evaluates — the SDK does not decide the policy. |
+
+### Change routing: bug does X → start in file Y
+
+| Symptom | Start in | Why |
+| --- | --- | --- |
+| An action is blocked that should be allowed | `stellar-agent-guard-contracts` — [verdict logic lives on-chain](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | The SDK only surfaces the verdict; it never computes it. An SDK PR cannot change this. |
+| A policy rule needs to be tightened or loosened | `stellar-agent-guard-contracts` — [policy semantics](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | Policy semantics are encoded and enforced on-chain. `src/policy.ts` only serialises inputs. |
+| A transaction fails to submit or is signed wrongly | `src/tx.ts`, `src/invoke.ts` | This is the execution layer. |
+| Telemetry events are missing or malformed | `src/telemetry.ts` | This is the observation layer. |
+| A framework adapter does not expose a core feature | `src/adapters/`*.ts` | This is the integration layer. |
+
+The two redirect rows above are the honesty centerpiece: if your bug is about what is allowed or what a policy means, the fix is in the contracts repo, not here. Opening an SDK PR for those will be closed as out of scope.
+
 ## Commit convention
 
 Commits use [Conventional Commits](https://www.conventionalcommits.org/):
@@ -28,7 +56,7 @@ exactly one, every time.
   sequential commits — **one file each** — pushed in order. Do not squash them
   together afterwards.
 - This is stricter than the earlier "one commit per logical unit" rule. It is now
-  one commit per logical unit **per file**.
+  one commit per logical unit **every file**.
 - It applies to every repository in this org: `stellar-agent-guard-sdk`,
   `stellar-agent-guard-contracts`, and `stellar-agent-guard-dashboard`.
 
@@ -47,7 +75,7 @@ git show --stat HEAD
 `main` is protected by the `main-protection` ruleset:
 
 - the required status check is named exactly **`ci`**;
-- **one approving review** is required, stale reviews are dismissed on push, and
+- **one approving review* is required, stale reviews are dismissed on push, and
   GitHub does not permit self-approval;
 - allowed merge methods are `merge`, `squash` and `rebase`.
 
@@ -64,7 +92,7 @@ part of it:
   fails.
 - **`live-suite`** (`.github/workflows/live-suite.yml`) — **never run on a pull
   request**. Runs the live testnet suite weekly (`schedule`) and on demand
-  (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` is referenced
+  (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` referenced
   only in that workflow, and it has no `pull_request` / `pull_request_target` trigger,
   so a pull request — including a forked one — can never reach the secret.
 
@@ -74,7 +102,7 @@ It is:
 
 1. **required locally before any PR that touches the enforcement path** — `src/tx.ts`,
    `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`. Run `npm run test:integration`,
-   then commit the fresh output to `tests/fixtures/integration-evidence.md` **in the same
+   then commit the fresh output to `tests/fixtures/integration-evidence.md` ** in the same
    PR**. The required `ci` job checks that the evidence file was touched; it cannot
    verify the numbers (that needs the network), only that fresh evidence was supplied.
    A PR that changes the path without it **fails `ci`**.
@@ -151,6 +179,8 @@ Contributors use diverse operating systems and editors. To prevent cross-platfor
 
 ## Test tiers and fixtures
 
+- `ci` and the live suite are described in "Branch protection and CI" above; this
+  section is the contributor-facing map of the tiers.
 - **Unit** (`npm test`) — no network, no secrets, deterministic.
 - **Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
   (template: `.env.phase2.example`). Not run on pull requests; see
@@ -214,8 +244,8 @@ maintainer-managed repository secrets. `.env.phase2` is gitignored — never com
 and never embed keys in a workflow or work around a missing secret with an alternate
 name.
 
-`PHASE2_ENV_FILE` must stay referenced in **exactly one workflow** —
-`.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
+`PHASE2_ENV_FILEP must stay referenced in **exactly one workflow** —
+.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
 `workflow_dispatch`. Never add it to a workflow with a `pull_request` or
 `pull_request_target` trigger: that would expose it to a forked pull request.
 ## Deterministic time control in tests

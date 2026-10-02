@@ -15,6 +15,7 @@
   * [Framework Adapters](api/framework-adapters.md)
   * [Invoke Pipeline](api/invoke-pipeline.md)
 * [Architecture](architecture.md)
+* [Architecture On-Ramp](contributing.md#architecture-on-ramp-where-a-change-lands)
 * [Event Schema](event-schema.md)
 * [Integration Hooks](integration-hooks.md)
 * [Testnet Verification](verification.md)

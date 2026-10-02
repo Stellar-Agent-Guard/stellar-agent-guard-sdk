@@ -21,6 +21,8 @@
 
 **Non-custodial TypeScript SDK and pre-flight policy interception firewall for AI agents on Stellar.**
 
+> **New contributor?** Start with the [architecture on-ramp in CONTRIBUTING.md](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands) — a five-layer map of this SDK's `src/` files plus a change-routing table that tells you which file (or which sibling repo) a given bug belongs in.
+
 An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
 
 **Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
@@ -720,6 +722,8 @@ const recentWindow = listener.recent({ fromLedger: 4_700_000 });
 
 ## Architecture
 
+> **Where does my change land?** The diagram below shows how the three repositories fit together. For the *inside* of this SDK — the five layers, their `src/` files, and a routing table for "bug does X → start in file Y" (including honest redirects to sibling repos) — see [CONTRIBUTING.md § Architecture on-ramp](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands).
+
 Stellar Agent Guard operates across three dedicated repositories:
 
 ```
@@ -832,6 +836,9 @@ Licensed under [MIT](LICENSE). This is unaudited security tooling that gates rea
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR process, and
 project structure — including the strict one-commit-per-logical-unit rule.
+New contributors should start with the [architecture on-ramp](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands):
+five layers mapped to `src/` files, plus a change-routing table (with honest redirects to
+sibling repos when the fix does not belong here).
 
 Looking for something to work on? The
 [issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
