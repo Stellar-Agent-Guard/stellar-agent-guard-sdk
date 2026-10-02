@@ -179,6 +179,14 @@ export type {
 } from "./preflight.ts";
 
 export {
+  sacTransfer,
+  sacTransferFrom,
+  type SacTransferAmount,
+  type SacTransferFromParams,
+  type SacTransferParams,
+} from "./calls.ts";
+
+export {
   CostPreChecker,
   STROOPS_PER_XLM,
   describeCostDecision,

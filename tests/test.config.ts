@@ -1,8 +1,7 @@
 /**
  * The one test-runner configuration (issue #104).
  *
- * Unit and integration suites used to be two hand-written `node --test`
- * invocations in `package.json`, and the two drifted: the unit glob went through
+ * Unit and integration suites used to be two hand-written `node --test` invocations in `package.json`, and the two drifted: the unit glob went through
  * the `tsx` transform, the integration glob did not. Whether that difference was
  * intentional was not recorded anywhere, so nothing stopped the next edit from
  * making it worse. This file is the single source of truth: one runner (Node's
