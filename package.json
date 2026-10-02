@@ -4,6 +4,7 @@
   "description": "Pre-flight policy interception and guardrails for AI agents on Stellar Soroban smart accounts.",
   "type": "module",
   "license": "MIT",
+  "sideEffects": false,
   "engines": {
     "node": ">=24"
   },
@@ -72,12 +73,15 @@
     "test:all": "node --import tsx scripts/run-tests.ts all",
     "test:coverage": "node --import tsx scripts/run-tests.ts all --coverage",
     "test:exports": "node --import tsx scripts/check-export-map.ts",
+    "check:bundle-size": "node scripts/check-bundle-size.mjs",
     "test:smoke": "node --input-type=module -e \"import('./dist/index.js').then(m => { if (!m.PreFlightInterceptor) throw new Error('Missing PreFlightInterceptor'); console.log('ESM export-map resolution smoke test passed: ' + Object.keys(m).length + ' exports found'); })\"",
     "bench": "node --import tsx benches/check-decode.bench.ts",
     "bench:preflight": "node --import tsx scripts/bench-preflight-encode.ts",
     "inspect": "node scripts/inspect-deployment.ts",
     "deploy:phase2": "node scripts/deploy-phase2-instance.ts",
     "sync:fixtures": "node --import tsx scripts/sync-contract-fixtures.ts",
+    "vendor:refresh": "node --import tsx scripts/vendor-fixtures.ts",
+    "policy-schema:bootstrap": "node --import tsx -e \"import { bootstrapAheadOfUpstream } from './scripts/vendor-fixtures.ts'; import { readFileSync } from 'node:fs'; const r = bootstrapAheadOfUpstream(readFileSync('scripts/policy-schema.bootstrap.json', 'utf8')); console.log('vendored', r.artifact.outputPath, 'sha256:' + r.digest);\"",
     "capture:rpc-fixtures": "node --import tsx scripts/capture-rpc-fixtures.ts",
     "prepublishOnly": "npm run build"
   },
