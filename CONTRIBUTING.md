@@ -125,6 +125,12 @@ scheme has to be renamed later.
 Anything still open when a phase closes gets an issue, not just a note in a pull request or a
 chat log.
 
+## Releasing
+
+Version bumps, tags, npm publish, and the 0.x breaking-change policy are
+documented in [`docs/releasing.md`](docs/releasing.md) — publishing itself is
+maintainer-only (npm 2FA/automation token, outside this repo).
+
 ## Local gates before pushing
 
 ```bash
@@ -132,8 +138,27 @@ npm run typecheck
 npm run lint
 npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
+npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
+node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
 ```
+
+## TypeScript strictness ratchet
+
+`tsconfig.json` enables `strict`, `noUncheckedIndexedAccess` and
+`exactOptionalPropertyTypes`, and they stay on. `noUncheckedIndexedAccess` makes
+an indexed read yield `T | undefined` — the TypeScript-side mirror of the
+contract's `parse_call` bounds checks — and `exactOptionalPropertyTypes` stops an
+omitted optional property and an explicitly-`undefined` one from being
+interchangeable, which is where options-object footguns hide.
+
+Turning a flag off makes `npm run typecheck` *easier* to pass, so typecheck alone
+cannot stop a regression. `npm run check:strict-ratchet` (`scripts/check-strict-ratchet.mjs`)
+is the ratchet: it resolves `tsconfig.json` and `tsconfig.build.json` through
+`extends` and exits non-zero, naming the file and flag, if any of the three is not
+exactly `true`. It runs as a step of the required `ci` check, so a config edit
+that disables one is caught before merge. Fix the call site; do not turn the flag
+back off.
 
 ## Cross-editor standardization
 
