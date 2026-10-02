@@ -47,6 +47,15 @@ jobs:
       - name: typecheck
         run: npm run typecheck
 
+      # The strictness ratchet (issue #137): `strict`,
+      # `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are on, and
+      # this guard fails the required check if any is later flipped off or
+      # dropped from tsconfig.json / tsconfig.build.json (following `extends`).
+      # `typecheck` alone cannot catch that: turning a flag off makes typecheck
+      # *pass* more easily, not fail.
+      - name: strictness ratchet
+        run: npm run check:strict-ratchet
+
       - name: lint
         run: npm run lint
 

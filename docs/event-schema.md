@@ -64,6 +64,62 @@ behaves:
 | `GUARD_REASON_CODES` numbers | contract | **Append-only** | Numeric codes are never renumbered and never reused; removed variants keep their number. |
 | `describeGuardEvent()` text | SDK | **Internal** | A log line, not a format. Parse `GuardEvent`, not this string. |
 | `poll()` `cursor` / `latestLedger` | RPC | **Best-effort** | Pagination is host-defined; treat as opaque. |
+| `serializeEvent()` output | SDK | **Stable** | Canonical JSON line. Fixed key order and normalization policy — see below. |
+
+### Canonical JSON serialization — `serializeEvent()`
+
+`serializeEvent(event: GuardEvent): string` renders one event as a single-line
+canonical JSON string, for shipping to a log sink as JSON-lines:
+
+```ts
+logger.info(serializeEvent(event)); // one line per event
+```
+
+The rendering is deterministic: the same event always serializes byte-for-byte
+the same, so a stored line can be diffed and a golden-string test can pin it
+(`tests/unit/serialize-event.test.ts`). The projection is **explicit**, not an
+object spread, so adding a field to `GuardEvent` cannot silently change the
+serialized shape.
+
+**Key order** — identity, then stream facts, then the decoded decision and data,
+matching the field reference above:
+
+```
+id → kind → topic → source → stream → contractId → ledger → ledgerClosedAt
+   → observedAt → transactionHash → decision → data
+```
+
+and, nested inside `decision` (which is `null` when the event carries no
+decision):
+
+```
+result → reason → source
+```
+
+**Empty/absent fields — the drop-`undefined` policy:**
+- A field whose value is `undefined` is **omitted** from the output. Absence is
+  expressed by the key not being present.
+- `null` is **kept**. It is a real value on the stream-dependent fields
+  (`ledger`, `ledgerClosedAt`, `transactionHash`, `observedAt`, `decision`), not
+  a missing value, so a consumer can still distinguish "no transaction" from "not
+  serialized".
+- Inside an **array**, an `undefined` element is rendered as `null`, so indices
+  stay stable.
+
+**Non-JSON-safe values** are normalized per this repo's policy (the same rules
+`normalizeEventData` + `stableStringify` use for event identity):
+- **`bigint` → decimal string.** `JSON.stringify` throws on a bigint, and the
+  decoded `data.at` u64 arrives as one. Decimal (not the hashing form `…n`) is
+  used so `JSON.parse` reads back an ordinary string.
+- **`Uint8Array`/`Buffer` → `bytes:<hex>`**, the rendering `stableStringify`
+  already uses.
+
+**Round-trip:** `JSON.parse(serializeEvent(event))` is shape-equal to the input
+modulo those normalizations — `bigint` becomes a decimal string, bytes become
+`bytes:<hex>`, and `undefined` keys are absent.
+
+`serializeEvent()` is a format; `describeGuardEvent()` remains **Internal** (a
+log line, not a format), and the two are independent.
 
 ## How it was captured
 
