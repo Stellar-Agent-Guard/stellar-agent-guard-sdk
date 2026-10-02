@@ -114,6 +114,7 @@ export type {
 
 export {
   decodeAuthDecision,
+  decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
 } from "./events.ts";
@@ -302,3 +303,11 @@ export type {
   ElizaGuardOptions,
   ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+export {
+  createVercelAIGuard,
+  wrapToolWithGuard,
+  type VercelAIGuardOptions,
+  type VercelAIToolCallInput,
+  type VercelAIToolLike,
+} from "./adapters/vercelai.ts";
