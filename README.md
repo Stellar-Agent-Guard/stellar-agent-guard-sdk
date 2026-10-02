@@ -1,1 +1,860 @@
-PHA+PGEgaHJlZj0iaHR0cHM6Ly9naXRodWIuY29tL2FpZ2JhZ2JvYmlsYS9zdGVsbGFyLWFnZW50LWd1YXJkLXNkay9hY3Rpb25zL3dvcmtmbG93cy9jaS55bWwiPgo8aW1nIHNyYz0iaHR0cHM6Ly9naXRodWIuY29tL2FpZ2JhZ2JvYmlsYS9zdGVsbGFyLWFnZW50LWd1YXJkLXNkay9hY3Rpb25zL3dvcmtmbG93cy9jaS55bWwvYmFkZ2Uuc3ZnIiBhbHQ9IkNJIj4KPC9hPgo8YSBocmVmPSJMSUNFTlNFIj4KPGltZyBzcmM9Imh0dHBzOi8vaW1nLnNoaWVsZHMuaW8vYmFkZ2UvbGljZW5zZS1NSVQtYmx1ZSIgYWx0PSJMaWNlbnNlOiBNSVQiLz4KPC9hPgo8YSBocmVmPSJodHRwczovL25vZGVqcy5vcmcvIj4KPGltZyBzcmM9Imh0dHBzOi8vaW1nLnNoaWVsZHMuaW8vYmFkZ2Uvbm9kZS0yNCUyQi1ibHVlIiBhbHQ9Ik5vZGUgMjQrIi8+CjwvYT4KPCEtLSBkb2NzOiA8YSBocmVmPSIjIj48aW1nIHNyYz0iaHR0cHM6Ly9pbWcuc2hpZWxkcy5pby9iYWRnZS9kb2NzLUdpdEJvb2stYmx1ZSIgYWx0PSJEb2N1bWVudGF0aW9uIi8+PC9hPiAoYWRkZWQgaW4gUDIgb25jZSBHaXRCb29rIFVSTCBpcyBjb25maXJtZWQgbGl2ZSkgLS0+CjwvcD4KCiMgU3RlbGxhciBBZ2VudCBHdWFyZCDigJQgU0RLCgo8IS0tIPCfk5ogKipbRG9jdW1lbnRhdGlvbl0oLi4uKSoqIChhZGRlZCBpbiBQMiBvbmNlIEdpdEJvb2sgVVJMIGlzIGNvbmZpcm1lZCBsaXZlKSAqKiAtLT4KCioqTm9uLWN1c3RvZGlhbCBUeXBlU2NyaXB0IFNESyBhbmQgcHJlLWZsaWdodCBwb2xpY3kgaW50ZXJjZXB0aW9uIGZpcmV3YWxsIGZvciBBSSBhZ2VudHMgb24gU3RlbGxhci4qKgoKQW4gYXV0b25vbW91cyBhZ2VudCBob2xkaW5nIGEgd2FsbGV0IGhhcyBhIHNpbmdsZSBwb2ludCBvZiBmYWlsdXJlOiBvbmUgcHJvbXB0LWluamVjdGlvbiBvciBvbmUgYnVnZ3kgbG9vcCBjYW4gZHJhaW4gaXQuIFN0ZWxsYXIgQWdlbnQgR3VhcmQgbWFrZXMgdGhhdCBpbXBvc3NpYmxlIG9uLWNoYWluIOKAlCB0aGUgYWdlbnQncyBmdW5kcyBzdGF5IGluIGl0cyBvd24gc21hcnQgYWNjb3VudCwgYW5kICpldmVyeSogdHJhbnNhY3Rpb24gdGhlIGFjY291bnQgbXVzdCBhdXRob3JpemUgaXMgaW50ZXJjZXB0ZWQgYnkgdGhlIGNvbnRyYWN0J3MgIGFuZCByZWplY3RlZCBwcmUtYnJvYWRjYXN0IHVubGVzcyBpdCBzYXRpc2ZpZXMgdGhlIG9wZXJhdG9yJ3MgaW5zdGFsbGVkIHBvbGljeTogcGVyLXRyYW5zYWN0aW9uIHNwZW5kIGNhcHMsIGEgcm9sbGluZy13aW5kb3cgc3BlbmQgbGltaXQsIHJlY2lwaWVudC9hc3NldCBhbGxvd2xpc3RzLCBwcm90b2NvbCBhbGxvd2xpc3RzLCBhIHBhdXNlIHN3aXRjaCwgYW5kIGEgZGVhZC1tYW4gc3dpdGNoLiBUaGlzIFNESyBwcm92aWRlcyB0aGUgaW50ZWdyYXRpb24gbGF5ZXI6IHByZS1mbGlnaHQgc2ltdWxhdGlvbiBpbnRlcmNlcHRpb24sIHplcm8tYnJvYWRjYXN0IGZlZSBlc3RpbWF0aW9uLCBhZ2VudC1hdXRoIHRyYW5zYWN0aW9uIHNpZ25pbmcsIGFuZCBkdWFsLXN0cmVhbSBldmVudCB0ZWxlbWV0cnkgZm9yIEFJIGFnZW50IGZyYW1ld29ya3MgKExhbmdDaGFpbiwgRWxpemFBT1MpLgoKKipTdGF0dXM6IFBoYXNlIDIgY29tcGxldGUg4oCUIGFuZCB0aGUgcGFja2FnZSBpcyBwdWJsaXNoZWQuKiogW2BzdGVsbGFyLWFnZW50LWd1YXJkLXNka0AwLjEuMWBdKGh0dHBzOi8vd3d3Lm5wbWpzLmNvbS9wYWNrYWdlL3N0ZWxsYXItYWdlbnQtZ3VhcmQtc2RrKSBpcyBsaXZlIG9uIHRoZSBucG0gcmVnaXN0cnkgKGBucG0gaW5zdGFsbCBzdGVsbGFyLWFnZW50LWd1YXJkLXNka2ApLiBBbGwgZml2ZSBlbmZvcmNlbWVudCBzY2VuYXJpb3Mgd2VyZSBwcm92ZW4gYWdhaW5zdCBsaXZlIFN0ZWxsYXIgdGVzdG5ldCAocHJvdG9jb2wgMjgpIHdpdGggcmVhbCBjb250cmFjdCBJRHMsIHRyYW5zYWN0aW9uIGhhc2hlcywgYW5kIGRpYWdub3N0aWMgZXZlbnRzIOKAlCBldmlkZW5jZSBpcyByZWNvcmRlZCBpbiBbYHRlc3RzL2ZpeHR1cmVzL2ludGVncmF0aW9uLWV2aWRlbmNlLm1kYF0odGVzdHMvZml4dHVyZXMvaW50ZWdyYXRpb24tZXZpZGVuY2UubWQpLiBQaGFzZSAyIGNvZGUgaXMgbWVyZ2VkIGludG8gYG1haW5gIHdpdGggZ3JlZW4gQ0kgKGBjaWAgc3RhdHVzIGNoZWNrKS4gRm9yIGhpc3RvcmljYWwgcmVsZWFzZSBub3RlcyBhbmQgcHVibGlzaCBwaXBlbGluZSByZWNvbmNpbGlhdGlvbiwgc2VlIFtgZG9jcy9wdWJsaXNoaW5nLWhpc3RvcnkubWRgXShkb2NzL3B1Ymxpc2hpbmctaGlzdG9yeS5tZCkuCgojIyDwn46vIFdoYXQgbWFrZXMgdGhpcyBkaWZmZXJlbnQKCkVuZm9yY2VtZW50IGhhcHBlbnMgKippbnNpZGUgdGhlIGFjY291bnQgaXRzZWxmKiosIHZpYSBTb3JvYmFuJ3MgbmF0aXZlIEN1c3RvbSBBY2NvdW50IEFic3RyYWN0aW9uIOKAlCBub3QgaW4gYSB3cmFwcGVyIGNvbnRyYWN0IGluIGZyb250IG9mIGZ1bmRzLCBhbmQgbm90IGluIGFuIG9mZi1jaGFpbiBzZXJ2aWNlLgoKLSAqKlByZS1mbGlnaHQgc2ltdWxhdGlvbiB3aXRob3V0IGJyb2FkY2FzdCoqOiBUaGUgU0RLIGV2YWx1YXRlcyBndWFyZCBhcHByb3ZhbCBhZ2FpbnN0IFNvcm9iYW4gUlBDIGJlZm9yZSBhIHNpbmdsZSBieXRlIGhpdHMgdGhlIG5ldHdvcmsuIElmIHRoZSB0cmFuc2FjdGlvbiB2aW9sYXRlcyBwb2xpY3ksIGl0IGlzIHJlamVjdGVkIGNsaWVudC1zaWRlIHdpdGggdGhlIGNvbnRyYWN0J3Mgb3duIHJlYXNvbiBjb2RlLCBpbmN1cnJpbmcgemVybyBuZXR3b3JrIGZlZXMuCi0gKipEdWFsLXN0cmVhbSB0ZWxlbWV0cnkqKjogQmxvY2tlZCBkZWNpc2lvbnMgbmV2ZXIgY29tbWl0IHRvIHRoZSBsZWRnZXIgYmVjYXVzZSBTb3JvYmFuIHJvbGxzIGJhY2sgZmFpbGVkIGF1dGhvcml6YXRpb25zLiBBIGxpc3RlbmVyIHRoYXQgb25seSB0YWlscyBjb21taXR0ZWQgbGVkZ2VyIGV2ZW50cyBzZWVzIGEgZ3VhcmQgdGhhdCBhcHBlYXJzIHRvIGFwcHJvdmUgZXZlcnl0aGluZy4gVGhlIFNESyBleHRyYWN0cyBgZXZlbnRfYXV0aF9jaGVja2VkYCBmcm9tIHNpbXVsYXRpb24gZGlhZ25vc3RpY3MgYXMgd2VsbCBhcyBjb21taXR0ZWQgYmxvY2tzLgotICoqSW4tcHJvY2VzcyBzaW11bGF0aW9uIHByaWNpbmcqKjogYENvc3RQcmVDaGVja2VyYCBjb21wdXRlcyBuZXR3b3JrIHJlc291cmNlIGFuZCBpbmNsdXNpb24gZmVlcyBkaXJlY3RseSBmcm9tIHRoZSBlbmZvcmNlZCBzaW11bGF0aW9uLCBhdm9pZGluZyBkZXBlbmRlbmNpZXMgb24gZXh0ZXJuYWwgcHJvZmlsaW5nIHRvb2xzLgotICoqRnJhbWV3b3JrIG1pZGRsZXdhcmUqKjogUGx1Zy1hbmQtcGxheSBtaWRkbGV3YXJlIGZvciBMYW5nQ2hhaW4gYW5kIHZhbGlkYXRvcnMgZm9yIEVsaXphT1MgaGFsdCBleGVjdXRpb24gYmVmb3JlIGV4dGVybmFsIHRvb2wgY2FsbHMgcnVuLgoKPiDimqDvuI8gKipEaXNjbGFpbWVyOioqIFRoaXMgaXMgdW5hdWRpdGVkIHNlY3VyaXR5IHRvb2xpbmcgdGhhdCBnYXRlcyByZWFsIGZ1bmQgYWNjZXNzLiBEbyBub3QgZGVwbG95IHRvIG1haW5uZXQgd2l0aG91dCBhbiBpbmRlcGVuZGVudCBhdWRpdC4gU2VlIHRoZSBjb250cmFjdHMgcmVwbydzIFtTRUNVUklUWS5tZF0oaHR0cHM6Ly9naXRodWIuY29tL2FpZ2JhZ2JvYmlsYS9zdGVsbGFyLWFnZW50LWd1YXJkLWNvbnRyYWN0cy9ibG9iL21haW4vU0VDVVJJVFkubWQpLgoKIyMgV2hhdCBpdCBkb2VzCgotICoqUHJlLWZsaWdodCBwb2xpY3kgaW50ZXJjZXB0aW9uIChgUHJlRmxpZ2h0SW50ZXJjZXB0b3JgKSoqOiBJbnRlcmNlcHRzIGNvbnRyYWN0IGNhbGxzIGJlZm9yZSBicm9hZGNhc3QsIHNpbXVsYXRlcyBhdXRoIGF1dGhvcml6YXRpb24sIGFuZCByZXR1cm5zIGEgZGlzY3JpbWluYXRlZCBgYWRtaXNzaWJsZWAsIGBibG9ja2VkYCwgb3IgYHVuZGV0ZXJtaW5lZGAgdmVyZGljdC4gTmV2ZXIgdGhyb3dzIG9uIHBvbGljeSByZWZ1c2FsOyBhbiBvcHQtaW4gc2hvcnQtbGl2ZWQgY2FjaGUgY2FuIHJlZHVjZSByZXBlYXRlZCBzaW11bGF0aW9uIFJQQyBjYWxscyB3aXRoaW4gdGhlIGN1cnJlbnQgbGVkZ2VyLgotICoqSW4tcHJvY2VzcyBjb3N0IHByZS1jaGVja2luZyAoYENvc3RQcmVDaGVja2VyYCkqKjogUHJpY2VzIHRyYW5zYWN0aW9uIGV4ZWN1dGlvbiBmcm9tIHNpbXVsYXRpb24gcmVzdWx0cywgcmVwb3J0aW5nIHJlc291cmNlIGZlZXMsIGluY2x1c2lvbiBmZWVzLCBhbmQgdG90YWwgZmVlcyBhZ2FpbnN0IGFuIG9wdGlvbmFsIGNlaWxpbmcuCi0gKipBdXRvbm9tb3VzIHRyYW5zYWN0aW9uIGV4ZWN1dGlvbiAoYGludm9rZSgpYCkqKjogRXhlY3V0ZXMgdGhlIGZ1bGwgU29yb2JhbiBsaWZlY3ljbGU6IHByb2JlIHNpbXVsYXRpb24sIGF1dGggc2lnbmluZyBmb3IgY3VzdG9tIGFjY291bnRzLCBlbmZvcmNlZCBzaW11bGF0aW9uLCBhbmQgYnJvYWRjYXN0IHdpdGggYm91bmRlZCBleHBvbmVudGlhbC1iYWNrb2ZmIHJldHJ5IGZvciBzdGFsZSBsZWRnZXIgcmVzb3VyY2UgbGltaXRzIChgc2NlY0V4Y2VlZGVkTGltaXRgKS4KLSAqKkZyYW1ld29yayBhZGFwdGVycyoqOgogIC0gYGNyZWF0ZUxhbmdDaGFpbkd1YXJkTWlkZGxld2FyZWA6IEhhbHRzIHRvb2wgZXhlY3V0aW9uIGlmIHRoZSBpbnRlcmNlcHRvciBibG9ja3MgdGhlIHBsYW5uZWQgYWN0aW9uLgogIC0gYGNyZWF0ZUd1YXJkVmFsaWRhdG9yYDogRWxpemFBT1MgYWN0aW9uIHZhbGlkYXRvciByZXR1cm5pbmcgYm9vbGVhbiB2ZXJkaWN0cyBiZWZvcmUgYWN0aW9ucyBydW4uCi0gKipUZWxlbWV0cnkgbGlzdGVuZXIgKGBHdWFyZFRlbGVtZXRyeUxpc3RlbmVyYCkqKjogVGFpbHMgYm90aCBjb21taXR0ZWQgZXZlbnRzIGFuZCBkaWFnbm9zdGljIHN0cmVhbXMsIGRlY29kaW5nIGNvbnRyYWN0IHRvcGljcyBhbmQgcmVhc29uIGNvZGVzLgoKIyMgUXVpY2sgU3RhcnQKCiMjIyBJbnN0YWxsYXRpb24KCmBgYGJhc2gKbnBtIGluc3RhbGwgc3RlbGxhci1hZ2VudC1ndWFyZC1zZGYKYGBgCgo+ICoqTW9kdWxlIEZvcm1hdCAmIEVudmlyb25tZW50IE5vdGU6KioKPiBgc3RlbGxhci1hZ2VudC1ndWFyZC1zZGtgIGlzIHB1Ymxpc2hlZCBzdHJpY3RseSBhcyAqKnB1cmUgRVNNKiogKGAidHlwZSI6ICJtb2R1bGUiYCkgdGFyZ2V0aW5nICoqTm9kZS5qcyA+PSAyNC4wLjAqKiAoZGVjbGFyZWQgaW4gYGVuZ2luZXNgKS4KPgo+IElmIHlvdXIgcHJvamVjdCBvciB0b29sY2hhaW4gcnVucyBpbiBDb21tb25KUyAoZS5nLiBsZWdhY3kgTGFuZ0NoYWluIHNldHVwcywgSmVzdCBjb25maWdzLCBvciBgLmNqc2Agc2NyaXB0cyksIGxvYWQgdGhlIFNESyB1c2luZyB0aGUgZHluYW1pYyBgYXdhaXQgaW1wb3J0KClgIHBhdHRlcm46Cj4KPgo+IGBgYGphdmFzY3JpcHQKPiAvLyBDb21tb25KUyAoLmNqcyBvciBwYWNrYWdlIHdpdGhvdXQgInR5cGUiOiAibW9kdWxlIikKPiBhc3luYyBmdW5jdGlvbiBydW4oKSB7Cj4gICBjb25zdCB7IFByZUZsaWdodEludGVyY2VwdG9yLCBDb3N0UHJlQ2hlY2tlciB9ID0gYXdhaXQgaW1wb3J0KCJzdGVsbGFyLWFnZW50LWd1YXJkLXNkayIpOwo+ICAgLy8gdXNlIGludGVyY2VwdG9yLCBjb3N0IHByZS1jaGVja2VyLCBldGMuCj4gfQo+IGBgYAoKKk9yIGJ1aWxkIGxvY2FsbHkgZnJvbSBzb3VyY2Ugd2l0aCBOb2RlIDI0KykqCgpgYGBiYXNoCmdpdCBjbG9uZSBodHRwczovL2dpdGh1Yi5jb20vYWlnYmFnYm9iaWxhL3N0ZWxsYXItYWdlbnQtZ3VhcmQtc2RrLmdpdApjZCBzdGVsbGFyLWFnZW50LWd1YXJkLXNkawpucG0gY2kKbnBtIHJ1biBidWlsZApgYGAKCiMjIyBMaXZlIHRlc3RuZXQgc3VpdGUgKGAuZW52LnBoYXNlMmApCgpUaGUgdW5pdCBzdWl0ZSBuZWVkcyBubyBjcmVkZW50aWFscy4gVGhlICoq bGl2ZSoqIHN1aXRlIChgbnBtIHJ1biB0ZXN0OmludGVncmF0aW9uYCkKcnVucyByZWFsIHRyYW5zYWN0aW9ucyBhZ2FpbnN0IHRoZSBkZXBsb3llZCBQaGFzZSAyIHRlc3RuZXQgaW5zdGFuY2UgYW5kIHJlYWRzCml0cyBzaWduaW5nIGtleXMgZnJvbSBhIGdpdGlnbm9yZWQgYC5lbnYucGhhc2UyYC4gU3RhcnQgZnJvbSB0aGUgY29tbWl0dGVkCnRlbXBsYXRlLCB3aGljaCBkb2N1bWVudHMgZXZlcnkga2V5IGFuZCB3aGF0IGVhY2ggb25lIHVubG9ja3Mgd2l0aG91dCBjYXJyeWluZyBhCnZhbHVlOgoKYGBgYmFzaApjcCAuZW52LnBoYXNlMi5leGFtcGxlIC5lbnYucGhhc2UyICAgIyB0aGVuIGZpbGwgaW4gdGhlIHZhbHVlcwpucG0gcnVuIGRlcGxveTpwaGFzZTIgICAgICAgICAgICAgICAgIyBvciBwcm92aXNpb24gYSBmcmVzaCBpbnN0YW5jZSBhbmQgd3JpdGUgaXQgZm9yIHlvdQpucG0gcnVuIHRlc3Q6aW50ZWdyYXRpb24KYGBgCgpgdGVzdHMvaW50ZWdyYXRpb24vaGFybmVzcy50c2AgdmFsaWRhdGVzIHRoZSBmaWxlIHVwIGZyb250LiBXaGVuIGl0IGlzCmluY29tcGxldGUgaXQgZmFpbHMgb25jZSB3aXRoICoqZXZlcnkqKiBtaXNzaW5nIGtleSBuYW1lZCDigJQgbm90IG9uZSBrZXkgcGVyIHJ1biwKd2hpY2ggd291bGQgbWFrZSBzZXR1cCBhIGd1ZXNzaW5nIGdhbWUgb2YgZml2ZSByb3VuZCB0cmlwczoKCmBgYAouZW52LnBoYXNlMiBpcyBpbmNvbXBsZXRlOiAzIHJlcXVpcmVkIGtleShzKSBhcmUgbWlzc2luZzoKICAtIFBIQVNFMl9BRE1JTl9TRUNSRVQKICAtIFBIQVNFMl9SRUNJUElFTlRfU0VDUkVUCiAgLSBQSEFTRTJfT1VUU0lERVJfU0VDUkVUCgpDb3B5IHRoZSBkb2N1bWVudGVkIHRlbXBsYXRlIGFuZCBmaWxsIGl0IGluOiAgY3AgLmVudi5waGFzZTIuZXhhbXBsZSAuZW52LnBoYXNlMgpPciBwcm92aXNpb24gYSBmcmVzaCBpbnN0YW5jZSAod3JpdGVzIHRoZSBmaWxlLCBpbmNsdWRpbmcgUEhBU0UyX0lTU1VFUl9TRUNSRVQpOiAgbnBtIHJ1biBkZXBsb3k6cGhhc2UyCmBgYAoKVGhlIHJlcXVpcmVkIGtleXMgYXJlIGBQSEFTRTJfR1VBUkRgLCBgUEhBU0UyX1RPS0VOYCwgYFBIQVNFMl9BRE1JTl9TRUNSRVRgLApgUEhBU0UyX0FHRU5UX1NFQ1JFVCRgLCBgUEhBU0UyX1JFQ0lQSUVOVF9TRUNSRVRgIGFuZApgUEhBU0UyX09VVFNJREVSX1NFQ1JFVCRgLCBwbHVzIG9wdGlvbmFsbHkgYFBIQVNFMl9SUENfVVJMYDsKYFBIQVNFMl9JU1NVRVJfU0VDUkVUYCBpcyBhZGRpdGlvbmFsbHkgcmVxdWlyZWQgdG8gKHJlKWRlcGxveS4gYC5lbnYucGhhc2UyYCBpcgpnaXRpZ25vcmVkIChhcyBhcmUgYWxsIGAuZW52LipgIHZhbHVlcyBmaWxlcyDigJQgb25seSBgKi5leGFtcGxlYCB0ZW1wbGF0ZXMgYXJlCmNvbW1pdHRhYmxlKTsgbmV2ZXIgY29tbWl0IHRoZSBmaWxsZWQtaW4gY29weS4KCiMjIyBQcmUtZmxpZ2h0IFBvbGljeSBJbnRlcmNlcHRpb24KCmBgYHRzCmltcG9ydCB7IEtleXBhaXIsIHJwYyB9IGZyb20gIkBzdGVsbGFyL3N0ZWxsYXItc2RrIjsKaW1wb3J0IHsgUHJlRmxpZ2h0SW50ZXJjZXB0b3IgfSBmcm9tICJzdGVsbGFyLWFnZW50LWd1YXJkLXNkayI7Cgpjb25zdCBpbnRlcmNlcHRvciA9IG5ldyBQcmVGbGlnaHRJbnRlcmNlcHRvcih7CiAgc2VydmVyOiBuZXcgcnBjLlNlcnZlcigiaHR0cHM6Ly9zb3JvYmFuLXRlc3RuZXQuc3RlbGxhci5vcmciKSwKICBuZXR3b3JrUGFzc3BocmFzZTogIlRlc3QgU0RGIE5ldHdvcmsgOyBTZXB0ZW1iZXIgMjAxNSIsCiAgZ3VhcmQ6ICJDQVBBREdFSzQ1N1JIS040UllWVU1ESlRGSERTRzdSNUhSRVFRTktMWUs3TUZLQzVXRkVOUFA0NCIsCiAgYWdlbnQ6IEtleXBhaXIuZnJvbVNlY3JldChwcm9jZXNzLmVudi5BR0VOVF9TRUNSRVQhKSwKICBzb3VyY2U6IEtleXBhaXIuZnJvbVNlY3JldChwcm9jZXNzLmVudi5TT1VSQ0VfU0VDUkVUIUUpLAp9KTsKCmNvbnN0IGRlY2lzaW9uID0gYXdhaXQgaW50ZXJjZXB0b3IuY2hlY2soewogIGNvbnRyYWN0OiAiQ0RDWURHQkdTNUFaNUJaUzZYWTJTSzJQSkhTT0VHVE4zTjRJTkNLMzRLRjZHVTLCR0M3WjZNQiIsCiAgZm46ICJ0cmFuc2ZlciIsCiAgYXJnczogWy8qIGZyb20sIHRvLCBhbW91bnQgKi9dLAp9KTsKCmlmIChkZWNpc2lvbi5raW5kID09PSAiYWRtaXNzaWJsZSIpIHsKICBjb25zb2xlLmxvZygiQWxsb3dlZCEgUmVzb3VyY2UgZmVlOiIsIGRlY2lzaW9uLmVzdGltYXRlZFJlc291cmNlRmVlKTsKfSBlbHNlIGlmIChkZWNpc2lvbi5raW5kID09PSAiYmxvY2tlZCIpIHsKICBjb25zb2xlLmxvZygiQmxvY2tlZCBieSBndWFyZDoiLCBkZWNpc2lvbi5yZWFzb24pOwp9IGVsc2UgewogIGNvbnNvbGUubG9nKCJVbmRldGVybWluZWQgKGZhaWxzIGNsb3NlZCkiKTsKfQpgYGAKCiMjIyMgVGhyb3cgdnMuIFZlcmRpY3QgQ29udHJhY3QKClByZS1mbGlnaHQgcG9saWN5IGludGVyY2VwdGlvbiBtYWtlcyBhbiBpbnRlbnRpb25hbCBhc3ltbWV0cmljIGRpc3RpbmN0aW9uIGJldHdlZW4gcHJvZ3JhbW1lciBlcnJvcnMgYW5kIHBvbGljeSBvdXRjb21lczoKCi0gKipJbnB1dCB2YWxpZGF0aW9uIHRocm93cyBgSW52YWxpZElucHV0RXJyb3JgIChzeW5jaHJvbm91cykqKjogSWYgYSBgQ29udHJhY3RDYWxsYCBpcyBtYWxmb3JtZWQgKGludmFsaWQgU3RyS2V5IGNvbnRyYWN0IElELCBtaXNzaW5nIG9yIG5vbi1gc3ltYm9sYC1zaGFwZWQgZnVuY3Rpb24gbmFtZSwgaW52YWxpZCBhcmd1bWVudHMgYXJyYXksIG9yIG5vbi1gaTEyOGAgYW1vdW50KSwgYGludGVyY2VwdG9yLmNoZWNrKClgIHRocm93cyBgSW52YWxpZElucHV0RXJyb3JgIHN5bmNocm9ub3VzbHkgd2l0aG91dCBkaXNwYXRjaGluZyBhbnkgbmV0d29yayBSUEMgcmVxdWVzdC4KLSAqKlBvbGljeSByZWZ1c2FscyByZXR1cm4gYSB2ZXJkaWN0IChga2luZDogImJsb2NrZWQiYCkqKjogV2hlbiBpbnB1dCBpcyB2YWxpZCBidXQgcG9saWN5IGRpc2FsbG93cyB0aGUgYWN0aW9uIChzcGVuZCBjYXAgZXhjZWVkZWQsIHJlY2lwaWVudCBub3QgYWxsb3dsaXN0ZWQsIGFjY291bnQgcGF1c2VkKSwgdGhpcyByZXByZXNlbnRzIGV4cGVjdGVkIGd1YXJkcmFpbCBvcGVyYXRpb24uIGBjaGVjaygpYCByZXR1cm5zIGB7IGFsbG93ZWQ6IGZhbHNlLCBraW5kOiAiYmxvY2tlZCIsIHJlYXNvbiwgZXhwbGFuYXRpb24sIC4uLiB9YCBpbnN0ZWFkIG9mIHRocm93aW5nLgotIENhbGxlcnMgcmVxdWlyaW5nIGEgdGhyb3ctb24tcmVmdXNhbCBmbG93IGNhbiB1c2UgYGludGVyY2VwdG9yLmFzc2VydEFsbG93ZWQoY2FsbClgLCB3aGljaCB0aHJvd3MgYEd1YXJkQmxvY2tlZEVycm9yYCBvbiBgYmxvY2tlZGAgYW5kIGBQcmVGbGlnaHRVbmRldGVybWluZWRFcnJvcmAgb24gYHVuZGV0ZXJtaW5lZGAuCgojIyMgT3B0aW9uYWwgc2ltdWxhdGlvbi1yZXN1bHQgY2FjaGUKCmBQcmVGbGlnaHRJbnRlcmNlcHRvcmAgYWx3YXlzIHBlcmZvcm1zIGEgZnJlc2ggc2ltdWxhdGlvbiBieSBkZWZhdWx0LiBGb3IgYWdlbnQKbG9vcHMgdGhhdCByZXBlYXRlZGx5IGNoZWNrIHRoZSBzYW1lIGNhbGwsIGNhY2hpbmcgY2FuIGJlIGVuYWJsZWQgZXhwbGljaXRseToKCmBgYHRzCmNvbnN0IGludGVyY2VwdG9yID0gbmV3IFByZUZsaWdodEludGVyY2VwdG9yKHsKICBzZXJ2ZXIsCiAgbmV0d29ya1Bhc3NwaHJhc2UsCiAgZ3VhcmQsCiAgYWdlbnQsCiAgc291cmNlLAogIGNhY2hlOiB7CiAgICB0dGxMZWRnZXJzOiAxLCAvLyBtYXhpbXVtIG9uZSBhcHByb3hpbWF0ZSBmaXZlLXNlY29uZCBsZWRnZXIgd2luZG93CiAgICBwb2xpY3lSZXZpc2lvbjogKCkgPT4gcmVhZFBvbGljeVJldmlzaW9uKCksCiAgfSwKfSk7Cgpjb25zdCBmaXJzdCA9IGF3YWl0IGludGVyY2VwdG9yLmNoZWNrKGNhbGwpOwpjb25zdCBzZWNvbmQgPSBhd2FpdCBpbnRlcmNlcHRvci5jaGVjayhjYWxsKTsgLy8gbWF5IHJldXNlIHRoZSBmaXJzdCB2ZXJkaWN0CmludGVyY2VwdG9yLmludmFsaWRhdGUoKTsgICAgICAgICAgICAgICAgICAgICAgIC8vIGNsZWFyIGFsbCBlbnRyaWVzCmludGVyY2VwdG9yLmludmFsaWRhdGUoY2FsbCk7ICAgICAgICAgICAgICAgICAgICAgIC8vIGNsZWFyIG9uZSBjYWxsJ3MgZW50cmllcwpgYGAKClRoZSBjYWNoZSBpcyAqKmRpc2FibGVkIHVubGVzcyBgY2FjaGVgIGlzIHN1cHBsaWVkKiouIEl0IHN0b3JlcyBvbmx5IGFjdHVhbApgYWRtaXNzaWJsZWAgYW5kIGBibG9ja2VkYCBkZWNpc2lvbnM7IHRyYW5zaWVudCBgdW5kZXRlcm1pbmVkYCByZXN1bHRzIGFyZSBub3QKY2FjaGVkLiBBIGNhY2hlIGtleSBpbmNsdWRlcyB0aGUgY29udHJhY3QsIGZ1bmN0aW9uLCBjYW5vbmljYWwgWERSIGFyZ3VtZW50CmZpbmdlcnByaW50LCBpbnRlcmNlcHRvciBpZGVudGl0eSwgYW5kIHRoZSBzdXBwbGllZCBwb2xpY3kgcmV2aXNpb24uIFRoZSBjYWNoZQppcyBkaXNjYXJkZWQgd2hlbiB0aGUgb2JzZXJ2ZWQgbGVkZ2VyIGFkdmFuY2VzLCB3aGVuIHRoZSBUVEwgZXhwaXJlcywgb3Igd2hlbgppbnZhbGlkYXRlKClgIGlzIGNhbGxlZC4gYHR0bE1zYCBhbmQgYHR0bExlZGdlcnNgIGFyZSBib3RoIGNhcHBlZCBhdCBvbmUKYXBwcm94aW1hdGUgbGVkZ2VyLWNsb3NlIGludGVydmFsOyBpZiBib3RoIGFyZSBzdXBwbGllZCwgYHR0bE1zYCB0YWtlcwpwcmVjZWRlbmNlLgoKQSAqKmNhY2hlZCB2ZXJkaWN0IGNhbiBiZSBzdGFsZXIgdGhhbiBvbmUgYWRtaXR0ZWQgdHJhbnNmZXIqKi4gVGhlIHJvbGxpbmcgc3BlbmQKd2luZG93IGNhbiBjaGFuZ2UgYWZ0ZXIgYSBzaW11bGF0aW9uIHdoaWxlIGEgY2FjaGVkIHJlc3VsdCBpcyBzdGlsbCBiZWluZwpyZXVzZWQsIHNvIGNhbGxlcnMgdGhhdCBjYW5ub3QgdG9sZXJhdGUgdGhhdCB0cmFkZW9mZiBzaG91bGQgbGVhdmUgY2FjaGluZyBvZmYsCnVzZSBhIHNob3J0ZXIgVFRMLCBwcm92aWRlIGEgcG9saWN5IHJldmlzaW9uLCBhbmQgaW52YWxpZGF0ZSBhZnRlciBwb2xpY3kgb3IKYWNjb3VudC1zdGF0ZSBjaGFuZ2VzLgoKIyMjIFBpcGVsaW5lIHN0ZXAgb2JzZXJ2YWJpbGl0eSAoYG9uU3RlcGApCgpgYGludm9rZSgpYCBhY2NlcHRzIGFuICoq b3B0aW9uYWwqKiBgb25TdGVwYCBjYWxsYmFjay4gV2hlbiBvbWl0dGVkLCBiZWhhdmlvciBpcwpleGFjdGx5IGFzIGJlZm9yZSDigJQgdGhlIGhvb2sgaXMgcHVyZSBvYnNlcnZhYmlsaXR5IGFuZCB0aGUgU0RLIGl0c2VsZiBuZXZlcgpsb2dzIGFueXRoaW5nIChhbmQgdGFrZXMgbm8gbG9nZ2VyIGRlcGVuZGVuY3k7IHdoYXQgeW91IGRvIHdpdGggdGhlIGV2ZW50cyBpcwp1cCB0byB5b3UpOgoKYGBgdHMKY29uc3Qgb3V0Y29tZSA9IGF3YWl0IGludm9rZSh7CiAgc2VydmVyLAogIHNvdXJjZSwKICBjYWxsLAogIG5ldHdvcmtQYXNzcGhyYXNlLAogIGd1YXJkQXV0aCwKICBvblN0ZXAoc3RlcCkgewogICAgLy8gY29uc3VtZXIgZGVjaWRlcyBob3cgdG8gZGlzcGxheS9sb2cgdGhlIGV2ZW50CiAgICBjb25zb2xlLmxvZyhgWyR7c3RlcC5hdHRlbXB0fV0gJHtzdGVwLm5hbWV9ICR7c3RlcC5zdGF0dXN9IGluICR7c3RlcC5kdXJhdGlvbk1zfW1zYCk7CiAgfSwKfSk7CmBgYAoKRXZlbnQgc2hhcGUgKGBJbnZva2VTdGVwRXZlbnRgKToKCnwgRmllbGQgfCBNZWFuaW5nIHwKfC0tLXwtLS18CnwgYG5hbWVgIHwgUGlwZWxpbmUgc3RhZ2U6IGBwcm9iZWAg4oaSIGBzaWduYCDihpIgYHNpbXVsYXRlYCDihpIgYGJyb2FkY2FzdGAgKHRoZSBzaGFyZWQgYFRSQUNFX1NURVBfTkFNRVNgIHZvY2FidWxhcnkpLiB8CnwgYHN0YXR1c2AgfCBgc3RhcnRgIChlbWl0dGVkIGltbWVkaWF0ZWx5IGJlZm9yZSB0aGUgc3RhZ2UgcnVucyksIHRoZW4gYG9rYCBvciBgZmFpbGAuIHwKfCBgZHVyYXRpb25Nc2AgfCBFbGFwc2VkIHRpbWUgb2YgKip0aGlzIHN0YWdlIGF0dGVtcHQqKiBpbiBtaWxsaXNlY29uZHMg4oCUIG5vdCB0aGUgdG90YWwgYGludm9rZSgpYCBkdXJhdGlvbi4gQWx3YXlzIGAwYCBvbiBgc3RhcnRgLiB8CnwgYGF0dGVtcHRgIHwgMC1iYXNlZCByZXRyeSBpbmRleC4gYDBgIGZvciB0aGUgZmlyc3QgcGFzcywgYDFgIG9uIHRoZSBidWlsdC1pbiBzdGFsZS1sZWRnZXIgcmUtcnVuLiBBbHdheXMgcHJlc2VudC4gfAoKPiBUaGUgY29tcGxldGUgYEludm9rZVN0ZXBFdmVudGAgdHlwZSBpcyBleHBvcnRlZCBmcm9tIHRoZSBwYWNrYWdlIHJvb3QgZm9yIGNvbnN1bWVycyB3aG8gd2FudCB0byB0eXBlIHRoZWlyIGhhbmRsZXJzIGV4cGxpY2l0bHkuCgojIyBUZWxlbWV0cnkgbGlzdGVuZXIgKGBHdWFyZFRlbGVtZXRyeUxpc3RlbmVyYCkKCmBHYXJkVGVsZW1ldHJ5TGlzdGVuZXJgIHRhaWxzIGJvdGggY29tbWl0dGVkIGxlZGdlciBldmVudHMgYW5kIHNpbXVsYXRpb24KZGlhZ25vc3RpYyBzdHJlYW1zLiBUaGUgY29uc3VtZXIgZHJpdmVzIGl0IHdpdGggYGdldEV2ZW50cygpYCwgYW4gYXN5bmMgaXRlcmF0b3IKdGhhdCB5aWVsZHMgZGVjb2RlZCBndWFyZCBldmVudHMuCgojIyMgTWlkLXdhdGNoIGZhaWx1cmUgbW9kZXMgKGBvblN0cmVhbUVycm9yYCkKCldoZW4gdGhlIHVuZGVybHlpbmcgUlBDIGJlZ2lucyB0aHJvd2luZyAqZHVyaW5nKiBhIHdhdGNoIOKAlCBmb3IgZXhhbXBsZSwgdGhlClJQQyBlbmRwb2ludCBnb2VzIGRvd24gZm9yIHRlbiBtaW51dGVzIOKAlCB0aGUgbGlzdGVuZXIgZG9lcyAqKm5vdCoqIGRpZSBzaWxlbnRseS4KVGhlIGRlZmF1bHQgaXMgYm91bmRlZCByZXRyeSB3aXRoIGV4cG9uZW50aWFsIGJhY2tvZmYsIHRoZW4gYSB2aXNpYmxlIHRlcm1pbmFsCmZhaWx1cmUuCgp8IEZhaWx1cmUgbW9kZSB8IERlZmF1bHQgYmVoYXZpb3IgfCBgZ2V0RXZlbnRzKClgIGVuZHMgfCBgb25TdHJlYW1FcnJvcmAgfAp8LS0tfC0tLXwtLS18LS0tfAp8IFRyYW5zaWVudCBSRUMgZXJyb3IgfCBSZXRyaWVkIHdpdGggZXhwb25lbnRpYWwgYmFja29mZiB1cCB0byBgTWF4U3RyZWFtUmV0cmllc2AgKGRlZmF1bHQgYDVgKSBhdHRlbXB0cyB8IE5vcm1hbGx5LCBvbmNlIHRoZSBzdHJlYW0gcmVjb3ZlcnMgfCBOb3QgaW52b2tlZCB8CnwgUGVyc2lzdGVudCBSRUMgZXJyb3IgfCBSZXRyaWVzIGV4aGF1c3RlZDsgYG9uU3RyZWFtRXJyb3IoZXJyKWAgaXMgY2FsbGVkIG9uY2Ugd2l0aCB0aGUgZmluYWwgZXJyb3IgfCBJdGVyYXRvciBjb21wbGV0ZXMgbm9ybWFsbHkgKG5vIHRocm93LCBubyB1bmhhbmRsZWQgcmVqZWN0aW9uKSB8IEludm9rZWQgb25jZSB3aXRoIHRoZSB0ZXJtaW5hbCBlcnJvciB8CnwgQ29uc3VtZXIgYWJvcnQgKGBBYm9ydFNpZ25hbGApIHwgSW1tZWRpYXRlIGhhbHQ7IG5vIHJldHJ5IHwgSXRlcmF0b3IgY29tcGxldGVzIG5vcm1hbGx5IHwgTm90IGludm9rZWQgfAoKIyMjIyBEZWZhdWx0IGJlaGF2aW9yCgpCeSBkZWZhdWx0LCBgbGlzdGVuZXIuZ2V0RXZlbnRzKClgIHJldHJpZXMgYSBmYWlsaW5nIFJQQyBjYWxsIHdpdGgKZXhwb25lbnRpYWwgYmFja29mZi4gVGhlIG51bWJlciBvZiBhdHRlbXB0cyBpcyBgTWF4U3RyZWFtUmV0cmllc2AgKGRlZmF1bHQgYDVgKSwKY29uZmlndXJhYmxlIHZpYSB0aGUgbGlzdGVuZXIgb3B0aW9ucy4gT25jZSByZXRyaWVzIGFyZSBleGhhdXN0ZWQsIHRoZSBsaXN0ZW5lcgoKMS4gY2FsbHMgYG9uU3RyZWFtRXJyb3IoZXJyKWAgZXhhY3RseSBvbmNlIHdpdGggdGhlIHRlcm1pbmFsIGVycm9yLCB0aGVuCjIuIGxldHMgdGhlIGBmb3IgYXdhaXQuLi5vZmAgbG9vcCBjb21wbGV0ZSBub3JtYWxseS4KCk5vIGVycm9yIGlzIHRocm93biBvdXQgb2YgdGhlIGl0ZXJhdG9yLCBzbyB0aGVyZSBpcyBubyB1bmhhbmRsZWQgcmVqZWN0aW9uIGFuZCBubwpzaWxlbnQgc3RyZWFtIGRlYXRoLgoKIyMjIyBQcm9wYWdhdGlvbiBmcm9tIGBvblN0cmVhbUVycm9yYAoKSWYgeW91ciBgb25TdHJlYW1FcnJvcmAgY2FsbGJhY2sgdGhyb3dzLCB0aGUgZXJyb3IgaXMgKipwcm9wYWdhdGVkKiogb3V0IG9mIHRoZQpgZm9yIGF3YWl0Li4ub2ZgIGxvb3AuIFRoaXMgaXMgaW50ZW50aW9uYWw6IGEgY29uc3VtZXIgd2hvIHBhc3NlcyBhIHRocm93aW5nCmNhbGxiYWNrIGhhcyBleHBsaWNpdGx5IGFza2VkIHRvIGhhdmUgdGhlIGZhaWx1cmUgc3VyZmFjZSBhcyBhbiBleGNlcHRpb24uIFRoZQpjYWxsYmFjayBpcyBpbnZva2VkIGF0IG1vc3Qgb25jZSBwZXIgd2F0Y2gsIGFuZCB0aGUgaXRlcmF0b3Igd2lsbCBub3QgY29udGludWUKYWZ0ZXIgaXQgdGhyb3dzLgoKIyMjIyBPYnNlcnZhYmlsaXR5IHdpdGhvdXQgYSBjYWxsYmFjawoKSWYgeW91IGRvIG5vdCBjb25maWd1cmUgYG9uU3RyZWFtRXJyb3JgLCB0aGUgcmV0cnktdGhlbi1lbmQgYmVoYXZpb3Igc3RpbGwKb2NjdXJzLiBUaGUgdGVybWluYWwgZXJyb3IgaXMgcmV0cmlldmFibGUgYWZ0ZXIgdGhlIGxvb3AgZW5kcyB2aWEgdGhlCmxpc3RlbmVyJ3MgYGxhc3RTdHJlYW1FcnJvcmAgZ2V0dGVyOgoKYGBgdHMKY29uc3QgbGlzdGVuZXIgPSBuZXcgR3VhcmRUZWxlbWV0cnlMaXN0ZW5lcih7IHNlcnZlciwgZ3VhcmQsIG5ldHdvcmtQYXNzcGhyYXNlIH0pOwoKZm9yIGF3YWl0IChjb25zdCBldmVudCBvZiBsaXN0ZW5lci5nZXRFdmVudHMoKSkgewogIGNvbnN1bWVFdmVudChldmVudCk7Cn0KCmlmIChsaXN0ZW5lci5sYXN0U3RyZWFtRXJyb3IpIHsKICAvLyB0aGUgc3RyZWFtIGRpZWQgYWZ0ZXIgZXhoYXVzdGluZyByZXRyaWVzIOKAlCBzdXJmYWNlIGl0IGFzIGFuIGluY2lkZW50CiAgcmVwb3J0SW5jaWRlbnQobGlzdGVuZXIubGFzdFN0cmVhbUVycm9yKTsKfQpgYGAKCiMjIyMjIEZhaWwtdmlzaWJsZSB2cy4gZmFpbC1zaWxlbnQKCmBvblN0cmVhbUVycm9yYCBleGlzdHMgc28gdGhhdCBhIG1pZC13YXRjaCBmYWlsdXJlIGlzIGFuIG9ic2VydmFibGUgZXZlbnQsIG5vdCBhCnNpbGVudCBpdGVyYXRvciBlbmQuIENvbnN1bWVycyB0aGF0IHdhbnQgaGFsdC1vbi1maXJzdC1lcnJvciBwYXNzIGEgY2FsbGJhY2sKdGhhdCB0aHJvd3M7IGNvbnN1bWVycyB0aGF0IHdhbnQgdG8gcmVjb3JkIGFuZCBjb250aW51ZSBwYXNzIGEgY2FsbGJhY2sgdGhhdApsb2dzIGFuZCByZXR1cm5zLgoKIyMjIEV4YW1wbGUKCmBgYHRzCmltcG9ydCB7IEd1YXJkVGVsZW1ldHJ5TGlzdGVuZXIgfSBmcm9tICJzdGVsbGFyLWFnZW50LWd1YXJkLXNkayI7Cgpjb25zdCBsaXN0ZW5lciA9IG5ldyBHdWFyZFRlbGVtZXRyeUxpc3RlbmVyKHsKICBzZXJ2ZXIsCiAgZ3VhcmQsCiAgbmV0d29ya1Bhc3NwaHJhc2UsCiAgb25TdHJlYW1FcnJvcihlcnIpIHsKICAgIC8vIEZhaWwtdmlzaWJsZTogdGhpcyBpcyB0aGUgdGVybWluYWwgZmFpbHVyZSBhZnRlciBib3VuZGVkIHJldHJpZXMuCiAgICAvLyBUaHJvdyBoZXJlIGlmIHlvdSB3YW50IHRoZSBmYWlsdXJlIHRvIHByb3BhZ2F0ZSBvdXQgb2YgdGhlIGxvb3AuCiAgICBjb25zb2xlLmVycm9yKCJ0ZWxlbWV0cnkgc3RyZWFtIGZhaWxlZDoiLCBlcnIpOwoKICAgIC8vIE9yLCB0byBoYWx0IG9uIGZpcnN0IGVycm9yOgovLyAgICB0aHJvdyBlcnI7CiAgfSwKfSk7Cgpmb3IgYXdhaXQgKGNvbnN0IGV2ZW50IG9mIGxpc3RlbmVyLmdldEV2ZW50cygpKSB7CiAgY29uc29sZS5sb2coZXZlbnQpOwp9Ci8vIElmIHRoZSBzdHJlYW0gZGllZCwgbGlzdGVuZXIubGFzdFN0cmVhbUVycm9yIGlzIG5vdyBzZXQuCmBgYAoKIyMjIEFib3J0aW5nIGEgd2F0Y2gKCmBsaXN0ZW5lci5nZXRFdmVudHMoKWAgYWNjZXB0cyBhbiBvcHRpb25hbCBgQWJvcnRTaWduYWxgLiBBYm9ydGluZyB0ZXJtaW5hdGVzIHRoZQppdGVyYXRvciBpbW1lZGlhdGVseSwgd2l0aCBubyByZXRyeSBhbmQgbm8gYG9uU3RyZWFtRXJyb3JgIGludm9jYXRpb24uCgpgYGB0cwpmb3IgYXdhaXQgKGNvbnN0IGV2ZW50IG9mIGxpc3RlbmVyLmdldEV2ZW50cyh7IHNpZ25hbCB9KSkgewogIGNvbnN1bWVFdmVudChldmVudCk7Cn0KYGBgCgojIyBMaWNlbnNlCgpNSVQg4oCUIHNlZSBbTElDRU5TRV0oTElDRU5TRSkuCg==
+<!-- npm keywords: stellar, soroban, ai-agents, guardrails, stellar-sdk, policy, firewall, langchain, elizaos, non-custodial, smart-account, custom-account-abstraction, spend-limits, allowlist, telemetry, typescript, web3, blockchain-security -->
+<p align="center">
+<img src="Gemini_Generated_Image_mvimg2mvimg2mvim.jpeg" alt="Stellar Agent Guard" width="700"/>
+</p>
+<p align="center">
+<a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml">
+<img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+</a>
+<a href="LICENSE">
+<img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"/>
+</a>
+<a href="https://nodejs.org/">
+<img src="https://img.shields.io/badge/node-24%2B-blue" alt="Node 24+"/>
+</a>
+<!-- docs: <a href="#"><img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/></a> (added in P2 once GitBook URL is confirmed live) -->
+</p>
+
+# Stellar Agent Guard — SDK
+
+<!-- 📚 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) -->
+
+**Non-custodial TypeScript SDK and pre-flight policy interception firewall for AI agents on Stellar.**
+
+An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
+
+**Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
+
+## 🎯 What makes this different
+
+Enforcement happens **inside the account itself**, via Soroban's native Custom Account Abstraction — not in a wrapper contract in front of funds, and not in an off-chain service.
+
+- **Pre-flight simulation without broadcast**: The SDK evaluates guard approval against Soroban RPC before a single byte hits the network. If the transaction violates policy, it is rejected client-side with the contract's own reason code, incurring zero network fees.
+- **Dual-stream telemetry**: Blocked decisions never commit to the ledger because Soroban rolls back failed authorizations. A listener that only tails committed ledger events sees a guard that appears to approve everything. The SDK extracts `event_auth_checked` from simulation diagnostics as well as committed blocks.
+- **In-process simulation pricing**: `CostPreChecker` computes network resource and inclusion fees directly from the enforced simulation, avoiding dependencies on external profiling tools.
+- **Framework middleware**: Plug-and-play middleware for LangChain and validators for ElizaOS halt execution before external tool calls run.
+
+> ⚠️ **Disclaimer:** This is unaudited security tooling that gates real fund access. Do not deploy to mainnet without an independent audit. See the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md).
+
+## What it does
+
+- **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal; an opt-in short-lived cache can reduce repeated simulation RPC calls within the current ledger.
+- **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
+- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
+- **Framework adapters**:
+  - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
+  - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
+  - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
+- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+
+## Quick Start
+
+> **A verdict is a prediction, not a settlement guarantee.** Before relying on a
+> pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
+> known gaps in simulation fidelity, and what the SDK does about each.
+
+### Installation
+
+```bash
+npm install stellar-agent-guard-sdk
+```
+
+> **Module Format & Environment Note:**
+> `stellar-agent-guard-sdk` is published strictly as **pure ESM** (`"type": "module"`) targeting **Node.js >= 24.0.0** (declared in `engines`).
+>
+> If your project or toolchain runs in CommonJS (e.g. legacy LangChain setups, Jest configs, or `.cjs` scripts), load the SDK using the dynamic `await import()` pattern:
+>
+> ```javascript
+> // CommonJS (.cjs or package without "type": "module")
+> async function run() {
+>   const { PreFlightInterceptor, CostPreChecker } = await import("stellar-agent-guard-sdk");
+>   // use interceptor, cost pre-checker, etc.
+> }
+> ```
+
+*(Or build locally from source with Node 24+)*
+
+```bash
+git clone https://github.com/aigbagbobila/stellar-agent-guard-sdk.git
+cd stellar-agent-guard-sdk
+npm ci
+npm run build
+```
+
+### Live testnet suite (`.env.phase2`)
+
+The unit suite needs no credentials. The **live** suite (`npm run test:integration`)
+runs real transactions against the deployed Phase 2 testnet instance and reads
+its signing keys from a gitignored `.env.phase2`. Start from the committed
+template, which documents every key and what each one unlocks without carrying a
+value:
+
+```bash
+cp .env.phase2.example .env.phase2   # then fill in the values
+npm run deploy:phase2                # or provision a fresh instance and write it for you
+npm run test:integration
+```
+
+`tests/integration/harness.ts` validates the file up front. When it is
+incomplete it fails once with **every** missing key named — not one key per run,
+which would make setup a guessing game of five round trips:
+
+```
+.env.phase2 is incomplete: 3 required key(s) are missing:
+  - PHASE2_ADMIN_SECRET
+  - PHASE2_RECIPIENT_SECRET
+  - PHASE2_OUTSIDER_SECRET
+
+Copy the documented template and fill it in:  cp .env.phase2.example .env.phase2
+Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  npm run deploy:phase2
+```
+
+The required keys are `PHASE2_GUARD`, `PHASE2_TOKEN`, `PHASE2_ADMIN_SECRET`,
+`PHASE2_AGENT_SECRET`, `PHASE2_RECIPIENT_SECRET` and
+`PHASE2_OUTSIDER_SECRET`, plus optionally `PHASE2_RPC_URL`;
+`PHASE2_ISSUER_SECRET` is additionally required to (re)deploy. `.env.phase2` is
+gitignored (as are all `.env.*` values files — only `*.example` templates are
+committable); never commit the filled-in copy.
+
+### Pre-flight Policy Interception
+
+```ts
+import { Keypair, rpc } from "@stellar/stellar-sdk";
+import { PreFlightInterceptor, isContractAddress, type ContractAddress } from "stellar-agent-guard-sdk";
+
+// Validate contract address from environment
+const guardAddress = process.env.GUARD_ADDRESS;
+if (!isContractAddress(guardAddress)) {
+  throw new Error(`Invalid guard contract address: ${guardAddress}`);
+}
+
+// For known hardcoded addresses, use type assertion
+const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB" as ContractAddress;
+
+const interceptor = new PreFlightInterceptor({
+  server: new rpc.Server("https://soroban-testnet.stellar.org"),
+  networkPassphrase: "Test SDF Network ; September 2015",
+  guard: guardAddress, // Type-safe: validated as ContractAddress
+  agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
+  source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
+});
+
+const decision = await interceptor.check({
+  contract: contractAddress,
+  fn: "transfer",
+  args: [/* from, to, amount */],
+});
+
+if (decision.kind === "admissible") {
+  console.log("Allowed! Resource fee:", decision.estimatedResourceFee);
+} else if (decision.kind === "blocked") {
+  console.log("Blocked by guard:", decision.reason);
+} else {
+  console.log("Undetermined (fails closed)");
+}
+```
+
+#### Branded Address Types (v0.2.0+)
+
+This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
+
+**Type Guards:**
+
+```ts
+import { 
+  isContractAddress,    // Validates C... addresses
+  isAccountAddress,     // Validates G... addresses
+  isStrKeyAddress,      // Validates any StrKey (C... or G...)
+  isPublicKeyHex,       // Validates 64-char hex public keys
+} from "stellar-agent-guard-sdk";
+
+// Runtime validation before use
+if (!isContractAddress(userInput)) {
+  throw new Error("Expected contract address (C...)");
+}
+```
+
+**Migration:** If upgrading from an earlier version, see [MIGRATION.md](./MIGRATION.md) for guidance on updating your code to use typed addresses.
+
+#### Throw vs. Verdict Contract
+
+Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
+
+- **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
+- **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
+- Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+
+### Fidelity & limits
+
+Pre-flight simulation is a prediction made against one ledger snapshot, not a settlement guarantee. These are the four known limitations of that prediction, each with the mitigation the SDK applies and the residual risk that remains. Every claim is pinned to the function that implements it so a reviewer can check it rather than trust it.
+
+1. **Window state can move between `check` and broadcast (concurrent spenders).**
+   - *Mitigation:* `PreFlightInterceptor.check()` never broadcasts; it calls `enforceCall()` (`src/invoke.ts`) to run the guard's real `__check_auth` against live ledger state, which is what makes a refusal free. Under `invoke()`, `withAccountQueue()` (`src/invoke.ts`) serializes fetch → build → submit per source account, and the committed contract re-evaluates the rolling window atomically. If the window moved anyway, the post-inclusion refusal is still reported as `blocked` with `charged: true` (`src/invoke.ts`).
+   - *Residual risk:* a spender that does not route through this SDK's queue, or that uses a different source account, can consume the window after an `admissible` verdict; the transfer can then be refused on-chain and, when it reaches inclusion, charged. The optional cache reuses verdicts within one ledger, so a cached `admissible` can be staler than one admitted transfer (`src/preflight.ts`).
+
+2. **The fee market can move (fee-bump).**
+   - *Mitigation:* `CostPreChecker.checkWithCost()` and `costOf()` (`src/cost.ts`) derive the quote from the same enforced simulation that produced the verdict, so price and verdict never describe two snapshots, and `feeBreakdown()` uses the same `INCLUSION_FEE` the submitted envelope declares (`src/tx.ts`).
+   - *Residual risk:* Soroban fees are dynamic and the SDK does not implement fee-bump handling. A fee-bump or an inclusion/base-fee change between simulation and broadcast can move the real price. `maxFeeStroops` in `CostPreChecker` is a pre-flight ceiling, not a network guarantee.
+
+3. **Simulation does not execute — return-value-dependent effects are invisible.**
+   - *Mitigation:* the enforced simulation runs the real `__check_auth` (Step 3 of `enforceCall()`, `src/invoke.ts`), and refusals are recovered from simulation diagnostics by `reasonFromDiagnosticEvents()` (`src/invoke.ts`) and `decodeAuthDecision()` (`src/events.ts`) even though a rolled-back block never commits to a ledger.
+   - *Residual risk:* simulation rolls back its writes; it cannot reveal effects that depend on a return value or on state another call would produce (an oracle price, a swap quote, a balance read mid-transaction). Such a call can be `admissible` pre-flight and still behave differently on-chain. Telemetry `telemetryFromDecision()` (`src/telemetry.ts`) observes the decision event, not the call's return value.
+
+4. **Multi-context batch semantics are approximated (batch).**
+   - *Mitigation:* `PreFlightInterceptor.checkBatch()` and `preflightBatch()` (`src/preflight.ts`) simulate each call in sequence with staged window accounting, so a call that passes in isolation but pushes cumulative spend past `window_cap` is reported `blocked` with `window_cap_exceeded`.
+   - *Residual risk:* it is sequential single-call simulation, not atomic batch simulation. State mutations between calls other than guard window spend are not observed, intra-batch window expiry is not modelled, and `totalEstimatedResourceFee` is the sum of per-call estimates rather than one envelope's fee (`src/preflight.ts:571`). The intended fix is to route to a contract-side `check_batch` once it lands, keeping this sequential staging as the fallback.
+
+### Optional simulation-result cache
+
+`PreFlightInterceptor` always performs a fresh simulation by default. For agent
+loops that repeatedly check the same call, caching can be enabled explicitly:
+
+```ts
+const interceptor = new PreFlightInterceptor({
+  server,
+  networkPassphrase,
+  guard,
+  agent,
+  source,
+  cache: {
+    ttlLedgers: 1, // maximum one approximate five-second ledger window
+    policyRevision: () => readPolicyRevision(),
+  },
+});
+
+const first = await interceptor.check(call);
+const second = await interceptor.check(call); // may reuse the first verdict
+interceptor.invalidate();                       // clear all entries
+interceptor.invalidate(call);                  // clear one call's entries
+```
+
+The cache is **disabled unless `cache` is supplied**. It stores only actual
+`admissible` and `blocked` decisions; transient `undetermined` results are not
+cached. A cache key includes the contract, function, canonical XDR argument
+fingerprint, interceptor identity, and the supplied policy revision. The cache
+is discarded when the observed ledger advances, when the TTL expires, or when
+`invalidate()` is called. `ttlMs` and `ttlLedgers` are both capped at one
+approximate ledger-close interval; if both are supplied, `ttlMs` takes
+precedence.
+
+A **cached verdict can be staler than one admitted transfer**. The rolling spend
+window can change after a simulation while a cached result is still being
+reused, so callers that cannot tolerate that tradeoff should leave caching off,
+use a shorter TTL, provide a policy revision, and invalidate after policy or
+account-state changes.
+
+### Deterministic time control in tests (Clock injection)
+
+Time-dependent operations (cache TTL, transaction polling) support optional `Clock` injection for deterministic testing without real delays.
+
+**For tests**, use `FakeClock` to control time:
+
+```ts
+import { FakeClock, PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+test("cache entry expires", async () => {
+  const clock = new FakeClock(0);
+  const interceptor = new PreFlightInterceptor({
+    server,
+    guard,
+    agent,
+    source,
+    cache: { ttlMs: 5000 },
+    clock, // Inject the fake clock
+  });
+
+  const decision1 = await interceptor.check(call);
+
+  // Advance clock without real delays
+  clock.advance(6000); // Skip to t=6000ms (past the 5000ms TTL)
+
+  const decision2 = await interceptor.check(call); // Cache expired, fresh lookup
+});
+```
+
+**For production**, no action is needed: modules default to the system clock. The `Clock` interface is purely optional and for testing.
+
+Key methods on `FakeClock`:
+
+- `now()` — returns current time in milliseconds
+- `sleep(ms)` — returns a promise (resolves instantly when time allows)
+- `advance(ms)` — move the clock forward deterministically
+- `setTime(ms)` — set clock to an absolute time
+
+Time-dependent modules (preflight cache, transaction polling) accept an optional `clock` parameter. When omitted, they use the system clock (`Date.now()`, real `setTimeout`). Tests pass a `FakeClock` to eliminate real waits and make timing deterministic. For full guidance, see [CONTRIBUTING.md](CONTRIBUTING.md) under "Deterministic time control in tests".
+
+### Pipeline step observability (`onStep`)
+
+`invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
+exactly as before — the hook is pure observability and the SDK itself never
+logs anything (and takes no logger dependency; what you do with the events is
+up to you):
+
+```ts
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  guardAuth,
+  onStep(step) {
+    // consumer decides how to display/log the event
+    console.log(`[${step.attempt}] ${step.name} ${step.status} in ${step.durationMs}ms`);
+  },
+});
+```
+
+Event shape (`InvokeStepEvent`):
+
+| Field | Meaning |
+|---|---|
+| `name` | Pipeline stage: `probe` → `sign` → `simulate` → `broadcast` (the shared `TRACE_STEP_NAMES` vocabulary). |
+| `status` | `start` (emitted immediately before the stage runs), then `ok` or `fail`. |
+| `durationMs` | Elapsed time of **this stage attempt** in milliseconds — not the total `invoke()` duration. Always `0` on `start`. |
+| `attempt` | 0-based retry index. `0` for the first pass; `1` on the built-in stale-ledger re-run. Always present. |
+
+The callback is optional, receives every stage attempt (a retried invoke emits
+a full `probe → sign → simulate → broadcast` sequence per attempt, each tagged
+with its `attempt` index), and **callback exceptions are isolated**: a throwing
+`onStep` never breaks the pipeline, never turns a successful invoke into a
+failure, and never masks the original pipeline error — callback errors are
+swallowed silently, since the SDK is logger-agnostic and has no sink to report
+them to. Step names come from the same shared vocabulary the dry-run trace
+uses (`TRACE_STEP_NAMES`), so consumers of either see identical stage names.
+
+The LangChain adapter exposes the same capability:
+
+```ts
+const middleware = createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall: (request) => (/* ... */),
+  onStep(step) {
+    // enforcement-stage events (probe → sign → simulate; never broadcast)
+  },
+});
+```
+
+### Framework Middleware (LangChain & ElizaOS)
+
+When deploying fleets of hundreds or thousands of autonomous agents derived from identical templates or scheduled loops, fixed poll intervals (e.g. exactly every 5s) cause all instances to poll RPC nodes in lockstep phase. This creates synchronized traffic spikes (thundering herds) against public Soroban RPC endpoints, triggering aggressive HTTP 429 rate limits and cascade backpressure errors.
+
+`GuardTelemetryListener.watch()` defaults to `jitter: 'full'`, which uniformly randomizes each poll delay in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2` (a 20% variance window). This breaks lockstep fleet synchronization while keeping polling responsive and bounded. Deterministic fixed interval cadence can be restored when needed by specifying `jitter: 'none'`.
+
+```ts
+// Follow event telemetry with full jitter (default)
+for await (const events of listener.watch({
+  pollIntervalMs: 5_000,
+  jitter: "full", // uniformly distributed in [4000ms, 5000ms]
+})) {
+  console.log(`Received ${events.length} guard event(s)`);
+}
+```
+
+### Aborting a watch: what cancellation does and does not cover
+
+`watch({ signal })` ends the stream — aborting is a normal exit, never a throw.
+Abort is honoured at **loop boundaries**: before the first request (an
+already-aborted listener issues no RPC call at all, not even the
+`getLatestLedger` probe that resolves a default `startLedger`), before each
+poll, and during the delay between polls. The default delay's timer is cleared
+on abort, so a stopped listener leaves no open handle behind for a Node process
+or a test suite to hang on.
+
+```ts
+const controller = new AbortController();
+for await (const events of listener.watch({ signal: controller.signal })) {
+  handle(events);
+}
+// Runtime teardown, a new tool call, or a shutdown hook:
+controller.abort(); // the loop ends, and no further getEvents is issued
+```
+
+**One limitation, stated rather than papered over: a request already in flight
+is not cancelled.** `@stellar/stellar-sdk` ^17 (the version this package
+depends on, `dependencies` in `package.json`) declares
+`getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, and
+its internal JSON-RPC `postObject` helper takes no per-request config, so there
+is no supported way to plumb a signal through to the socket. The listener
+consequently stops *issuing* requests immediately but cannot cancel one already
+sent: the worst case between `signal.abort()` and the iterator ending is **one
+request duration** — never a whole poll interval. The rejection of that
+in-flight request (or of an abort-aware `sleep`) is swallowed as teardown, so an
+aborted watch ends quietly in a `for await` loop instead of surfacing an
+`AbortError` or an unhandled rejection.
+
+Revisit this when the SDK adds per-request signals to `getEvents`; until then,
+read `signal` as *stop soon and stop asking*, not *cancel the socket*.
+
+### Framework Middleware (LangChain & ElizaOS)
+
+Plug-and-play middleware intercepts agent actions before tools are executed:
+
+- **Framework adapters**:
+  - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
+  - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
+  - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency.
+
+### Policy validation before broadcast (validateGuardPolicy)
+
+Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
+This provides a **fail-before-broadcast** safety rail that catches configuration errors before burning transaction fees or facing on-chain contract rejections.
+
+Unlike fail-fast validators, `validateGuardPolicy` returns **all** failures at once (`PolicyFailure[]`), which is critical for dashboard form UX where an operator needs to see all field-level issues simultaneously. The failure `rule` identifiers align with SPEC §8 rules:
+
+```ts
+import {
+  validateGuardPolicy,
+  type PolicyConfig,
+  type PolicyFailure,
+} from "stellar-agent-guard-sdk";
+
+const draftPolicy: PolicyConfig = {
+  per_tx_cap: 10_000n,
+  window_secs: 0n,         // Incompatible with window_cap > 0
+  window_cap: 50_000n,
+  assets: [],              // Empty assets vector is a no-op
+  protocols: [],
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  allow_any_recipient: false,
+  active_from: 1000n,
+  active_until: 500n,      // Inverted active window (active_until <= active_from)
+  paused: false,
+  dms_grace_secs: 0n,
+};
+
+const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
+  guardAddress: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+});
+
+if (failures.length > 0) {
+  for (const failure of failures) {
+    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+  }
+  // Safe-exit before encode or broadcast
+} else {
+  // Proceed with policyToScVal(draftPolicy) and broadcast
+}
+```
+
+### Policy encode/decode round trip
+
+`decodePolicy` is the canonical read-side counterpart to `policyToScVal`. It returns
+`bigint` for every integer field, keeps `ProtocolRule.fns: null` distinct from an empty
+array, normalizes Stellar addresses, and rejects missing, duplicate, unknown, unsorted, or
+wrongly typed fields with a path-bearing `PolicyDecodeError`.
+
+```ts
+import {
+  decodePolicy,
+  policyToScVal,
+  type PolicyConfig,
+} from "stellar-agent-guard-sdk";
+
+const policy: PolicyConfig = {
+  per_tx_cap: 1_000n,
+  window_secs: 60n,
+  window_cap: 150n,
+  assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
+  protocols: [
+    {
+      contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      fns: ["transfer"],
+    },
+  ],
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  allow_any_recipient: false,
+  active_from: 0n,
+  active_until: 0n,
+  paused: false,
+  dms_grace_secs: 0n,
+};
+
+const encoded = policyToScVal(policy);
+const decoded = decodePolicy(encoded); // exactly equal to policy
+```
+
+The decoder accepts the direct `ScVal::Map` returned by the deployed `policy()` read and
+also the one-element `Vec` representation used by some RPC/host surfaces for
+`Some(PolicyConfig)`. `ScVal::Void` means no policy is installed and therefore throws
+rather than fabricating a default-deny config. Canonical u64/i128 variants are range
+checked exactly; base-10 `ScVal::String` integers are accepted as a deliberate
+compatibility path for stringly-typed RPC/telemetry payloads and normalized to `bigint`.
+
+### Debug a blocked transfer with `invoke({ dryRun: true })`
+
+Dry run executes the real probe, authorization signing, and enforced-simulation path,
+then returns the verdict, diagnostics, network-derived fees, and per-stage timings. It
+stops before final transaction assembly and cannot call `sendTransaction`, so its result
+has no transaction hash or submission object.
+
+```ts
+import { invoke } from "stellar-agent-guard-sdk";
+
+const debug = await invoke({
+  server,
+  source,
+  call: blockedTransferCall,
+  networkPassphrase,
+  guardAuth: { guard, agent },
+  dryRun: true,
+});
+
+if (debug.kind === "dry_run") {
+  console.log({
+    admissible: debug.admissible,
+    verdict: debug.verdict,
+    reason: debug.reason,
+    fees: debug.fees,
+  });
+  console.table(debug.steps);
+}
+```
+
+A blocked or undetermined dry run reports an explicit all-zero **charged** fee breakdown;
+an admissible dry run reports the simulation's resource fee plus the SDK's 100-stroop
+inclusion floor. Missing, negative, malformed, unsafe-number, or out-of-u64-range fee
+payloads are `ContractResponseError` failures and remain undetermined—never free.
+`steps[].ok` describes whether a stage completed, not whether policy approved the call;
+the separate `verdict` field is the policy answer. The `probe → sign → simulate` stages
+are measured through the same `onStep` hook a live invocation uses, so a dry-run trace
+and an `onStep` trace are the same measurement of the same code.
+
+### Troubleshooting agent authentication
+
+`verifyAgentSignature` lets an agent runtime check that a signature belongs to the key it
+believes is registered before entering an agent loop. The helper is verify-only: it never
+accepts, signs with, stores, or derives a private key. Other SDK APIs continue to accept
+caller-created `Keypair` objects for transaction/authorization signing as before.
+
+```ts
+import { verifyAgentSignature } from "stellar-agent-guard-sdk";
+
+function signerMatches(
+  registeredPublicKey: string | Uint8Array,
+  hostSignaturePayload: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  return verifyAgentSignature(
+    registeredPublicKey,
+    hostSignaturePayload,
+    signature,
+  );
+}
+```
+
+`hostSignaturePayload` must be the exact 32-byte host digest covered by the signature;
+the helper verifies those bytes without re-hashing and is not SEP-53 message signing. A
+successful result proves only the key/payload/signature relationship—it does not validate
+network ID, invocation, nonce, expiration ledger, or transaction freshness.
+
+### Typed errors and 0.1.x migration
+
+All SDK-owned errors now share a `GuardError` base. `invoke()` remains result-oriented:
+inspect `outcome.error` with `instanceof` when `outcome.kind === "error"`.
+
+```ts
+import {
+  BroadcastError,
+  GuardError,
+  SigningError,
+  SimulationError,
+} from "stellar-agent-guard-sdk";
+
+if (outcome.kind === "error") {
+  if (outcome.error instanceof SigningError) {
+    console.error("agent signer is wrong or unavailable");
+  } else if (outcome.error instanceof SimulationError) {
+    console.error("enforcement could not be determined");
+  } else if (outcome.error instanceof BroadcastError) {
+    console.error("submission failed", outcome.error.transactionHash);
+  } else if (outcome.error instanceof GuardError) {
+    console.error(outcome.error.message);
+  }
+}
+```
+
+A pipeline stage that throws — a dropped RPC connection, say — is reported the same way:
+as `kind: "error"` carrying the original error as the typed error's `cause`, never as a
+rejection. A guardrail that could not reach a verdict has no business throwing at its
+caller, and the original error object stays reachable for diagnostics.
+
+If ledger state changes after enforced simulation and the included transaction is then
+refused by the guard, `invoke()` still returns `kind: "blocked"` with the contract reason
+and diagnostics. That charged outcome additionally carries `transactionHash` and
+`charged: true`; it is not flattened into a technical `BroadcastError`.
+
+`GuardBlockedError` keeps its published name, message, fields, and `instanceof` behavior
+and now extends `GuardError`; `PreFlightUndeterminedError` extends `SimulationError`.
+The hierarchy, `decodePolicy`, and `verifyAgentSignature` are additive to 0.1.x callers.
+The one intentional behavior change is for callers already using `dryRun: true`: the old
+success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
+documented above. Non-dry-run callers keep their existing outcome shapes.
+
+## API Reference
+
+> **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`docs/deprecations.md`](docs/deprecations.md). Release process and versioning checklist: [`docs/releasing.md`](docs/releasing.md).
+
+### Interception & Execution
+
+- `PreFlightInterceptor`
+  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
+  - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
+  - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
+  - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
+- `CostPreChecker`
+  - `constructor(options: CostPreCheckerOptions)`
+  - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
+  - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
+
+#### Fee units: stroops and XLM
+
+`CostPreChecker` reports fees as exact integer stroops — the raw value is the
+source of truth, and it is what a `maxFeeStroops` ceiling is compared against.
+`formatFee()` renders the same number in XLM, the unit operators think in, using
+**integer math only** (XLM has 7 decimal places; float rounding on
+money-adjacent output in a security tool is not acceptable) and with no trailing
+zeros:
+
+```ts
+import { formatFee } from "stellar-agent-guard-sdk";
+
+cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
+formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+
+formatFee(1n);             // "0.0000001" — one stroop
+formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
+```
+
+#### `CostPreChecker` resource breakdown
+
+Priced `within_budget` and `over_budget` results may include a `breakdown` parsed from the same Soroban simulation that produced `resourceFeeStroops`:
+
+```ts
+if (decision.kind === "within_budget" && decision.breakdown) {
+  console.log(decision.breakdown);
+  // {
+  //   instructions,       // SorobanResources.instructions
+  //   diskReadBytes,      // SorobanResources.diskReadBytes
+  //   writeBytes,         // SorobanResources.writeBytes
+  //   readOnlyEntries,    // footprint.readOnly.length
+  //   readWriteEntries,   // footprint.readWrite.length
+  //   storageEntries      // readOnlyEntries + readWriteEntries
+  // }
+}
+```
+
+`breakdown` is `undefined` when the simulation is undetermined, malformed, or missing any required resource field; the SDK never fabricates zero values. The stellar-sdk v17 Soroban resource payload has no `memBytes` field, so this API reports the actual `writeBytes`/disk resource fields rather than relabeling them as memory usage.
+
+#### One simulation per check: prefer `checkWithCost`
+
+`PreFlightInterceptor.check()` answers *may this proceed?* and
+`CostPreChecker.check()` answers *what will it cost?* — but calling both runs the
+enforced simulation **twice**, against two ledger snapshots. The extra RPC is the
+lesser problem: the fee reported for a call can then differ from the fee implied
+by the verdict that was actually enforced, so the price no longer corresponds to
+the approved decision.
+
+`CostPreChecker.checkWithCost()` returns both from a **single** simulation:
+
+```ts
+const { decision, cost } = await costChecker.checkWithCost(call);
+
+if (decision.kind === "blocked") {
+  console.log("refused:", decision.reason);        // nothing was charged
+} else if (cost.kind === "over_budget") {
+  console.log("too expensive:", formatFee(cost.totalFeeStroops), "XLM");
+} else if (decision.allowed) {
+  console.log("approved at", formatFee(cost.totalFeeStroops), "XLM");
+}
+```
+
+Prefer this over calling `interceptor.check(call)` and `costChecker.check(call)`
+in sequence. That two-call pattern still works and its types are unchanged, but
+it carries the fee-drift caveat above. `precheckCostWithDecision()` is the
+one-shot form.
+
+### Telemetry & Helpers
+
+- [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
+- `GuardTelemetryListener`
+  - `constructor(options: GuardTelemetryListenerOptions)`
+  - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover).
+  - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
+  - `serializeEvent(event: GuardEvent): string` — Canonical single-line JSON for deterministic JSON-lines log shipping. Fixed key order, drops `undefined`, keeps `null`, renders `bigint` as a decimal string. Contract: [`docs/event-schema.md`](docs/event-schema.md#canonical-json-serialization--serializeevent).
+- `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX.
+- `POLICY_RULE_IDS` — Canonical array of SPEC §8 validation rule identifiers.
+- `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct.
+- `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
+- `policyFromScVal(scVal)` — Alias for callers using the issue's original function name.
+- `invoke(options)` / `invoke({ ...options, dryRun: true })` — Broadcasts an admissible result, or returns the full pre-broadcast dry-run trace.
+- `verifyAgentSignature(publicKey, payload, signature): boolean` — Verify-only Ed25519 check against a strkey or raw 32-byte key.
+- `GuardError`, `SimulationError`, `SigningError`, `BroadcastError`, `PolicyDecodeError`, and `ContractResponseError` — Typed failure hierarchy.
+- `decodeCheckResult(raw): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
+- `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
+- `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
+- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
+- `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
+- `isDeadManFrozen(status: GuardStatus): boolean`
+- `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
+- `dmsUrgency(status: GuardStatus, policy: PolicyConfig | null, nowSecs?: bigint, warnRatio = DMS_WARN_RATIO_DEFAULT): 'ok' | 'warn' | 'expired' | 'unknown'` — Dead-man countdown urgency for dashboards: `warn` from `warnRatio` (default `DMS_WARN_RATIO_DEFAULT` = 0.8) of the grace period, `expired` once the grace has elapsed. `unknown` exactly where `deadManRemaining` is `null` (no policy, switch disabled, never heartbeated — never ≠ expired).
+- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; protocols match by contract and report `fns` changes at paths like `protocols[0].fns[1]`.
+
+#### Dashboard-style snapshot (issue #68)
+
+A consumer that wants "the last N decisions, right now" — a dashboard panel, an agent status endpoint — can opt into a bounded in-memory window instead of maintaining its own store:
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD_ID,
+  buffer: { max: 200 }, // opt-in; omitted → no buffer is allocated
+});
+
+// ...drive it with listener.watch() or listener.watchAll(), then read on demand:
+const lastBlocked = listener.recent({ stream: "diagnostic" });
+const capRefusals = listener.recent({ reason: "per_tx_cap_exceeded" });
+const recentWindow = listener.recent({ fromLedger: 4_700_000 });
+```
+
+`recent(filter?)` returns the retained events oldest-first, filtered by any of `stream`, `reason`, `fromLedger`, `toLedger`. The buffer is FIFO and non-durable: it holds only what this listener decoded in this process, and a restart empties it. Persistence across restarts is a cursor store (tracked separately), not something this buffer pretends to provide.
+
+#### Ship events to your logger
+
+`serializeEvent(event)` gives you one canonical JSON line per event, so a log pipeline gets a stable, diffable record with no logger dependency in the SDK:
+
+```ts
+import { serializeEvent } from "stellar-agent-guard-sdk";
+
+for await (const event of listener.watchAll({ diagnostics })) {
+  logger.info(serializeEvent(event)); // one deterministic JSON line per event
+}
+```
+
+Key order, the drop-`undefined`/keep-`null` policy, and the `bigint`-to-decimal-string normalization are documented in [`docs/event-schema.md`](docs/event-schema.md#canonical-json-serialization--serializeevent).
+
+## Architecture
+
+Stellar Agent Guard operates across three dedicated repositories:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                      Operator (Browser / Freighter)                     │
+│                                     │                                   │
+│                                     ▼                                   │
+│              stellar-agent-guard-dashboard (Next.js / UI)               │
+└─────────────────────────────────────┬───────────────────────────────────┘
+                                      │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│                   AI Agent Runtime (LangChain / ElizaOS)                │
+│                                     │                                   │
+│                                     ▼                                   │
+│                stellar-agent-guard-sdk (TypeScript / RPC)               │
+│               • Pre-flight policy check  • Cost pre-checks              │
+│               • Agent-auth tx signing    • Event telemetry              │
+└─────────────────────────────────────┬───────────────────────────────────┘
+                                      │
+                                      ▼ Soroban RPC
+┌─────────────────────────────────────────────────────────────────────────┐
+│               stellar-agent-guard-contracts (Soroban / Rust)             │
+│            • CustomAccount interface (`__check_auth`)                   │
+│            • Spend caps, rolling window, allowlists, dead-man switch    │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+| Repository | Role | Documentation |
+|---|---|---|
+| [**stellar-agent-guard-contracts**](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | Soroban smart contracts implementing Custom Account Abstraction and spending policy firewall | [GitBook Docs](https://soroban-cost-estimator.gitbook.io/stellar-agent-guard-contracts/) |
+| [**stellar-agent-guard-sdk**](https://github.com/aigbagbobila/stellar-agent-guard-sdk) (this repo) | TypeScript SDK for pre-flight interception, simulation pricing, and AI agent framework integration | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-sdk) |
+| [**stellar-agent-guard-dashboard**](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | Client-side operator dashboard for policy deployment, inspection, and emergency panic-button freeze | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) |
+
+## ✅ Verified against live testnet
+
+Proven against a real deployed instance on Stellar testnet (protocol 28, `Test SDF Network ; September 2015`):
+
+- **Guard (custom account)**: `CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44`
+- **SAC Token**: `CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB`
+- **WASM bytecode hash**: `f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63` (identical to Phase 1 artifact)
+
+Verify a downloaded artifact against the pinned hash before deploying — the same constant the dashboard checks, so there is one source of truth rather than a copy per consumer:
+
+```ts
+import { readFileSync } from "node:fs";
+import { verifyGuardWasm } from "stellar-agent-guard-sdk";
+
+const result = await verifyGuardWasm(readFileSync("guard.wasm"));
+if (!result.ok) {
+  throw new Error(`WASM mismatch: got ${result.actual}, expected ${result.expected}`);
+}
+```
+
+`verifyGuardWasm` hashes with WebCrypto (`crypto.subtle`), so the identical call runs in Node and in the browser and needs no extra dependency. It is async, because `crypto.subtle.digest` is. `GUARD_WASM_HASH` is exported if you need the constant on its own.
+
+### 5/5 Live Enforcement Scenarios
+
+| Scenario | Condition | Result | Evidence |
+|---|---|---|---|
+| 1. Within caps | Transfer 100 within caps (cap: 1000, window: 150) | **Allowed** | Tx hash `f8f5b3c51b85c8777c956d71330d015fcf72fa57548077d8b32969f8ba9c762e` at ledger `4704849` |
+| 2. Per-tx cap | Transfer 1001 > 1000 cap | **Blocked** (`per_tx_cap_exceeded`) | Diagnostic event `event_auth_checked, blocked, per_tx_cap_exceeded`, pre-broadcast, 0 fees |
+| 3. Rolling window | Transfer 76 + 76 = 152 > 150 window cap | **Blocked** (`window_cap_exceeded`) | Rolling window accumulation refusal, balances untouched |
+| 4. Recipient allowlist | Transfer to unlisted recipient | **Blocked** (`recipient_not_allowed`) | Default-deny address check refusal |
+| 5. Account paused | Call while `paused = true` | **Blocked** (`paused`) | Account-state refusal cleanly distinguished from policy caps |
+
+Complete run output and assertion logs are preserved in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md).
+
+## Honest limitations
+
+- **Enforcement boundary for arbitrary calls**: Full amount/recipient limits are native to SAC token transfers. Arbitrary Soroban contract calls are enforced via protocol/function allowlists, active window, pause, and dead-man switches; per-call amount limits are not available generically from host auth contexts (tracked as v2).
+- **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
+- **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
+- **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
+- **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
+
+## Enforcement scope — read this before relying on the caps
+
+Full recipient/amount enforcement — spend caps, allowlists, per-transaction limits — is native and automatic for SAC token transfers (`transfer`/`transfer_from`), since these are the calls whose arguments the Soroban auth context exposes for inspection. For other Soroban contract calls made by the guarded account (arbitrary DEX/lending/protocol calls), the policy engine still enforces window and pause state, but per-call amount/recipient limits are not yet enforced — extending fine-grained enforcement to arbitrary calls is tracked as a v2 item, not implied as already covered.
+
+This boundary is an inherent property of the platform (the auth context does not expose arbitrary call arguments generically), not a gap this project hides or overclaims. The classification that produces this boundary (`AssetTransfer` vs `Protocol` vs `Unknown` default-deny) is spelled out in SPEC §6.
+
+## Topics
+
+`stellar`, `soroban`, `ai-agents`, `guardrails`, `custom-account`, `pre-flight`,
+`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `telemetry`, `typescript`
+
+## Maintainers
+
+| Name | GitHub | Telegram |
+|---|---|---|
+| Hybrid | [@aigbagbobila](https://github.com/aigbagbobila) | [@aigbagbobila](https://t.me/+EzSusj-2vVhhNmI0) |
+
+## Socials
+
+- [Telegram](https://t.me/+EzSusj-2vVhhNmI0)
+- [Discord](https://discord.gg/Z766vsgjg)
+
+## Contact
+
+- GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues>
+- Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
+- Security disclosures: see [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md) (Telegram, the Stellar ecosystem norm)
+
+## License
+
+Licensed under [MIT](LICENSE). This is unaudited security tooling that gates real fund access — see the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md) before considering mainnet use.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR process, and
+project structure — including the strict one-commit-per-logical-unit rule and the
+[TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
+(`npm run check:strict-ratchet`).
+
+Looking for something to work on? The
+[issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
+holds scoped issues with Summary / Acceptance Criteria / Tech Stack — good first tasks for
+the Drips Stellar Wave contributor sprints.
+
+![Contributors](https://contrib.rocks/image?repo=aigbagbobila/stellar-agent-guard-sdk)

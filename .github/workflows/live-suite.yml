@@ -25,6 +25,9 @@ on:
 
 permissions:
   contents: read
+  # Issue #143: the notify steps below open/comment/close ONE tracked issue on
+  # failure/recovery. Nothing else in this workflow writes.
+  issues: write
 
 jobs:
   live:
@@ -61,3 +64,27 @@ jobs:
 
       - name: run the live testnet suite
         run: npm run test:integration
+
+      # ── Failure visibility beyond the workflow page (issue #143) ──────────
+      # The suite fails exactly when nobody is editing the repo (host/testnet
+      # drift), so the Actions page is the one place nobody is looking. One
+      # tracked issue is the push path: opened on first failure, one comment per
+      # consecutive failure, auto-closed with the recovery run linked on the
+      # next green run (self-healing). Idempotency contract and the offline
+      # simulation of these two scripts live in scripts/live-suite-notify/.
+      # Deliberately path (a) — in-repo, no secret, no external service; the
+      # Slack/Telegram path (b) stays declined unless a maintainer opts in.
+      - name: notify — open or update the tracking issue
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER: ${{ github.event_name }}
+        run: bash scripts/live-suite-notify/failure.sh
+
+      - name: notify — close the tracking issue on recovery
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/live-suite-notify/success.sh
