@@ -10,12 +10,13 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import { InvalidInputError, PreFlightUndeterminedError } from "../../src/preflight.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 import { createVercelAIGuard, wrapToolWithGuard } from "../../src/adapters/vercelai.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../../src/preflight.ts";
 import type { ContractCall } from "../../src/tx.ts";
 import type { VercelAIToolLike } from "../../src/adapters/vercelai.ts";
 
-const CALL: ContractCall = { contract: "C".repeat(56), fn: "transfer", args: [] };
+const CALL: ContractCall = { contract: unsafeContractAddress("C".repeat(56)), fn: "transfer", args: [] };
 
 /** An interceptor stub whose verdicts are queued per check. */
 function stubInterceptor(verdicts: PreFlightDecision[]): PreFlightInterceptor {
