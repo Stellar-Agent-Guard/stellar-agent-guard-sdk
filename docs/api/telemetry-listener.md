@@ -31,6 +31,29 @@ Yields pages of decoded guard events (`event_auth_checked`, `event_policy_update
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `jitter`, `rng`, `sleep`, `onGap`, and `signal`.
 
+#### Mid-watch failures (`onStreamError`)
+
+When `getEvents` starts failing mid-watch, the default is **bounded retry with
+backoff, then a clean end**: the listener retries up to `maxRetries` (default
+`5`) times with exponential backoff, then calls `onStreamError(err)` exactly
+once with the terminal error and completes the iterator normally. The stream
+never dies silently and never leaves an unhandled rejection behind.
+
+Failure-mode matrix:
+
+| Failure | Retried? | `onStreamError` | Iterator |
+| --- | --- | --- | --- |
+| Transient (recovers within `maxRetries`) | yes | not called | continues |
+| Persistent (retries exhausted) | yes, then gives up | called once with final error | ends normally |
+| Abort (`signal`) | no | not called | ends immediately |
+
+If no `onStreamError` is configured, retry-then-end still happens; the terminal
+error is retrievable via the `lastError` getter for observability.
+
+If the callback itself throws, that throw **propagates** out of the `for await`
+loop — the consumer asked for halt-on-first-error semantics by supplying a
+throwing callback, so it is not swallowed.
+
 #### Aborting (`signal`)
 
 Aborting ends the stream as a normal exit, never a throw:

@@ -627,6 +627,17 @@ export interface GuardTelemetryWatchParams {
    * break the watch loop), matching `invoke()`'s `onStep` contract.
    */
   onGap?: (gap: GuardTelemetryGap) => void;
+  /**
+   * Called once when the committed stream ends because of a terminal RPC
+   * failure — after the bounded retry envelope is exhausted. Fail-visible
+   * telemetry: a silent stream death is an incident blind spot.
+   *
+   * The callback receives the final error. A callback that throws propagates
+   * out of the `for await` loop: the consumer asked for it. When omitted, the
+   * stream still retries-then-ends, and the terminal error is retrievable via
+   * `lastError` on the listener.
+   */
+  onStreamError?: (error: unknown) => void;
 }
 
 /**
@@ -786,6 +797,18 @@ export class GuardTelemetryListener {
    */
   private readonly buffer: GuardEventRingBuffer | null;
 
+  /**
+   * The terminal error that ended the most recent `watch()` stream, or `null`
+   * when the stream ended normally (abort or completion). Set when the bounded
+   * retry envelope is exhausted; cleared at the start of each `watch()`.
+   */
+  private lastError: unknown = null;
+
+  /** The terminal error that ended the most recent `watch()` stream, if any. */
+  getLastError(): unknown {
+    return this.lastError;
+  }
+
   constructor(config: GuardTelemetryConfig) {
     this.config = config;
     this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
@@ -899,6 +922,7 @@ export class GuardTelemetryListener {
     const sleep: PollSleep = params.sleep ?? defaultPollSleep;
     let cursor = params.cursor;
     let startLedger = params.startLedger;
+    this.lastError = null;
 
     // An abort that landed before the iterator was first pulled must not probe
     // the RPC — not even the `getLatestLedger` call that resolves the default
@@ -922,6 +946,7 @@ export class GuardTelemetryListener {
 
     while (!signal?.aborted) {
       let page: PollResult;
+      let attempts = 0;
       try {
         page = await this.poll({
           ...(startLedger !== undefined ? { startLedger } : {}),
@@ -936,7 +961,37 @@ export class GuardTelemetryListener {
         // telemetry failure: end the stream quietly instead of throwing at the
         // `for await` consumer or leaving an unhandled rejection behind.
         if (signal?.aborted) return;
-        throw error;
+        // Bounded retry with backoff, then a fail-visible end: call
+        // `onStreamError` once with the terminal error and complete the
+        // iterator normally. A callback that throws propagates (the consumer
+        // asked for it); without a callback the error is retrievable via
+        // `getLastError()`.
+        const maxAttempts = 5;
+        let terminal: unknown = error;
+        let recovered: PollResult | null = null;
+        while (attempts < maxAttempts) {
+          attempts += 1;
+          const backoff = Math.min(interval, 100 * 2 ** (attempts - 1));
+          await raceAbort(signal, () => sleep(backoff, signal));
+          if (signal?.aborted) return;
+          try {
+            recovered = await this.poll({
+              ...(startLedger !== undefined ? { startLedger } : {}),
+              ...(cursor !== undefined ? { cursor } : {}),
+              ...(params.limit !== undefined ? { limit: params.limit } : {}),
+            });
+            break;
+          } catch (retryError) {
+            if (signal?.aborted) return;
+            terminal = retryError;
+          }
+        }
+        if (recovered === null) {
+          this.lastError = terminal;
+          if (params.onStreamError) params.onStreamError(terminal);
+          return;
+        }
+        page = recovered;
       }
       cursor = page.cursor;
       // Once a cursor is held, the ledger range must not be sent again — the RPC
