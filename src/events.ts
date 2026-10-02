@@ -40,6 +40,11 @@
 import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import type { GuardReason } from "./reasons.ts";
 
+/**
+ * The guard contract's event-topic vocabulary: camelCase property → the exact
+ * `event_*` symbol the contract emits. Values are matched literally — topic
+ * decoding never fuzzes or aliases them.
+ */
 export const GUARD_EVENT_TOPICS = {
   /** Every policy decision, in-path and pre-flight. */
   authChecked: "event_auth_checked",
@@ -59,6 +64,7 @@ export const GUARD_AUTH_RESULTS = {
   blocked: "blocked",
 } as const;
 
+/** The decision half of an `event_auth_checked` topic: `allowed` or `blocked`. */
 export type GuardAuthResult =
   (typeof GUARD_AUTH_RESULTS)[keyof typeof GUARD_AUTH_RESULTS];
 

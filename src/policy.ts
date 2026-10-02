@@ -107,29 +107,44 @@ export function unsafeContractAddress(value: string): ContractAddress {
   return value as ContractAddress;
 }
 
+/** Unsafe cast to `AccountAddress`; validation bypassed — test/fixture values only (see `unsafeContractAddress`). */
 export function unsafeAccountAddress(value: string): AccountAddress {
   return value as AccountAddress;
 }
 
+/** Unsafe cast to `StrKeyAddress`; validation bypassed — test/fixture values only (see `unsafeContractAddress`). */
 export function unsafeStrKeyAddress(value: string): StrKeyAddress {
   return value as StrKeyAddress;
 }
 
+/** Unsafe cast to `PublicKeyHex`; validation bypassed — test/fixture values only (see `unsafeContractAddress`). */
 export function unsafePublicKeyHex(value: string): PublicKeyHex {
   return value as PublicKeyHex;
 }
 
+/**
+ * An allowlist entry for non-asset contract calls: which contract may be
+ * called, and with which function symbols (`fns: null` means any function on
+ * that contract).
+ */
 export interface ProtocolRule {
   contract: ContractAddress;
   /** `null` means "any function on this contract". */
   fns: string[] | null;
 }
 
+/** A per-recipient limit for the current rolling window: who it applies to, and the cap. */
 export interface RecipientWindowCap {
   recipient: AccountAddress;
   cap: bigint;
 }
 
+/**
+ * The full guard policy as the contract stores it: spend caps, allowlists
+ * (assets, protocols, recipients), the active window, pause state, and the
+ * dead-man-switch grace. Field names are the contract's own snake_case, because
+ * this object round-trips through `policyToScVal` and `decodePolicy` unchanged.
+ */
 export interface PolicyConfig {
   per_tx_cap: bigint;
   window_secs: bigint;
@@ -211,14 +226,17 @@ export const POLICY_RULE_IDS = [
   "self_as_recipient_cap",
 ] as const;
 
+/** One of the SPEC §8 rule identifiers in `POLICY_RULE_IDS` — the `rule` half of a `PolicyFailure`. */
 export type PolicyRuleId = (typeof POLICY_RULE_IDS)[number];
 
+/** One structural validation failure from `validateGuardPolicy`: field path, rule, message. */
 export interface PolicyFailure {
   path: string;
   rule: PolicyRuleId;
   message: string;
 }
 
+/** Knobs for `validateGuardPolicy`: the enforcing guard's address (self-reference rules) and the recipient-list size limit. */
 export interface ValidatePolicyOptions {
   /** Guard contract address used to enforce self-address rejection rules. */
   guardAddress?: ContractAddress | string;
@@ -226,6 +244,11 @@ export interface ValidatePolicyOptions {
   maxRecipientEntries?: number;
 }
 
+/**
+ * The guard account's authorization state as the contract reports it: policy
+ * presence, admin freeze, heartbeat liveness, and the two timestamps
+ * (`last_heartbeat`, `now`) the dead-man switch compares.
+ */
 export interface GuardStatus {
   has_policy: boolean;
   admin_frozen: boolean;
@@ -551,6 +574,16 @@ function sortedScMap(entries: Array<{ key: string; val: xdr.ScVal }>): xdr.ScVal
   );
 }
 
+/**
+ * Normalise a decoded `check` result into the SDK's discriminated union.
+ *
+ * @param raw - The `scValToNative` payload from the guard: `"Allowed"` or
+ *   `{ Blocked: "<reason>" }`.
+ * @returns `{ kind: "allowed" }`, or `{ kind: "blocked", reason }` with the
+ *   reason always coerced to a string.
+ * @throws {ContractResponseError} When `raw` is neither shape — an unexpected
+ *   payload is a protocol violation, not a refusal.
+ */
 export function decodeCheckResult(raw: unknown): CheckResult {
   if (raw === "Allowed") return { kind: "allowed" };
   if (raw && typeof raw === "object" && "Blocked" in (raw as Record<string, unknown>)) {

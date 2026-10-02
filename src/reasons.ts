@@ -11,6 +11,11 @@
  */
 import { GuardError } from "./errors.ts";
 
+/**
+ * The guard contract's block-reason vocabulary: stable snake_case symbol →
+ * numeric code, mirrored from the contract so off-chain code and on-chain code
+ * share one table. Single source for the `GuardReason` type and `GUARD_REASONS`.
+ */
 export const GUARD_REASON_CODES = {
   unauthorized: 1,
   already_initialized: 2,
@@ -64,6 +69,9 @@ export const GUARD_REASONS: Readonly<Record<GuardReason, GuardReason>> = Object.
 );
 
 /**
+ * Alternate name for `GuardReason`, kept as an alias so existing imports keep
+ * compiling.
+ *
  * @deprecated Use `GuardReason`. Kept as an alias so existing imports keep
  * compiling; new code should import the canonical name.
  */
@@ -101,6 +109,10 @@ const EXPLANATIONS: Record<GuardReason, string> = {
   create_contract_not_allowed: "The account may not authorize contract creation.",
 };
 
+/**
+ * Map a numeric reason code to its symbol; `undefined` for a code the
+ * vocabulary does not know.
+ */
 export function reasonNameFromCode(code: number): GuardReason | undefined {
   return BY_CODE.get(code);
 }
@@ -111,6 +123,11 @@ export function reasonName(reason: number | string): GuardReason | string {
   return reason;
 }
 
+/**
+ * One-line operator-facing meaning of a reason, given as either the numeric
+ * code or the symbol; unknown values get an explicit "unrecognised" note
+ * rather than a plausible-sounding guess.
+ */
 export function explainReason(reason: number | string): string {
   const name = reasonName(reason);
   return EXPLANATIONS[name as GuardReason] ?? `Unrecognised guard reason: ${String(reason)}`;

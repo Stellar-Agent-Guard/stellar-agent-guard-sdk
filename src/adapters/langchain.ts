@@ -38,6 +38,11 @@ export interface LangChainToolMessage {
   status: "error";
 }
 
+/**
+ * Configuration for `createLangChainGuardMiddleware`: the interceptor that
+ * decides, the tool-call → contract-call mapping that says *which* tool calls
+ * are intercepted at all, and optional observability hooks.
+ */
 export interface LangChainGuardOptions {
   interceptor: PreFlightInterceptor;
   /**
@@ -65,6 +70,45 @@ export interface LangChainGuardOptions {
  * Register it first: LangChain composes middleware with *"first defined =
  * outermost"*, so ordering it ahead of other tool middleware means the guard
  * decides before anything else touches the call.
+ *
+ * @example
+ * ```ts
+ * import { Keypair, rpc } from "@stellar/stellar-sdk";
+ * import {
+ *   createLangChainGuardMiddleware,
+ *   isContractAddress,
+ *   PreFlightInterceptor,
+ * } from "stellar-agent-guard-sdk";
+ *
+ * const guard = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+ * if (!isContractAddress(guard)) throw new Error(`bad guard address: ${guard}`);
+ *
+ * const guardMiddleware = createLangChainGuardMiddleware({
+ *   name: "stellar-agent-guard",
+ *   interceptor: new PreFlightInterceptor({
+ *     server: new rpc.Server("https://soroban-testnet.stellar.org"),
+ *     networkPassphrase: "Test SDF Network ; September 2015",
+ *     guard,
+ *     agent: Keypair.random(),
+ *     source: Keypair.random(),
+ *   }),
+ *   // Only fund-moving tools are intercepted; anything else passes through.
+ *   toContractCall: ({ toolCall }) =>
+ *     toolCall.name === "transfer_tokens"
+ *       ? { contract: guard, fn: "transfer", args: [] }
+ *       : null,
+ * });
+ *
+ * // A tool the guard has no opinion about runs untouched — `toContractCall`
+ * // returned null, so this executes with no verdict and no network. A
+ * // `transfer_tokens` call instead goes to `interceptor.check(...)` and the
+ * // tool body is never entered when the guard refuses.
+ * const result = await guardMiddleware.wrapToolCall(
+ *   { toolCall: { name: "get_balance", args: {}, id: "call-1" } },
+ *   async () => ({ content: "42" }),
+ * );
+ * console.log(result); // { content: "42" }
+ * ```
  */
 export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
   const name = options.name ?? "stellar-agent-guard";

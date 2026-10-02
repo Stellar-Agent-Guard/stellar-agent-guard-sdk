@@ -234,6 +234,11 @@ interface CostResultBreakdown {
   breakdown?: ResourceBreakdown;
 }
 
+/**
+ * What `CostPreChecker` needs: an interceptor to price through, and an optional
+ * fee ceiling to object to. The interceptor is structural (`Pick`), so a
+ * stand-in works anywhere the real one does — the budget arithmetic is pure.
+ */
 export interface CostPreCheckConfig {
   /**
    * The pre-flight interceptor whose `check` produces the network's own price.
@@ -260,6 +265,12 @@ export interface FeeBreakdown {
   totalFeeStroops: bigint;
 }
 
+/**
+ * A call priced in cost terms. Narrow on `kind`: `within_budget` (priced, under
+ * the ceiling), `over_budget` (priced, over the ceiling — the guard itself may
+ * still allow it), `blocked` (guard refused; fees are zero by construction), or
+ * `undetermined` (not priced). `allowed` mirrors `kind` for boolean callers.
+ */
 export type CostDecision =
   | ({
       kind: "within_budget";
@@ -367,6 +378,44 @@ export function describeCostDecision(decision: CostDecision): string {
  * Runs the same enforcement question the pre-flight interceptor runs — one
  * simulation of the real `__check_auth` — and reports the result in cost terms.
  * Nothing is broadcast, so calling this repeatedly costs only RPC time.
+ *
+ * @example
+ * ```ts
+ * import {
+ *   CostPreChecker,
+ *   describeCostDecision,
+ *   feeBreakdown,
+ *   formatFee,
+ *   isContractAddress,
+ * } from "stellar-agent-guard-sdk";
+ *
+ * const guard = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+ * if (!isContractAddress(guard)) throw new Error(`bad guard address: ${guard}`);
+ *
+ * // `interceptor` is structural, so a stand-in makes this example runnable
+ * // with no network: the budget arithmetic is pure.
+ * const checker = new CostPreChecker({
+ *   interceptor: {
+ *     check: async () => ({
+ *       allowed: true as const,
+ *       kind: "admissible" as const,
+ *       estimatedResourceFee: 1_234n,
+ *       footprintKeys: 3,
+ *     }),
+ *   },
+ *   maxFeeStroops: 10_000n,
+ * });
+ *
+ * const call = { contract: guard, fn: "transfer", args: [] };
+ * const cost = await checker.check(call);
+ *
+ * console.log(describeCostDecision(cost));
+ * // within budget: ... stroops (... resource + ... inclusion), ceiling 10000
+ *
+ * // The two fee components, never conflated:
+ * const { totalFeeStroops } = feeBreakdown(1_234n);
+ * console.log(`${formatFee(totalFeeStroops)} XLM`);
+ * ```
  */
 export class CostPreChecker {
   private readonly config: CostPreCheckConfig;

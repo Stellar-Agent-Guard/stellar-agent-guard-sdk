@@ -32,6 +32,11 @@ import { topicSymbols } from "./invoke.ts";
 /** The event name topics this SDK knows how to interpret. */
 const KNOWN_TOPICS = new Set<string>(Object.values(GUARD_EVENT_TOPICS));
 
+/**
+ * Which guard event this is: the contract's `event_*` vocabulary as a stable
+ * union, plus `unknown` for a topic this SDK does not recognise (dropped, not
+ * guessed at).
+ */
 export type GuardEventKind =
   | "auth_checked"
   | "heartbeat"
@@ -66,6 +71,12 @@ export type GuardEventSource = "ledger" | "diagnostic";
  */
 export type GuardEventStream = "committed" | "diagnostic";
 
+/**
+ * One guard event, normalised across both observation channels — a committed
+ * ledger event or a pre-broadcast diagnostic. Fields the channel does not
+ * supply are `null` rather than absent; `id` is stable on both streams, and
+ * `stream` says which stream produced the event (see `docs/event-schema.md`).
+ */
 export interface GuardEvent {
   /**
    * Stable identity for this event, non-null on both streams.
@@ -429,6 +440,7 @@ export class GuardEventRingBuffer {
   }
 }
 
+/** What `GuardTelemetryListener` needs: the RPC server and the guard contract to follow. The event buffer is opt-in. */
 export interface GuardTelemetryConfig {
   server: rpc.Server;
   /** The guard contract to follow. */
@@ -442,6 +454,7 @@ export interface GuardTelemetryConfig {
   buffer?: GuardEventBufferOptions;
 }
 
+/** One page from `poll()`: decoded events, the RPC's resume cursor, and the ledger window the response describes. */
 export interface PollResult {
   events: GuardEvent[];
   /** Cursor to resume from, as returned by the RPC. */
@@ -486,8 +499,10 @@ export interface GuardTelemetryGap {
   retainedToLedger: number;
 }
 
+/** Poll-delay jitter mode: `'full'` (uniform jitter, the default) or `'none'` (fixed cadence). */
 export type TelemetryJitter = "none" | "full";
 
+/** The default jitter fraction: delays are drawn uniformly from `[interval * 0.8, interval]`. */
 export const DEFAULT_JITTER_FRACTION = 0.2;
 
 /**
@@ -576,6 +591,11 @@ function raceAbort(signal: AbortSignal | undefined, wait: () => Promise<void>): 
   });
 }
 
+/**
+ * Per-stream parameters for `watch()`/`watchAll()`: a start ledger or a cursor
+ * resume, poll cadence and jitter, page size, cancellation (`signal`), the
+ * `onGap` gap report, and the RNG/sleep injectors for deterministic tests.
+ */
 export interface GuardTelemetryWatchParams {
   startLedger?: number;
   pollIntervalMs?: number;
@@ -778,6 +798,17 @@ export async function* mergeGuardEventStreams(
   }
 }
 
+/**
+ * Follow one guard contract's events over RPC.
+ *
+ * Three reads, one vocabulary: `poll()` takes a single page of committed
+ * events, `watch()` streams the committed ledger, and `watchAll()` merges that
+ * stream with pre-broadcast diagnostics into one ordered async iterable —
+ * blocked decisions never reach a ledger, so only `watchAll()` shows both
+ * halves. Provable coverage gaps are reported through `onGap`
+ * (`GuardTelemetryGap`), never filled in. The `recent()` buffer is opt-in and
+ * in-process.
+ */
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
   /**

@@ -31,6 +31,12 @@ export interface ElizaActionLike {
   validate: ElizaValidator;
 }
 
+/**
+ * Configuration for `createGuardValidator`: the interceptor that decides, the
+ * action-intent → contract-call mapping that says *which* actions are guarded
+ * at all, and the optional hooks for the base validator and for observing a
+ * refusal (a `false` verdict is otherwise silent).
+ */
 export interface ElizaGuardOptions {
   interceptor: PreFlightInterceptor;
   /**
@@ -56,6 +62,38 @@ export interface ElizaGuardOptions {
  *
  * Fails closed: a refusal and an undetermined enforcement run both return
  * `false`, so the action never executes either way.
+ *
+ * @example
+ * ```ts
+ * import { Keypair, rpc } from "@stellar/stellar-sdk";
+ * import {
+ *   createGuardValidator,
+ *   isContractAddress,
+ *   PreFlightInterceptor,
+ * } from "stellar-agent-guard-sdk";
+ *
+ * const guard = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+ * if (!isContractAddress(guard)) throw new Error(`bad guard address: ${guard}`);
+ *
+ * const validate = createGuardValidator({
+ *   interceptor: new PreFlightInterceptor({
+ *     server: new rpc.Server("https://soroban-testnet.stellar.org"),
+ *     networkPassphrase: "Test SDF Network ; September 2015",
+ *     guard,
+ *     agent: Keypair.random(),
+ *     source: Keypair.random(),
+ *   }),
+ *   baseValidate: async (_runtime, message) => message !== undefined,
+ *   // Return a ContractCall for fund-moving intents (that path goes to
+ *   // interceptor.check and may hit the network); null means "nothing to guard".
+ *   toContractCall: () => null,
+ *   onBlocked: (decision) => console.warn(`blocked: ${decision.kind}`),
+ * });
+ *
+ * // Not a fund-moving action: no verdict is sought, no network is touched,
+ * // and validation alone decides.
+ * console.log(await validate({}, { room: "general" })); // true
+ * ```
  */
 export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator {
   return async (runtime, message, state, handlerOptions) => {

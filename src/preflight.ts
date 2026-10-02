@@ -181,6 +181,12 @@ export class PreFlightUndeterminedError extends SimulationError {
   }
 }
 
+/**
+ * One pre-flight verdict. Narrow on `kind`: `admissible` (guard approved),
+ * `blocked` (guard refused, carrying the contract's reason), or
+ * `undetermined` (enforcement could not rule — treated as not-allowed).
+ * `allowed` mirrors `kind` for callers that only need the boolean.
+ */
 export type PreFlightDecision =
   | {
       allowed: true;
@@ -231,6 +237,12 @@ export interface CheckBatchOptions {
   initialWindowSpent?: bigint;
 }
 
+/**
+ * The result of a batched check: one overall boolean — all-or-nothing, matching
+ * the contract's batch auth semantics — plus the per-call verdicts in input
+ * order. `admissible`/`overallAdmissible` and `verdicts`/`calls` are alias
+ * pairs, kept for both spellings.
+ */
 export interface PreFlightBatchDecision {
   /**
    * Overall batch verdict: true only if every call in the batch is admissible.
@@ -275,6 +287,11 @@ export interface PreFlightCheckOptions {
   onStep?: (step: InvokeStepEvent) => void;
 }
 
+/**
+ * Opt-in simulation-result cache settings (`PreFlightConfig.cache`). The TTL is
+ * capped at one approximate ledger close (5 seconds), so a cached verdict can
+ * never outlive the ledger snapshot it was priced against.
+ */
 export interface PreFlightCacheOptions {
   /**
    * Maximum cache age in milliseconds. The effective value is capped at one
@@ -291,6 +308,11 @@ export interface PreFlightCacheOptions {
   policyRevision?: PolicyRevision | (() => PolicyRevision | Promise<PolicyRevision>);
 }
 
+/**
+ * Everything an interceptor needs to enforce a guarded account: the RPC server,
+ * network passphrase, guard contract, agent signer, and fee-paying source.
+ * Each member is documented inline; `cache` and `clock` are opt-in.
+ */
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
@@ -372,6 +394,46 @@ function configFingerprint(config: PreFlightConfig): string {
   return hash.digest("hex");
 }
 
+/**
+ * Pre-flight policy interceptor: asks the guarded account's guard whether a
+ * call may proceed *before* anything is signed for broadcast.
+ *
+ * Construct one per guard configuration. `check()` runs the same enforcement
+ * the chain would, in a simulation that cannot mutate anything — a refusal is
+ * therefore free — and never throws for a policy refusal: a `blocked` verdict
+ * is a normal result. Malformed input is the exception: it throws
+ * `InvalidInputError` before any RPC dispatch.
+ *
+ * @example
+ * ```ts
+ * import { Keypair, rpc } from "@stellar/stellar-sdk";
+ * import {
+ *   InvalidInputError,
+ *   isContractAddress,
+ *   PreFlightInterceptor,
+ * } from "stellar-agent-guard-sdk";
+ *
+ * const guard = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+ * if (!isContractAddress(guard)) throw new Error(`bad guard address: ${guard}`);
+ *
+ * const interceptor = new PreFlightInterceptor({
+ *   server: new rpc.Server("https://soroban-testnet.stellar.org"),
+ *   networkPassphrase: "Test SDF Network ; September 2015",
+ *   guard,
+ *   agent: Keypair.random(),
+ *   source: Keypair.random(),
+ * });
+ *
+ * // Malformed input throws before any RPC dispatch — this runs offline.
+ * try {
+ *   await interceptor.check({ contract: guard, fn: "transfer amount", args: [] });
+ * } catch (error) {
+ *   if (error instanceof InvalidInputError) {
+ *     console.log(`rejected ${error.field} by rule ${error.rule}`);
+ *   }
+ * }
+ * ```
+ */
 export class PreFlightInterceptor {
   private readonly config: PreFlightConfig;
   private readonly cacheOptions: PreFlightCacheOptions | undefined;

@@ -91,8 +91,19 @@ export const SCHEMA_DIALECT = [
   SCHEMA_RULE_ID_ANNOTATION,
 ] as const;
 
+/**
+ * One keyword from {@link SCHEMA_DIALECT} — the complete vocabulary this
+ * interpreter understands. Anything outside this union is, by construction,
+ * something the vendored schema is not allowed to use.
+ */
 export type SchemaKeyword = (typeof SCHEMA_DIALECT)[number];
 
+/**
+ * Knobs for `validateGuardPolicyAgainstSchema`, whose third parameter accepts
+ * either this object or a bare guard address (shorthand for
+ * `{ guardAddress: address }`). Omitting both skips the §8 self-reference rules
+ * and uses the default recipient cap.
+ */
 export interface SchemaValidationOptions {
   /**
    * Guard contract address used to enforce the §8 self-reference rules

@@ -59,6 +59,14 @@ jobs:
       - name: lint
         run: npm run lint
 
+      # JSDoc completeness on the public export graph (issue #128): every
+      # specifier in src/index.ts must resolve to a documented declaration, and
+      # the five main entry points must carry an @example. Hover docs in an
+      # editor are whatever the .d.ts carries — this is what keeps it there.
+      # Reads the working tree only: no network, no secret.
+      - name: jsdoc completeness check
+        run: npm run test:jsdoc
+
       - name: unit tests
         run: npm test
 

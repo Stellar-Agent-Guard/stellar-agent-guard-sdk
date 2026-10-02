@@ -710,3 +710,62 @@ No network, no credentials.
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this
 addendum with the fresh run output if desired.
 
+## Addendum — 2026-09-30 (Issue #128: JSDoc for every exported symbol + `test:jsdoc` completeness gate)
+
+Recorded because this PR touches the enforcement path (`src/preflight.ts`,
+`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`) and CI's `enforcement-path
+evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this checkout, so `npm run test:integration` cannot execute here. No fresh
+Phase-2 transcript is claimed, and the CI gate verifies only that this file was
+touched — not the numbers.
+
+### What the PR changes on the enforcement path
+
+**Comments only — zero executable code changes**, which is stronger than the
+usual "behaviour unchanged" argument and is proved mechanically, twice:
+
+- `git diff main...HEAD -- src` filtered to non-comment changed lines
+  (`grep -E '^[+-]' | grep -v '^(\+\+\+|---)' | grep -vE '^[+-]\s*(\*|/\*|\*/)'`)
+  returns **zero lines**: every added or removed line in `src/` is part of a JSDoc
+  block. 613 insertions / 30 deletions across the diff, all comments.
+- **Emitted output is byte-identical.** `tsc -p tsconfig.build.json
+  --removeComments` was run on `main` and on this branch, then
+  `diff -r -x '*.map'` across the two outputs: all `.js` and `.d.ts` files match
+  exactly. (Source maps are excluded because they encode source line numbers,
+  which inserting comments legitimately shifts.)
+
+The JSDoc itself covers all 184 exports reachable from `src/index.ts` (baseline
+137/184), with runnable `@example` blocks on the five entry points named in the
+issue plus the two stale `clock.ts` examples rewritten to the real API. The new
+CI gate (`scripts/check-jsdoc.ts`, `npm run test:jsdoc`) enforces completeness
+for future PRs.
+
+### What did run locally (Node v22.15.0; CI runs Node 24 and is the authority for the engine range)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 437 tests: 436 pass, 0 fail, 1 skipped
+npm run build                            # clean
+npm run test:exports                     # export-map check OK: every exports entry resolves and undeclared paths are refused
+npm run test:jsdoc                       # jsdoc check OK: 184/184 exports documented, 5/5 entry-point examples present
+node --import tsx scripts/check-enforcement-evidence.ts main HEAD
+                                         # pass; evidence file detected as updated, structure valid
+```
+
+The 7 `@example` blocks were extracted verbatim from the committed JSDoc and
+executed (import rewritten to `../src/index.ts`, the repo's own pattern): the
+interceptor, cost, LangChain, ElizaOS and both clock examples all ran to their
+documented output; the `invoke` example was typechecked with repo-strict `tsc`
+flags instead of executed, because running it needs funded testnet credentials
+(`.env.phase2`) — `invoke` behaviour is covered by the 436-passing unit suite,
+including `tests/unit/invoke.test.ts` and `tests/unit/invoke-dry-run.test.ts`.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+For this diff in particular the live re-run is a formality — the emitted code is
+proven byte-identical to `main` — but the rule the gate enforces is a
+measurement, and this addendum does not substitute one for the other.
+
