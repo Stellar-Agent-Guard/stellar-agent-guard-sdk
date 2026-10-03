@@ -125,6 +125,14 @@ scheme has to be renamed later.
 Anything still open when a phase closes gets an issue, not just a note in a pull request or a
 chat log.
 
+## Local development setup
+
+- **Node 24+**: run `nvm use` (or `fnm use` / `asdf install` for the same `.nvmrc`
+  readers) to pick up the pinned major from `.nvmrc` (`24`), or install Node 24 from
+  [nodejs.org](https://nodejs.org/). `package.json` `engines.node` (`>=24`) declares the
+  supported range and CI tests Node 24 and Node 26, with lint and typecheck on Node 24. Then run
+  `npm ci` and the gates below — see ["Local gates before pushing"](#local-gates-before-pushing)
+  and ["Test tiers and fixtures"](#test-tiers-and-fixtures) for what each tier runs.
 ## Releasing
 
 Version bumps, tags, npm publish, and the 0.x breaking-change policy are
