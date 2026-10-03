@@ -33,6 +33,8 @@ import {
   buildInitialEnvelope,
   describeSimulationResources,
   describeSubmissionFailure,
+  INCLUSION_FEE,
+  isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   parseSimulationResourceFee,
@@ -82,12 +84,14 @@ export type InvokeErrorCause =
  */
 export type RetryableInvokeFailure =
   | "stale_ledger_resource_limit"
-  | "sequence_number_collision";
+  | "sequence_number_collision"
+  | "min_fee";
 
 /** The coarse cause each retryable failure reports once the budget is spent. */
 const RETRYABLE_CAUSES = {
   stale_ledger_resource_limit: INVOKE_ERROR_CAUSES.staleLedgerResourceLimit,
   sequence_number_collision: INVOKE_ERROR_CAUSES.sequenceNumberCollision,
+  min_fee: INVOKE_ERROR_CAUSES.undetermined,
 } as const satisfies Record<RetryableInvokeFailure, InvokeErrorCause>;
 
 /** The error arm returned by one invocation attempt. */
@@ -102,6 +106,10 @@ export interface InvokeErrorOutcome {
   cause?: InvokeErrorCause;
   /** Set when a re-simulation against fresh state can fix the failure. */
   retryable?: RetryableInvokeFailure;
+  /** Fee of the transaction when broadcast was attempted. */
+  lastFee?: bigint | undefined;
+  /** Submission result when broadcast was attempted. */
+  submission?: SubmissionResult | undefined;
 }
 
 /**
@@ -190,8 +198,26 @@ export interface InvokeDryRunResult {
   steps: InvokePipelineStep[];
 }
 
-export type InvokeOutcome =
-  | InvokeDryRunResult
+/** Configuration for bounded fee bumping when broadcast fails due to minimum fee. */
+export interface FeeBumpConfig {
+  /**
+   * Maximum total broadcast attempts permitted (initial attempt + retries).
+   * Default: 3 attempts.
+   */
+  maxAttempts?: number | undefined;
+  /**
+   * Multiplier applied to the inclusion fee on each fee-bump retry.
+   * Default: 2 (doubles the inclusion fee per attempt).
+   */
+  feeMultiplier?: number | undefined;
+  /**
+   * Initial inclusion fee in stroops to use on the first attempt.
+   * Default: 100 stroops (`INCLUSION_FEE`).
+   */
+  initialInclusionFee?: bigint | undefined;
+}
+
+export type PipelineOutcome =
   | { kind: "allowed"; submission: SubmissionResult }
   | {
       kind: "blocked";
@@ -207,6 +233,11 @@ export type InvokeOutcome =
     }
   | InvokeErrorOutcome
   | InvokeRetryError;
+
+export type InvokeOutcome =
+  | InvokeDryRunResult
+  | PipelineOutcome
+  | BroadcastError;
 
 /** Defaults for the bounded stale-ledger retry policy. */
 export const DEFAULT_INVOKE_RETRY_OPTIONS = {
@@ -258,6 +289,20 @@ export interface InvokeParams {
   retry?: InvokeRetryOptions | undefined;
   pollAttempts?: number | undefined;
   pollIntervalMs?: number | undefined;
+  /** Options controlling polling interval and attempts after submission. */
+  pollOptions?: { pollAttempts?: number; pollIntervalMs?: number } | undefined;
+  /**
+   * Optional configuration for fee-bump retry when broadcast hits min-fee.
+   * If omitted, defaults to 3 attempts with a 2x fee multiplier.
+   */
+  feeBump?: FeeBumpConfig | undefined;
+  /**
+   * Overall maximum retries across retryable classes. If specified, bounds the
+   * total attempts across all triggers.
+   */
+  maxRetries?: number | undefined;
+  /** Custom inclusion fee (used internally during fee-bump retries). */
+  fee?: bigint | string | undefined;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -677,21 +722,55 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   const sourceKey = await params.source.publicKey();
   return withAccountQueue(params.server, sourceKey, async () => {
     const retry = resolveRetryOptions(params.retry);
-    let attempts = 0;
+
+    const configuredFeeMax =
+      params.feeBump?.maxAttempts ??
+      (params.maxRetries !== undefined ? params.maxRetries + 1 : 3);
+    const maxFeeAttempts = Math.max(1, configuredFeeMax);
+    const feeMultiplier = params.feeBump?.feeMultiplier ?? 2;
+    let currentInclusionFee = params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE);
+
+    let feeAttempt = 0;
+    let generalAttempt = 0;
 
     while (true) {
-      attempts += 1;
+      generalAttempt += 1;
+      feeAttempt += 1;
       // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
-      const outcome = await invokePipeline(params, attempts - 1);
+      const outcome = await invokePipeline(params, generalAttempt - 1, {
+        inclusionFee: currentInclusionFee,
+      });
 
       if (outcome.kind !== "error" || outcome.retryable === undefined) {
         return outcome;
       }
-      if (attempts >= retry.maxAttempts) {
-        return new InvokeRetryError({ attempts, lastOutcome: outcome });
+
+      if (outcome.retryable === "min_fee") {
+        if (feeAttempt < maxFeeAttempts) {
+          const bumped = BigInt(Math.ceil(Number(currentInclusionFee) * feeMultiplier));
+          currentInclusionFee = bumped > currentInclusionFee ? bumped : currentInclusionFee + 100n;
+          continue;
+        }
+
+        const broadcastError = new BroadcastError({
+          attempts: feeAttempt,
+          lastFee: outcome.lastFee ?? currentInclusionFee,
+          failure: outcome.submission?.failure ?? {
+            resultXdr: null,
+            resultCode: "result=txInsufficientFee",
+            message: outcome.detail,
+            diagnosticEvents: [],
+          },
+          detail: outcome.detail,
+        });
+        return broadcastError;
       }
 
-      await retry.sleep(fullJitterDelay(attempts, retry));
+      if (generalAttempt >= retry.maxAttempts) {
+        return new InvokeRetryError({ attempts: generalAttempt, lastOutcome: outcome });
+      }
+
+      await retry.sleep(fullJitterDelay(generalAttempt, retry));
     }
   });
 }
@@ -826,9 +905,19 @@ export type EnforcementOutcome =
     };
 
 /** One attempt: simulate → sign → enforce → submit. No retry logic lives here. */
-async function invokePipeline(params: InvokeParams, attempt: number): Promise<InvokeOutcome> {
+async function invokePipeline(
+  params: InvokeParams,
+  attempt: number,
+  options?: { inclusionFee?: bigint | undefined },
+): Promise<PipelineOutcome> {
   const { server } = params;
-  const enforced = await enforceCall(params, attempt);
+  const enforced = await enforceCall(
+    {
+      ...params,
+      ...(options?.inclusionFee !== undefined ? { fee: options.inclusionFee } : {}),
+    },
+    attempt,
+  );
   if (enforced.kind === "error") {
     // The guard never made a decision, so this is `undetermined` and not
     // `blocked`. Classify it here, at the point the failure is produced, so
@@ -853,6 +942,7 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
       operation: enforced.operation,
       networkPassphrase: params.networkPassphrase,
       guard: params.guardAuth?.guard ?? null,
+      ...(options?.inclusionFee !== undefined ? { inclusionFee: options.inclusionFee } : {}),
     });
   } catch (cause) {
     // The enforced simulation passed, so a failure to turn its result into a
@@ -870,14 +960,21 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
   }
 
   let submission: SubmissionResult;
+  const pollAttempts = params.pollOptions?.pollAttempts ?? params.pollAttempts;
+  const pollIntervalMs = params.pollOptions?.pollIntervalMs ?? params.pollIntervalMs;
+  const signers: Array<Keypair | AdminSigner> = [
+    params.source,
+    ...(params.accountSigners ?? []),
+  ];
+
   try {
     submission = await withStepTiming(
       params.onStep,
       { name: "broadcast", attempt },
       () =>
-        submitAndPoll(server, assembled.transaction, [params.source], {
-          pollAttempts: params.pollAttempts,
-          pollIntervalMs: params.pollIntervalMs,
+        submitAndPoll(server, assembled.transaction, signers, {
+          pollAttempts,
+          pollIntervalMs,
         }),
       (result) => result.failure !== null,
     );
@@ -913,11 +1010,12 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
         charged: true,
       };
     }
-    const staleLedger = isStaleLedgerResourceFailure(submission.failure);
+    const isMinFee = isMinimumFeeBroadcastFailure(submission.failure);
+    const staleLedger = !isMinFee && isStaleLedgerResourceFailure(submission.failure);
     // A sequence collision is only expected when something outside this queue
     // broadcasts for the same account; inside the queue it means the RPC
     // snapshot lagged further than the per-account reservation assumed.
-    const sequenceCollision = !staleLedger && isSequenceNumberFailure(submission.failure);
+    const sequenceCollision = !isMinFee && !staleLedger && isSequenceNumberFailure(submission.failure);
     return {
       kind: "error",
       detail,
@@ -932,7 +1030,11 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
         ? { retryable: "stale_ledger_resource_limit" as const }
         : sequenceCollision
           ? { retryable: "sequence_number_collision" as const }
-          : {}),
+          : isMinFee
+            ? { retryable: "min_fee" as const }
+            : {}),
+      lastFee: BigInt(assembled.transaction.fee),
+      submission,
     };
   }
   return { kind: "allowed", submission };
@@ -984,6 +1086,7 @@ export async function enforceCall(
       operation,
       networkPassphrase,
       guard: params.guardAuth?.guard ?? null,
+      fee: params.fee,
     });
     first = await withStepTiming(
       params.onStep,
@@ -1200,6 +1303,7 @@ export async function enforceCall(
           operation: authorized,
           networkPassphrase,
           guard: params.guardAuth?.guard ?? null,
+          fee: params.fee,
         });
         return { operation: authorized, response: await server.simulateTransaction(enforcingTx) };
       },
