@@ -852,6 +852,12 @@ project structure — including the strict one-commit-per-logical-unit rule and 
 [TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
 (`npm run check:strict-ratchet`).
 
+Before changing the public surface, the dependency set, or the runtime the SDK runs
+in, read [`docs/design-principles.md`](docs/design-principles.md): fail-closed
+verdicts, no secret handling, one runtime dependency, additive-only 0.x surface,
+a browser-safe core, and logger-optional silence. Departures are maintainer
+decisions (`tier:maintainer-decision`), not silent exceptions.
+
 Looking for something to work on? The
 [issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
 holds scoped issues with Summary / Acceptance Criteria / Tech Stack — good first tasks for
