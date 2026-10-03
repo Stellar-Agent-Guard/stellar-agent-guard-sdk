@@ -1,5 +1,5 @@
 /**
- * Markdown link checker (issue #140): extraction, anchors, and resolution rules.
+ * Markdown link checker (issues #78 and #140): extraction, anchors, and resolution rules.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -24,8 +24,9 @@ describe("extractLinks", () => {
       "See [a](docs/a.md) and ![img](img/x.png \"title\").",
       "[ref]: ./b.md#part",
       '<a href="c.md">c</a>',
+      "<a href='d.md'>d</a>",
     ].join("\n");
-    assert.deepEqual(targets(md), ["docs/a.md", "img/x.png", "./b.md#part", "c.md"]);
+    assert.deepEqual(targets(md), ["docs/a.md", "img/x.png", "./b.md#part", "c.md", "d.md"]);
   });
 
   it("reports 1-based line numbers", () => {

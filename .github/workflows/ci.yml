@@ -91,6 +91,12 @@ jobs:
       - name: lint
         run: npm run lint
 
+      # Keep relative documentation links valid on every PR.
+      - name: documentation link check (relative)
+        run: npm run check:docs
+
+      - name: unit tests
+        run: npm test
       - name: build
         run: npm run build
 

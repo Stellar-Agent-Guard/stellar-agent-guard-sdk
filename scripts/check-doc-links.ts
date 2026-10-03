@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Markdown link checker (issue #140). Zero dependencies: Node built-ins only.
+ * Markdown link checker (issues #78 and #140). Zero dependencies: Node built-ins only.
  *
  *   node scripts/check-doc-links.ts               # relative links + anchors (PR gate)
  *   node scripts/check-doc-links.ts --external    # also probe http(s) URLs (scheduled sweep)
@@ -92,8 +92,10 @@ export function extractLinks(file: string, markdown: string): DocLink[] {
     // Reference definitions: [label]: target
     const reference = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/.exec(line);
     if (reference) push(reference[1]);
-    // Raw HTML anchors: <a href="...">
-    for (const match of line.matchAll(/<a\s[^>]*href="([^"]+)"/g)) push(match[1]);
+    // Raw HTML anchors accept either quote style: <a href="..."> or <a href='...'>.
+    for (const match of line.matchAll(/<a\s[^>]*href=(?:"([^"]+)"|'([^']+)')/gi)) {
+      push(match[1] ?? match[2]);
+    }
   });
   return links;
 }

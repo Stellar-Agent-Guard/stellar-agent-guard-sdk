@@ -25,6 +25,26 @@ An autonomous agent holding a wallet has a single point of failure: one prompt-i
 
 **Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
 
+## Documentation
+
+Every document under [`docs/`](docs/), with a one-line purpose. Start here rather than hunting through the tree:
+
+- [Introduction](docs/introduction.md) — what the SDK is, and why agents need an on-chain guard.
+- [Installation](docs/installation.md) — npm/source install and the Node 24 requirement.
+- [Architecture](docs/architecture.md) — how the guard, SDK, dashboard, and contracts fit together.
+- [Concepts](docs/concepts/) — deep dives: pre-flight interception, simulation cost pre-checking, dual-stream telemetry, custom-account signing, and multi-key agent signing.
+- [API Reference](docs/api/) — per-class reference for `PreFlightInterceptor`, `CostPreChecker`, `GuardTelemetryListener`, framework adapters, and the invoke pipeline.
+- [Examples](docs/examples/) — runnable LangChain and ElizaOS integrations.
+- [Event Schema](docs/event-schema.md) — every telemetry event and field, each with its stability tier.
+- [Integration Hooks](docs/integration-hooks.md) — the real hooks each agent framework exposes, and AutoGPT findings.
+- [Enforcement Scope](docs/enforcement-scope.md) — exactly what is and is not enforced, and why.
+- [Testnet Verification](docs/verification.md) — end-to-end verification against the deployed guard.
+- [Benchmarks](docs/benchmarks.md) — committed decode- and pre-flight-path baselines.
+- [FAQ](docs/faq.md) — fees, the dead-man switch, and arbitrary-call coverage.
+- [Contributing](docs/contributing.md) — pointer to the repository contribution guide.
+- [Publishing History](docs/publishing-history.md) — release notes and publish-pipeline reconciliation.
+- [Summary](docs/SUMMARY.md) — the GitBook table of contents for the full nested tree.
+
 ## 🎯 What makes this different
 
 Enforcement happens **inside the account itself**, via Soroban's native Custom Account Abstraction — not in a wrapper contract in front of funds, and not in an off-chain service.
