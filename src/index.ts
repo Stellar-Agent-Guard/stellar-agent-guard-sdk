@@ -288,6 +288,17 @@ export {
   type GuardWasmVerification,
 } from "./wasm.ts";
 
+export {
+  HeartbeatIntervalError,
+  startHeartbeat,
+  submitHeartbeat,
+  type HeartbeatBeat,
+  type HeartbeatHandle,
+  type HeartbeatOptions,
+  type HeartbeatSubmission,
+  type SubmitHeartbeatParams,
+} from "./heartbeat.ts";
+
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
 export {
