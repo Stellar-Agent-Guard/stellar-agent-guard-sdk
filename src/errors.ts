@@ -84,3 +84,27 @@ export class PolicyDecodeError extends GuardError {
     this.path = options.path;
   }
 }
+
+/**
+ * An RPC call exceeded its configured `timeoutMs` or was aborted via an
+ * `AbortSignal`.
+ *
+ * This is a typed error for the pipeline surface (`invoke`/`cost`). The verdict
+ * surface (`check`) instead reports timeouts as `abcepted(undetermined(cause:
+ * 'timeout'))` so the fail-closed verdict remains a decision rather than a throw.
+ */
+export class RpcTimeoutError extends GuardError {
+  /** The configured timeout in milliseconds, when the failure was a timeout. */
+  readonly timeoutMs: number | null;
+  /** Whether the failure was caused by an abort signal rather than a timeout. */
+  readonly aborted: boolean;
+
+  constructor(
+    message: string,
+    options: { timeoutMs?: number | null; aborted?: boolean; cause?: unknown } = {},
+  ) {
+    super(message, causeOptions(options.cause));
+    this.timeoutMs = options.timeoutMs ?? null;
+    this.aborted = options.aborted ?? false;
+  }
+}

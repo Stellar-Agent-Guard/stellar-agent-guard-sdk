@@ -14,6 +14,7 @@ import {
   type PreFlightCacheOptions,
   type PreFlightDecision,
 } from "../../src/preflight.ts";
+import { RpcTimeoutError } from "../../src/rpc.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
@@ -36,7 +37,12 @@ function validTransferCall(amount: bigint = 100n): ContractCall {
 }
 
 /** Mock RPC server to track calls and assert zero requests when validation fails. */
-function createMockServer(options?: { simulateResponse?: unknown; enforcedSimulateResponse?: unknown }) {
+function createMockServer(options?: {
+  simulateResponse?: unknown;
+  enforcedSimulateResponse?: unknown;
+  simulateDelayMs?: number;
+  simulateSignal?: AbortSignal;
+}) {
   let requestCount = 0;
   let simulateCount = 0;
   const mock = {
@@ -56,6 +62,27 @@ function createMockServer(options?: { simulateResponse?: unknown; enforcedSimula
     async simulateTransaction() {
       requestCount++;
       simulateCount++;
+      if (options?.simulateDelayMs !== undefined) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, options.simulateDelayMs);
+          const signal = options.simulateSignal;
+          if (signal) {
+            if (signal.aborted) {
+              clearTimeout(timer);
+              reject(new Error("aborted"));
+              return;
+            }
+            signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                reject(new Error("aborted"));
+              },
+              { once: true },
+            );
+          }
+        });
+      }
       if (simulateCount === 2 && options?.enforcedSimulateResponse !== undefined) {
         return options.enforcedSimulateResponse;
       }
@@ -337,6 +364,52 @@ describe("interceptor.check() input validation and zero RPC round-trips", () => 
     );
 
     assert.equal(mockServer.requestCount, 0, "No RPC calls should be attempted on invalid amount");
+  });
+});
+
+describe("abortSignal + timeoutMs plumbing", () => {
+  it("already-aborted signal returns without any RPC call", async () => {
+    const mockServer = createMockServer();
+    const interceptor = createTestInterceptor(mockServer);
+    const controller = new AbortController();
+    controller.abort();
+
+    await assert.rejects(
+      async () => interceptor.check(validTransferCall(), { signal: controller.signal }),
+      (err: unknown) => {
+        assert(err instanceof Error);
+        return true;
+      },
+    );
+
+    assert.equal(mockServer.requestCount, 0, "No RPC calls should be attempted when signal is already aborted");
+  });
+
+  it("mid-flight abort rejects promptly", async () => {
+    const controller = new AbortController();
+    const mockServer = createMockServer({ simulateDelayMs: 10_000, simulateSignal: controller.signal });
+    const interceptor = createTestInterceptor(mockServer);
+
+    const pending = interceptor.check(validTransferCall(), { signal: controller.signal });
+    setTimeout(() => controller.abort(), 10);
+
+    await assert.rejects(async () => pending, (err: unknown) => {
+      assert(err instanceof Error);
+      return true;
+    });
+  });
+
+  it("timeoutMs fires a typed RpcTimeoutError", async () => {
+    const mockServer = createMockServer({ simulateDelayMs: 10_000 });
+    const interceptor = createTestInterceptor(mockServer);
+
+    await assert.rejects(
+      async () => interceptor.check(validTransferCall(), { timeoutMs: 10 }),
+      (err: unknown) => {
+        assert(err instanceof RpcTimeoutError);
+        return true;
+      },
+    );
   });
 });
 
