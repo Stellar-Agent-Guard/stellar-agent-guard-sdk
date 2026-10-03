@@ -87,7 +87,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^17.0.1"
+    "@stellar/stellar-sdk": "^17.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
