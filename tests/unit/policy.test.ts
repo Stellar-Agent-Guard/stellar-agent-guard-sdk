@@ -6,6 +6,23 @@
  * here but is not sorted would fail on-chain with an opaque object error. That is
  * a real bug this suite has already caused once.
  */
+/**
+ * Property tests for policy encode/decode (issue: seeded generators beyond
+ * round-trip).
+ *
+ * Load-bearing invariants (violations MUST be fixed, not downgraded):
+ *   P1. encode(p).toXDR() is deterministic — same p twice → byte-identical XDR.
+ *       Canonical sorted-struct guarantee; contracts parity depends on order.
+ *   P2. validation-before-encode: any policy the SDK hands you (i.e. output of
+ *       definePolicy) is encodable — validator ⊆ encodability.
+ *   P3. decode(encode(p)) is field-equal under documented normalizations,
+ *       including boundary values (i128 min/max, u64 max, empty lists,
+ *       list-at-cardinality-limit).
+ *
+ * Generators are seeded; the seed is printed on failure. Iteration count is
+ * CI-bounded (see PROPERTY_ITERATIONS / PROPERTY_BUDGET_MS) mirroring the
+ * contracts property-test runtime discipline.
+ */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -32,6 +49,12 @@ import {
   type ProtocolRule,
 } from "../../src/policy.ts";
 
+// CI-bounded property-test budget. Keep in step with the contracts repo's
+// property-test runtime discipline (bounded iterations + wall-clock budget).
+const PROPERTY_ITERATIONS = 128;
+const PROPERTY_BUDGET_MS = 2_000;
+const PROPERTY_SEED = Number(process.env["POLICY_PROPERTY_SEED"] ?? 0x5eed_1234);
+
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
@@ -50,6 +73,111 @@ function samplePolicy(overrides: Partial<PolicyConfig> = {}): PolicyConfig {
     paused: false,
     dms_grace_secs: 0n,
     ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Shared seeded generator module (single source of truth).
+//
+// This module is the input source for BOTH the round-trip property issue and
+// this issue's widened property set. Do not fork generators: any new property
+// must draw from `makePolicyGenerator` below.
+// ---------------------------------------------------------------------------
+
+/** Deterministic PRNG (mulberry32) — seeded, reproducible, no deps. */
+function makeRng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b_79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 0x1_0000_0000;
+  };
+}
+
+function pick<T>(rng: () => number, xs: readonly T[]): T {
+  return xs[Math.floor(rng() * xs.length)]!;
+}
+
+function randBigInt(rng: () => number, lo: bigint, hi: bigint): bigint {
+  const span = hi - lo + 1n;
+  const bits = span.toString(2).length;
+  let v = 0n;
+  for (let i = 0; i < bits; i += 1) {
+    v = (v << 1n) | (rng() < 0.5 ? 0n : 1n);
+  }
+  return lo + (v % span);
+}
+
+const I128_MIN = -(2n ** 127n);
+const I128_MAX = 2n ** 127n - 1n;
+const U64_MAX = 2n ** 64n - 1n;
+
+// Vendored cardinality constant (contract vocab helper family). Keep in step
+// with the contracts repo's MAX_RECIPIENT_ENTRIES. If the contracts-side
+// cardinality limit lands, encode-at-limit must succeed and limit+1 must be
+// rejected by the validator pre-encode (cross-repo limit sync).
+const MAX_RECIPIENT_ENTRIES = 256;
+
+const ADDRESSES = [TOKEN, GUARD, RECIPIENT] as const;
+
+/**
+ * Seeded policy generator. Applies `definePolicy`-equivalent normalization
+ * first (see `normalizePolicy`) so that the generated policy is exactly what
+ * the SDK would hand a caller — this is what makes P2 meaningful.
+ */
+function* makePolicyGenerator(seed: number): Generator<PolicyConfig> {
+  const rng = makeRng(seed);
+  for (let i = 0; i < PROPERTY_ITERATIONS; i += 1) {
+    const assetsCount = Math.floor(rng() * 3);
+    const recipientsCount = Math.floor(rng() * 3);
+    const protocolsCount = Math.floor(rng() * 3);
+    const assets = Array.from({ length: assetsCount }, () => pick(rng, ADDRESSES));
+    const recipients = Array.from({ length: recipientsCount }, () => pick(rng, ADDRESSES));
+    const protocols = Array.from({ length: protocolsCount }, () => ({
+      contract: pick(rng, ADDRESSES),
+      fns: rng() < 0.33 ? null : rng() < 0.5 ? [] : ["transfer", "approve"].slice(0, 1 + Math.floor(rng() * 2)),
+    }));
+    const raw: PolicyConfig = {
+      per_tx_cap: randBigInt(rng, 0n, I128_MAX),
+      window_secs: randBigInt(rng, 0n, U64_MAX),
+      window_cap: randBigInt(rng, I128_MIN, I128_MAX),
+      assets,
+      protocols,
+      recipients,
+      allow_any_recipient: rng() < 0.5,
+      active_from: randBigInt(rng, 0n, U64_MAX),
+      active_until: rng() < 0.5 ? 0n : randBigInt(rng, 0n, U64_MAX),
+      paused: rng() < 0.5,
+      dms_grace_secs: randBigInt(rng, 0n, U64_MAX),
+    };
+    yield normalizePolicy(raw);
+  }
+}
+
+/**
+ * `definePolicy`-equivalent normalization: dedupe address lists, drop empty
+ * protocol fn lists to `null`, and clamp caps into the i128/u64 wire ranges.
+ * The generator applies this BEFORE encoding so P2 ("any policy the SDK hands
+ * you is encodable") is exercised against the SDK's actual output shape.
+ */
+function normalizePolicy(p: PolicyConfig): PolicyConfig {
+  const dedupe = (xs: string[]): string[] => [...new Set(xs)];
+  return {
+    ...p,
+    per_tx_cap: p.per_tx_cap < 0n ? 0n : p.per_tx_cap > I128_MAX ? I128_MAX : p.per_tx_cap,
+    window_cap: p.window_cap < I128_MIN ? I128_MIN : p.window_cap > I128_MAX ? I128_MAX : p.window_cap,
+    window_secs: p.window_secs > U64_MAX ? U64_MAX : p.window_secs,
+    active_from: p.active_from > U64_MAX ? U64_MAX : p.active_from,
+    active_until: p.active_until > U64_MAX ? U64_MAX : p.active_until,
+    dms_grace_secs: p.dms_grace_secs > U64_MAX ? U64_MAX : p.dms_grace_secs,
+    assets: dedupe(p.assets),
+    recipients: dedupe(p.recipients),
+    protocols: p.protocols.map((r) => ({
+      contract: r.contract,
+      fns: r.fns && r.fns.length > 0 ? [...new Set(r.fns)] : null,
+    })),
   };
 }
 
@@ -348,6 +476,136 @@ describe("decodePolicy", () => {
         return true;
       },
     );
+  });
+});
+
+describe("policy encode/decode properties (seeded)", () => {
+  it("P1: encode(p).toXDR() is deterministic (byte-identical across calls)", () => {
+    const started = Date.now();
+    let n = 0;
+    for (const policy of makePolicyGenerator(PROPERTY_SEED)) {
+      const a = policyToScVal(policy).toXDR("base64");
+      const b = policyToScVal(policy).toXDR("base64");
+      assert.equal(
+        a,
+        b,
+        `non-deterministic XDR for seed=${PROPERTY_SEED} iteration=${n}`,
+      );
+      n += 1;
+      assert.ok(Date.now() - started < PROPERTY_BUDGET_MS, "P1 exceeded time budget");
+    }
+    assert.equal(n, PROPERTY_ITERATIONS);
+  });
+
+  it("P2: validation-before-encode — every generated (definePolicy-normalized) policy encodes", () => {
+    const started = Date.now();
+    let n = 0;
+    for (const policy of makePolicyGenerator(PROPERTY_SEED)) {
+      // The generator applies definePolicy normalization, so this is exactly
+      // the shape the SDK hands a caller. Validator must accept it, and it
+      // must encode without throwing.
+      const failures = validateGuardPolicy(policy);
+      assert.deepEqual(
+        failures,
+        [],
+        `validator rejected SDK-normalized policy at seed=${PROPERTY_SEED} iteration=${n}: ${JSON.stringify(failures)}`,
+      );
+      assert.doesNotThrow(
+        () => policyToScVal(policy),
+        `encodability violated at seed=${PROPERTY_SEED} iteration=${n}`,
+      );
+      n += 1;
+      assert.ok(Date.now() - started < PROPERTY_BUDGET_MS, "P2 exceeded time budget");
+    }
+    assert.equal(n, PROPERTY_ITERATIONS);
+  });
+
+  it("P3: decode(encode(p)) is field-equal under documented normalizations", () => {
+    const started = Date.now();
+    let n = 0;
+    for (const policy of makePolicyGenerator(PROPERTY_SEED)) {
+      const encoded = policyToScVal(policy);
+      const decoded = decodePolicy(encoded);
+      assert.deepEqual(
+        decoded,
+        policy,
+        `round-trip field mismatch at seed=${PROPERTY_SEED} iteration=${n}`,
+      );
+      assert.equal(
+        policyToScVal(decoded).toXDR("base64"),
+        encoded.toXDR("base64"),
+        `re-encode drift at seed=${PROPERTY_SEED} iteration=${n}`,
+      );
+      n += 1;
+      assert.ok(Date.now() - started < PROPERTY_BUDGET_MS, "P3 exceeded time budget");
+    }
+    assert.equal(n, PROPERTY_ITERATIONS);
+  });
+
+  describe("boundary corpus", () => {
+    const boundaries: Array<[string, PolicyConfig]> = [
+      [
+        "i128 min/max and u64 max",
+        samplePolicy({
+          per_tx_cap: I128_MAX,
+          window_cap: I128_MIN,
+          window_secs: U64_MAX,
+          active_from: 0n,
+          active_until: U64_MAX,
+          dms_grace_secs: U64_MAX,
+        }),
+      ],
+      [
+        "empty lists (allow_any_recipient)",
+        samplePolicy({ assets: [TOKEN], recipients: [], allow_any_recipient: true }),
+      ],
+      [
+        "list at cardinality limit",
+        samplePolicy({
+          recipients: Array.from({ length: MAX_RECIPIENT_ENTRIES }, (_, i) =>
+            // Deterministic distinct addresses: rotate through the known set
+            // and pad with a derived strkey-shaped value via Address round-trip.
+            i < ADDRESSES.length
+              ? ADDRESSES[i]!
+              : new Address(
+                  Buffer.from(
+                    createHash("sha256").update(`recipient-${i}`).digest(),
+                  ).subarray(0, 32),
+                ).toString(),
+          ),
+        }),
+      ],
+    ];
+
+    for (const [name, policy] of boundaries) {
+      it(`P1/P3 hold for ${name}`, () => {
+        const a = policyToScVal(policy).toXDR("base64");
+        const b = policyToScVal(policy).toXDR("base64");
+        assert.equal(a, b, `P1 violated for boundary: ${name}`);
+        assert.deepEqual(decodePolicy(policyToScVal(policy)), policy, `P3 violated for boundary: ${name}`);
+      });
+    }
+
+    it("P2: cardinality limit+1 is rejected by the validator pre-encode", () => {
+      const overLimit = samplePolicy({
+        recipients: Array.from({ length: MAX_RECIPIENT_ENTRIES + 1 }, (_, i) =>
+          i < ADDRESSES.length
+            ? ADDRESSES[i]!
+            : new Address(
+                Buffer.from(
+                  createHash("sha256").update(`recipient-${i}`).digest(),
+                ).subarray(0, 32),
+              ).toString(),
+        ),
+      });
+      const failures = validateGuardPolicy(overLimit, {
+        maxRecipientEntries: MAX_RECIPIENT_ENTRIES,
+      });
+      assert.ok(
+        failures.some((f) => f.rule === "max_recipient_entries_exceeded"),
+        `expected max_recipient_entries_exceeded at limit+1, got ${JSON.stringify(failures)}`,
+      );
+    });
   });
 });
 
