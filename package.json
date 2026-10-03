@@ -73,6 +73,7 @@
     "test:integration": "node --import tsx scripts/run-tests.ts integration",
     "test:all": "node --import tsx scripts/run-tests.ts all",
     "test:coverage": "node --import tsx scripts/run-tests.ts all --coverage",
+    "coverage": "node --import tsx scripts/run-tests.ts all --coverage",
     "test:exports": "node --import tsx scripts/check-export-map.ts",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
     "test:smoke": "node --input-type=module -e \"import('./dist/index.js').then(m => { if (!m.PreFlightInterceptor) throw new Error('Missing PreFlightInterceptor'); console.log('ESM export-map resolution smoke test passed: ' + Object.keys(m).length + ' exports found'); })\"",

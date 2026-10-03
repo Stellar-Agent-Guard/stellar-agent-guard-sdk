@@ -6,6 +6,12 @@
 <a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml">
 <img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </a>
+<a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/live-suite.yml">
+<img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/live-suite.yml/badge.svg" alt="Live suite"/>
+</a>
+<a href="https://www.npmjs.com/package/stellar-agent-guard-sdk">
+<img src="https://img.shields.io/npm/v/stellar-agent-guard-sdk" alt="npm version"/>
+</a>
 <a href="LICENSE">
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"/>
 </a>
@@ -14,6 +20,12 @@
 </a>
 <!-- docs: <a href="#"><img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/></a> (added in P2 once GitBook URL is confirmed live) -->
 </p>
+
+**What each badge means:**
+- **CI** — required checks (lint, type-check, unit tests) ran on the latest `main` commit; a green CI does **not** mean the live suite ran (see [Honest limitations](#honest-limitations)).
+- **Live suite** — the weekly scheduled run of `npm run test:integration` against real Stellar testnet; this is the project's honest signal, since green CI ≠ live suite ran.
+- **npm version** — the currently published `stellar-agent-guard-sdk` version on the npm registry.
+- **Coverage** — skipped: no coverage reporting exists yet in this repo; adding a coverage badge is blocked on the coverage-reporting prerequisite issue. This line will be replaced with a live badge once that lands.
 
 # Stellar Agent Guard — SDK
 

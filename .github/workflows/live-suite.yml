@@ -1,5 +1,9 @@
 # The live testnet suite, on a schedule — deliberately NOT on pull requests.
 #
+# This workflow is the project's honest-signal: a green `ci` run does NOT mean
+# the live suite ran. The README badge for this workflow links here so readers
+# can see the last scheduled run's real state.
+#
 # Policy (see CONTRIBUTING.md and the README):
 #   - The live suite does not run on every PR. A PR that touches the enforcement
 #     path must ship fresh evidence, which the required `ci` job checks as a file
@@ -17,6 +21,8 @@
 name: live-suite
 
 on:
+  # `push` to the default branch is intentionally absent: this workflow must
+  # never be reachable from a pull request. Only schedule + manual dispatch.
   schedule:
     # Weekly, Monday 06:17 UTC. Off the hour so it does not stack with the
     # top-of-hour cron load every GitHub runner feels.
@@ -28,6 +34,10 @@ permissions:
   # Issue #143: the notify steps below open/comment/close ONE tracked issue on
   # failure/recovery. Nothing else in this workflow writes.
   issues: write
+
+# Badge source: the README links to
+# https://github.com/<owner>/<repo>/actions/workflows/live-suite.yml
+# so the badge reflects this workflow's latest run, not the CI job's.
 
 jobs:
   live:
