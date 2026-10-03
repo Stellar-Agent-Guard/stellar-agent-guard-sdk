@@ -627,6 +627,17 @@ export interface GuardTelemetryWatchParams {
    * break the watch loop), matching `invoke()`'s `onStep` contract.
    */
   onGap?: (gap: GuardTelemetryGap) => void;
+  /**
+   * Called once when the committed stream ends because of a terminal RPC
+   * failure — after the bounded retry envelope is exhausted. Fail-visible
+   * telemetry: a silent stream death is an incident blind spot.
+   *
+   * The callback receives the final error. A callback that throws propagates
+   * out of the `for await` loop: the consumer asked for it. When omitted, the
+   * stream still retries-then-ends, and the terminal error is retrievable via
+   * `lastError` on the listener.
+   */
+  onStreamError?: (error: unknown) => void;
 }
 
 /**
@@ -786,6 +797,18 @@ export class GuardTelemetryListener {
    */
   private readonly buffer: GuardEventRingBuffer | null;
 
+  /**
+   * The terminal error that ended the most recent `watch()` stream, or `null`
+   * when the stream ended normally (abort or completion). Set when the bounded
+   * retry envelope is exhausted; cleared at the start of each `watch()`.
+   */
+  private lastError: unknown = null;
+
+  /** The terminal error that ended the most recent `watch()` stream, if any. */
+  getLastError(): unknown {
+    return this.lastError;
+  }
+
   constructor(config: GuardTelemetryConfig) {
     this.config = config;
     this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
@@ -899,6 +922,7 @@ export class GuardTelemetryListener {
     const sleep: PollSleep = params.sleep ?? defaultPollSleep;
     let cursor = params.cursor;
     let startLedger = params.startLedger;
+    this.lastError = null;
 
     // An abort that landed before the iterator was first pulled must not probe
     // the RPC — not even the `getLatestLedger` call that resolves the default
@@ -922,6 +946,7 @@ export class GuardTelemetryListener {
 
     while (!signal?.aborted) {
       let page: PollResult;
+      let attempts = 0;
       try {
         page = await this.poll({
           ...(startLedger !== undefined ? { startLedger } : {}),
@@ -936,7 +961,37 @@ export class GuardTelemetryListener {
         // telemetry failure: end the stream quietly instead of throwing at the
         // `for await` consumer or leaving an unhandled rejection behind.
         if (signal?.aborted) return;
-        throw error;
+        // Bounded retry with backoff, then a fail-visible end: call
+        // `onStreamError` once with the terminal error and complete the
+        // iterator normally. A callback that throws propagates (the consumer
+        // asked for it); without a callback the error is retrievable via
+        // `getLastError()`.
+        const maxAttempts = 5;
+        let terminal: unknown = error;
+        let recovered: PollResult | null = null;
+        while (attempts < maxAttempts) {
+          attempts += 1;
+          const backoff = Math.min(interval, 100 * 2 ** (attempts - 1));
+          await raceAbort(signal, () => sleep(backoff, signal));
+          if (signal?.aborted) return;
+          try {
+            recovered = await this.poll({
+              ...(startLedger !== undefined ? { startLedger } : {}),
+              ...(cursor !== undefined ? { cursor } : {}),
+              ...(params.limit !== undefined ? { limit: params.limit } : {}),
+            });
+            break;
+          } catch (retryError) {
+            if (signal?.aborted) return;
+            terminal = retryError;
+          }
+        }
+        if (recovered === null) {
+          this.lastError = terminal;
+          if (params.onStreamError) params.onStreamError(terminal);
+          return;
+        }
+        page = recovered;
       }
       cursor = page.cursor;
       // Once a cursor is held, the ledger range must not be sent again — the RPC
@@ -1048,6 +1103,113 @@ export function telemetryFromDecision(
 /** True when a decoded decision means the guard permitted the action. */
 export function isAllowedDecision(decision: GuardAuthDecision | null): boolean {
   return decision?.result === GUARD_AUTH_RESULTS.allowed;
+}
+
+/**
+ * The top-level key order `serializeEvent()` emits, pinned to the `GuardEvent`
+ * field reference in `docs/event-schema.md`: the identity fields first, then the
+ * stream facts, then the decoded decision and data.
+ *
+ * This is an explicit, frozen projection rather than an object spread, so adding
+ * a field to `GuardEvent` cannot silently change the serialized shape (or its
+ * key order) — a new field must be added here deliberately, and its addition is
+ * a visible golden-string diff in `tests/unit/serialize-event.test.ts`.
+ */
+const EVENT_KEY_ORDER = [
+  "id",
+  "kind",
+  "topic",
+  "source",
+  "stream",
+  "contractId",
+  "ledger",
+  "ledgerClosedAt",
+  "observedAt",
+  "transactionHash",
+  "decision",
+  "data",
+] as const;
+
+/** The nested key order `serializeEvent()` emits for `decision`. */
+const DECISION_KEY_ORDER = ["result", "reason", "source"] as const;
+
+/**
+ * Recursively project a decoded value into the JSON-safe shape `serializeEvent()`
+ * ships, matching the repo's normalization policy (`normalizeEventData` +
+ * `stableStringify`):
+ *
+ * - `undefined` is **dropped** from objects (the documented empty-field policy)
+ *   and rendered as `null` inside arrays, so indices stay stable;
+ * - `null` is kept — it is a real value on stream-dependent fields, not absence;
+ * - `bigint` becomes a decimal **string** (no `n` suffix), because `JSON.stringify`
+ *   throws on a bigint and a logger needs a value `JSON.parse` can read back;
+ * - a `Uint8Array`/`Buffer` becomes `bytes:<hex>`, the rendering `stableStringify`
+ *   already uses for hashing.
+ */
+function toJsonSafe(value: unknown): unknown {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "bigint") return value.toString();
+  if (
+    typeof value === "boolean" ||
+    typeof value === "number" ||
+    typeof value === "string"
+  ) {
+    return value;
+  }
+  if (value instanceof Uint8Array) return `bytes:${Buffer.from(value).toString("hex")}`;
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      const normalized = toJsonSafe(item);
+      return normalized === undefined ? null : normalized;
+    });
+  }
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    const normalized = toJsonSafe(item);
+    if (normalized !== undefined) out[key] = normalized;
+  }
+  return out;
+}
+
+/**
+ * Canonical one-line JSON for a `GuardEvent`, for deterministic JSON-lines log
+ * shipping (issue #130).
+ *
+ * The output is a stable serialization, not a debugging convenience:
+ *
+ * - **Key order is fixed** (see `EVENT_KEY_ORDER`), so the same event always
+ *   renders byte-for-byte identically and a log line can be diffed.
+ * - **`undefined` fields are dropped; `null` is kept.** Absence is expressed by
+ *   the key not being present, while `null` remains a real value on the
+ *   stream-dependent fields (`ledger`, `transactionHash`, …).
+ * - **`bigint` is rendered as a decimal string.** `JSON.stringify` throws on a
+ *   bigint, so the decoded `data.at` (a u64 `bigint`) must be converted; decimal
+ *   is used over the hashing form `…n` so `JSON.parse` reads a normal string.
+ * - **Round-trip:** `JSON.parse(serializeEvent(e))` is shape-equal to `e` modulo
+ *   those normalizations (`bigint` → decimal string, `Uint8Array` → `bytes:…`,
+ *   `undefined` → absent).
+ *
+ * The exact contract — order and policies — is documented in
+ * `docs/event-schema.md` under "Canonical JSON serialization".
+ */
+export function serializeEvent(event: GuardEvent): string {
+  const projected: Record<string, unknown> = {};
+  for (const key of EVENT_KEY_ORDER) {
+    const value = event[key];
+    if (value === undefined) continue;
+    projected[key] = value;
+  }
+  if (event.decision !== undefined && event.decision !== null) {
+    const decision: Record<string, unknown> = {};
+    for (const key of DECISION_KEY_ORDER) {
+      const value = event.decision[key];
+      if (value === undefined) continue;
+      decision[key] = value;
+    }
+    projected.decision = decision;
+  }
+  return JSON.stringify(toJsonSafe(projected));
 }
 
 /** A compact one-line rendering of a guard event, for logs. */
