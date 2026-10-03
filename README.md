@@ -134,6 +134,7 @@ const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6M
 const interceptor = new PreFlightInterceptor({
   server: new rpc.Server("https://soroban-testnet.stellar.org"),
   networkPassphrase: "Test SDF Network ; September 2015",
+  expectedNetwork: "Test SDF Network ; September 2015",
   guard: guardAddress, // Type-safe: validated as ContractAddress
   agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
   source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
@@ -144,6 +145,11 @@ const decision = await interceptor.check({
   fn: "transfer",
   args: [/* from, to, amount */],
 });
+
+// `expectedNetwork` binds the interceptor to the network it was configured for.
+// If the RPC server reports a different passphrase, construction (or first use)
+// fails with a typed `NetworkMismatchError` naming expected vs. actual. Leaving
+// it unset preserves legacy unchecked behavior — not recommended.
 
 if (decision.kind === "admissible") {
   console.log("Allowed! Resource fee:", decision.estimatedResourceFee);
@@ -216,6 +222,7 @@ const interceptor = new PreFlightInterceptor({
   guard,
   agent,
   source,
+  expectedNetwork: "Test SDF Network ; September 2015",
   cache: {
     ttlLedgers: 1, // maximum one approximate five-second ledger window
     policyRevision: () => readPolicyRevision(),
@@ -296,6 +303,7 @@ const outcome = await invoke({
   source,
   call,
   networkPassphrase,
+  expectedNetwork: "Test SDF Network ; September 2015",
   guardAuth,
   onStep(step) {
     // consumer decides how to display/log the event
@@ -495,6 +503,7 @@ const debug = await invoke({
   source,
   call: blockedTransferCall,
   networkPassphrase,
+  expectedNetwork: "Test SDF Network ; September 2015",
   guardAuth: { guard, agent },
   dryRun: true,
 });
@@ -556,6 +565,7 @@ inspect `outcome.error` with `instanceof` when `outcome.kind === "error"`.
 import {
   BroadcastError,
   GuardError,
+  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "stellar-agent-guard-sdk";
@@ -567,6 +577,8 @@ if (outcome.kind === "error") {
     console.error("enforcement could not be determined");
   } else if (outcome.error instanceof BroadcastError) {
     console.error("submission failed", outcome.error.transactionHash);
+  } else if (outcome.error instanceof NetworkMismatchError) {
+    console.error("wrong network", outcome.error.expected, "vs", outcome.error.actual);
   } else if (outcome.error instanceof GuardError) {
     console.error(outcome.error.message);
   }
@@ -590,6 +602,16 @@ The one intentional behavior change is for callers already using `dryRun: true`:
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
 documented above. Non-dry-run callers keep their existing outcome shapes.
 
+### Network interlock (`expectedNetwork`)
+
+`PreFlightInterceptor`, `invoke()`, and the shared transaction config accept an optional
+`expectedNetwork: NetworkPassphrase` (or `network: 'testnet' | 'mainnet' | 'futurenet'`).
+When set, the SDK fetches the RPC server's network passphrase at construction (or first
+use) and fails with a typed `NetworkMismatchError` naming both the expected and actual
+passphrases if they differ. When unset, behavior is exactly the legacy unchecked path —
+documented as **not recommended**. The interlock is a guardrail, not a sandbox: an RPC
+server that lies about its passphrase is not defended against.
+
 ## API Reference
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`docs/deprecations.md`](docs/deprecations.md). Release process and versioning checklist: [`docs/releasing.md`](docs/releasing.md).
@@ -598,6 +620,7 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
 
 - `PreFlightInterceptor`
   - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
+  - Pass `expectedNetwork` to bind the interceptor to an expected network passphrase; mismatch throws `NetworkMismatchError`.
   - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
@@ -606,6 +629,7 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
+  - Accepts `expectedNetwork`; mismatch fails with `NetworkMismatchError` before broadcast.
 
 #### Fee units: stroops and XLM
 
@@ -690,6 +714,7 @@ one-shot form.
 - `invoke(options)` / `invoke({ ...options, dryRun: true })` — Broadcasts an admissible result, or returns the full pre-broadcast dry-run trace.
 - `verifyAgentSignature(publicKey, payload, signature): boolean` — Verify-only Ed25519 check against a strkey or raw 32-byte key.
 - `GuardError`, `SimulationError`, `SigningError`, `BroadcastError`, `PolicyDecodeError`, and `ContractResponseError` — Typed failure hierarchy.
+- `NetworkMismatchError` — Thrown when `expectedNetwork` does not match the RPC server's reported passphrase; carries `expected` and `actual`.
 - `decodeCheckResult(raw): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
@@ -811,6 +836,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
+- **Network interlock is a guardrail, not a sandbox**: `expectedNetwork` catches a misconfigured RPC URL (testnet key + mainnet RPC, or the reverse) by comparing the server's reported passphrase against the expected one. It does not defend against an RPC server that lies about its passphrase; that boundary is honest and out of scope.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
 
 ## Enforcement scope — read this before relying on the caps
