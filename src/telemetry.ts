@@ -110,6 +110,45 @@ export interface GuardEvent {
   decision: GuardAuthDecision | null;
   /** Decoded event data: `{ at }` for a heartbeat, `{ by }` for admin events. */
   data: unknown;
+  /**
+   * The undecoded source event, present only when the decode was asked for it
+   * with `includeRaw: true` (issue #94). Absent — not merely `null` — otherwise,
+   * so a runtime that does not want the payload does not retain it.
+   *
+   * The value is what was available at the decode site, which differs per
+   * stream: a **diagnostic** keeps the host-shaped event object the RPC
+   * returned (`{ event: { contractId, body: { v0: { topics: ScVal[], data } } }
+   * }`), and a **ledger** event keeps the `rpc.Api.EventResponse` object from
+   * `getEvents` (`topic: ScVal[]`, `value: ScVal`, `txHash`, …). Neither is a
+   * base64 blob — the SDK never re-serialises it, so what a consumer files in a
+   * bug report is the object the SDK actually saw.
+   *
+   * **Memory:** this holds a reference to the source payload (including its
+   * `xdr.ScVal`s) for as long as the `GuardEvent` lives, and, when the listener's
+   * ring buffer is enabled, for as long as that buffer retains the event. That is
+   * why it is opt-in and off by default; turn it on for the debugging session or
+   * the bug-report window, not for a long-running fleet.
+   */
+  raw?: unknown;
+}
+
+/**
+ * Decode-time options shared by every entry point that produces `GuardEvent`s.
+ */
+export interface GuardEventDecodeOptions {
+  /**
+   * Opt-in retention of the undecoded source event on each decoded event's
+   * `raw` field (issue #94). Default `false`: the raw payload is discarded as
+   * soon as it has been decoded, which is the memory discipline the default
+   * path has always had. When `false`, `raw` is absent (undefined) rather than
+   * a copy of anything.
+   *
+   * Intended as a debugging affordance: when a decoded verdict looks wrong, the
+   * raw event is what you attach to an SDK bug report. Pair it with
+   * `guardEventsFromDiagnostics(events, guard, { includeRaw: true })` for offline
+   * analysis of a captured simulation.
+   */
+  includeRaw?: boolean;
 }
 
 function decodeData(value: unknown): unknown {
@@ -281,7 +320,9 @@ function interpret(
 export function diagnosticsToEvents(
   diagnosticEvents: readonly unknown[],
   guard?: string,
+  options?: GuardEventDecodeOptions,
 ): GuardEvent[] {
+  const includeRaw = options?.includeRaw === true;
   const out: GuardEvent[] = [];
   for (const [index, raw] of diagnosticEvents.entries()) {
     const bare = (raw as { event?: unknown }).event ?? raw;
@@ -297,6 +338,9 @@ export function diagnosticsToEvents(
       // The position within this batch is what keeps two blocked decisions from
       // one simulation apart once both are rolled back and neither has a hash.
       simulationIndex: index,
+      // The host-shaped wrapper is the source object here, not `bare`: it is
+      // exactly what the RPC returned and what a bug report needs to include.
+      ...(includeRaw ? { raw } : {}),
     });
     if (decoded) out.push(decoded);
   }
@@ -316,8 +360,9 @@ export function diagnosticsToEvents(
 export function guardEventsFromDiagnostics(
   diagnosticEvents: readonly unknown[],
   guard?: string,
+  options?: GuardEventDecodeOptions,
 ): GuardEvent[] {
-  return diagnosticsToEvents(diagnosticEvents, guard);
+  return diagnosticsToEvents(diagnosticEvents, guard, options);
 }
 
 /**
@@ -516,6 +561,18 @@ export interface GuardTelemetryConfig {
    * Omitted → no buffer is allocated and `recent()` always returns `[]`.
    */
   buffer?: GuardEventBufferOptions;
+  /**
+   * Opt-in: attach the raw `rpc.Api.EventResponse` to every committed event
+   * decoded by `poll()`/`watch()`/`watchAll()` (issue #94). Default `false`.
+   *
+   * Diagnostic events decoded by the caller (`guardEventsFromDiagnostics` /
+   * `telemetryFromDecision`) take their own `includeRaw` option, so the two
+   * halves of the unified stream are independent: a consumer can retain the raw
+   * payload for the committed feed, the diagnostic feed, or both.
+   *
+   * Memory: see `GuardEvent.raw`.
+   */
+  includeRaw?: boolean;
 }
 
 export interface PollResult {
@@ -1073,6 +1130,9 @@ export class GuardTelemetryListener {
           // Committed events anchor on the transaction hash, not on a position
           // within a page: a page boundary would otherwise change an event's id.
           simulationIndex: null,
+          // `includeRaw` is off unless the listener was constructed with it, so
+          // the default path keeps discarding the RPC object (issue #94).
+          ...(this.config.includeRaw ? { raw: event } : {}),
         },
       );
       if (decoded) events.push(decoded);
@@ -1308,9 +1368,10 @@ export class GuardTelemetryListener {
 export function telemetryFromDecision(
   decision: { kind: string; diagnosticEvents?: unknown[]; reason?: string },
   guard: string,
+  options?: GuardEventDecodeOptions,
 ): GuardEvent[] {
   if (decision.kind !== "blocked" || !decision.diagnosticEvents) return [];
-  return diagnosticsToEvents(decision.diagnosticEvents, guard);
+  return diagnosticsToEvents(decision.diagnosticEvents, guard, options);
 }
 
 /** True when a decoded decision means the guard permitted the action. */

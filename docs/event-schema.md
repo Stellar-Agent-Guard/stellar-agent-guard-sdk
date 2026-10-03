@@ -58,6 +58,7 @@ behaves:
 | `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Delivered as a string in JSON, normalised to `bigint` by the SDK to prevent >2^53 precision loss. |
 | `data.by` (admin events) | contract payload | **Stable** | The acting admin address, for `event_initialized` / `event_frozen` / `event_unfrozen` / `event_policy_set` / `event_policy_revoked`. |
 | `data` — any other key | contract / host | **Best-effort** | Not under SDK control. Normalised: strings of pure digits become `bigint`; other strings (e.g. ISO dates) are preserved. |
+| `raw` | SDK (opt-in) | **Best-effort** | The undecoded source event, attached only when the decode was asked for it (`includeRaw: true`, issue #94). Committed → the `rpc.Api.EventResponse` object from `getEvents`; diagnostic → the host-shaped object the RPC returned. **Absent** (undefined) otherwise, so the default path retains nothing. Its exact shape is host-supplied and may change in any release; decode the event, use `raw` only as bug-report evidence. |
 | Raw topic list (undecoded XDR / `ScVal` objects) | RPC | **Best-effort** | Host-shaped. Decode with `topicSymbols()` / `decodeAuthDecision()`. |
 | `contractEventsXdr` grouping | RPC | **Best-effort** | An array of *groups*, one per contract — reading it as a flat list silently loses events (see "The capture"). |
 | `GUARD_EVENT_TOPICS` values | contract | **Stable** | The name-topic vocabulary. |

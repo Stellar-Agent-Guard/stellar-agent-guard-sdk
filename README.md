@@ -694,7 +694,7 @@ one-shot form.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
-- `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
+- `explainReason(reason: string | number, locale?, overrides?): string` — Human-readable explanation of contract reason codes. The default call is unchanged; the optional `locale` catalog and per-reason `overrides` localise or reword a refusal without an i18n dependency. Reason keys, titles and remediation text: [`reasonMessages` / `reasonMessagesEn`](#reason-messages-issue-96).
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 - `dmsUrgency(status: GuardStatus, policy: PolicyConfig | null, nowSecs?: bigint, warnRatio = DMS_WARN_RATIO_DEFAULT): 'ok' | 'warn' | 'expired' | 'unknown'` — Dead-man countdown urgency for dashboards: `warn` from `warnRatio` (default `DMS_WARN_RATIO_DEFAULT` = 0.8) of the grace period, `expired` once the grace has elapsed. `unknown` exactly where `deadManRemaining` is `null` (no policy, switch disabled, never heartbeated — never ≠ expired).
@@ -822,7 +822,7 @@ This boundary is an inherent property of the platform (the auth context does not
 ## Topics
 
 `stellar`, `soroban`, `ai-agents`, `guardrails`, `custom-account`, `pre-flight`,
-`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `telemetry`, `typescript`
+`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `mcp`, `telemetry`, `typescript`
 
 ## Maintainers
 

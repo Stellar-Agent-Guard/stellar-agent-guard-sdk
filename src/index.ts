@@ -45,6 +45,8 @@ export {
   GUARD_REASONS,
   explainReason,
   isGuardReason,
+  reasonMessages,
+  reasonMessagesEn,
   reasonName,
   reasonNameFromCode,
 } from "./reasons.ts";
@@ -53,6 +55,9 @@ export type {
   GuardBlockedErrorParams,
   GuardReason,
   GuardReasonName,
+  ReasonMessage,
+  ReasonMessageCatalog,
+  ReasonMessageText,
 } from "./reasons.ts";
 
 export {
@@ -221,6 +226,7 @@ export {
   type GuardEvent,
   type GuardEventBufferOptions,
   type GuardEventContext,
+  type GuardEventDecodeOptions,
   type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardEventStream,
