@@ -14,6 +14,8 @@
 #
 # A green `ci` means the required checks ran. It does not mean the live suite ran
 # against this change — the evidence file it points at is the record for that.
+# The gate's one documented override (the PR's own `skip-live-evidence` label)
+# is described at the gate step and in CONTRIBUTING.md.
 #
 # ---------------------------------------------------------------------------
 # Pipeline shape (issue #101) — why two jobs, and why not more:
@@ -52,8 +54,14 @@ on:
   pull_request:
 
 # Read-only: CI inspects the repo and runs tests; it never writes to it.
+# `issues: read` is read-only too: the evidence gate looks up the pull
+# request's own labels and their timeline events (who applied the
+# skip-live-evidence label, when) through the issue REST endpoints. It grants
+# no write access, and no secret is reachable from this workflow —
+# PHASE2_ENV_FILE stays scoped to live-suite.yml alone.
 permissions:
   contents: read
+  issues: read
 
 jobs:
   ci:
@@ -130,15 +138,54 @@ jobs:
       - name: evidence structure check
         run: node scripts/check-enforcement-evidence.ts --check-structure
 
+      # The gate's own end-to-end self-test (issue #51): builds a throwaway git
+      # repository and drives scripts/check-enforcement-evidence.ts through the
+      # pass, fail and skip-live-evidence paths, so the gate's wiring is proven
+      # on the same runners that enforce it. Documented in CONTRIBUTING.md;
+      # runnable locally with `npm run test:gate-self-test`.
+      - name: gate self-test
+        run: npm run test:gate-self-test
+
       # A PR that changes the enforcement path must ship fresh live-testnet
       # evidence in the same PR. This checks the file list only: no network, no
       # secret, so it cannot go green on a missing credential.
+      #
+      # ESCAPE HATCH (issue #51): the only override is the PR's own
+      # `skip-live-evidence` label, and the audit trail is GitHub's own record
+      # of that label — the timeline event names the actor who applied it and
+      # when it was applied, visible on the PR. Both lookups are read-only (see
+      # `permissions`); any failure leaves the variables empty, so a broken
+      # lookup fails the gate CLOSED instead of bypassing it. The script only
+      # passes on the label when the actor/time came through, and it logs a
+      # ::warning stating that fresh evidence was NOT supplied and by whom the
+      # skip was applied. Removing the label re-enables the gate on the next run.
       - name: enforcement-path evidence gate
         if: github.event_name == 'pull_request'
         env:
           BASE_REF: ${{ github.base_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           git fetch --no-tags origin "$BASE_REF"
+
+          # The PR's label list (the authority on whether the label is present
+          # right now), one name per line.
+          labels="$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels" --jq '.[].name' 2>/dev/null || true)"
+
+          # The most recent timeline event that applied the skip label: who +
+          # when, from GitHub's record. The recursive-descent filter (`..
+          # objects`) is agnostic to how --slurp nests the paginated pages.
+          # Piped as "login|created_at" so no shell quoting games are needed;
+          # GitHub logins and ISO timestamps never contain a "|".
+          last_labeled='[ .. | objects | select(.event? == "labeled" and .label?.name? == "skip-live-evidence") ] | last'
+          skip_line="$(gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/timeline" \
+            --jq "$last_labeled | (.actor.login // \"\") + \"|\" + (.created_at // \"\")" 2>/dev/null || true)"
+          SKIP_LABEL_ACTOR="${skip_line%%|*}"
+          SKIP_LABEL_TIME="${skip_line#*|}"
+
+          export SKIP_LABELS="$labels"
+          export SKIP_LABEL_ACTOR="$SKIP_LABEL_ACTOR"
+          export SKIP_LABEL_TIME="$SKIP_LABEL_TIME"
           node scripts/check-enforcement-evidence.ts "origin/$BASE_REF" HEAD
 
   # Informational only, never gating — and deliberately a separate job so it does

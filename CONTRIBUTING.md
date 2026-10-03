@@ -61,7 +61,8 @@ part of it:
 - **`ci`** — required, and the only check that gates a merge. Runs typecheck, lint, the
   unit tests, and the **enforcement-path evidence gate**. It touches no secret, so
   nothing in it can silently mask a skip: every step either really runs or the job
-  fails.
+  fails. (The gate's one documented override — the `skip-live-evidence` PR label — is
+  logged in the run when used; see "Skipping the evidence requirement" below.)
 - **`live-suite`** (`.github/workflows/live-suite.yml`) — **never run on a pull
   request**. Runs the live testnet suite weekly (`schedule`) and on demand
   (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` is referenced
@@ -83,6 +84,51 @@ It is:
 
 A green `ci` therefore means "the required checks ran", not "the live suite ran on this
 change". The committed evidence file is the record for the change itself.
+
+### Skipping the evidence requirement (`skip-live-evidence` label)
+
+There is exactly **one** way to merge a PR that touches the enforcement path without
+fresh evidence: a maintainer applies the **`skip-live-evidence` label** to the pull
+request. Nothing else bypasses the gate — no config flag, no `skip-checks` commit
+message, no editor variable.
+
+The audit trail is GitHub's own record of that label, not a file this repo maintains:
+
+- the label is visible on the PR itself, to every reviewer, and a reviewer can simply
+  remove it;
+- the PR's timeline keeps the `labeled` event — **who** applied the label and **when** —
+  which is exactly the record a reviewer wants;
+- removing the label re-enables the gate on the next CI run, automatically.
+
+When a labeled PR runs `ci`, the gate does **not** pass silently:
+
+1. the workflow reads the PR's label list and its timeline (read-only REST calls, no
+   secret) and hands both to the gate;
+2. the gate engages **only** when the label is present *and* its actor/timestamp came
+   through — a labeled PR with missing provenance fails closed with a `::notice`
+   explaining why the override was not engaged;
+3. an engaged override **passes with a `::warning`** in the run log that states, in
+   plain text, that fresh live-testnet evidence was **not** supplied for this change
+   and names the actor and time the label was applied.
+
+Use it for the cases the evidence rule cannot reasonably cover — a pure refactor with
+byte-identical enforcement behaviour, or a maintainer who will run
+`npm run test:integration` immediately before merge. It is an honest, logged override,
+not a quiet one: if you use it, say why on the PR.
+
+### Testing the evidence gate itself
+
+The gate is code, and it is tested like code:
+
+- `tests/unit/check-enforcement-evidence.test.ts` pins the gate's decision functions —
+  which files trigger the requirement, what the failure message must name, and the
+  fail-closed behaviour of the label override.
+- `npm run test:gate-self-test` (`scripts/self-test-enforcement-gate.ts`) is the
+  end-to-end proof: it builds a throwaway git repository and runs the real gate script
+  over real base/head diffs — the PR-gate pass, the failure (naming the changed files
+  and the fix), the evidence-updated pass, and the labeled skip with its `::warning`.
+  The `ci` workflow runs this as its own `gate self-test` step, so the gate's wiring is
+  exercised on the same runners that enforce it.
 
 ## Branch lifecycle
 
@@ -138,6 +184,7 @@ npm run typecheck
 npm run lint
 npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
+npm run test:gate-self-test             # end-to-end check of the evidence gate itself
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)

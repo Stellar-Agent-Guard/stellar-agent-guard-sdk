@@ -30,6 +30,32 @@
  * Usage:
  *   node scripts/check-enforcement-evidence.ts <base-ref> [head-ref]
  *   node scripts/check-enforcement-evidence.ts --check-structure [--evidence <path>]
+ *
+ * ## The `skip-live-evidence` escape hatch (issue #51)
+ *
+ * A maintainer may apply the `skip-live-evidence` label to a PR that touches
+ * the enforcement path without fresh evidence (a pure refactor, a maintainer
+ * who will run the suite before merge, an emergency fix). The override is
+ * deliberately a *label on the PR itself*, and the audit trail is GitHub's own
+ * record of that label: the PR's timeline keeps a `labeled` event naming the
+ * actor who applied it and the time it was applied, visible to anyone who can
+ * see the PR. This script maintains no audit trail of its own — it can only
+ * read what GitHub already records:
+ *
+ *   - CI (`.github/workflows/ci.yml`) reads the PR's label list and its
+ *     timeline, and exports `SKIP_LABELS` (the label names),
+ *     `SKIP_LABEL_ACTOR` (who applied the label) and `SKIP_LABEL_TIME` (when)
+ *     for this script. A label removed before a later run stops suppressing
+ *     the gate again, automatically.
+ *   - The override engages only when the label is present **and** its
+ *     actor/timestamp were supplied. A labeled run without provenance fails
+ *     with a notice rather than passing silently.
+ *   - A passing override is logged as a `::warning` stating that fresh
+ *     evidence was NOT supplied and who logged the skip; the same message is
+ *     what a failing PR sees as guidance.
+ *
+ * It is not silently bypassable: the override sits on the PR where a reviewer
+ * sees it, the run log states it, and it is documented in CONTRIBUTING.md.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -192,6 +218,8 @@ export function decideEvidenceRequirement(changedFiles: readonly string[]): Evid
         "This PR touches the enforcement path but does not include fresh live-testnet evidence.",
         "Run `npm run test:integration` and update `tests/fixtures/integration-evidence.md` in this PR.",
         `Enforcement-path files changed: ${enforcementTouched.join(", ")}`,
+        `If this PR genuinely cannot ship evidence, a maintainer can apply the "${SKIP_LIVE_EVIDENCE_LABEL}" label`,
+        "to it (who/when are recorded on the label; see CONTRIBUTING.md). Nothing else bypasses this gate.",
       ].join("\n"),
     };
   }
@@ -205,6 +233,113 @@ export function decideEvidenceRequirement(changedFiles: readonly string[]): Evid
       `enforcement-path evidence gate: ok ` +
       `(enforcement path: ${enforcement}; evidence file: ${evidenceTouched ? "updated" : "untouched"})`,
   };
+}
+
+export interface SkipLiveEvidenceVerdict {
+  /** Whether the label was found in the PR's label list. */
+  present: boolean;
+  /** Login that applied the label, from the PR's timeline (null if unknown). */
+  appliedBy: string | null;
+  /** ISO-8601 time the label was applied, from the PR's timeline (null if unknown). */
+  appliedAt: string | null;
+  /** Who/when as printed in logs, or an explanation that they were not supplied. */
+  provenance: string | null;
+  /** Full message printed on both outcomes. */
+  message: string;
+}
+
+/**
+ * How CI hands this script the PR's label state. `labels` comes from the PR
+ * object itself (the authority on whether the label is present *right now*);
+ * `actor`/`appliedAt` come from the PR's `labeled` timeline events (the
+ * authority on who applied it and when). None of it is faked by the script:
+ * the workflow derives all three from the GitHub API before invoking it.
+ */
+export interface SkipLiveEvidenceInput {
+  labels: readonly string[];
+  actor?: string | null;
+  appliedAt?: string | null;
+}
+
+/** The `skip-live-evidence` label name and the env vars CI exports for it. */
+export const SKIP_LIVE_EVIDENCE_LABEL = "skip-live-evidence";
+export const SKIP_LABELS_ENV = "SKIP_LABELS";
+export const SKIP_ACTOR_ENV = "SKIP_LABEL_ACTOR";
+export const SKIP_TIME_ENV = "SKIP_LABEL_TIME";
+
+/**
+ * Pure override decision, testable without a git repository or the network:
+ * when the label is present the gate can pass, but the message states plainly
+ * that fresh evidence was *not* supplied and who logged the skip. Presence is
+ * decided by `input.labels` alone; a missing actor/timestamp is reported as
+ * missing provenance rather than invented.
+ */
+export function skipLiveEvidenceVerdict(input: SkipLiveEvidenceInput): SkipLiveEvidenceVerdict {
+  const present = input.labels.includes(SKIP_LIVE_EVIDENCE_LABEL);
+  if (!present) {
+    return {
+      present,
+      appliedBy: null,
+      appliedAt: null,
+      provenance: null,
+      message: `evidence gate: not overridden — no "${SKIP_LIVE_EVIDENCE_LABEL}" label on this PR`,
+    };
+  }
+
+  const appliedBy = input.actor?.trim() || null;
+  const appliedAt = input.appliedAt?.trim() || null;
+  // Say exactly which half of the provenance is missing — "unknown" must never
+  // overwrite a value this run actually received.
+  const provenance =
+    appliedBy && appliedAt
+      ? `applied by ${appliedBy} at ${appliedAt}`
+      : appliedBy
+        ? `applied by ${appliedBy} at an unknown time (the label time was not supplied to this run)`
+        : appliedAt
+          ? `applied by an unknown actor at ${appliedAt} (the label actor was not supplied to this run)`
+          : "applied by an unknown actor at an unknown time (no provenance was supplied to this run)";
+
+  const message = [
+    `evidence gate: OVERRIDDEN — the "${SKIP_LIVE_EVIDENCE_LABEL}" label is present on this PR`,
+    `${provenance}. Fresh live-testnet evidence is NOT supplied for this change;`,
+    "the label and its timeline event on the PR are the audit trail.",
+  ].join(" ");
+
+  return { present, appliedBy, appliedAt, provenance, message };
+}
+
+/**
+ * The CLI's view of the escape hatch: read the env vars CI exports and decide
+ * whether the override engages. It deliberately does NOT engage on label
+ * presence alone — a labeled run without full provenance is refused (loudly,
+ * not silently), so a half-configured workflow can never look like an honest
+ * skip. `env` defaults to `process.env`; tests pass their own object.
+ */
+export function skipLiveEvidenceOverride(
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): { allow: boolean; note: string } {
+  const labels = (env[SKIP_LABELS_ENV] ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const verdict = skipLiveEvidenceVerdict({
+    labels,
+    actor: env[SKIP_ACTOR_ENV] ?? null,
+    appliedAt: env[SKIP_TIME_ENV] ?? null,
+  });
+
+  if (!verdict.present) {
+    return { allow: false, note: verdict.message };
+  }
+  if (!verdict.appliedBy || !verdict.appliedAt) {
+    return {
+      allow: false,
+      note:
+        `the "${SKIP_LIVE_EVIDENCE_LABEL}" label is present but its actor/timestamp were not supplied ` +
+        "to this run; the override requires full provenance and is not engaged",
+    };
+  }
+  return { allow: true, note: verdict.message };
 }
 
 function changedFilesBetween(base: string, head: string): string[] {
@@ -274,6 +409,23 @@ function main(): void {
   console.log(verdict.message);
 
   if (!verdict.ok) {
+    // The escape hatch is the PR's own `skip-live-evidence` label (see the
+    // header and CONTRIBUTING.md): a labeled PR bypasses the gate, and the
+    // label's timeline event — who applied it, when, on which PR — is the
+    // audit trail. The override is logged here so the run itself records that
+    // fresh evidence was NOT supplied; a bypass only the merge button knows
+    // about would be a silent one, which the issue explicitly rules out.
+    const override = skipLiveEvidenceOverride();
+    if (override.allow) {
+      console.log(
+        `::warning title=live evidence skipped::${verdict.message.split("\n")[0] ?? ""} ${override.note} ` +
+          `To supply evidence instead, run \`npm run test:integration\` and update \`${EVIDENCE_FILE}\` in this PR.`,
+      );
+      process.exit(0);
+    }
+    // Label present but unprovenanced, or label absent: say which before the
+    // failure annotation, so a maintainer reading the run knows the difference.
+    console.error(`::notice title=evidence gate override not engaged::${override.note}`);
     // A GitHub Actions annotation makes the failure legible in the run summary,
     // where an engineer will actually look first.
     console.error(`::error title=enforcement-path evidence required::${verdict.message.split("\n")[0] ?? ""}`);
