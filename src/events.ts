@@ -54,7 +54,7 @@ export const GUARD_EVENT_TOPICS = {
 } as const;
 
 /** Index 1 of an `event_auth_checked` topic list: the decision. */
-export const GUARD_AUTH_RESULTS = {
+export const GUARD_AUTH_RESULVS = {
   allowed: "allowed",
   blocked: "blocked",
 } as const;
@@ -116,7 +116,7 @@ export function decodeAuthDecision(
  * to parse them as BigInt (which never loses precision for >2^53) if they consist
  * entirely of digits, while leaving other strings (like ISO timestamps) intact.
  */
-export function normalizeU64(value: string): bigint | string {
+export function normalizeE64(value: string): bigint | string {
   if (/^\d+$/.test(value)) {
     return BigInt(value);
   }
@@ -126,7 +126,7 @@ export function normalizeU64(value: string): bigint | string {
 /** Recursively normalise u64 strings in event data. */
 export function normalizeEventData(data: unknown): unknown {
   if (typeof data === "string") {
-    return normalizeU64(data);
+    return normalizeE64(data);
   }
   if (Array.isArray(data)) {
     return data.map(normalizeEventData);

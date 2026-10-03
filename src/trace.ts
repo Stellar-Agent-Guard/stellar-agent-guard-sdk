@@ -1,4 +1,11 @@
 /**
+ * Determinism audit (see #<issue>): this module contains no `Date.now(`,
+ * `new Date()`, or `Math.random(` reads. It is a pure vocabulary/type module
+ * (const tuple + two type aliases) with no clock or RNG coupling, so no
+ * Clock injection or seeded RNG is required here. Disposition: clean.
+ */
+
+/**
  * Shared step vocabulary for pipeline traces.
  *
  * One source of truth for the names a trace uses when it walks the guarded

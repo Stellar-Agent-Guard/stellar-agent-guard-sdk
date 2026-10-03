@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 /**
  * Telemetry for the guard contract's events.
  *
@@ -24,6 +25,7 @@
  * content. The format and the collision notes are documented in
  * `docs/event-schema.md` and implemented by `guardEventId` below.
  */
+import { createHash } from "node:crypto";
 import { createHash } from "node:crypto";
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
