@@ -84,3 +84,33 @@ export class PolicyDecodeError extends GuardError {
     this.path = options.path;
   }
 }
+
+/**
+ * An adapter was constructed with misconfigured options.
+ *
+ * This is a programmer error, not a policy refusal: it is thrown at
+ * construction time, before the adapter ever sees an agent action, so a code
+ * bug in the integration fails fast instead of killing the first tool call of
+
+ * production. The `field` names the offending option and `expected` describes
+ * the shape it must have, so the fix is obvious without reading this SDK's
+ * source.
+ */
+export class AdapterConfigError extends GuardError {
+  /** Option key that was missing or had the wrong type. */
+  readonly field: string;
+  /** Human-readable description of the expected shape. */
+  readonly expected: string;
+  /** Adapter identifier, e.g. `"langchain"` or `"elizaos"`. */
+  readonly adapter: string;
+
+  constructor(
+    message: string,
+    options: { field: string; expected: string; adapter: string; cause?: unknown },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.field = options.field;
+    this.expected = options.expected;
+    this.adapter = options.adapter;
+  }
+}

@@ -1,10 +1,10 @@
 /**
- * ElizaOS adapter — built on `Action.validate`.
+ * ElizaOS adapter -- built on `Action.validate`.
  *
  * `Action.validate` is already a pre-execution gate: the runtime calls it with
  * the same `(runtime, message, state, options)` triple the handler receives and
  * admits the action to the eligible set only when it returns truthy. Composing
- * the guard into `validate` therefore stops the handler from ever running — see
+ * the guard into `validate` therefore stops the handler from ever running -- see
  * `docs/integration-hooks.md` §2 for the source-pinned signatures and the three
  * call sites that enforce it.
  *
@@ -13,9 +13,20 @@
  * there is a failure rather than a refusal.
  *
  * Written structurally, so `@elizaos/core` is not a dependency of this SDK.
+ *
+ * Options are validated at construction time (see `src/adapters/validate.ts`):
+ * a misconfigured adapter throws `AdapterConfigError` before any action runs,
+ * rather than failing mid-loop on the first tool call.
  */
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
+import {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./validate.ts";
 
 /** The subset of ElizaOS's `Validator` signature this adapter implements. */
 export type ElizaValidator = (
@@ -40,7 +51,7 @@ export interface ElizaGuardOptions {
   toContractCall: (message: unknown, state: unknown) => ContractCall | null;
   /** The action's own validation, composed in front of the guard's. */
   baseValidate?: ElizaValidator;
-  /** Observe every decision — the place to wire telemetry. */
+  /** Observe every decision -- the place to wire telemetry. */
   onDecision?: (decision: PreFlightDecision) => void;
   /**
    * Called with the refusal, because a `false` verdict is silent by design: the
@@ -58,6 +69,19 @@ export interface ElizaGuardOptions {
  * `false`, so the action never executes either way.
  */
 export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator {
+  const issues: AdapterConfigIssue[] = [];
+  const interceptorIssue = validateInterceptor(options.interceptor);
+  if (interceptorIssue) const issues.push(interceptorIssue);
+  const toCallIssue = validateRequiredFunction("toContractCall", options.toContractCall);
+  if (toCallIssue) issues.push(toCallIssue);
+  const baseValidateIssue = validateOptionalFunction("baseValidate", options.baseValidate);
+  if (baseValidateIssue) issues.push(baseValidateIssue);
+  const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
+  if (onDecisionIssue) issues.push(onDecisionIssue);
+  const onBlockedIssue = validateOptionalFunction("onBlocked", options.onBlocked);
+  if (onBlockedIssue) issues.push(onBlockedIssue);
+  throwAdapterConfigError("elizaos", issues);
+
   return async (runtime, message, state, handlerOptions) => {
     if (options.baseValidate) {
       const baseOk = await options.baseValidate(runtime, message, state, handlerOptions);
@@ -81,8 +105,8 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
  *
  * The returned `validate` is deliberately typed as the full `ElizaValidator`, not
  * as the wrapped action's own (possibly narrower) signature. An action authored
- * with `validate: async () => boolean` is assignable to `ElizaValidator` — extra
- * parameters are allowed to be ignored — but the *wrapped* validator genuinely
+ * with `validate: async () => boolean` is assignable to `ElizaValidator` -- extra
+ * parameters are allowed to be ignored -- but the *wrapped* validator genuinely
  * accepts all four arguments and forwards them to the base, so reporting the
  * narrower type would both misdescribe it and prevent a caller from invoking the
  * action the way the runtime does.

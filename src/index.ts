@@ -1,17 +1,17 @@
 /**
- * stellar-agent-guard-sdk — the public surface.
+ * stellar-agent-guard-sdk -- the public surface.
  *
  * An integration bridge between AI agent frameworks and `stellar-agent-guard`
  * smart accounts: pre-flight policy interception, agent-auth transaction
  * signing, and on-chain event telemetry.
  *
  * **Enforcement scope, stated where the capability is claimed:** full
- * recipient/amount enforcement — spend caps, allowlists, per-transaction limits
- * — is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
+ * recipient/amount enforcement -- spend caps, allowlists, per-transaction limits
+ * -- is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
  * since these are the calls whose arguments the Soroban auth context exposes for
  * inspection. For other Soroban contract calls made by the guarded account
  * (arbitrary DEX/lending/protocol calls), the policy engine still enforces window
- * and pause state, but per-call amount/recipient limits are not yet enforced —
+ * and pause state, but per-call amount/recipient limits are not yet enforced --
  * extending fine-grained enforcement to arbitrary calls is tracked as a v2 item,
  * not implied as already covered.
  *
@@ -21,6 +21,7 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  AdapterConfigError,
   BroadcastError,
   ContractResponseError,
   GuardError,
@@ -261,8 +262,8 @@ export type {
 } from "./tx.ts";
 
 export {
-  DEFAULT_NETWORK_PASSPHRASE,
-  agentPubkeyToScVal,
+  DEFAULT_NETWORK_PASSTHRASE,
+  agentPubKeyToScVal,
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
@@ -271,6 +272,13 @@ export {
   submitRotateAgentKey,
   submitSetPolicy,
   submitUnfreeze,
+  type AdminopParams,
+  type RotateAgentKeyParams,
+  type SetPolicyParams,
+||||||| MERGE_BASE
+  type AdminOpParams,
+  type RotateAgentKeyParams,
+  type SetPolicyParams,
 } from "./admin.ts";
 
 export type {
@@ -288,7 +296,10 @@ export {
 } from "./wasm.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
-// so neither framework is a dependency of this package.
+// so neither framework is a dependency of this package. Options are validated
+// at construction time (see `src/adapters/validate.ts`), so a misconfigured
+// adapter throws `AdapterConfigError` before the first action rather than
+// failing mid-loop.
 export {
   createLangChainGuardMiddleware,
 } from "./adapters/langchain.ts";
@@ -309,6 +320,13 @@ export type {
   ElizaGuardOptions,
   ElizaValidator,
 } from "./adapters/elizaos.ts";
+export {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./adapters/validate.ts";
 
 export {
   createVercelAIGuard,
