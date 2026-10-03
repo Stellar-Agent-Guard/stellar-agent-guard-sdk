@@ -12,13 +12,68 @@ constructor(options: GuardTelemetryListenerOptions)
 
 - `server: rpc.Server` — Soroban RPC server
 - `guard: string` — Guard contract address
-- `failedTx?: boolean` — opt-in: also surface diagnostics from transactions that were broadcast, included in a ledger, and then failed on-chain, as GuardEvents with `stream: "failed_tx"` (default off). The scan follows its own `getTransactions` cursor and cannot skip or advance the committed `getEvents` cursor; see `docs/event-schema.md` for the spike evidence and semantics.
+- `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
 
 ## Methods
 
-### `watch(signal?: AbortSignal): AsyncIterable<GuardEventPage>`
+### `recent(filter?): GuardEvent[]`
+
+The retained window of most-recent decoded events, oldest first, empty unless a
+`buffer` was configured. `filter` narrows by `stream`, `reason`, `fromLedger`, or
+`toLedger`; a ledger-less diagnostic event is excluded from a ledger range rather
+than treated as inside it. Non-durable: the window lives in process memory and a
+restart empties it. Only events this listener decoded are retained — committed
+events via `poll()`/`watch()`, and diagnostic events via `watchAll()`.
+
+### `watch(params?): AsyncIterable<GuardEventPage>`
 
 Yields pages of decoded guard events (`event_auth_checked`, `event_policy_updated`, etc.).
+Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
+`jitter`, `rng`, `sleep`, `onGap`, and `signal`.
+
+#### Mid-watch failures (`onStreamError`)
+
+When `getEvents` starts failing mid-watch, the default is **bounded retry with
+backoff, then a clean end**: the listener retries up to `maxRetries` (default
+`5`) times with exponential backoff, then calls `onStreamError(err)` exactly
+once with the terminal error and completes the iterator normally. The stream
+never dies silently and never leaves an unhandled rejection behind.
+
+Failure-mode matrix:
+
+| Failure | Retried? | `onStreamError` | Iterator |
+| --- | --- | --- | --- |
+| Transient (recovers within `maxRetries`) | yes | not called | continues |
+| Persistent (retries exhausted) | yes, then gives up | called once with final error | ends normally |
+| Abort (`signal`) | no | not called | ends immediately |
+
+If no `onStreamError` is configured, retry-then-end still happens; the terminal
+error is retrievable via the `lastError` getter for observability.
+
+If the callback itself throws, that throw **propagates** out of the `for await`
+loop — the consumer asked for halt-on-first-error semantics by supplying a
+throwing callback, so it is not swallowed.
+
+#### Aborting (`signal`)
+
+Aborting ends the stream as a normal exit, never a throw:
+
+- an abort before the first pull issues no RPC call at all — not even the
+  `getLatestLedger` probe that resolves a default `startLedger`;
+- an abort between pages prevents the next poll and does not serve out the
+  remaining poll delay (the default delay's timer is cleared, so no handle is
+  left open);
+- an abort while a request is in flight lets that request's rejection go
+  quietly as teardown instead of surfacing an `AbortError` or an unhandled
+  rejection.
+
+**In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^17 exposes
+`getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
+there is no supported way to cancel a request that has already been sent. The
+worst case between `signal.abort()` and the iterator ending is therefore **one
+request duration**, never a full poll interval. The README's
+[“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
+section states the same boundary for consumers.
 
 ## Event identity
 

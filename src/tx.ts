@@ -47,24 +47,68 @@ import {
   Address,
   Keypair,
   SorobanDataBuilder,
+  StrKey,
   Transaction,
   TransactionBuilder,
   rpc,
   scValToNative,
+  verify as verifyEd25519,
   xdr,
 } from "@stellar/stellar-sdk";
+import {
+  BroadcastError,
+  ContractResponseError,
+  SigningError,
+  SimulationError,
+} from "./errors.ts";
+import { systemClock, type Clock } from "./clock.ts";
+import type { ContractAddress } from "./policy.ts";
 
 /** Extra ledger validity granted to a guard auth entry when it is signed. */
 const SIG_EXPIRATION_LEDGERS = 10_000;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
+const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
 
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
-  contract: string;
+  contract: ContractAddress;
   /** Function name as it appears in the contract spec. */
   fn: string;
   args: xdr.ScVal[];
+}
+
+/**
+ * Parse the RPC's simulation resource fee without allowing a missing or
+ * malformed value to masquerade as a free transaction.
+ *
+ * Stellar SDK versions have surfaced this field as a decimal string, number,
+ * or bigint. All three are accepted only when they are an exact non-negative
+ * u64. A missing field is invalid, not zero: callers must report the simulation
+ * as undetermined rather than make a budget decision from fabricated pricing.
+ */
+export function parseSimulationResourceFee(raw: unknown): bigint {
+  let value: bigint;
+  if (typeof raw === "bigint") {
+    value = raw;
+  } else if (typeof raw === "number" && Number.isSafeInteger(raw)) {
+    value = BigInt(raw);
+  } else if (typeof raw === "string" && /^\d+$/.test(raw)) {
+    value = BigInt(raw);
+  } else {
+    throw new ContractResponseError(
+      `simulation returned an invalid resource fee: ${JSON.stringify(raw)}`,
+      { field: "minResourceFee" },
+    );
+  }
+
+  if (value < 0n || value > MAX_RESOURCE_FEE) {
+    throw new ContractResponseError(
+      `simulation resource fee ${value} is outside the u64 range`,
+      { field: "minResourceFee" },
+    );
+  }
+  return value;
 }
 
 /** The guard's own persistent storage keys, as they exist in ledger state. */
@@ -82,6 +126,37 @@ function ledgerKeyId(key: xdr.LedgerKey): string {
 
 export function addressToScVal(strkey: string): xdr.ScVal {
   return new Address(strkey).toScVal();
+}
+
+/**
+ * Verify an Ed25519 agent-auth signature without accepting or deriving a
+ * private key.
+ *
+ * `publicKey` accepts the registered account strkey (`G…`) or the raw 32-byte
+ * public key stored by the contract. The Stellar SDK's low-level Ed25519
+ * verifier is the same primitive used by `Keypair.verify` and the Stellar auth
+ * path, so callers do not need a second cryptographic implementation.
+ *
+ * `payload` is verified exactly as supplied and is never re-hashed. The guard
+ * verifies the host-provided 32-byte `HashIdPreimage` digest, so an integration
+ * checking an auth entry must pass that same digest. Malformed keys, payloads that
+ * are not 32 bytes, non-64-byte signatures, and verification failures all return
+ * `false`; this diagnostic
+ * helper does not throw for attacker-controlled input.
+ */
+export function verifyAgentSignature(
+  publicKey: string | Uint8Array,
+  payload: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  try {
+    const rawPublicKey =
+      typeof publicKey === "string" ? StrKey.decodeEd25519PublicKey(publicKey) : publicKey;
+    if (rawPublicKey.length !== 32 || payload.length !== 32 || signature.length !== 64) return false;
+    return verifyEd25519(payload, signature, rawPublicKey);
+  } catch {
+    return false;
+  }
 }
 
 export function invocationArgs(call: ContractCall): xdr.InvokeContractArgs {
@@ -266,7 +341,18 @@ export async function buildGuardAuthEntry(params: {
         );
 
   const digest = createHash("sha256").update(preimage.toXDR()).digest();
-  const signature = await signer.signDigest(digest);
+  let signature: Uint8Array;
+  try {
+    signature = await signer.signDigest(digest);
+  } catch (error) {
+    // A signer that cannot produce a signature is a `SigningError` at the layer
+    // that owns the failure, so a direct caller of this helper gets the same
+    // typed category an `invoke()` caller would have gotten.
+    throw new SigningError("could not sign the guard authorization entry", {
+      address: guard,
+      cause: error,
+    });
+  }
 
   const addressCredentials = new xdr.SorobanAddressCredentials({
     address: guardAddress,
@@ -296,17 +382,24 @@ export async function signAccountAuthEntry(params: {
   networkPassphrase: string;
 }): Promise<xdr.SorobanAuthorizationEntry> {
   const { entry, signer, signatureExpirationLedger, networkPassphrase } = params;
-  if ("signAuthEntry" in signer && typeof signer.signAuthEntry === "function") {
-    return signer.signAuthEntry(entry, { signatureExpirationLedger, networkPassphrase });
-  }
-  if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
-    const { authorizeEntry } = await import("@stellar/stellar-sdk");
-    return authorizeEntry(
-      entry,
-      signer as Keypair,
-      signatureExpirationLedger,
-      networkPassphrase,
-    );
+  try {
+    if ("signAuthEntry" in signer && typeof signer.signAuthEntry === "function") {
+      return await signer.signAuthEntry(entry, { signatureExpirationLedger, networkPassphrase });
+    }
+    if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+      const { authorizeEntry } = await import("@stellar/stellar-sdk");
+      return await authorizeEntry(
+        entry,
+        signer as Keypair,
+        signatureExpirationLedger,
+        networkPassphrase,
+      );
+    }
+  } catch (error) {
+    throw new SigningError("could not sign the required account authorization entry", {
+      address: await signer.publicKey(),
+      cause: error,
+    });
   }
   // For classic transaction signers (e.g. Freighter) without a separate auth-entry signer,
   // return entry to be authorized via the envelope signature.
@@ -331,7 +424,15 @@ export async function simulateSigned(
   server: rpc.Server,
   transaction: Transaction,
 ): Promise<SimulationOutcome> {
-  const raw = await server.simulateTransaction(transaction);
+  let raw: rpc.Api.SimulateTransactionResponse;
+  try {
+    raw = await server.simulateTransaction(transaction);
+  } catch (error) {
+    throw new SimulationError("signed transaction simulation request failed", {
+      stage: "simulate",
+      cause: error,
+    });
+  }
   if (rpc.Api.isSimulationError(raw)) {
     const error = raw as rpc.Api.SimulateTransactionErrorResponse;
     return {
@@ -601,6 +702,26 @@ export function isStaleLedgerResourceFailure(
   );
 }
 
+/**
+ * Was a submission rejected because the source account sequence was stale?
+ *
+ * `tx_bad_seq` is the canonical code, but RPC error payloads are not perfectly
+ * consistent across SDK and server versions. Keep the matching deliberately
+ * narrow so ordinary transaction failures are never retried with a new sequence.
+ */
+export function isSequenceNumberFailure(
+  failure: NonNullable<SubmissionResult["failure"]>,
+): boolean {
+  const haystack = [
+    failure.message,
+    failure.resultCode ?? "",
+    ...failure.diagnosticEvents.map((event) => JSON.stringify(event)),
+  ].join("\n");
+  return /tx_bad_seq|bad[_ ]seq|sequence (?:number )?(?:is )?(?:too (?:low|high|small|large)|mismatch|does not match|already (?:been )?(?:used|spent))/i.test(
+    haystack,
+  );
+}
+
 /** Full, copy-pasteable rendering of a failed submission, for evidence. */
 export function describeSubmissionFailure(failure: NonNullable<SubmissionResult["failure"]>): string {
   const lines = [`resultCode: ${failure.resultCode ?? "unknown"}`, `message: ${failure.message}`];
@@ -616,8 +737,14 @@ export async function submitAndPoll(
   server: rpc.Server,
   transaction: Transaction,
   signers: Array<Keypair | AdminSigner>,
-  options: { pollAttempts?: number | undefined; pollIntervalMs?: number | undefined } = {},
+  options: {
+    pollAttempts?: number | undefined;
+    pollIntervalMs?: number | undefined;
+    clock?: Clock | undefined;
+  } = {},
 ): Promise<SubmissionResult> {
+  const clock = options.clock ?? systemClock;
+
   for (const signer of signers) {
     if ("signTransaction" in signer && typeof signer.signTransaction === "function") {
       const signed = await signer.signTransaction(transaction, {
@@ -633,7 +760,12 @@ export async function submitAndPoll(
     }
   }
 
-  const sent = await server.sendTransaction(transaction);
+  let sent: Awaited<ReturnType<rpc.Server["sendTransaction"]>>;
+  try {
+    sent = await server.sendTransaction(transaction);
+  } catch (error) {
+    throw new BroadcastError("transaction submission request failed", { cause: error });
+  }
   if (sent.status === "ERROR") {
     return {
       hash: sent.hash,
@@ -652,8 +784,16 @@ export async function submitAndPoll(
   const attempts = options.pollAttempts ?? 20;
   const interval = options.pollIntervalMs ?? 3_000;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    await new Promise((resolve) => setTimeout(resolve, interval));
-    const result = await server.getTransaction(sent.hash);
+    await clock.sleep(interval);
+    let result: Awaited<ReturnType<rpc.Server["getTransaction"]>>;
+    try {
+      result = await server.getTransaction(sent.hash);
+    } catch (error) {
+      throw new BroadcastError(`could not poll transaction ${sent.hash}`, {
+        transactionHash: sent.hash,
+        cause: error,
+      });
+    }
     if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
       return {
         hash: sent.hash,

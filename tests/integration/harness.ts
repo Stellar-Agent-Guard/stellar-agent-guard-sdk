@@ -16,6 +16,7 @@
  *  - The live policy is read, not assumed, and the tests skip with an explicit
  *    reason if the deployed instance does not match the shape they need.
  */
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import {
   Address,
@@ -28,7 +29,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke, type InvokeOutcome } from "../../src/invoke.ts";
-import { policyToScVal, type PolicyConfig } from "../../src/policy.ts";
+import { policyToScVal, unsafeContractAddress, unsafeAccountAddress, type PolicyConfig } from "../../src/policy.ts";
 import { readPersistentEntry } from "../../scripts/inspect-deployment.ts";
 
 export const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -49,8 +50,10 @@ export interface Phase2Config {
   policy: PolicyConfig;
 }
 
-async function readEnvFile(path = ".env.phase2"): Promise<Record<string, string>> {
-  const raw = await readFile(path, "utf8");
+/**
+ * Parses simple KEY=VALUE lines from an env file string, ignoring comments and whitespace.
+ */
+export function parseEnvContent(raw: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const line of raw.split("\n")) {
     const trimmed = line.trim();
@@ -61,17 +64,127 @@ async function readEnvFile(path = ".env.phase2"): Promise<Record<string, string>
   return out;
 }
 
+/**
+ * Synchronous reader for the env file, used for up-front entry checks before test runners launch.
+ */
+export function readEnvFileSync(path = ENV_FILE): Record<string, string> | null {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  return parseEnvContent(raw);
+}
+
+async function readEnvFile(path = ENV_FILE): Promise<Record<string, string> | null> {
+  let raw: string;
+  try {
+    raw = await readFile(path, "utf8");
+  } catch (error) {
+    // A missing file is the ordinary first-run case, not an unexpected I/O
+    // failure. Return null so the caller fails with the same actionable pointer
+    // an incomplete file gets, instead of a bare ENOENT with no next step.
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  return parseEnvContent(raw);
+}
+
+/**
+ * Every key the live suite reads from `.env.phase2`.
+ *
+ * Kept in one list so the failure path can name *all* missing keys in a single
+ * message. Failing one key per run — fix, re-run, discover the next — turns a
+ * five-minute setup into five round trips, and the fix is one array.
+ */
+export const REQUIRED_PHASE2_KEYS = [
+  "PHASE2_GUARD",
+  "PHASE2_TOKEN",
+  "PHASE2_ADMIN_SECRET",
+  "PHASE2_AGENT_SECRET",
+  "PHASE2_RECIPIENT_SECRET",
+  "PHASE2_OUTSIDER_SECRET",
+] as const;
+
+/** The gitignored env file the live suite reads. Template: `ENV_EXAMPLE_FILE`. */
+export const ENV_FILE = ".env.phase2";
+
+/** Safe-to-commit template listing every key, with no values. */
+export const ENV_EXAMPLE_FILE = ".env.phase2.example";
+
+/** What produces a populated `.env.phase2`, including the keys the suite does not read. */
+export const DEPLOY_COMMAND = "npm run deploy:phase2";
+
+/**
+ * The fail-fast message for an incomplete `.env.phase2`: every missing key at
+ * once, plus the two ways to produce a complete file. Exported so it can be
+ * asserted verbatim rather than pattern-matched loosely.
+ */
+export function missingPhase2KeysMessage(missing: readonly string[]): string {
+  return [
+    `.env.phase2 is incomplete: ${missing.length} required key(s) are missing:`,
+    ...missing.map((key) => `  - ${key}`),
+    "",
+    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} .env.phase2`,
+    `Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  ${DEPLOY_COMMAND}`,
+  ].join("\n");
+}
+
+/**
+ * The fail-fast message for a missing `.env.phase2`: the same two ways to
+ * produce it that `missingPhase2KeysMessage` points at, stated as a not-found
+ * rather than a not-incomplete file, so a first run is not misreported.
+ *
+ * Before this, a missing file surfaced as a raw `ENOENT` from `readFile` — the
+ * exact case the README's quick start hits first — with no `cp`/deploy pointer;
+ * only a file that existed *and* was incomplete got the actionable message.
+ */
+export function missingEnvFileMessage(): string {
+  return [
+    `${ENV_FILE} was not found in the working directory.`,
+    "",
+    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} ${ENV_FILE}`,
+    `Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  ${DEPLOY_COMMAND}`,
+  ].join("\n");
+}
+
+export interface Phase2EnvValidationResult {
+  readonly ok: boolean;
+  readonly message?: string;
+  readonly missingKeys?: readonly string[];
+}
+
+/**
+ * Validates the Phase 2 live testnet environment up front before executing test runners.
+ * Returns { ok: true } when all required keys are present, or { ok: false, message }
+ * with the single actionable failure message listing all missing keys and the template copy pointer.
+ */
+export function validatePhase2Env(
+  env: Record<string, string> | null = readEnvFileSync(),
+): Phase2EnvValidationResult {
+  if (env === null) {
+    return { ok: false, message: missingEnvFileMessage() };
+  }
+  const missing = REQUIRED_PHASE2_KEYS.filter((key) => !env[key]);
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      missingKeys: [...missing],
+      message: missingPhase2KeysMessage(missing),
+    };
+  }
+  return { ok: true };
+}
+
 export async function loadPhase2Config(): Promise<Phase2Config> {
   const env = await readEnvFile();
-  const need = (key: string): string => {
-    const value = env[key];
-    if (!value) {
-      throw new Error(
-        `${key} missing from .env.phase2 — run scripts/deploy-phase2-instance.ts first`,
-      );
-    }
-    return value;
-  };
+  const validation = validatePhase2Env(env);
+  if (!validation.ok || env === null) {
+    throw new Error(validation.message);
+  }
+  const need = (key: (typeof REQUIRED_PHASE2_KEYS)[number]): string => env[key]!;
 
   const guard = need("PHASE2_GUARD");
   const token = need("PHASE2_TOKEN");
@@ -90,9 +203,9 @@ export async function loadPhase2Config(): Promise<Phase2Config> {
     per_tx_cap: 1000n,
     window_secs: 60n,
     window_cap: 150n,
-    assets: [token],
+    assets: [unsafeContractAddress(token)],
     protocols: [],
-    recipients: [keys.recipient.publicKey()],
+    recipients: [unsafeAccountAddress(keys.recipient.publicKey())],
     allow_any_recipient: false,
     active_from: 0n,
     active_until: 0n,
@@ -147,7 +260,7 @@ export async function installPolicy(
     server,
     source: config.keys.admin,
     call: {
-      contract: config.guard,
+      contract: unsafeContractAddress(config.guard),
       fn: "set_policy",
       args: [policyToScVal(policy)],
     },
@@ -170,7 +283,7 @@ export async function transfer(
     server,
     source: config.keys.agent,
     call: {
-      contract: config.token,
+      contract: unsafeContractAddress(config.token),
       fn: "transfer",
       args: [
         new Address(config.guard).toScVal(),

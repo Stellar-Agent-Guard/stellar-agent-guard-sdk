@@ -5,7 +5,12 @@ are built against, read from each framework's own source rather than from its
 documentation or from an assumed API shape.
 
 Every entry below is pinned to the file revision it was read from (blob SHA), so a
-reader can confirm the signatures have not drifted under them. Read 2026-09-14.
+reader can confirm the signatures have not drifted under them. Each section
+carries its own **last verified** date, and every superseded pin is recorded —
+never silently replaced — in the [revision log](#revision-log) at the end of this
+file.
+
+**Last verified: 2026-09-28** for every section (previously read 2026-09-14).
 
 **Summary**
 
@@ -24,8 +29,11 @@ recorded here rather than papered over with an adapter built on a guessed interf
 
 ## 1. LangChain — `AgentMiddleware.wrap_tool_call`
 
+**Last verified: 2026-09-28** (previously read 2026-09-14).
+
 **Source:** `langchain-ai/langchain`, `master`, `libs/langchain_v1/langchain/agents/middleware/types.py`
-(blob `b7d5b8050ab8`).
+(blob `b7d5b8050ab887acb3f180edae17ee06c11022d2`, unchanged since the previous pin
+`b7d5b8050ab8`).
 
 ### The hook
 
@@ -58,7 +66,8 @@ The async variant is declared on the same class:
 
 `ToolCallRequest` is re-exported by that module and defined in `langgraph`:
 `langchain-ai/langgraph`, `main`, `libs/prebuilt/langgraph/prebuilt/tool_node.py`
-(blob `95e161b9078e`):
+(blob `95e161b9078e3123afa1854247a5dfd132410a53`, unchanged since the previous pin
+`95e161b9078e`):
 
 ```python
 @dataclass
@@ -126,8 +135,16 @@ Build an `AgentMiddleware` (or a `@wrap_tool_call`-decorated function) that:
 
 ## 2. ElizaOS — `Action.validate`
 
+**Last verified: 2026-09-28** (previously read 2026-09-14).
+
 **Source:** `elizaOS/eliza`, `develop`. `packages/core/src/types/components.ts`
-(blob `5f604e593854`) and `packages/core/src/runtime.ts` (blob `eb3f3fc98cef`).
+(blob `1a319a3d7b2d5e7418e03c85a2ad33b607e46198`, superseding `5f604e593854`) and
+`packages/core/src/runtime.ts`
+(blob `c13af759cafde630483450f97bb802b58d1b253a`, superseding `eb3f3fc98cef`).
+
+The `Validator` type and `Action.validate` shown below are **unchanged** between
+the two revisions — the files grew (new `ActionMode` hook scopes and disclosure
+gating) without touching the validator contract the adapter depends on.
 
 ### The hook types
 
@@ -182,8 +199,11 @@ returns truthy:
 ```
 
 The same `action.validate(` gate is used from the other execution paths as well —
-`packages/core/src/services/message/action-surface.ts` and
-`packages/core/src/runtime/execute-planned-tool-call.ts` — so a false verdict keeps
+`plugins/plugin-assistant/src/services/message/action-surface.ts`
+(blob `cfa968b054786ab691ceacf0271dff550ad0ca7e`; the previous pin pointed at
+`packages/core/src/services/message/action-surface.ts`, which moved there and now
+404s at the old path) and `packages/core/src/runtime/execute-planned-tool-call.ts`
+(blob `daf3a44b3521a0dac4451661660576099b4ff0c9`) — so a false verdict keeps
 the handler from running whether the action was chosen by the planner or by a
 planned tool call.
 
@@ -221,13 +241,19 @@ silent.
 ## 3. AutoGPT — **no third-party pre-execution blocking hook**
 
 This entry is the resolution of an open question, not an assumption. The finding is
-negative and is recorded as such.
+negative and is recorded as such. Re-verified 2026-09-28: the finding is
+**unchanged**.
+
+**Last verified: 2026-09-28** (previously read 2026-09-14).
 
 **Source:** `Significant-Gravitas/AutoGPT`, `master`.
 
-- `autogpt_platform/backend/backend/executor/manager.py` (blob `713459246689`)
-- `autogpt_platform/backend/backend/blocks/_base.py` (blob `78ee11373050`)
+- `autogpt_platform/backend/backend/executor/manager.py`
+  (blob `00a3b26453a0374cc752bd190c5d10fe3dbd44ef`, superseding `713459246689`)
+- `autogpt_platform/backend/backend/blocks/_base.py`
+  (blob `f459b3ceac3ecdedc7311ce616ebb694ada2505a`, superseding `78ee11373050`)
 - `autogpt_platform/backend/backend/executor/automod/manager.py`
+  (blob `bcbbfc79ee09f48a00dd9facb4f1a8ad9a1a4e64`)
 
 ### What was checked
 
@@ -292,6 +318,12 @@ and the gate itself:
             return False, input_data
 ```
 
+The early-return condition above is unchanged at the 2026-09-28 revision; the
+review it guards now delegates to
+`backend.blocks.helpers.review.HITLReviewHelper.handle_review_decision`, which
+does not change the conclusion — it is still a platform-owned human-in-the-loop
+pause, not a third-party extension point.
+
 This is a real pre-execution pause — but it is **not an extension point**:
 
 - it is a method on the platform's own `Block` base class, so intervening in it
@@ -340,3 +372,50 @@ If AutoGPT's executor gains a middleware mechanism, this section should be
 re-checked by repeating the three searches above against the then-current
 `executor/manager.py` and `blocks/_base.py`, and the blob SHAs here superseded
 rather than silently replaced.
+
+Re-run 2026-09-28 against the pins above:
+
+```bash
+# 1. Any middleware/hook registry in the executor?
+rg -i 'hook|middleware|interceptor|register.*callback' \
+  autogpt_platform/backend/backend/executor/manager.py
+
+# 2. Any pre-execution gate inside the block lifecycle?
+rg -n 'is_block_exec_need_review|is_sensitive_action|def _execute|def run' \
+  autogpt_platform/backend/backend/blocks/_base.py
+
+# 3. Is the AutoMod path an extension point?
+rg -n 'def moderate_graph_execution_inputs|class AutoModManager|ModerationError' \
+  autogpt_platform/backend/backend/executor/automod/manager.py
+```
+
+Result: search 1 still returns no registry (its only hit is an unrelated
+"webhook" mention in a comment); search 2 still finds `is_block_exec_need_review`
+called immediately before `run`; search 3 still finds the internal, per-user
+moderation path. The negative finding stands.
+
+---
+
+## Revision log
+
+Append-only record of every superseded pin, newest last. A pin is never replaced
+silently: the old value stays here with the date it was retired and what changed.
+
+### 2026-09-28 — re-verification sweep
+
+| File | Old pin | New pin | What changed |
+| --- | --- | --- | --- |
+| `langchain-ai/langchain` `libs/langchain_v1/langchain/agents/middleware/types.py` | `b7d5b8050ab8` | `b7d5b8050ab887acb3f180edae17ee06c11022d2` | none (pin unchanged; re-confirmed) |
+| `langchain-ai/langgraph` `libs/prebuilt/langgraph/prebuilt/tool_node.py` | `95e161b9078e` | `95e161b9078e3123afa1854247a5dfd132410a53` | none (pin unchanged; re-confirmed) |
+| `elizaOS/eliza` `packages/core/src/types/components.ts` | `5f604e593854` | `1a319a3d7b2d5e7418e03c85a2ad33b607e46198` | file grew new `ActionMode` hook scopes and disclosure gating; `Validator` and `Action.validate` unchanged |
+| `elizaOS/eliza` `packages/core/src/runtime.ts` | `eb3f3fc98cef` | `c13af759cafde630483450f97bb802b58d1b253a` | grew mode/disclosure logic around the same `action.validate(this, message, state)` gate |
+| `elizaOS/eliza` `packages/core/src/services/message/action-surface.ts` | (path pin) | `plugins/plugin-assistant/src/services/message/action-surface.ts` @ `cfa968b054786ab691ceacf0271dff550ad0ca7e` | file moved out of `packages/core/`; the old path now 404s |
+| `elizaOS/eliza` `packages/core/src/runtime/execute-planned-tool-call.ts` | (path pin) | `daf3a44b3521a0dac4451661660576099b4ff0c9` | `action.validate` gate still present |
+| `Significant-Gravitas/AutoGPT` `autogpt_platform/backend/backend/executor/manager.py` | `713459246689` | `00a3b26453a0374cc752bd190c5d10fe3dbd44ef` | no middleware/hook registry still |
+| `Significant-Gravitas/AutoGPT` `autogpt_platform/backend/backend/blocks/_base.py` | `78ee11373050` | `f459b3ceac3ecdedc7311ce616ebb694ada2505a` | `is_block_exec_need_review` unchanged; review now delegates to `HITLReviewHelper` |
+| `Significant-Gravitas/AutoGPT` `autogpt_platform/backend/backend/executor/automod/manager.py` | (path pin) | `bcbbfc79ee09f48a00dd9facb4f1a8ad9a1a4e64` | internal moderation path unchanged |
+
+Superseded file-content pins are kept above rather than deleted, so the previous
+revision remains addressable. No framework gained a genuine third-party
+pre-execution blocking hook in this sweep, so no new adapter is unblocked and no
+follow-up adapter issue is filed.

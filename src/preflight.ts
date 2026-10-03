@@ -26,11 +26,20 @@
  */
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
+import { GuardError, SimulationError } from "./errors.ts";
 import { enforceCall } from "./invoke.ts";
+import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
+import {
+  extractTransferAmount,
+  fetchGuardPolicyAndWindow,
+  type ContractAddress,
+  type ReadonlyPolicyConfig,
+} from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
-import { toAgentSigner } from "./tx.ts";
+import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
+import { systemClock, type Clock } from "./clock.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -159,11 +168,14 @@ export function validateContractCall(call: ContractCall): void {
  * when the guard never ruled would be a false claim about the security
  * boundary, which is the one thing an operator must be able to trust.
  */
-export class PreFlightUndeterminedError extends Error {
+export class PreFlightUndeterminedError extends SimulationError {
   readonly detail: string;
 
-  constructor(detail: string) {
-    super(`stellar-agent-guard could not determine this action's status\n${detail}`);
+  constructor(detail: string, options: { cause?: unknown } = {}) {
+    super(`stellar-agent-guard could not determine this action's status\n${detail}`, {
+      stage: "preflight",
+      ...(options.cause === undefined ? {} : { cause: options.cause }),
+    });
     this.name = "PreFlightUndeterminedError";
     this.detail = detail;
   }
@@ -177,6 +189,8 @@ export type PreFlightDecision =
       estimatedResourceFee: bigint;
       /** Number of ledger keys the call is priced to touch. */
       footprintKeys: number;
+      /** Resource limits and footprint counts from the same simulation. */
+      resourceBreakdown?: ResourceBreakdown;
     }
   | {
       allowed: false;
@@ -192,7 +206,59 @@ export type PreFlightDecision =
       allowed: false;
       kind: "undetermined";
       detail: string;
+      /** Machine-readable cause; use `instanceof` instead of matching `detail`. */
+      error?: GuardError;
     };
+
+/**
+ * Options for a batched pre-flight check.
+ *
+ * Both fields exist so a caller can run the batch check against values it
+ * already knows, without an extra ledger read. Omit them and the interceptor
+ * fetches the live policy and committed window spend from the guard's storage.
+ */
+export interface CheckBatchOptions {
+  /**
+   * Policy configuration to enforce against during batch staging.
+   * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
+   */
+  policy?: ReadonlyPolicyConfig | null;
+
+  /**
+   * Initial committed amount already spent in the current rolling window.
+   * If omitted, attempts to fetch it from the guard's `Window` ledger entry (defaults to 0n).
+   */
+  initialWindowSpent?: bigint;
+}
+
+export interface PreFlightBatchDecision {
+  /**
+   * Overall batch verdict: true only if every call in the batch is admissible.
+   * Mirrors the contract's all-or-nothing auth batch semantics.
+   */
+  admissible: boolean;
+
+  /**
+   * Alias for `admissible`.
+   */
+  overallAdmissible: boolean;
+
+  /**
+   * Per-call decisions in the exact order of the input batch.
+   */
+  verdicts: PreFlightDecision[];
+
+  /**
+   * Alias for `verdicts`.
+   */
+  calls: PreFlightDecision[];
+
+  /**
+   * Total estimated resource fee in stroops across all calls in the batch
+   * that were admissible.
+   */
+  totalEstimatedResourceFee: bigint;
+}
 
 /** A caller-supplied policy revision token used as part of the cache key. */
 export type PolicyRevision = string | number | bigint | boolean | null | undefined;
@@ -229,7 +295,7 @@ export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
-  guard: string;
+  guard: ContractAddress;
   /**
    * The key registered as the account's agent, used to sign the auth entry: an
    * `AgentSigner` for any signing setup, or a plain Ed25519 `Keypair` for the
@@ -240,11 +306,18 @@ export interface PreFlightConfig {
   source: Keypair;
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
   accountSigners?: Keypair[];
+  /** Optional policy to use for batch staging (otherwise fetched from ledger). */
+  policy?: ReadonlyPolicyConfig | null;
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
    */
   cache?: PreFlightCacheOptions;
+  /**
+   * Inject a custom clock for time-dependent operations (cache TTL, etc.).
+   * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
+   */
+  clock?: Clock;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -304,10 +377,12 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  private readonly clock: Clock;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
+    this.clock = config.clock ?? systemClock;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
   }
@@ -358,7 +433,7 @@ export class PreFlightInterceptor {
       return null;
     }
 
-    const now = Date.now();
+    const now = this.clock.now();
     for (const [key, entry] of this.cache) {
       if (entry.ledger !== ledger || entry.expiresAt <= now) this.cache.delete(key);
     }
@@ -397,7 +472,7 @@ export class PreFlightInterceptor {
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {
-        const now = Date.now();
+        const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
           return cached.decision;
         }
@@ -416,7 +491,12 @@ export class PreFlightInterceptor {
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
-      decision = { allowed: false, kind: "undetermined", detail: outcome.detail };
+      decision = {
+        allowed: false,
+        kind: "undetermined",
+        detail: outcome.detail,
+        error: outcome.error,
+      };
     } else if (outcome.kind === "blocked") {
       decision = {
         allowed: false,
@@ -427,16 +507,41 @@ export class PreFlightInterceptor {
         diagnosticEvents: outcome.diagnosticEvents,
       };
     } else {
+      const resourceBreakdown = resourceBreakdownFromSimulation(outcome.simulation);
       const data = outcome.simulation.transactionData as unknown as
         | { getReadOnly?: () => unknown[]; getReadWrite?: () => unknown[] }
         | undefined;
       const footprintKeys =
         (data?.getReadOnly?.().length ?? 0) + (data?.getReadWrite?.().length ?? 0);
+
+      // Fail closed on an unpriceable simulation: a guardrail must never hand
+      // back an admissible verdict carrying a fabricated or silently zero fee.
+      let estimatedResourceFee: bigint;
+      try {
+        estimatedResourceFee = parseSimulationResourceFee(outcome.simulation.minResourceFee);
+      } catch (cause) {
+        decision = {
+          allowed: false,
+          kind: "undetermined",
+          detail: `enforced simulation returned an invalid resource fee: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+          error:
+            cause instanceof GuardError
+              ? cause
+              : new SimulationError("enforced simulation returned an invalid resource fee", {
+                  stage: "preflight",
+                  cause,
+                }),
+        };
+        return decision;
+      }
       decision = {
         allowed: true,
         kind: "admissible",
-        estimatedResourceFee: BigInt(outcome.simulation.minResourceFee ?? 0),
+        estimatedResourceFee,
         footprintKeys,
+        ...(resourceBreakdown ? { resourceBreakdown } : {}),
       };
     }
 
@@ -450,6 +555,112 @@ export class PreFlightInterceptor {
       });
     }
     return decision;
+  }
+
+  /**
+   * Decide whether an entire batch of calls may proceed with all-or-nothing semantics.
+   *
+   * Mirrors the contract's staged window evaluation:
+   * 1. Evaluates each call in sequence.
+   * 2. For SAC transfers, tracks the cumulative admitted amounts in memory ("simulated staging").
+   * 3. If an individual call passes simulation in isolation but would push the cumulative
+   *    staged window spend past `window_cap`, it is marked as `blocked` with reason
+   *    `window_cap_exceeded`.
+   * 4. If any call is blocked or undetermined, the overall batch `admissible` is false.
+   *
+   * Documented approximation vs true batch simulation:
+   * This sequential simulation with staged window accounting is an off-chain approximation
+   * of the contract's atomic auth batch evaluation:
+   * - State mutations between calls (other than guard window spend) are not observed during
+   *   independent simulations.
+   * - Window entries are staged against the initial window snapshot without modelling intra-batch
+   *   time expiration.
+   * - Total estimated resource fee is the sum of per-call estimates rather than a single
+   *   transaction envelope's resource fee.
+   *
+   * Note cross-dependency:
+   * When contract-side `check_batch` lands in `stellar-agent-guard-contracts`, `checkBatch`
+   * will route to that entrypoint for atomic on-chain simulation, and this sequential
+   * staging implementation will serve as the fallback for contracts on earlier ABI versions.
+   */
+  async checkBatch(
+    calls: ContractCall[],
+    options?: CheckBatchOptions,
+  ): Promise<PreFlightBatchDecision> {
+    if (calls.length === 0) {
+      return {
+        admissible: true,
+        overallAdmissible: true,
+        verdicts: [],
+        calls: [],
+        totalEstimatedResourceFee: 0n,
+      };
+    }
+
+    // Resolve policy and initial window spend for staging
+    let policy: ReadonlyPolicyConfig | null = options?.policy ?? this.config.policy ?? null;
+    let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
+
+    if (policy === null || options?.initialWindowSpent === undefined) {
+      try {
+        const fetched = await fetchGuardPolicyAndWindow(this.config.server, this.config.guard);
+        if (policy === null) {
+          policy = fetched.policy;
+        }
+        if (options?.initialWindowSpent === undefined) {
+          initialWindowSpent = fetched.windowSpent;
+        }
+      } catch {
+        // Fall back gracefully if ledger entry fetch is not possible (e.g. mock server in unit tests)
+      }
+    }
+
+    let stagedWindowSpent = 0n;
+    let allAdmissible = true;
+    let totalEstimatedResourceFee = 0n;
+    const verdicts: PreFlightDecision[] = [];
+
+    for (const call of calls) {
+      const decision = await this.check(call);
+
+      if (decision.kind === "admissible") {
+        const amount = extractTransferAmount(call);
+        const windowCap = policy?.window_cap ?? 0n;
+
+        // If this is a transfer with a positive amount and a window cap is defined:
+        if (amount !== null && amount > 0n && windowCap > 0n) {
+          const projectedSpend = initialWindowSpent + stagedWindowSpent + amount;
+          if (projectedSpend > windowCap) {
+            const blockedDecision: PreFlightDecision = {
+              allowed: false,
+              kind: "blocked",
+              reason: "window_cap_exceeded",
+              explanation: explainReason("window_cap_exceeded"),
+              detail: `staged window cap exceeded: cumulative spend ${projectedSpend} > window_cap ${windowCap}`,
+              diagnosticEvents: [],
+            };
+            verdicts.push(blockedDecision);
+            allAdmissible = false;
+            continue;
+          }
+          stagedWindowSpent += amount;
+        }
+
+        verdicts.push(decision);
+        totalEstimatedResourceFee += decision.estimatedResourceFee;
+      } else {
+        verdicts.push(decision);
+        allAdmissible = false;
+      }
+    }
+
+    return {
+      admissible: allAdmissible,
+      overallAdmissible: allAdmissible,
+      verdicts,
+      calls: verdicts,
+      totalEstimatedResourceFee,
+    };
   }
 
   /**
@@ -472,7 +683,34 @@ export class PreFlightInterceptor {
         rawEvent,
       });
     }
-    throw new PreFlightUndeterminedError(decision.detail);
+    throw new PreFlightUndeterminedError(decision.detail, { cause: decision.error });
+  }
+
+  /**
+   * Convenience for adapters that want a throw-on-refusal shape for batches.
+   *
+   * Throws `GuardBlockedError` if any call in the batch is blocked, or
+   * `PreFlightUndeterminedError` if any call is undetermined.
+   */
+  async assertBatchAllowed(
+    calls: ContractCall[],
+    options?: CheckBatchOptions,
+  ): Promise<PreFlightBatchDecision & { admissible: true }> {
+    const decision = await this.checkBatch(calls, options);
+    if (decision.admissible) return decision as PreFlightBatchDecision & { admissible: true };
+    for (const verdict of decision.verdicts) {
+      if (verdict.kind === "blocked") {
+        throw new GuardBlockedError({
+          reason: verdict.reason,
+          stage: "preflight",
+          detail: verdict.detail,
+        });
+      }
+      if (verdict.kind === "undetermined") {
+        throw new PreFlightUndeterminedError(verdict.detail);
+      }
+    }
+    throw new PreFlightUndeterminedError("batch refused by guardrails");
   }
 }
 
@@ -480,3 +718,13 @@ export class PreFlightInterceptor {
 export function preflight(config: PreFlightConfig, call: ContractCall): Promise<PreFlightDecision> {
   return new PreFlightInterceptor(config).check(call);
 }
+
+/** One-shot form for batch pre-flight checks. */
+export function preflightBatch(
+  config: PreFlightConfig,
+  calls: ContractCall[],
+  options?: CheckBatchOptions,
+): Promise<PreFlightBatchDecision> {
+  return new PreFlightInterceptor(config).checkBatch(calls, options);
+}
+

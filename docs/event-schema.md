@@ -49,19 +49,77 @@ behaves:
 | `decision.reason` | SDK (from topics[2]) | **Append-only** | `string \| null`. Never re-spelled for the same condition. |
 | `decision.source` | SDK | **Stable** | Closed set `ledger` \| `diagnostic`. |
 | `source` | SDK | **Stable** | Same closed set as `decision.source`. |
+| `stream` | SDK | **Stable** | `committed` \| `diagnostic`. Derived from `source`; present on every event. Additive (issue #67). |
 | `contractId` | stream | **Best-effort** | May be `null`; the diagnostic stream only carries the contract the SDK was pointed at. |
 | `ledger` | stream | **Best-effort** | `null` on the diagnostic stream; present only for committed events. |
 | `ledgerClosedAt` | stream | **Best-effort** | Host-formatted timestamp; `null` on the diagnostic stream. |
+| `observedAt` | SDK (unified stream) | **Best-effort** | ISO-8601 time `watchAll()` observed a diagnostic batch; `null` on the committed stream. Additive (issue #67). |
 | `transactionHash` | stream | **Best-effort** | Always `null` on the diagnostic stream — a refusal has no transaction. |
-| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Semantics are stable; the decoded JS rendering is for display. |
+| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Delivered as a string in JSON, normalised to `bigint` by the SDK to prevent >2^53 precision loss. |
 | `data.by` (admin events) | contract payload | **Stable** | The acting admin address, for `event_initialized` / `event_frozen` / `event_unfrozen` / `event_policy_set` / `event_policy_revoked`. |
-| `data` — any other key | contract / host | **Best-effort** | Not under SDK control; ignore rather than infer. |
+| `data` — any other key | contract / host | **Best-effort** | Not under SDK control. Normalised: strings of pure digits become `bigint`; other strings (e.g. ISO dates) are preserved. |
 | Raw topic list (undecoded XDR / `ScVal` objects) | RPC | **Best-effort** | Host-shaped. Decode with `topicSymbols()` / `decodeAuthDecision()`. |
 | `contractEventsXdr` grouping | RPC | **Best-effort** | An array of *groups*, one per contract — reading it as a flat list silently loses events (see "The capture"). |
 | `GUARD_EVENT_TOPICS` values | contract | **Stable** | The name-topic vocabulary. |
 | `GUARD_REASON_CODES` numbers | contract | **Append-only** | Numeric codes are never renumbered and never reused; removed variants keep their number. |
 | `describeGuardEvent()` text | SDK | **Internal** | A log line, not a format. Parse `GuardEvent`, not this string. |
 | `poll()` `cursor` / `latestLedger` | RPC | **Best-effort** | Pagination is host-defined; treat as opaque. |
+| `serializeEvent()` output | SDK | **Stable** | Canonical JSON line. Fixed key order and normalization policy — see below. |
+
+### Canonical JSON serialization — `serializeEvent()`
+
+`serializeEvent(event: GuardEvent): string` renders one event as a single-line
+canonical JSON string, for shipping to a log sink as JSON-lines:
+
+```ts
+logger.info(serializeEvent(event)); // one line per event
+```
+
+The rendering is deterministic: the same event always serializes byte-for-byte
+the same, so a stored line can be diffed and a golden-string test can pin it
+(`tests/unit/serialize-event.test.ts`). The projection is **explicit**, not an
+object spread, so adding a field to `GuardEvent` cannot silently change the
+serialized shape.
+
+**Key order** — identity, then stream facts, then the decoded decision and data,
+matching the field reference above:
+
+```
+id → kind → topic → source → stream → contractId → ledger → ledgerClosedAt
+   → observedAt → transactionHash → decision → data
+```
+
+and, nested inside `decision` (which is `null` when the event carries no
+decision):
+
+```
+result → reason → source
+```
+
+**Empty/absent fields — the drop-`undefined` policy:**
+- A field whose value is `undefined` is **omitted** from the output. Absence is
+  expressed by the key not being present.
+- `null` is **kept**. It is a real value on the stream-dependent fields
+  (`ledger`, `ledgerClosedAt`, `transactionHash`, `observedAt`, `decision`), not
+  a missing value, so a consumer can still distinguish "no transaction" from "not
+  serialized".
+- Inside an **array**, an `undefined` element is rendered as `null`, so indices
+  stay stable.
+
+**Non-JSON-safe values** are normalized per this repo's policy (the same rules
+`normalizeEventData` + `stableStringify` use for event identity):
+- **`bigint` → decimal string.** `JSON.stringify` throws on a bigint, and the
+  decoded `data.at` u64 arrives as one. Decimal (not the hashing form `…n`) is
+  used so `JSON.parse` reads back an ordinary string.
+- **`Uint8Array`/`Buffer` → `bytes:<hex>`**, the rendering `stableStringify`
+  already uses.
+
+**Round-trip:** `JSON.parse(serializeEvent(event))` is shape-equal to the input
+modulo those normalizations — `bigint` becomes a decimal string, bytes become
+`bytes:<hex>`, and `undefined` keys are absent.
+
+`serializeEvent()` is a format; `describeGuardEvent()` remains **Internal** (a
+log line, not a format), and the two are independent.
 
 ## How it was captured
 
@@ -177,8 +235,8 @@ from topics, requiring no payload decoding. It must consume **both** streams:
 committed ledger events for allowed decisions and administrative actions, and
 enforced-simulation diagnostic events for blocked ones — because a refusal is
 never committed, and a listener that only tails the ledger would see a guard that
-appears to never block anything. (The opt-in third stream for post-inclusion
-failures is described below.)
+appears to never block anything. `watchAll()` (see "Merged stream" below)
+delivers exactly that union as one ordered iterator.
 
 ## Event identity — `GuardEvent.id`
 
@@ -233,9 +291,136 @@ an id is always produced.
   hashed from the `diagnostic` stream name regardless of how the event was
   observed.
 
-Part of #7 (stable ids + unified stream). This slice delivers the id field only;
-the unified stream and any persistence for the dashboard remain out of scope
-there.
+Part of #7 (stable ids + unified stream). The `id` field was the first slice;
+the unified stream below (`watchAll()`, issue #67) is the second. Persistence for
+the dashboard remains out of scope.
+
+## Merged stream — `watchAll()`
+
+`GuardTelemetryListener.watch()` tails committed ledger events only. That is a
+trap for a telemetry consumer: a blocked decision is rolled back before
+broadcast and never reaches a ledger, so a guard read through `watch()` alone
+appears to approve everything (the motivating failure in #7).
+
+`watchAll()` follows both streams as one iterator of `GuardEvent`:
+
+```ts
+for await (const event of listener.watchAll({
+  startLedger,
+  // Batches of guardEventsFromDiagnostics(...) / telemetryFromDecision(...),
+  // in observation order.
+  diagnostics: diagnosticBatches,
+})) {
+  if (event.stream === "diagnostic" && event.decision?.result === "blocked") {
+    alerting.blocked(event.decision.reason);
+  }
+}
+```
+
+Every event carries a `stream` discriminator — `committed` for a ledger event,
+`diagnostic` for a pre-broadcast one — so the loop above needs no knowledge of
+the SDK's two-channel model. `source` remains and is unchanged; `stream` is its
+alias in the merged vocabulary, and both are additive (`watch()` output gains the
+fields, and nothing else about it moves).
+
+### Ordering rule
+
+- **Committed events are emitted in ledger order.** A page is sorted by `ledger`
+  ascending before it is yielded, and pages arrive in cursor order, so no
+  committed event overtakes an earlier-ledger one.
+- **Diagnostic events are emitted when the batch carrying them is observed**,
+  tagged with `observedAt` (ISO-8601; defaults to the merge time). A refusal has
+  no ledger — it was rolled back before broadcast — so it is positioned at its
+  point of observation relative to the committed events already drained, not by a
+  ledger. A decision observed at time T appears after the committed events
+  drained at or before T.
+
+### De-duplication rule
+
+`GuardEvent.id` (above) is the SDK's delivery key, and the merged stream emits
+each id **at most once** — first observation wins. A guard decision is
+single-homed: a blocked decision is rolled back and never committed, and an
+allowed decision has no diagnostic, so one decision cannot arrive under two ids.
+The duplicate the merge actually guards against is the *same id* delivered twice
+— a re-fed diagnostic batch, or an overlapping committed page — which the
+emitted-id set suppresses.
+
+### `observedAt`
+
+| Field | Type | Stability | Meaning |
+| --- | --- | --- | --- |
+| `observedAt` | `string \| null` | **Best-effort** | ISO-8601 time the unified stream observed a diagnostic batch. `null` on the committed stream, which carries `ledgerClosedAt` instead. |
+
+## Coverage gaps — `GuardTelemetryGap`
+
+A cursor is opaque, and Soroban RPC retains events for a bounded window, so a
+listener that resumes after being offline may find the ledgers it needed have
+been pruned. Silently skipping that range is the one failure a security monitor
+must never have: an announced gap is operationally honest, an unnoticed one is
+not.
+
+### The rule (read from the RPC response, not inferred)
+
+`getEvents` returns its retention window on **every** response — `oldestLedger`
+and `latestLedger` (`Api.RetentionState` in `@stellar/stellar-sdk`). Coverage is
+broken precisely when:
+
+```
+earliestLedgerTheListenerStillNeeds  <  response.oldestLedger
+```
+
+- On a fresh ledger range the earliest ledger needed is `startLedger`.
+- Resuming from a stored cursor, it is `resumeLedger + 1`, where `resumeLedger`
+  is the last ledger already consumed. A cursor is opaque, so the listener cannot
+  derive that from the cursor itself — pass it explicitly. Without it no gap can
+  be proven and none is reported.
+- After each page, coverage advances to `latestLedger + 1` (or to one past the
+  last event on a full, partial page), so a gap is reported once per
+  discontinuity, never once per poll.
+
+The rule is about the retention boundary, not event density. An empty page inside
+the window is silence, not loss, so a sparse but fully-retained history raises no
+false notice; and no event is ever fabricated for a pruned range — the range is
+reported as a gap and the stream continues with real events only.
+
+### Gap notice shape
+
+| Field | Type | Stability | Meaning |
+| --- | --- | --- | --- |
+| `fromLedger` | `number` | **Stable** | First ledger that can no longer be retrieved (inclusive). |
+| `toLedger` | `number` | **Stable** | Last ledger that can no longer be retrieved (inclusive). |
+| `reason` | `"history_pruned"` | **Append-only** | Why coverage broke. New reasons may be added; switch with a default. |
+| `retainedFromLedger` | `number` | **Best-effort** | `oldestLedger` of the response that detected the gap. |
+| `retainedToLedger` | `number` | **Best-effort** | `latestLedger` of that same response. |
+
+Delivery is the optional `watch({ onGap })` callback. Without it, behaviour is
+unchanged and the listener stays silent. A throwing `onGap` is isolated — it
+cannot break the stream (the same contract as `invoke()`'s `onStep`).
+
+```ts
+for await (const events of listener.watch({
+  cursor: saved.cursor,
+  resumeLedger: saved.ledger, // the last ledger already consumed
+  onGap(gap) {
+    alerting.coverageGap(gap.fromLedger, gap.toLedger, gap.reason);
+  },
+})) {
+  /* ... */
+}
+```
+
+### Consumer guidance
+
+1. **Treat a gap as a fact, not a warning.** The `fromLedger..toLedger` range is
+   unrecoverable *from this RPC* — it is no longer in its window.
+2. **Alert an operator.** An unobserved range in a spend-policy monitor means
+   decisions were made outside the monitor's view.
+3. **Replay only from a durable checkpoint.** If you persist events (or a cursor)
+   downstream, reconcile the gap against that store. If you do not, there is
+   nothing to replay from — record the gap and move on rather than inventing the
+   missing events.
+4. **Do not read a gap as an authorization event.** It says "this range could not
+   be observed", not "the guard allowed or blocked anything here".
 
 ## Cross-check: do the classifications match the code?
 

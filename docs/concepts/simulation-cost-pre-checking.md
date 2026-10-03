@@ -11,4 +11,10 @@ Other tools profile local compiled WASM files via CLI invocations. In contrast, 
 - **Inclusion Fee**: Base transaction inclusion cost.
 - **Total Fee**: Total stroops required for execution.
 
+Priced decisions may also expose a `breakdown` containing the simulation's actual
+`instructions`, `diskReadBytes`, and `writeBytes` resource limits plus derived
+read-only/read-write/total storage-footprint entry counts. The breakdown is
+omitted when the simulation does not provide a complete resource block; it is
+never replaced with fabricated zeroes.
+
 If an operator specifies `maxFeeStroops`, calls exceeding the limit return `over_budget`. Blocked calls are reported as `blocked` with an explicitly zero fee.

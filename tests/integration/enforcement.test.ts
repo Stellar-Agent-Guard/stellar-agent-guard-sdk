@@ -29,8 +29,9 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "../../src/events.ts";
-import { topicSymbols } from "../../src/invoke.ts";
+import { invoke, topicSymbols } from "../../src/invoke.ts";
 import { PreFlightInterceptor } from "../../src/preflight.ts";
+import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
 import { GUARD_REASON_CODES } from "../../src/reasons.ts";
 import {
   TESTNET_PASSPHRASE,
@@ -52,7 +53,7 @@ let interceptor: PreFlightInterceptor;
 /** Positional args for a SAC `transfer` out of the guarded account. */
 function transferCall(to: string, amount: bigint) {
   return {
-    contract: config.token,
+    contract: unsafeContractAddress(config.token),
     fn: "transfer",
     args: [
       new Address(config.guard).toScVal(),
@@ -119,7 +120,7 @@ before(async () => {
   interceptor = new PreFlightInterceptor({
     server,
     networkPassphrase: TESTNET_PASSPHRASE,
-    guard: config.guard,
+    guard: unsafeContractAddress(config.guard),
     agent: config.keys.agent,
     source: config.keys.agent,
   });
@@ -178,6 +179,51 @@ describe("live enforcement: SAC transfer", () => {
     assert.equal((await readWindowTotal(server, config)).total, windowBefore.total);
   });
 
+  it("returns a blocked dry-run trace without broadcasting", async () => {
+    await installPolicy(server, config);
+    const balanceBefore = await guardTokenBalance(server, config);
+    const windowBefore = (await readWindowTotal(server, config)).total;
+    const overCap = config.policy.per_tx_cap + 1n;
+
+    const outcome = await invoke({
+      server,
+      source: config.keys.agent,
+      call: {
+        contract: unsafeContractAddress(config.token),
+        fn: "transfer",
+        args: [
+          new Address(config.guard).toScVal(),
+          new Address(config.keys.recipient.publicKey()).toScVal(),
+          nativeToScVal(overCap, { type: "i128" }),
+        ],
+      },
+      networkPassphrase: TESTNET_PASSPHRASE,
+      guardAuth: { guard: config.guard, agent: config.keys.agent },
+      dryRun: true,
+    });
+
+    assert.equal(outcome.kind, "dry_run");
+    assert.equal(outcome.admissible, false);
+    assert.equal(outcome.verdict, "blocked");
+    assert.equal(outcome.reason, "per_tx_cap_exceeded");
+    assert.deepEqual(outcome.fees, {
+      resourceFeeStroops: 0n,
+      inclusionFeeStroops: 0n,
+      totalFeeStroops: 0n,
+    });
+    assert.deepEqual(
+      outcome.steps.map((step) => step.name),
+      ["probe", "sign", "simulate", "verdict", "fees"],
+    );
+    assert.ok(!("submission" in outcome), "a dry run must never carry a submission");
+    assert.ok(!("txHash" in outcome), "a dry run must never fabricate a transaction hash");
+    assert.equal(await guardTokenBalance(server, config), balanceBefore);
+    assert.equal((await readWindowTotal(server, config)).total, windowBefore);
+    console.log(
+      `[dry-run] blocked: ${outcome.reason}; ${outcome.steps.length} stages; nothing broadcast`,
+    );
+  });
+
   it("blocks a rolling-window-cap violation that only accumulation can explain", async () => {
     await installPolicy(server, config);
 
@@ -216,7 +262,7 @@ describe("live enforcement: SAC transfer", () => {
   it("blocks a recipient-allowlist violation", async () => {
     await installPolicy(server, config);
     const before = await guardTokenBalance(server, config);
-    const outsider = config.keys.outsider.publicKey();
+    const outsider = unsafeAccountAddress(config.keys.outsider.publicKey());
     assert.ok(
       !config.policy.recipients.includes(outsider),
       "the outsider address must not be allowlisted for this test to mean anything",
@@ -347,5 +393,7 @@ describe("live pre-flight fidelity: verdict vs on-chain outcome (delay = 0)", ()
 });
 
 after(() => {
-  console.log(`[live] suite finished against ${config.guard} on ${TESTNET_PASSPHRASE}`);
+  if (config?.guard) {
+    console.log(`[live] suite finished against ${config.guard} on ${TESTNET_PASSPHRASE}`);
+  }
 });

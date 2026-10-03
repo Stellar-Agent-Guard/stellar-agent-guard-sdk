@@ -17,13 +17,19 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Account, Address, Keypair, nativeToScVal, rpc, SorobanDataBuilder, xdr } from "@stellar/stellar-sdk";
-import { invoke } from "../../src/invoke.ts";
+import {
+  DEFAULT_INVOKE_RETRY_OPTIONS,
+  invoke,
+  InvokeRetryError,
+} from "../../src/invoke.ts";
+import { SimulationError } from "../../src/errors.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
 import type { InvokeStepEvent } from "../../src/invoke.ts";
+import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
 
-const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-const TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
-const RECIPIENT = "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH";
+const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
 const PASSPHRASE = "Test SDF Network ; September 2015";
 
 function transferCall() {
@@ -103,10 +109,10 @@ interface MockServerOptions {
   simulate?: (call: number) => unknown;
   /** Overrides only the enforced simulation (the 2nd one per attempt). */
   enforced?: (attempt: number) => unknown;
-  /** Overrides sendTransaction. */
-  send?: () => unknown;
-  /** Overrides getTransaction (post-broadcast polling). */
-  getTransaction?: () => unknown;
+  /** Overrides sendTransaction; receives the 1-based send count. */
+  send?: (call: number) => unknown;
+  /** Overrides getTransaction (post-broadcast polling); receives the tx hash. */
+  getTransaction?: (hash: string) => unknown;
 }
 
 /**
@@ -117,6 +123,7 @@ interface MockServerOptions {
 function createMockServer(options: MockServerOptions = {}) {
   let simulations = 0;
   let sends = 0;
+  let accountLookups = 0;
   const mock = {
     get simulationCount() {
       return simulations;
@@ -124,7 +131,11 @@ function createMockServer(options: MockServerOptions = {}) {
     get sendCount() {
       return sends;
     },
+    get accountLookupCount() {
+      return accountLookups;
+    },
     async getAccount() {
+      accountLookups += 1;
       return new Account(Keypair.random().publicKey(), "100");
     },
     async getLatestLedger() {
@@ -139,14 +150,18 @@ function createMockServer(options: MockServerOptions = {}) {
     },
     async sendTransaction() {
       sends += 1;
-      if (options.send) return options.send();
+      if (options.send) return options.send(sends);
       return { status: "PENDING", hash: "0".repeat(64) };
     },
-    async getTransaction() {
-      if (options.getTransaction) return options.getTransaction();
+    async getTransaction(hash: string) {
+      if (options.getTransaction) return options.getTransaction(hash);
       return { status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 42 };
     },
-  } as unknown as rpc.Server & { simulationCount: number; sendCount: number };
+  } as unknown as rpc.Server & {
+    simulationCount: number;
+    sendCount: number;
+    accountLookupCount: number;
+  };
   return mock;
 }
 
@@ -163,6 +178,33 @@ function makeParams(
     ...overrides,
   };
 }
+
+/**
+ * A post-inclusion stale-ledger resource rejection, from the recorded real
+ * failure that motivated the bounded retry.
+ */
+const staleRejection = (): unknown => ({
+  status: "FAILED",
+  hash: "1".repeat(64),
+  errorResult: null,
+  resultXdr: "AAAAAAAAURj/////AAAAAQAAAAAAAAAY/////QAAAAA=",
+  diagnosticEventsXdr: [
+    {
+      body: {
+        v0: {
+          topics: ["error", { type: "system", code: 5, value: "scecExceededLimit" }],
+          data: ["operation byte-write resources exceeds amount specified", "724", "652"],
+        },
+      },
+    },
+  ],
+});
+
+/** A host rejection the guard never saw: not retryable, and not a block. */
+const invalidInputSimulation = (): unknown => ({
+  error: "HostError: invalid_input",
+  events: [],
+});
 
 /** Recorder for onStep events. */
 function recorder() {
@@ -238,7 +280,10 @@ describe("invoke() onStep: pipeline order", () => {
 
     const outcome = await invoke(makeParams(server, { dryRun: true, onStep: callback }));
 
-    assert.equal(outcome.kind, "error");
+    // A dry run returns its own structured result rather than an `invoke()`
+    // outcome, but the stages it does run are the same instrumented pipeline.
+    assert.equal(outcome.kind, "dry_run");
+    assert.equal(outcome.admissible, true);
     assert.deepEqual(events.map((event) => [event.name, event.status]), [
       ["probe", "start"],
       ["probe", "ok"],
@@ -247,6 +292,7 @@ describe("invoke() onStep: pipeline order", () => {
       ["simulate", "start"],
       ["simulate", "ok"],
     ]);
+    assert.equal(server.sendCount, 0);
   });
 
   it("emits a fail event for the simulate stage on a guard block, with no ok for it", async () => {
@@ -304,7 +350,12 @@ describe("invoke() onStep: durationMs", () => {
 });
 
 describe("invoke() onStep: original error identity", () => {
-  it("rethrows the exact error object a stage threw", async () => {
+  // `invoke()` is result-oriented: a stage that throws becomes a typed
+  // `kind: "error"` outcome rather than a rejection, so the original error
+  // travels as the typed error's `cause`. The identity that matters is
+  // unchanged — the pipeline's own error is the one that survives, and a
+  // throwing consumer callback never replaces it with its own.
+  it("keeps the exact error object a stage threw as the typed cause", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -312,10 +363,15 @@ describe("invoke() onStep: original error identity", () => {
       },
     });
 
-    await assert.rejects(invoke(makeParams(server)), (error: unknown) => error === boom);
+    const outcome = await invoke(makeParams(server));
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.stage, "probe");
+    assert.equal(outcome.error.cause, boom);
   });
 
-  it("rethrows the original error when the fail callback also throws", async () => {
+  it("keeps the original error when the fail callback also throws", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -323,16 +379,17 @@ describe("invoke() onStep: original error identity", () => {
       },
     });
 
-    await assert.rejects(
-      invoke(
-        makeParams(server, {
-          onStep: (step) => {
-            if (step.status === "fail") throw new Error("callback exploded");
-          },
-        }),
-      ),
-      (error: unknown) => error === boom,
+    const outcome = await invoke(
+      makeParams(server, {
+        onStep: (step) => {
+          if (step.status === "fail") throw new Error("callback exploded");
+        },
+      }),
     );
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.cause, boom);
   });
 });
 
@@ -376,24 +433,6 @@ describe("invoke() onStep: callback exceptions are isolated", () => {
 });
 
 describe("invoke() onStep: retries", () => {
-  /** A post-inclusion stale-ledger resource rejection, from the recorded real failure. */
-  const staleRejection = (): unknown => ({
-    status: "FAILED",
-    hash: "1".repeat(64),
-    errorResult: null,
-    resultXdr: "AAAAAAAAURj/////AAAAAQAAAAAAAAAY/////QAAAAA=",
-    diagnosticEventsXdr: [
-      {
-        body: {
-          v0: {
-            topics: ["error", { type: "system", code: 5, value: "scecExceededLimit" }],
-            data: ["operation byte-write resources exceeds amount specified", "724", "652"],
-          },
-        },
-      },
-    ],
-  });
-
   function staleServer() {
     let sends = 0;
     return createMockServer({
@@ -416,11 +455,16 @@ describe("invoke() onStep: retries", () => {
     const outcome = await pending;
 
     assert.equal(outcome.kind, "error");
-    assert.match(outcome.kind === "error" ? outcome.detail : "", /retried after a stale-ledger/);
+    // The retry budget is exhausted on a server where every broadcast is
+    // included and then rejected as stale, so the exhausted-budget error is
+    // what comes back — carrying the attempt count, not a bare outcome.
+    assert.ok(outcome instanceof InvokeRetryError);
+    assert.equal(outcome.attempts, DEFAULT_INVOKE_RETRY_OPTIONS.maxAttempts);
 
     // Every attempt runs the full pipeline; on this server every broadcast is
-    // included and then rejected as stale, so both attempts end broadcast:fail
-    // — and the retry (attempt 1) is exactly one more full pass, nothing else.
+    // included and then rejected as stale, so all three attempts end
+    // broadcast:fail — and each attempt is exactly one more full pass, indexed
+    // 0, 1, 2 in order.
     const attemptEvents = (attempt: number) =>
       SUCCESSFUL_ATTEMPT.map(([name, status]) =>
         name === "broadcast" && status === "ok"
@@ -429,11 +473,11 @@ describe("invoke() onStep: retries", () => {
       );
     assert.deepEqual(
       events.map((event) => `${event.name}:${event.status}:a${event.attempt}`),
-      [...attemptEvents(0), ...attemptEvents(1)],
+      [0, 1, 2].flatMap((attempt) => attemptEvents(attempt)),
     );
   });
 
-  it("does not change the number of pipeline attempts (2 simulations per attempt, 2 attempts)", async (t) => {
+  it("does not change the number of pipeline attempts (2 simulations per attempt, 3 attempts)", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const server = staleServer();
 
@@ -441,9 +485,10 @@ describe("invoke() onStep: retries", () => {
     await drainWithMockedTimers(t.mock.timers, pending);
     await pending;
 
-    // Exactly one retry: 2 simulations + 2 broadcasts per attempt pair.
-    assert.equal(server.simulationCount, 4);
-    assert.equal(server.sendCount, 2);
+    // One full retry budget: 2 simulations + 1 broadcast per attempt, 3 attempts.
+    const attempts = DEFAULT_INVOKE_RETRY_OPTIONS.maxAttempts;
+    assert.equal(server.simulationCount, 2 * attempts);
+    assert.equal(server.sendCount, attempts);
   });
 
   it("does not retry a broadcast failure that is not a stale-ledger rejection", async (t) => {
@@ -495,7 +540,7 @@ describe("invoke() without onStep: default behavior unchanged", () => {
     }
   });
 
-  it("still rethrows stage errors with no callback supplied", async () => {
+  it("still reports stage errors as typed results with no callback supplied", async () => {
     const boom = new Error("rpc connection reset");
     const server = createMockServer({
       simulate: () => {
@@ -503,7 +548,11 @@ describe("invoke() without onStep: default behavior unchanged", () => {
       },
     });
 
-    await assert.rejects(invoke(makeParams(server)), (error: unknown) => error === boom);
+    const outcome = await invoke(makeParams(server));
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.cause, boom);
   });
 });
 
@@ -526,5 +575,269 @@ describe("invoke() onStep: shared step vocabulary", () => {
     }
     // And the vocabulary covers exactly the stages the pipeline can emit.
     assert.deepEqual([...TRACE_STEP_NAMES].sort(), ["broadcast", "probe", "sign", "simulate"]);
+  });
+});
+
+/** Deterministic coverage for the per-account invoke queue. */
+describe("invoke sequence reservation", () => {
+  it("retries a sequence collision once after refreshing the account sequence", async () => {
+    const source = Keypair.random();
+    const sentSequences: string[] = [];
+    let sends = 0;
+    const simulation = {
+      transactionData: new SorobanDataBuilder().setResources(1, 0, 0).build(),
+      minResourceFee: "1",
+      result: { auth: [] },
+    };
+    const server = {
+      getAccount: async () => new Account(source.publicKey(), "7"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => simulation,
+      sendTransaction: async (transaction: { sequence: string }) => {
+        sentSequences.push(transaction.sequence);
+        sends += 1;
+        return sends === 1
+          ? { status: "ERROR", hash: "bad-seq", errorResult: { code: "tx_bad_seq" } }
+          : { status: "PENDING", hash: "good-seq" };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 101,
+        events: { contractEventsXdr: [] },
+      }),
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke({
+      server,
+      source,
+      call: { contract: TOKEN, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+    });
+
+    assert.equal(outcome.kind, "allowed");
+    assert.deepEqual(sentSequences, ["8", "9"]);
+  });
+
+  it("serializes concurrent calls and gives each transaction a distinct sequence", async () => {
+    const source = Keypair.random();
+    const simulated: string[] = [];
+    const sent: string[] = [];
+    let simulationsStarted = 0;
+    let releaseFirst!: () => void;
+    const firstSimulation = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const simulation = {
+      transactionData: new SorobanDataBuilder().setResources(1, 0, 0).build(),
+      minResourceFee: "1",
+      result: { auth: [] },
+    };
+    const server = {
+      // The RPC snapshot deliberately never advances: the second invoke can
+      // only get a fresh sequence from the per-account reservation.
+      getAccount: async () => new Account(source.publicKey(), "7"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async (transaction: { sequence: string }) => {
+        simulated.push(transaction.sequence);
+        simulationsStarted += 1;
+        if (simulationsStarted === 1) await firstSimulation;
+        return simulation;
+      },
+      sendTransaction: async (transaction: { sequence: string }) => {
+        sent.push(transaction.sequence);
+        return { status: "PENDING", hash: `tx-${sent.length}` };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 101,
+        events: { contractEventsXdr: [] },
+      }),
+    } as unknown as rpc.Server;
+
+    const params = {
+      server,
+      source,
+      call: { contract: TOKEN, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+    };
+    const first = invoke(params);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const second = invoke(params);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    // The second invoke must still be waiting behind the first one's queue.
+    assert.equal(simulationsStarted, 1);
+    releaseFirst();
+    const outcomes = await Promise.all([first, second]);
+
+    assert.deepEqual(outcomes.map((outcome) => outcome.kind), ["allowed", "allowed"]);
+    // TransactionBuilder consumes the base account sequence and emits base + 1,
+    // so the reservation is what keeps the two broadcast envelopes distinct.
+    assert.deepEqual(sent, ["8", "9"]);
+    assert.deepEqual(simulated, ["8", "8", "9", "9"]);
+  });
+});
+
+/**
+ * The retry boundary itself: how many attempts, how long between them, and what
+ * comes back when the budget runs out.
+ *
+ * The RPC is mocked, but the tests still drive the real transaction-building and
+ * signing path. That matters here: a retry is only safe if it builds a fresh
+ * transaction and reruns both simulations, not if it blindly resubmits the first
+ * resource declaration again.
+ *
+ * `sleep` is injected rather than timed, so the full-jitter windows are asserted
+ * exactly, with no wall-clock flake and no waiting.
+ */
+describe("invoke() stale-ledger retry", () => {
+  /** A short poll so the post-broadcast check happens without a real 3s wait. */
+  const FAST_POLL = { pollAttempts: 1, pollIntervalMs: 0 };
+
+  /** Collects the delays a run asks for instead of actually waiting them out. */
+  function sleepRecorder() {
+    const delays: number[] = [];
+    return {
+      delays,
+      sleep: async (delayMs: number) => {
+        delays.push(delayMs);
+      },
+    };
+  }
+
+  it("uses full jitter and reruns the complete simulation pipeline on each retry", async () => {
+    const { delays, sleep } = sleepRecorder();
+    const randomValues = [0.25, 0.75];
+    let randomCall = 0;
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `tx-${call}` }),
+      getTransaction: (hash) => (hash === "tx-3" ? { status: "SUCCESS", ledger: 1002 } : staleRejection()),
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST_POLL,
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          maxDelayMs: 250,
+          random: () => randomValues[randomCall++] ?? 0,
+          sleep,
+        },
+      }),
+    );
+
+    assert.equal(outcome.kind, "allowed");
+    assert.equal(server.sendCount, 3);
+    // A fresh account lookup per attempt: the retry must not reuse the first
+    // attempt's sequence number.
+    assert.equal(server.accountLookupCount, 3);
+    // Probe + enforced simulation for each of the three attempts.
+    assert.equal(server.simulationCount, 6);
+    // 0.25 x min(250, 100) = 25, then 0.75 x min(250, 200) = 150.
+    assert.deepEqual(delays, [25, 150]);
+  });
+
+  it("does not sleep after a single configured attempt", async () => {
+    let sleeps = 0;
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: "single-attempt" }),
+      getTransaction: staleRejection,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST_POLL,
+        retry: {
+          maxAttempts: 1,
+          sleep: async () => {
+            sleeps += 1;
+          },
+        },
+      }),
+    );
+
+    assert.ok(outcome instanceof InvokeRetryError);
+    assert.equal(outcome.attempts, 1);
+    assert.equal(sleeps, 0);
+    assert.equal(server.sendCount, 1);
+    assert.equal(server.simulationCount, 2);
+  });
+
+  it("returns a typed error with the final attempt count and cause when exhausted", async () => {
+    const { delays, sleep } = sleepRecorder();
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `stale-${call}` }),
+      getTransaction: staleRejection,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST_POLL,
+        retry: { maxAttempts: 3, baseDelayMs: 100, sleep, random: () => 0.5 },
+      }),
+    );
+
+    assert.ok(outcome instanceof InvokeRetryError);
+    assert.equal(outcome.kind, "error");
+    assert.equal(outcome.attempts, 3);
+    assert.equal(outcome.lastCause, "stale_ledger_resource_limit");
+    assert.equal(outcome.cause, "stale_ledger_resource_limit");
+    assert.match(outcome.message, /retry budget exhausted after 3 attempt/);
+    assert.deepEqual(delays, [50, 100]);
+    assert.equal(server.sendCount, 3);
+    assert.equal(server.simulationCount, 6);
+  });
+
+  it("fails fast for invalid input without sleeping or broadcasting", async () => {
+    let sleeps = 0;
+    const server = createMockServer({
+      simulate: invalidInputSimulation,
+      send: () => ({ status: "PENDING", hash: "must-not-send" }),
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST_POLL,
+        retry: {
+          maxAttempts: 3,
+          sleep: async () => {
+            sleeps += 1;
+          },
+        },
+      }),
+    );
+
+    assert.equal(outcome.kind, "error");
+    // The guard made no decision here, so this is `undetermined` — never
+    // conflated with `blocked`, and never retried.
+    assert.equal(outcome.kind === "error" ? outcome.cause : undefined, "undetermined");
+    assert.equal(server.sendCount, 0);
+    assert.equal(server.simulationCount, 1);
+    assert.equal(sleeps, 0);
+  });
+
+  it("does not sleep again when a retry discovers a non-retryable failure", async () => {
+    const { delays, sleep } = sleepRecorder();
+    const server = createMockServer({
+      simulate: (call) => (call >= 3 ? invalidInputSimulation() : probeSuccess()),
+      send: (call) => ({ status: "PENDING", hash: `tx-${call}` }),
+      getTransaction: (hash) => (hash === "tx-1" ? staleRejection() : { status: "SUCCESS", ledger: 9 }),
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST_POLL,
+        retry: { maxAttempts: 3, baseDelayMs: 10, random: () => 0.5, sleep },
+      }),
+    );
+
+    assert.equal(outcome.kind, "error");
+    assert.equal(outcome.kind === "error" ? outcome.cause : undefined, "undetermined");
+    // Exactly one sleep: the first rejection is retryable, the second is not.
+    assert.deepEqual(delays, [5]);
+    assert.equal(server.sendCount, 1);
+    assert.equal(server.simulationCount, 3);
   });
 });
