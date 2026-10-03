@@ -11,10 +11,9 @@ Verify the version actually on the registry:
 npm view stellar-agent-guard-sdk version
 ```
 
-There is no `CHANGELOG.md` in this repository yet, so there is no changelog to
-link to. When one lands, this header should point at it as the current release
-notes and this file becomes the historical annex for publish-pipeline
-archaeology.
+Release notes for what has actually shipped live in [`CHANGELOG.md`](../CHANGELOG.md)
+(Keep a Changelog format). This file is the historical annex for publish-pipeline
+archaeology — how the pipeline got to a version, not what a version contains.
 
 ## Release 0.1.0 (Manual Publish Deviation)
 
@@ -52,6 +51,7 @@ The template uses the standard [Keep a Changelog](https://keepachangelog.com/en/
 sections and the commit types `CONTRIBUTING.md` documents as in use — `feat`, `fix`,
 `docs`, `chore`, `ci`, `test` — so the mapping from a merged PR to a release section is
 the mapping from its type. Keep the headings even when a section is empty and write
-"None." under it: a missing section cannot be told from a forgotten one, and until issue
-#6 is decided this release body is the only published record of what changed in a
-version.
+"None." under it: a missing section cannot be told from a forgotten one. The release
+body is the per-tag record; [`CHANGELOG.md`](../CHANGELOG.md) is the cross-version
+record (issue #6 decided "yes", executed in issue #81) — both are drafted from the
+same commits and must not disagree.

@@ -11,6 +11,12 @@ Commits use [Conventional Commits](https://www.conventionalcommits.org/):
 Types in use in this repo: `feat`, `fix`, `docs`, `chore`, `ci`, `test`. The existing
 history is the reference — match its shape rather than inventing a new one.
 
+## Changelog
+
+User-facing changes need an **Unreleased** row in [`CHANGELOG.md`](CHANGELOG.md),
+added in the same PR as the change; changes no user can observe (CI, tests, internal
+docs) need none.
+
 ## One commit per logical unit, **per file** — the hard rule
 
 Every commit **and every push** must touch **exactly one file**. Not "on average" —
@@ -124,9 +130,14 @@ chat log.
 - **Node 24+**: run `nvm use` (or `fnm use` / `asdf install` for the same `.nvmrc`
   readers) to pick up the pinned major from `.nvmrc` (`24`), or install Node 24 from
   [nodejs.org](https://nodejs.org/). `package.json` `engines.node` (`>=24`) declares the
-  supported range and CI runs Node 24; the CI version matrix is owned by #125. Then run
+  supported range and CI tests Node 24 and Node 26, with lint and typecheck on Node 24. Then run
   `npm ci` and the gates below — see ["Local gates before pushing"](#local-gates-before-pushing)
   and ["Test tiers and fixtures"](#test-tiers-and-fixtures) for what each tier runs.
+## Releasing
+
+Version bumps, tags, npm publish, and the 0.x breaking-change policy are
+documented in [`docs/releasing.md`](docs/releasing.md) — publishing itself is
+maintainer-only (npm 2FA/automation token, outside this repo).
 
 ## Local gates before pushing
 
@@ -135,8 +146,27 @@ npm run typecheck
 npm run lint
 npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
+npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
+node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
 ```
+
+## TypeScript strictness ratchet
+
+`tsconfig.json` enables `strict`, `noUncheckedIndexedAccess` and
+`exactOptionalPropertyTypes`, and they stay on. `noUncheckedIndexedAccess` makes
+an indexed read yield `T | undefined` — the TypeScript-side mirror of the
+contract's `parse_call` bounds checks — and `exactOptionalPropertyTypes` stops an
+omitted optional property and an explicitly-`undefined` one from being
+interchangeable, which is where options-object footguns hide.
+
+Turning a flag off makes `npm run typecheck` *easier* to pass, so typecheck alone
+cannot stop a regression. `npm run check:strict-ratchet` (`scripts/check-strict-ratchet.mjs`)
+is the ratchet: it resolves `tsconfig.json` and `tsconfig.build.json` through
+`extends` and exits non-zero, naming the file and flag, if any of the three is not
+exactly `true`. It runs as a step of the required `ci` check, so a config edit
+that disables one is caught before merge. Fix the call site; do not turn the flag
+back off.
 
 ## Cross-editor standardization
 
