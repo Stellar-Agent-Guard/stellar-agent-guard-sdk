@@ -32,7 +32,7 @@
  * `docs/event-schema.md` and implemented by `guardEventId` below.
  */
 import { createHash } from "node:crypto";
-import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
 import { topicSymbols } from "./invoke.ts";
 
@@ -71,7 +71,7 @@ export type GuardEventSource = "ledger" | "diagnostic";
  * tell a committed event from a pre-broadcast one without knowing the SDK's
  * two-channel model.
  */
-export type GuardEventStream = "committed" | "diagnostic";
+export type GuardEventStream = "committed" | "diagnostic" | "failed_tx";
 
 export interface GuardEvent {
   /**
@@ -232,7 +232,7 @@ function stableStringify(value: unknown, depth = 0): string {
  */
 export type GuardEventContext = Omit<
   GuardEvent,
-  "kind" | "topic" | "id" | "decision" | "data" | "stream" | "observedAt"
+  "kind" | "topic" | "id" | "decision" | "data" | "observedAt"
 > & {
   /** Position within the diagnostic batch; null on the ledger stream. */
   simulationIndex: number | null;
@@ -265,7 +265,7 @@ function interpret(
       simulationIndex,
     }),
     ...streamFacts,
-    stream: streamFacts.source === "ledger" ? "committed" : "diagnostic",
+    stream: streamFacts.stream,
     observedAt: observedAt ?? null,
     decision: decodeAuthDecision(topics, context.source),
     data: normalizeEventData(data),
@@ -289,7 +289,7 @@ export function diagnosticsToEvents(
     if (topics.length === 0) continue;
     const decoded = interpret(topics, decodeData(dataOf(bare)), {
       source: "diagnostic",
-      stream: "simulation",
+      stream: "diagnostic",
       contractId: guard ?? null,
       ledger: null,
       ledgerClosedAt: null,
@@ -383,6 +383,18 @@ function dataOf(raw: unknown): unknown {
     | { v0?: { data?: unknown }; value?: { v0?: { data?: unknown } } }
     | undefined;
   return body?.v0?.data ?? body?.value?.v0?.data;
+}
+
+/** True only when the diagnostic's emitting contract is this guard. */
+function emittedByGuard(raw: unknown, guard: string): boolean {
+  const bare = (raw as { event?: unknown }).event ?? raw;
+  const contractId = (bare as { contractId?: xdr.ContractId | null }).contractId;
+  if (!contractId) return false;
+  try {
+    return StrKey.encodeContract(contractId.toBytes()) === guard;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -495,6 +507,8 @@ export interface GuardTelemetryConfig {
   server: rpc.Server;
   /** The guard contract to follow. */
   guard: string;
+  /** Opt in to scanning failed transaction diagnostics as a third stream. */
+  failedTx?: boolean;
   /** RPC URL, only used for error messages. */
   rpcUrl?: string;
   /**
@@ -977,6 +991,47 @@ export class GuardTelemetryListener {
   }
 
   /**
+   * Read one page of failed transactions independently from the event cursor.
+   * Without a cursor, start at the current head so existing failures are not
+   * replayed retroactively.
+   */
+  async pollFailedTransactions(
+    params: { cursor?: string; startLedger?: number; limit?: number } = {},
+  ): Promise<FailedTxPollResult> {
+    if (params.cursor === undefined && params.startLedger === undefined) {
+      const latest = await this.config.server.getLatestLedger();
+      return { events: [], cursor: String(latest.sequence) };
+    }
+
+    const request: rpc.Api.GetTransactionsRequest = params.cursor !== undefined
+      ? {
+          pagination: {
+            cursor: params.cursor,
+            ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          },
+        }
+      : {
+          startLedger: params.startLedger!,
+          ...(params.limit !== undefined ? { pagination: { limit: params.limit } } : {}),
+        };
+
+    try {
+      const response = await this.config.server.getTransactions(request);
+      const events: GuardEvent[] = [];
+      for (const tx of response.transactions) {
+        if (tx.status !== rpc.Api.GetTransactionStatus.FAILED) continue;
+        if (this.processedFailedTx.has(tx.txHash)) continue;
+        this.rememberFailedTx(tx.txHash);
+        events.push(...this.decodeFailedTransaction(tx));
+      }
+      this.record(events);
+      return { events, cursor: response.cursor };
+    } catch {
+      return { events: [], cursor: params.cursor ?? String(params.startLedger) };
+    }
+  }
+
+  /**
    * One page of committed guard events at or after `startLedger`.
    *
    * Filters server-side by contract id, so the listener only ever sees this
@@ -1064,6 +1119,7 @@ export class GuardTelemetryListener {
     const sleep: PollSleep = params.sleep ?? defaultPollSleep;
     let cursor = params.cursor;
     let startLedger = params.startLedger;
+    let failedTxCursor: string | undefined;
     this.lastError = null;
 
     // An abort that landed before the iterator was first pulled must not probe
@@ -1140,6 +1196,20 @@ export class GuardTelemetryListener {
       // rejects a request that mixes the two modes.
       startLedger = undefined;
 
+      let failedTxEvents: GuardEvent[] = [];
+      if (this.config.failedTx) {
+        try {
+          const failedTxPage = await this.pollFailedTransactions({
+            ...(failedTxCursor !== undefined ? { cursor: failedTxCursor } : {}),
+            ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          });
+          failedTxCursor = failedTxPage.cursor;
+          failedTxEvents = failedTxPage.events;
+        } catch {
+          // This optional stream must not interrupt committed event polling.
+        }
+      }
+
       // ── Gap detection ────────────────────────────────────────────────────
       // The retention window is reported on every response, so the rule is
       // exact rather than heuristic: coverage is broken precisely when the
@@ -1168,7 +1238,8 @@ export class GuardTelemetryListener {
         }
       }
 
-      if (page.events.length > 0) yield page.events;
+      const events = [...page.events, ...failedTxEvents];
+      if (events.length > 0) yield events;
 
       // Advance confirmed coverage. A page that reached the RPC's head confirms
       // everything up to `latestLedger`; a full page (a partial window, more to

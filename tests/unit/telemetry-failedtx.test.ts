@@ -448,6 +448,7 @@ describe("describeGuardEvent for failed_tx", () => {
       contractId: GUARD,
       ledger: 4_675_000,
       ledgerClosedAt: null,
+      observedAt: null,
       transactionHash: HASH,
       decision: { result: "blocked", reason: "per_tx_cap_exceeded", source: "diagnostic" },
       data: {},

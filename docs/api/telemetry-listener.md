@@ -12,6 +12,7 @@ constructor(options: GuardTelemetryListenerOptions)
 
 - `server: rpc.Server` — Soroban RPC server
 - `guard: string` — Guard contract address
+- `failedTx?: boolean` — opt in to failed-transaction diagnostics as a third event stream; defaults to `false`.
 - `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
 
 ## Methods
@@ -23,11 +24,23 @@ The retained window of most-recent decoded events, oldest first, empty unless a
 `toLedger`; a ledger-less diagnostic event is excluded from a ledger range rather
 than treated as inside it. Non-durable: the window lives in process memory and a
 restart empties it. Only events this listener decoded are retained — committed
-events via `poll()`/`watch()`, and diagnostic events via `watchAll()`.
+events via `poll()`/`watch()`, diagnostic events via `watchAll()`, and failed
+transaction events via `pollFailedTransactions()` or `watch()` when `failedTx`
+is enabled.
+
+### `pollFailedTransactions(params?): Promise<FailedTxPollResult>`
+
+Reads one page from the independent `getTransactions` cursor. Pass the returned
+cursor on the next call; omitting it starts at the current RPC head, without
+replaying older failures. Only failed transactions with diagnostics emitted by
+the configured guard are returned. RPC errors leave a supplied cursor unchanged.
 
 ### `watch(params?): AsyncIterable<GuardEventPage>`
 
 Yields pages of decoded guard events (`event_auth_checked`, `event_policy_updated`, etc.).
+Set `failedTx: true` in the constructor options to include failed-transaction
+diagnostics; this scan maintains its own cursor and does not advance the
+committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `jitter`, `rng`, `sleep`, `onGap`, and `signal`.
 
