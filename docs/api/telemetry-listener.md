@@ -12,14 +12,60 @@ constructor(options: GuardTelemetryListenerOptions)
 
 - `server: rpc.Server` — Soroban RPC server
 - `guard: string` — Guard contract address
+- `failedTx?: boolean` — opt in to failed-transaction diagnostics as a third event stream; defaults to `false`.
+- `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
 
 ## Methods
+
+### `recent(filter?): GuardEvent[]`
+
+The retained window of most-recent decoded events, oldest first, empty unless a
+`buffer` was configured. `filter` narrows by `stream`, `reason`, `fromLedger`, or
+`toLedger`; a ledger-less diagnostic event is excluded from a ledger range rather
+than treated as inside it. Non-durable: the window lives in process memory and a
+restart empties it. Only events this listener decoded are retained — committed
+events via `poll()`/`watch()`, diagnostic events via `watchAll()`, and failed
+transaction events via `pollFailedTransactions()` or `watch()` when `failedTx`
+is enabled.
+
+### `pollFailedTransactions(params?): Promise<FailedTxPollResult>`
+
+Reads one page from the independent `getTransactions` cursor. Pass the returned
+cursor on the next call; omitting it starts at the current RPC head, without
+replaying older failures. Only failed transactions with diagnostics emitted by
+the configured guard are returned. RPC errors leave a supplied cursor unchanged.
 
 ### `watch(params?): AsyncIterable<GuardEventPage>`
 
 Yields pages of decoded guard events (`event_auth_checked`, `event_policy_updated`, etc.).
+Set `failedTx: true` in the constructor options to include failed-transaction
+diagnostics; this scan maintains its own cursor and does not advance the
+committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `jitter`, `rng`, `sleep`, `onGap`, and `signal`.
+
+#### Mid-watch failures (`onStreamError`)
+
+When `getEvents` starts failing mid-watch, the default is **bounded retry with
+backoff, then a clean end**: the listener retries up to `maxRetries` (default
+`5`) times with exponential backoff, then calls `onStreamError(err)` exactly
+once with the terminal error and completes the iterator normally. The stream
+never dies silently and never leaves an unhandled rejection behind.
+
+Failure-mode matrix:
+
+| Failure | Retried? | `onStreamError` | Iterator |
+| --- | --- | --- | --- |
+| Transient (recovers within `maxRetries`) | yes | not called | continues |
+| Persistent (retries exhausted) | yes, then gives up | called once with final error | ends normally |
+| Abort (`signal`) | no | not called | ends immediately |
+
+If no `onStreamError` is configured, retry-then-end still happens; the terminal
+error is retrievable via the `lastError` getter for observability.
+
+If the callback itself throws, that throw **propagates** out of the `for await`
+loop — the consumer asked for halt-on-first-error semantics by supplying a
+throwing callback, so it is not swallowed.
 
 #### Aborting (`signal`)
 

@@ -52,11 +52,14 @@ describe("package module format and export-map", () => {
       "invoke",
       "enforceCall",
       "decodeAuthDecision",
+      "serializeEvent",
       "describePolicy",
       "policyToScVal",
       "GUARD_EVENT_TOPICS",
       "GUARD_AUTH_RESULTS",
       "GUARD_REASON_CODES",
+      "GUARD_REASONS",
+      "isGuardReason",
       "GuardBlockedError",
       // Typed failure hierarchy, the canonical policy decoder, the dry-run
       // trace, and the verify-only agent-auth check. These are published API:

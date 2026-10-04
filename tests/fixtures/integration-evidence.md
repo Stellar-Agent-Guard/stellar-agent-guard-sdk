@@ -3,6 +3,10 @@
 Record of the enforcement suite running against the real Phase 2 testnet
 instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
+**Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
+**Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
+**Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
+
 ## Instance under test
 
 | | |
@@ -447,6 +451,60 @@ suite, and it needs the contract-side `check_batch` entrypoint to compare agains
 
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
 
+## Addendum — 2026-09-27 (PR #177: simulation resource breakdown on `CostPreChecker`)
+
+Recorded because this PR touches the enforcement path (`src/preflight.ts`) and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
+this checkout, so `npm run test:integration` cannot execute here.
+
+### Summary of changes to the enforcement path
+
+- `src/preflight.ts`: an admissible decision now carries an optional
+  `resourceBreakdown`, parsed from the *same* enforced simulation that already
+  produced `estimatedResourceFee`. `footprintKeys` prefers
+  `breakdown.storageEntries` when the payload exposes a complete resource block and
+  otherwise falls back to the existing `getReadOnly()`/`getReadWrite()` count, so
+  the reported key count is unchanged wherever the parse does not succeed.
+- `src/cost.ts`: adds `ResourceBreakdown` and `resourceBreakdownFromSimulation()`,
+  which reads the actual `SorobanResources` fields (`instructions`,
+  `diskReadBytes`, `writeBytes`) and the footprint array lengths. A missing or
+  malformed field yields `undefined` for the whole breakdown — no zero-filling. The
+  parsed value is surfaced on priced `within_budget`/`over_budget` results as
+  `breakdown`.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification, and every existing outcome value. The
+breakdown is read *out of* the simulation the guard already runs; it does not add
+an RPC call, does not alter what is signed, and cannot change a verdict.
+
+This diff sits alongside two already-merged changes that touch the same file: the
+batched pre-flight staging above (`src/preflight.ts`, `src/policy.ts`) and the
+bounded stale-ledger retry (`src/invoke.ts`). They are independent —
+`checkBatch` consumes only a verdict's `kind`, and this change only adds a field to
+the `admissible` arm — but the merged tree type-checks and the full suite runs on
+all three together, which is the state the numbers below describe.
+
+### What did run locally (Node 24.16.0)
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 257 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # 73 exports resolve via the ESM export map
+```
+
+The new coverage for this change is `tests/unit/cost.test.ts` against the committed
+recorded payload fixture `tests/fixtures/simulation-resource-payload.json`: the
+wire-shape `SorobanResources` object, the parsed `SorobanDataBuilder` value, the
+raw base64 form, incomplete-payload handling (whole result `undefined`), and
+propagation through `CostPreChecker`. No network, no credentials.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
+
 
 
 ## 2026-09-28 — merge of `main` into the policy/dry-run/auth branch, and its re-validation
@@ -611,3 +669,105 @@ claim they do.
 this branch before merge** and replace this addendum with the fresh run output.
 No credentials, deployment or policy change are needed beyond what the suite
 already does.
+
+## Addendum — 2026-09-29 (PR #206 / Issue #161: `validateGuardPolicy` structured failures aligned to SPEC §8)
+
+Recorded because this PR touches the enforcement path (`src/policy.ts`) and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
+this contributor checkout, so `npm run test:integration` cannot execute here.
+
+### Summary of changes to the enforcement path
+
+- `src/policy.ts`: adds `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]`
+  providing client-side policy validation against all 10 bullets of SPEC §8 rules prior to encoding or broadcast.
+- Accumulates all failures at once (`PolicyFailure[]`) for form UX rather than failing fast on the first error.
+- Defines and exports `POLICY_RULE_IDS` (21 rule identifiers covering type guards, non-negative bounds, window constraints,
+  duplicate vectors, self-address collisions, and recipient conflicts), verified for parity against vendored fixture `tests/fixtures/policy-rule-ids.json`.
+
+Unchanged, deliberately: the existing policy encode/decode functions (`policyToScVal`, `decodePolicy`, `policyFromScVal`),
+`__check_auth` signing, pre-flight simulation, transaction submission, and all on-chain enforcement logic. `validateGuardPolicy`
+is pure client-side validation additive to the policy lifecycle.
+
+### What did run locally
+
+```text
+npm run typecheck                        # clean
+npm run lint                             # clean
+npm test                                 # 362 unit tests passing, 0 fail
+npm run build                            # clean
+npm run test:smoke                       # passes
+npm run test:exports                     # all 88 exports resolve via the ESM export map
+node scripts/check-enforcement-evidence.ts main HEAD
+                                         # pass; evidence file detected as updated and structure valid
+```
+
+The new coverage for this change is `tests/unit/policy.test.ts` with 37 tests covering non-object inputs, invalid field types,
+invalid addresses, all SPEC §8 rules (bullets 1–10), duplicate detection, self-address rejection, and multiple failure accumulation.
+No network, no credentials.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this
+addendum with the fresh run output if desired.
+
+## Addendum — 2026-10-04 (PR #195 / Issue #121: remove library-side console output, add optional logger injection)
+
+Recorded because this PR touches the enforcement path (`src/invoke.ts`,
+`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this checkout, so `npm run test:integration` cannot execute here. No fresh
+Phase-2 transcript is claimed below, and the gate verifies only that this file
+was touched — not the numbers.
+
+### What the PR changes on the enforcement path
+
+The change is output plumbing, not enforcement logic. The SDK previously wrote
+one environment-gated `console.*` line from `src/invoke.ts`
+(`SAG_DEBUG_RESOURCES=1`). Every such write is removed: a silent-by-default
+`GuardLogger` (`src/logger.ts`) is now threaded through `invoke`,
+`PreFlightInterceptor`, `CostPreChecker` and `GuardTelemetryListener` as an
+optional, injectable sink. With no logger supplied every config resolves to the
+shared `SILENT_LOGGER`, so the library prints nothing; with one supplied, each
+decision point (verdicts, cache hits/stores/invalidations, telemetry pages and
+gaps, cost overruns, retries) is reported through it.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification, and every outcome value and detail
+string. A logger is advisory only — a throwing sink is isolated and cannot
+change an outcome, the same guarantee `onStep` and `onGap` already carry. The
+five scenarios recorded above are produced by the contract during enforced
+simulation, which this diff does not touch.
+
+### What did run locally (post-merge with `main`)
+
+```text
+npm run typecheck                        # clean
+npm run check:strict-ratchet             # ok
+npm run lint                             # clean
+npm test                                 # 606 tests passing, 0 fail, 1 skipped
+npm run build                            # clean
+npm run test:smoke                       # 122 named exports resolve via the ESM export map
+npm run test:exports                     # every declared subpath resolves; undeclared paths refused
+npm run check:bundle-size                # within budget
+node scripts/check-enforcement-evidence.ts --check-structure   # ok
+```
+
+`tests/unit/logger.test.ts` covers the change with no network: silence by
+default across a full `check → blocked` cycle (console methods and both stdout
+and stderr writes are recorded, and none may occur), delivery to an injected
+sink with the host's own `this` preserved, level-dropping for partial loggers,
+isolation of a throwing sink on every level, and an exhaustive source-tree audit
+that fails `npm test` if any `src/` file ever calls `console.*` or writes to
+stdout/stderr. These are mocks and a static audit; they cannot substitute for
+the live run, and this addendum does not claim otherwise. The merge with `main`
+also re-validated the enforcement path against `main`'s newer unit suites
+(606 passing), which exercise the same classification and plumbing.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.
+
