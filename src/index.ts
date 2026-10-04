@@ -212,6 +212,7 @@ export {
   diagnosticsToEvents,
   guardEventId,
   guardEventsFromDiagnostics,
+  guardEventsFromFailedTransaction,
   isAllowedDecision,
   mergeGuardEventStreams,
   serializeEvent,
@@ -317,3 +318,15 @@ export {
   type VercelAIToolCallInput,
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
+
+// Optional logging. `SILENT_LOGGER` is the default every config resolves to
+// when no logger is supplied: the SDK writes nothing unless a host asks.
+export {
+  GUARD_LOG_LEVELS,
+  SILENT_LOGGER,
+  resolveLogger,
+  type GuardLogger,
+  type GuardLoggerInput,
+  type GuardLogLevel,
+  type GuardLogMeta,
+} from "./logger.ts";

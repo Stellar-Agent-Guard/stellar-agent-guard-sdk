@@ -286,9 +286,9 @@ Time-dependent modules (preflight cache, transaction polling) accept an optional
 ### Pipeline step observability (`onStep`)
 
 `invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
-exactly as before — the hook is pure observability and the SDK itself never
-logs anything (and takes no logger dependency; what you do with the events is
-up to you):
+exactly as before — the hook is pure observability and writes nothing itself
+(what you do with the events is up to you; for the SDK's own diagnostics see
+[Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask)):
 
 ```ts
 const outcome = await invoke({
@@ -318,9 +318,10 @@ a full `probe → sign → simulate → broadcast` sequence per attempt, each ta
 with its `attempt` index), and **callback exceptions are isolated**: a throwing
 `onStep` never breaks the pipeline, never turns a successful invoke into a
 failure, and never masks the original pipeline error — callback errors are
-swallowed silently, since the SDK is logger-agnostic and has no sink to report
-them to. Step names come from the same shared vocabulary the dry-run trace
-uses (`TRACE_STEP_NAMES`), so consumers of either see identical stage names.
+swallowed silently, because the callback is the caller's own code and not the
+SDK's sink to report through. Step names come from the same shared vocabulary
+the dry-run trace uses (`TRACE_STEP_NAMES`), so consumers of either see
+identical stage names.
 
 The LangChain adapter exposes the same capability:
 
@@ -333,6 +334,50 @@ const middleware = createLangChainGuardMiddleware({
   },
 });
 ```
+
+### Optional logging: the SDK is silent unless you ask
+
+A library that prints pollutes its host's logging pipeline — structured logs,
+level filtering, redirection — so **the SDK writes nothing by default.** The
+audit behind that claim, run for this change: `src/` contained exactly one
+`console.*` call, an env-gated debug dump in the invoke pipeline
+(`SAG_DEBUG_RESOURCES=1`). It is gone, and its description now goes to an
+injected logger, or nowhere. A unit test scans `src/` for console calls and
+direct stdout/stderr writes, so a new one fails `npm test` rather than quietly
+appearing in a host's output.
+
+What the SDK knows is still available, through an optional `logger` on every
+config that has a decision point — `PreFlightInterceptor`, `CostPreChecker`,
+`GuardTelemetryListener` and `invoke()`. Pass any object with the four levels;
+`console` itself satisfies the interface, as does a pino or winston child
+logger. Each call gets a complete message plus optional structured detail, so a
+logger that ignores the detail still reads well:
+
+```ts
+import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+const interceptor = new PreFlightInterceptor({
+  server,
+  networkPassphrase,
+  guard,
+  agent,
+  source,
+  logger: {
+    debug: (message, meta) => log.debug({ ...meta }, message), // stages, cache hits, retries
+    info: (message, meta) => log.info({ ...meta }, message), // a guard refusal
+    warn: (message, meta) => log.warn({ ...meta }, message), // undetermined, fee ceiling, coverage gap
+  },
+});
+
+const decision = await interceptor.check(call); // same verdict, same fees — now audible
+```
+
+A level the host omits is dropped rather than routed elsewhere, and a level that
+throws is isolated: a broken sink cannot turn an admissible verdict into an
+error, change a retry count, or fail a broadcast. Logging is observability, and
+observability never decides whether a transaction runs. `logger: console` is
+the one-liner that restores the removed `SAG_DEBUG_RESOURCES=1` behaviour
+deliberately, instead of a library making that choice for its host.
 
 ### Framework Middleware (LangChain & ElizaOS)
 
@@ -694,6 +739,7 @@ one-shot form.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
+- `GuardLogger`, `GuardLoggerInput`, `GuardLogMeta`, `GUARD_LOG_LEVELS` — the optional, structurally-typed log sink shared by every config above; `SILENT_LOGGER` is what a config resolves to when none is supplied. See [Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask).
 - `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
