@@ -635,6 +635,37 @@ The one intentional behavior change is for callers already using `dryRun: true`:
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
 documented above. Non-dry-run callers keep their existing outcome shapes.
 
+### Keep the dead-man switch alive (`startHeartbeat`)
+
+An agent that stops heartbeating freezes. `startHeartbeat` schedules the `heartbeat()` calls and makes the failure modes visible instead of silent — an ad-hoc `setTimeout` loop drops a beat on an event-loop stall and turns an RPC blip into an unhandled rejection.
+
+```ts
+import { startHeartbeat } from "stellar-agent-guard-sdk";
+
+const hb = await startHeartbeat({
+  server,
+  guard: GUARD_ID,
+  signer: agentKeypair,        // Keypair or AgentSigner
+  intervalMs: 30_000,
+  maxSkewMs: 2_000,            // tolerated drift before a beat counts as missed
+  onBeat: ({ lateMs }) => { if (lateMs > 2_000) alert("heartbeat late"); },
+  onError: (error) => logger.error("heartbeat failed", error),
+  graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
+});
+
+// on shutdown:
+await hb.stop();
+```
+
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
+- A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
+
+The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
+
 ## API Reference
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`docs/deprecations.md`](docs/deprecations.md). Release process and versioning checklist: [`docs/releasing.md`](docs/releasing.md).
@@ -651,6 +682,8 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
+- `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
+- `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 
 #### Fee units: stroops and XLM
 
