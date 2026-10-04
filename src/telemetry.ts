@@ -525,6 +525,13 @@ export interface GuardTelemetryConfig {
    * Omitted → no buffer is allocated and `recent()` always returns `[]`.
    */
   buffer?: GuardEventBufferOptions;
+  /**
+   * Opt-in: a cursor store adapter that persists the watch cursor across
+   * listener restarts. Without one, a restart resumes from the head (skipping
+   * events emitted while the process was dead) or replays history (if
+   * `startLedger` is used).
+   */
+  cursorStore?: CursorStore;
 }
 
 export interface PollResult {
@@ -894,9 +901,27 @@ export async function* mergeGuardEventStreams(
   }
 }
 
+export interface CursorStore {
+  save(cursor: string): Promise<void>;
+  load(): Promise<string | null>;
+}
+
+export class InMemoryCursorStore implements CursorStore {
+  private cursor: string | null = null;
+  async save(cursor: string): Promise<void> {
+    this.cursor = cursor;
+  }
+  async load(): Promise<string | null> {
+    return this.cursor;
+  }
+}
+
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
   private readonly logger: GuardLogger;
+
+  /** The persistence adapter this listener is using (defaults to in-memory). */
+  readonly activeCursorStore: CursorStore;
 
   /**
    * Null unless `config.buffer` is set: with no buffer requested, there is no
@@ -933,6 +958,7 @@ export class GuardTelemetryListener {
     this.config = config;
     this.logger = resolveLogger(config.logger);
     this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
+    this.activeCursorStore = config.cursorStore ?? new InMemoryCursorStore();
   }
 
   /**
@@ -1153,6 +1179,10 @@ export class GuardTelemetryListener {
     // start ledger. Teardown gets no requests at all, not one.
     if (signal?.aborted) return;
 
+    if (cursor === undefined && startLedger === undefined) {
+      cursor = (await this.activeCursorStore.load()) ?? undefined;
+    }
+
     // `expectedFrom` is the earliest ledger the listener has not yet confirmed
     // coverage through: `startLedger` for a fresh range request, or the ledger
     // *after* a resumed cursor. `null` means "cannot be known", in which case gap
@@ -1281,6 +1311,9 @@ export class GuardTelemetryListener {
       }
 
       const events = [...page.events, ...failedTxEvents];
+
+      await this.activeCursorStore.save(page.cursor);
+      
       if (events.length > 0) yield events;
 
       // Advance confirmed coverage. A page that reached the RPC's head confirms
