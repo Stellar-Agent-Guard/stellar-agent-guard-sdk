@@ -37,7 +37,7 @@ will be communicated in the private thread.
 
 ## Unaudited tooling disclaimer
 
-Tooling and examples in this repository are provided as-is and are **not**covered by the contracts audit. This matches the README disclaimer: the audit
+Tooling and examples in this repository are provided as-is and are **not** covered by the contracts audit. This matches the README disclaimer: the audit
 applies to the contracts, not to this SDK or its examples.
 
 ## Policy source
