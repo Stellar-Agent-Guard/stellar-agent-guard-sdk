@@ -9,10 +9,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import { Address, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
-import { CheckResult } from "../../src/policy.ts";
+import type { CheckResult } from "../../src/policy.ts";
 import {
   decodeCheckResult,
   decodePolicy,
@@ -362,25 +363,43 @@ describe("decodeCheckResult", () => {
     });
   });
 
-  it("decodes each known Blocked reason via fixture", () => {
-    const knownReasons: Array<CheckResult["reason"]> = [
-      "recipient_not_allowed",
-      "asset_not_allowed",
-      "protocol_not_allowed",
-      "per_tx_cap_exceeded",
-      "window_cap_exceeded",
-      "recipient_window_cap_exceeded",
-      "paused",
-      "not_active",
-      "expired",
-      "dead_man_frozen",
-    ];
+  it("decodes each known Blocked reason via fixture", async () => {
+    // The golden fixture is generated from the contracts repo's `BlockReason`
+    // enum, so this stays in lockstep with the deployed contract rather than a
+    // hand-maintained list.
+    const fixture = JSON.parse(
+      await readFile(resolve(process.cwd(), "tests/fixtures/contract-fixtures.json"), "utf8"),
+    ) as { entries: Array<{ result: string; reason: string }> };
+    const knownReasons = fixture.entries
+      .filter((entry) => entry.result === "blocked")
+      .map((entry) => entry.reason);
+    assert.ok(knownReasons.length > 0, "fixture must define at least one blocked reason");
     for (const reason of knownReasons) {
-      assert.deepEqual(decodeCheckResult({ Blocked: reason }), {
-        kind: "blocked",
-        reason,
-      });
+      const expected: CheckResult = { kind: "blocked", reason };
+      assert.deepEqual(decodeCheckResult({ Blocked: reason }), expected);
     }
+  });
+
+  it("decodes the raw ScVal the contract returns (ScVec enum encoding)", () => {
+    // `simulation.returnValue` is an xdr.ScVal, not a native value: a
+    // `#[contracttype]` enum crosses the wire as `ScVec([variant, payload…])`.
+    assert.deepEqual(
+      decodeCheckResult(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed")])),
+      { kind: "allowed" },
+    );
+    assert.deepEqual(
+      decodeCheckResult(
+        xdr.ScVal.scvVec([
+          xdr.ScVal.scvSymbol("Blocked"),
+          xdr.ScVal.scvSymbol("recipient_not_allowed"),
+        ]),
+      ),
+      { kind: "blocked", reason: "recipient_not_allowed" },
+    );
+  });
+
+  it("decodes a bare symbol ScVal verdict", () => {
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvSymbol("Allowed")), { kind: "allowed" });
   });
 
   it("falls back to undetermined on an unknown enum tag (documented)", () => {
@@ -428,8 +447,8 @@ describe("decodeCheckResult", () => {
       xdr.ScVal.scvU64(0n),
       xdr.ScVal.scvU64(2n ** 64n - 1n),
       xdr.ScVal.scvI64(-1n),
-      xdr.ScVal.scvU128({ hi: 0n, lo: 0n }),
-      xdr.ScVal.scvI128({ hi: 0n, lo: 0n }),
+      xdr.ScVal.scvU128(new xdr.Uint128Parts({ hi: 0n, lo: 0n })),
+      xdr.ScVal.scvI128(new xdr.Int128Parts({ hi: 0n, lo: 0n })),
       xdr.ScVal.scvString(""),
       xdr.ScVal.scvString("Allowed"),
       xdr.ScVal.scvString("Blocked"),

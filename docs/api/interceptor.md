@@ -1,1 +1,71 @@
-IyBQcmVGbGlnaHRJbnRlcmNlcHRvciBBUEkKClByZUZsaWdodEludGVyY2VwdG9yIGV2YWx1YXRlcyB3aGV0aGVyIGEgcGxhbm5lZCBjb250cmFjdCBjYWxsIHdpbGwgYmUgYWNjZXB0ZWQgYnkgdGhlIGd1YXJkIGNvbnRyYWN0LgoKIyMgQ29uc3RydWN0b3IKCmBgYHRzCmNvbnN0cnVjdG9yKG9wdGlvbnM6IFByZUZsaWdodEludGVyY2VwdG9yT3B0aW9ucykKYGBgCgojIyMgT3B0aW9ucwoKLSBgc2VydmVyOiBycGMuU2VydmVyYCDigJQgU29yb2JhbiBSUEMgc2VydmVyIGluc3RhbmNlCi0gYG5ldHdvcmtQYXNzcGhyYXNlOiBzdHJpbmdgIOKAlCBTdGVsbGFyIG5ldHdvcmsgcGFzc3BocmFzZQotIGBndWFyZDogc3RyaW5nYCDigJQgQ3VzdG9tIGFjY291bnQgY29udHJhY3QgYWRkcmVzcyAoYEMuLi5gKQotIGBhZ2VudDogS2V5cGFpcmAg4oCUIEtleXBhaXIgcmVnaXN0ZXJlZCBhcyB0aGUgYWdlbnQgaW4gdGhlIGd1YXJkCi0gYHNvdXJjZTogS2V5cGFpcmAg4oCUIEtleXBhaXIgcGF5aW5nIGZvciB0cmFuc2FjdGlvbiBmZWVzCi0gYGNhY2hlPzogUHJlRmxpZ2h0Q2FjaGVPcHRpb25zYCDigJQgT3B0aW9uYWwgc2hvcnQtbGl2ZWQgdmVyZGljdCBjYWNoZTsgZGlzYWJsZWQgYnkgZGVmYXVsdAoKIyMjIE9wdGlvbmFsIGNhY2hlCgpTZXQgZWl0aGVyIGBjYWNoZS50dGxNc2Agb3IgYGNhY2hlLnR0bExlZGdlcnNgIHRvIG9wdCBpbi4gVGhlIGVmZmVjdGl2ZSBUVEwgaXMK Y2FwcGVkIGF0IG9uZSBhcHByb3hpbWF0ZSBmaXZlLXNlY29uZCBsZWRnZXItY2xvc2UgaW50ZXJ2YWwsIGFuZCBhIGNhY2hlZCBlbnRyeQppcyBkaXNjYXJkZWQgd2hlbiB0aGUgb2JzZXJ2ZWQgbGVkZ2VyIGFkdmFuY2VzLiBgcG9saWN5UmV2aXNpb25gIG1heSBiZSBhIHZhbHVlCm9yIGFuIGFzeW5jIGdldHRlcjsgY2hhbmdpbmcgaXQgaW52YWxpZGF0ZXMgdGhlIG1hdGNoaW5nIGVudHJ5LiBDYWxsCmBpbnZhbGlkYXRlKGNhbGwuPylgIGFmdGVyIHBvbGljeSBvciBhY2NvdW50LXN0YXRlIGNoYW5nZXMuIEEgY2FjaGVkIHZlcmRpY3QgY2FuCmJlIHN0YWxlciB0aGFuIG9uZSBhZG1pdHRlZCB0cmFuc2Zlciwgc28gY2FsbGVycyBtdXN0IGFjY2VwdCB0aGF0IHRyYWRlb2ZmCmV4cGxpY2l0bHkuCgojIyBNZXRob2RzCgojIyMgYGNoZWNrKGNhbGw6IENvbnRyYWN0Q2FsbCk6IFByb21pc2U8UHJlRmxpZ2h0RGVjaXNpb24+CgpFdmFsdWF0ZXMgYSBjb250cmFjdCBjYWxsIGFnYWluc3QgdGhlIGd1YXJkIHdpdGhvdXQgdGhyb3dpbmcgb3IgYnJvYWRjYXN0aW5nLgoKIyMjIGBpbnZhbGlkYXRlKGNhbGw/OiBDb250cmFjdENhbGwpOiB2b2lkYAoKQ2xlYXJzIGFsbCBjYWNoZWQgZGVjaXNpb25zLCBvciBvbmx5IHRoZSBlbnRyaWVzIGZvciB0aGUgc3VwcGxpZWQgY2FsbC4KCiMjIyBgYXNzZXJ0QWxsb3dlZChjYWxsOiBDb250cmFjdENhbGwpOiBQcm9taXNlPEFkbWlzc2libGVEZWNpc2lvbj4KCkV2YWx1YXRlcyBhIGNhbGwgYW5kIHRocm93cyBgR3VhcmRCbG9ja2VkRXJyb3JgIGlmIGJsb2NrZWQgb3IgdW5kZXRlcm1pbmVkLgoKIyMgQ2hlY2tSZXN1bHQgZGVjb2RpbmcgYW5kIGZhbGxiYWNrIGJlaGF2aW9yCgpUaGUgaW50ZXJjZXB0b3IgcmVhZHMgdGhlIGd1YXJkIGNvbnRyYWN0J3MgYENoZWNrUmVzdWx0YCB2YWx1ZSBmcm9tIHRoZQpzaW11bGF0aW9uIHJlc3BvbnNlLiBUaGUgY29udHJhY3QgcmV0dXJucyBhbiBlbnVtIHdpdGggdGhlIGZvbGxvd2luZyBzaGFwZXM6CgotIGBBbGxvd2VkYCDigJQgYSB1bml0IHZhcmlhbnQgd2l0aCBubyBwYXlsb2FkLgotIGBCbG9ja2VkKHJlYXNvbmAg4oCUIGEgdmFyaWFudCBjYXJyeWluZyBhIHN5bWJvbCByZWFzb24gKGUuZy4gYHBvbGljeWAsCmAgbGltaXRgLCBgZXhwaXJ5YCkuCgpEZWNvZGluZyBpcyBmYWlsLWNsb3NlZC4gSWYgdGhlIHJldHVybmVkIFNjVmFsIGlzIG5vdCBhIHJlY29nbml6ZWQKQ2hlY2tSZXN1bHQgc2hhcGUg4oCUIGFuIHVua25vd24gZW51bSB0YWcsIGFuIGVtcHR5IG9yIG92ZXItbG9uZyBTY1ZlYywgYQpibG9ja2VkIHZhcmlhbnQgd2hvc2UgcmVhc29uIGlzIG5vdCBhIHN5bWJvbCwgb3IgYSBub24tU2NWZWMgaW5wdXQg4oCUIHRoZQpkZWNvZGVyIGRvZXMgbm90IHRocm93LiBJbnN0ZWFkIGl0IHJldHVybnMgdGhlIHR5cGVkIGZhbGxiYWNrIGZvciB0aGUKY2FsbC1zaXRlIGNvbnRyYWN0OgoKfCBDYWxsIHNpdGUgfCBGYWxsYmFjayB2ZXJkaWN0IHwgTm90ZXMgfAp8IC0tLSB8IC0tLSB8IC0tLSB8CnwgYFByZUZsaWdodEludGVyY2VwdG9yLmNoZWNrYCB8IGB1bmRldGVybWluZWRgIHdpdGggYG51bGxgIHJlYXNvbiB8IFRoZSBjYWxsZXIgc2VlcyBhIHR5cGVkIGRlY2lzaW9uLCBub3QgYW4gZXhjZXB0aW9uLiB8CnwgYGFzc2VydEFsbG93ZWRgIHwgYEd1YXJkQmxvY2tlZEVycm9yYCB3aXRoIGFuIGB1bmRldGVybWluZWRgIHZlcmRpY3QgfCBUaGUgZXJyb3IgaXMgdGhyb3duIGJ5IHRoZSBjYWxsZXItZmFjaW5nIGFzc2VydGlvbiwgbm90IGJ5IHRoZSBkZWNvZGVyLiB8CgpJbiBvdGhlciB3b3JkcywgYSBtYWxmb3JtZWQgb3IgZnV0dXJlIENoZWNrUmVzdWx0IG5ldmVyIGVzY2FwZXMgdG8gdGhlIGFnZW50Cmxvb3AgYXMgYSByYXcgdGhyb3cuIFRoZSBpbnRlcmNlcHRvciB0cmVhdHMgYW55IGRlY29kZSBmYWlsdXJlIGFzCmB1bmRldGVybWluZWRgLCB3aGljaCBpcyB0aGUgZmFpbC1jbG9zZWQgcmVzdWx0Lgo=
+# PreFlightInterceptor API
+
+`PreFlightInterceptor` evaluates whether a planned contract call will be accepted by the guard contract.
+
+## Constructor
+
+```ts
+constructor(options: PreFlightInterceptorOptions)
+```
+
+### Options
+
+- `server: rpc.Server` — Soroban RPC server instance
+- `networkPassphrase: string` — Stellar network passphrase
+- `guard: string` — Custom account contract address (`C...`)
+- `agent: Keypair` — Keypair registered as the agent in the guard
+- `source: Keypair` — Keypair paying for transaction fees
+- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default
+
+### Optional cache
+
+Set either `cache.ttlMs` or `cache.ttlLedgers` to opt in. The effective TTL is
+capped at one approximate five-second ledger-close interval, and a cached entry
+is discarded when the observed ledger advances. `policyRevision` may be a value
+or an async getter; changing it invalidates the matching entry. Call
+`invalidate(call?)` after policy or account-state changes. A cached verdict can
+be staler than one admitted transfer, so callers must accept that tradeoff
+explicitly.
+
+## Methods
+
+### `check(call: ContractCall): Promise<PreFlightDecision>`
+
+Evaluates a contract call against the guard without throwing or broadcasting.
+
+### `invalidate(call?: ContractCall): void`
+
+Clears all cached decisions, or only the entries for the supplied call.
+
+### `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>`
+
+Evaluates a call and throws `GuardBlockedError` if blocked or undetermined.
+
+## CheckResult decoding and fallback behavior
+
+The interceptor reads the guard contract's `CheckResult` value from the
+simulation response. The contract returns an enum with the following shapes:
+
+- `Allowed` — a unit variant with no payload.
+- `Blocked(reason)` — a variant carrying a symbol reason (e.g. `recipient_not_allowed`,
+  `per_tx_cap_exceeded`, `paused`).
+
+`decodeCheckResult` accepts either the raw `xdr.ScVal` the contract returns
+(for example `simulation.returnValue`) or the native value `scValToNative`
+produces from it, and validates a `Blocked` reason against the contract's own
+reason vocabulary.
+
+Decoding is fail-closed. If the returned ScVal is not a recognized
+`CheckResult` shape — an unknown enum tag, a `Blocked` reason the contract does
+not define, an empty or over-long `ScVec`, a blocked variant whose reason is not
+a symbol, or a non-`ScVec` input — the decoder does not throw. Instead it
+returns the typed fallback for the call-site contract:
+
+| Call site | Fallback verdict | Notes |
+| --- | --- | --- |
+| `PreFlightInterceptor.check` | `undetermined` with `null` reason | The caller sees a typed decision, not an exception. |
+| `assertAllowed` | `GuardBlockedError` with an `undetermined` verdict | The error is thrown by the caller-facing assertion, not by the decoder. |
+
+In other words, a malformed or future `CheckResult` never escapes to the agent
+loop as a raw throw. The interceptor treats any decode failure as
+`undetermined`, which is the fail-closed result.

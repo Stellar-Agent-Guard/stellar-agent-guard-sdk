@@ -14,7 +14,8 @@ import { Address, nativeToScVal, rpc, scValToNative, StrKey, xdr } from "@stella
  * caps are `i128` and silently narrowing them to `number` would lose precision
  * on exactly the values a spend guard exists to compare.
  */
-import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
+import { PolicyDecodeError } from "./errors.ts";
+import { isGuardReason } from "./reasons.ts";
 import type { ContractCall } from "./tx.ts";
 
 /**
@@ -244,8 +245,9 @@ export interface GuardStatus {
  * Callers observe a typed fallback instead of an exception:
  *
  * - `Allowed` → `{ kind: "allowed" }`
- * - `Blocked(reason)` → `{ kind: "blocked", reason }`
- * - anything else (unknown enum tag, malformed shape, non-ScVal) →
+ * - `Blocked(reason)` with a reason the contract defines →
+ *   `{ kind: "blocked", reason }`
+ * - anything else (unknown enum tag or reason, malformed shape, non-ScVal) →
  *   `{ kind: "undetermined" }` (fail-closed; the caller treats it as not-allowed)
  */
 export type CheckResult =
@@ -561,12 +563,37 @@ function sortedScMap(entries: Array<{ key: string; val: xdr.ScVal }>): xdr.ScVal
   );
 }
 
+/**
+ * Decode the guard's `CheckResult` into a typed verdict.
+ *
+ * Accepts either the raw `xdr.ScVal` the contract returns (for example
+ * `simulation.returnValue`) or the native value `scValToNative` produces from it,
+ * so a caller never has to decode twice. On the wire a `#[contracttype]` enum is
+ * a `ScVec` whose first element is the variant name — `["Allowed"]` or
+ * `["Blocked", "recipient_not_allowed"]` — which `scValToNative` turns into
+ * `"Allowed"` and `["Blocked", reason]` respectively. The symbol-only and
+ * `{ Blocked: reason }` native forms are accepted too.
+ *
+ * Deliberately total: it never throws, so a hostile or future payload cannot
+ * escape into the interceptor's verdict path.
+ */
 export function decodeCheckResult(raw: unknown): CheckResult {
   try {
-    if (raw === "Allowed") return { kind: "allowed" };
-    if (raw && typeof raw === "object" && "Blocked" in (raw as Record<string, unknown>)) {
-      const reason = (raw as { Blocked: unknown }).Blocked;
-      if (typeof reason === "string") return { kind: "blocked", reason };
+    const native = raw instanceof xdr.ScVal ? nativeCheckResult(raw as xdr.ScVal) : raw;
+
+    if (native === "Allowed") return { kind: "allowed" };
+
+    if (Array.isArray(native)) {
+      if (native.length === 1 && native[0] === "Allowed") return { kind: "allowed" };
+      if (native.length === 2 && native[0] === "Blocked" && typeof native[1] === "string") {
+        return blockedCheckResult(native[1]);
+      }
+      return { kind: "undetermined" };
+    }
+
+    if (native && typeof native === "object" && "Blocked" in (native as Record<string, unknown>)) {
+      const reason = (native as { Blocked: unknown }).Blocked;
+      if (typeof reason === "string") return blockedCheckResult(reason);
     }
   } catch {
     // fall through to the fail-closed verdict below
@@ -574,6 +601,26 @@ export function decodeCheckResult(raw: unknown): CheckResult {
   // Unknown enum tag, malformed shape, or non-ScVal input: fail closed rather
   // than throwing into the interceptor's verdict path.
   return { kind: "undetermined" };
+}
+
+/**
+ * Unwrap the two ScVal shapes a `#[contracttype]` enum can take, so the caller's
+ * fallback applies to every other ScVal type instead of an arbitrary ScVal's
+ * native value being mistaken for a verdict.
+ */
+function nativeCheckResult(scVal: xdr.ScVal): unknown {
+  if (scVal.type !== "scvVec" && scVal.type !== "scvSymbol") return null;
+  return scValToNative(scVal);
+}
+
+/**
+ * A `Blocked` payload decodes only for a reason the contract actually defines.
+ * An unrecognised reason is a future or hostile payload, so it fails closed to
+ * `undetermined` rather than being surfaced as a refusal reason callers would
+ * then try to map.
+ */
+function blockedCheckResult(reason: string): CheckResult {
+  return isGuardReason(reason) ? { kind: "blocked", reason } : { kind: "undetermined" };
 }
 
 /**
