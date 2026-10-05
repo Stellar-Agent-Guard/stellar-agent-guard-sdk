@@ -320,11 +320,17 @@ describe("adapter options validation (construction-time fail-fast)", () => {
   });
 
   describe("ElizaOS guardAction", () => {
+    // `guardAction` takes a real `ElizaActionLike`, whose `validate` is required:
+    // the whole point of the wrapper is to compose the guard in front of it. These
+    // construction-time cases only care about the options half, so they reuse one
+    // valid action shape rather than casting the action to `unknown`.
+    const actionLike = { name: "send_payment", validate: async () => true };
+
     it("rejects a missing toContractCall with a typed error naming the field", () => {
       assert.throws(
         () =>
           guardAction(
-            { name: "send_payment" },
+            actionLike,
             { interceptor } as unknown as Parameters<typeof guardAction>[1],
           ),
         (err: unknown) => {
@@ -339,7 +345,7 @@ describe("adapter options validation (construction-time fail-fast)", () => {
       assert.throws(
         () =>
           guardAction(
-            { name: "send_payment" },
+            actionLike,
             {} as unknown as Parameters<typeof guardAction>[1],
           ),
         (err: unknown) => {
@@ -354,7 +360,7 @@ describe("adapter options validation (construction-time fail-fast)", () => {
 
     it("constructs fine for a valid config (regression)", () => {
       const action = guardAction(
-        { name: "send_payment" },
+        actionLike,
         { interceptor, toContractCall: () => null },
       );
       assert.equal(typeof action.validate, "function");
