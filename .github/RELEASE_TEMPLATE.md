@@ -12,8 +12,10 @@ introducing a different pinning discipline. Both are recorded on issue #154.
 
 Sections are the standard Keep a Changelog set. Keep every heading, including
 the empty ones, and write "None." under a heading that has nothing in it — a
-missing section is indistinguishable from a forgotten one, and this is the
-package's only published history until issue #6 decides the changelog question.
+missing section is indistinguishable from a forgotten one. This body is the
+per-tag record; CHANGELOG.md is the cross-version record (issue #6 resolved
+"yes", executed in issue #81), and the two must be drafted from the same
+commits.
 
 The type labels match the commit types CONTRIBUTING.md documents as in use:
 `feat`, `fix`, `docs`, `chore`, `ci`, `test`.
