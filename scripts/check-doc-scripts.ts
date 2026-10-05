@@ -88,7 +88,7 @@ function main(): void {
         `  ${relative(ROOT, f.file)}:${f.line} -> npm run ${f.script}`,
       );
     }
-    consol.error(
+    console.error(
       '\nEither add the script to package.json or remove the reference from the docs.',
     );
     process.exitCode = 1;
