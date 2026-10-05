@@ -11,6 +11,7 @@ import { describe, it } from "node:test";
 import { xdr } from "@stellar/stellar-sdk";
 import {
   DEFAULT_JITTER_FRACTION,
+  GuardEventRingBuffer,
   GuardTelemetryListener,
   computePollDelay,
   describeGuardEvent,
@@ -23,9 +24,11 @@ import {
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardTelemetryGap,
+  type RecentEventFilter,
 } from "../../src/telemetry.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
-const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 
 /**
  * Build a diagnostic event in the shape the RPC returns: the host's own
@@ -1032,6 +1035,308 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
       ),
       "watch() is unchanged: committed events only, with the additive fields defaulted",
     );
+  });
+});
+
+describe("GuardEventRingBuffer (issue #68)", () => {
+  /** A minimal well-formed event; only the fields a test cares about are overridden. */
+  function event(partial: Partial<GuardEvent>): GuardEvent {
+    return {
+      id: "id",
+      kind: "auth_checked",
+      topic: "event_auth_checked",
+      source: "ledger",
+      stream: "committed",
+      contractId: GUARD,
+      ledger: 100,
+      ledgerClosedAt: null,
+      observedAt: null,
+      transactionHash: null,
+      decision: null,
+      data: null,
+      ...partial,
+    };
+  }
+
+  it("rejects a max that is not a positive integer", () => {
+    assert.throws(() => new GuardEventRingBuffer(0), RangeError);
+    assert.throws(() => new GuardEventRingBuffer(-1), RangeError);
+    assert.throws(() => new GuardEventRingBuffer(2.5), RangeError);
+  });
+
+  it("evicts oldest first and preserves order once full (FIFO)", () => {
+    const buffer = new GuardEventRingBuffer(5);
+    for (let i = 1; i <= 8; i += 1) buffer.push(event({ id: `e${i}`, ledger: i }));
+
+    assert.equal(buffer.size, 5, "push max+3 retains exactly max");
+    assert.deepEqual(
+      buffer.recent().map((entry) => entry.id),
+      ["e4", "e5", "e6", "e7", "e8"],
+      "the three oldest are evicted and the rest stay in order",
+    );
+  });
+
+  it("keeps the newest window across many wraps of the ring", () => {
+    const buffer = new GuardEventRingBuffer(3);
+    for (let i = 1; i <= 100; i += 1) buffer.push(event({ id: `e${i}`, ledger: i }));
+    assert.deepEqual(buffer.recent().map((entry) => entry.id), ["e98", "e99", "e100"]);
+  });
+
+  it("filters by stream and reason", () => {
+    const buffer = new GuardEventRingBuffer(10);
+    buffer.push(event({ id: "allowed" }));
+    buffer.push(
+      event({
+        id: "cap",
+        source: "diagnostic",
+        stream: "diagnostic",
+        decision: { result: "blocked", reason: "per_tx_cap_exceeded", source: "diagnostic" },
+      }),
+    );
+    buffer.push(
+      event({
+        id: "paused",
+        source: "diagnostic",
+        stream: "diagnostic",
+        decision: { result: "blocked", reason: "paused", source: "diagnostic" },
+      }),
+    );
+
+    assert.deepEqual(
+      buffer.recent({ stream: "diagnostic" }).map((entry) => entry.id),
+      ["cap", "paused"],
+    );
+    assert.deepEqual(
+      buffer.recent({ reason: "paused" }).map((entry) => entry.id),
+      ["paused"],
+    );
+    assert.deepEqual(buffer.recent({ stream: "committed", reason: "paused" }), []);
+  });
+
+  it("filters by ledger range and excludes ledger-less diagnostics from a range", () => {
+    const buffer = new GuardEventRingBuffer(10);
+    buffer.push(event({ id: "l10", ledger: 10 }));
+    buffer.push(event({ id: "l20", ledger: 20 }));
+    buffer.push(event({ id: "diag", ledger: null, source: "diagnostic", stream: "diagnostic" }));
+
+    assert.deepEqual(
+      buffer.recent({ fromLedger: 15 }).map((entry) => entry.id),
+      ["l20"],
+    );
+    assert.deepEqual(
+      buffer.recent({ toLedger: 15 }).map((entry) => entry.id),
+      ["l10"],
+    );
+    assert.deepEqual(
+      buffer.recent({ fromLedger: 0, toLedger: 100 }).map((entry) => entry.id),
+      ["l10", "l20"],
+      "a ledger-less diagnostic is not inside a ledger range",
+    );
+  });
+
+  it("hands out a copy, so a caller cannot mutate retained events", () => {
+    const buffer = new GuardEventRingBuffer(2);
+    buffer.push(event({ id: "a" }));
+    const returned = buffer.recent();
+    returned.pop();
+    assert.equal(buffer.recent().length, 1);
+  });
+});
+
+describe("GuardTelemetryListener opt-in buffer (issue #68)", () => {
+  function rawLedgerEvent(ledger: number) {
+    return {
+      contractId: GUARD,
+      ledger,
+      ledgerClosedAt: "2026-09-27T00:00:00Z",
+      txHash: "ab".repeat(32),
+      topic: ["event_auth_checked", "allowed", ""].map((topic) => xdr.ScVal.scvSymbol(topic)),
+      value: xdr.ScVal.scvMap([]),
+    };
+  }
+
+  function singlePageServer(events: unknown[]) {
+    return {
+      getLatestLedger: async () => ({ sequence: 1 }),
+      getEvents: async () => ({ events, cursor: "cursor_1", latestLedger: 600 }),
+    };
+  }
+
+  it("retains committed events decoded by poll()", async () => {
+    const server = singlePageServer([rawLedgerEvent(500)]);
+    const listener = new GuardTelemetryListener({
+      server: server as never,
+      guard: GUARD,
+      buffer: { max: 5 },
+    });
+
+    await listener.poll({ startLedger: 500 });
+
+    const recent = listener.recent();
+    assert.equal(recent.length, 1);
+    assert.equal(recent[0]!.ledger, 500);
+    assert.equal(recent[0]!.stream, "committed");
+  });
+
+  it("keeps nothing when no buffer is configured (default off)", async () => {
+    const server = singlePageServer([rawLedgerEvent(500)]);
+    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
+
+    await listener.poll({ startLedger: 500 });
+
+    assert.deepEqual(listener.recent(), [], "no buffer requested → recent() is always empty");
+  });
+
+  it("retains diagnostic events merged by watchAll()", async () => {
+    const server = singlePageServer([]);
+    const listener = new GuardTelemetryListener({
+      server: server as never,
+      guard: GUARD,
+      buffer: { max: 5 },
+    });
+    const blocked = guardEventsFromDiagnostics(
+      [diagnosticEvent(["event_auth_checked", "blocked", "paused"])],
+      GUARD,
+    );
+    async function* diagnostics(): AsyncIterable<GuardDiagnosticBatch> {
+      yield { events: blocked, observedAt: "2026-09-27T00:00:00Z" };
+    }
+
+    const controller = new AbortController();
+    let ticks = 0;
+    const seen: GuardEvent[] = [];
+    for await (const event of listener.watchAll({
+      startLedger: 500,
+      signal: controller.signal,
+      sleep: async () => {
+        if (++ticks >= 2) controller.abort();
+      },
+      diagnostics: diagnostics(),
+    })) {
+      seen.push(event);
+    }
+
+    assert.ok(
+      seen.some((event) => event.stream === "diagnostic"),
+      "the blocked decision must reach the unified stream",
+    );
+    const recent = listener.recent({ stream: "diagnostic" });
+    assert.equal(recent.length, 1, "the diagnostic half is what watchAll() adds to the buffer");
+    assert.equal(recent[0]!.decision?.reason, "paused");
+  });
+
+  it("exposes the filter surface through the listener accessor", async () => {
+    const server = singlePageServer([rawLedgerEvent(10), rawLedgerEvent(20)]);
+    const listener = new GuardTelemetryListener({
+      server: server as never,
+      guard: GUARD,
+      buffer: { max: 5 },
+    });
+
+    await listener.poll({ startLedger: 10 });
+
+    const filter: RecentEventFilter = { stream: "committed", fromLedger: 15 };
+    const filtered = listener.recent(filter);
+    assert.deepEqual(
+      filtered.map((event) => event.ledger),
+      [20],
+    );
+  });
+});
+
+/**
+ * Opt-in raw event retention (issue #94).
+ *
+ * When a decoded verdict looks wrong, the raw payload is the evidence an SDK
+ * bug report needs. It is off by default because the payload (XDR `ScVal`s,
+ * host-shaped objects) is large enough that retaining it for every event is a
+ * memory decision, not a convenience. These tests pin both halves: the source
+ * object is attached when asked for, and *absent* — not merely empty —
+ * otherwise, so the default path keeps discarding it.
+ */
+describe("opt-in raw event retention (issue #94)", () => {
+  const blockedEvent = () =>
+    diagnosticEvent(["event_auth_checked", "blocked", "per_tx_cap_exceeded"]);
+
+  it("omits the raw field entirely by default, including on guardEventsFromDiagnostics", () => {
+    const events = guardEventsFromDiagnostics([blockedEvent()], GUARD);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.raw, undefined);
+    assert.ok(
+      !("raw" in events[0]!),
+      "the default decode must not retain the source payload at all",
+    );
+  });
+
+  it("attaches the exact source event object when includeRaw is enabled", () => {
+    const source = blockedEvent();
+    const events = guardEventsFromDiagnostics([source], GUARD, { includeRaw: true });
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0]!.raw, source);
+    // Same reference, not a copy: a bug report should carry what the SDK saw.
+    assert.equal(events[0]!.raw, source);
+  });
+
+  it("keeps includeRaw off when the option object is present but false", () => {
+    const events = diagnosticsToEvents([blockedEvent()], GUARD, { includeRaw: false });
+    assert.ok(!("raw" in events[0]!));
+  });
+
+  it("forwards includeRaw through telemetryFromDecision", () => {
+    const source = blockedEvent();
+    const events = telemetryFromDecision(
+      { kind: "blocked", reason: "per_tx_cap_exceeded", diagnosticEvents: [source] },
+      GUARD,
+      { includeRaw: true },
+    );
+    assert.deepEqual(events[0]!.raw, source);
+  });
+
+  it("retains the ledger RPC event only when the listener opts in", async () => {
+    function rawLedgerEvent() {
+      return {
+        contractId: GUARD,
+        type: "contract",
+        ledger: 500,
+        ledgerClosedAt: "2026-09-27T00:00:00Z",
+        txHash: "ab".repeat(32),
+        topic: ["event_auth_checked", "allowed", ""].map((topic) => xdr.ScVal.scvSymbol(topic)),
+        value: xdr.ScVal.scvMap([]),
+      };
+    }
+    function server() {
+      return {
+        getLatestLedger: async () => ({ sequence: 1 }),
+        getEvents: async () => ({ events: [rawLedgerEvent()], cursor: "c", latestLedger: 600 }),
+      };
+    }
+
+    const off = new GuardTelemetryListener({ server: server() as never, guard: GUARD });
+    const offPage = await off.poll({ startLedger: 500 });
+    assert.equal(offPage.events[0]!.raw, undefined);
+    assert.ok(!("raw" in offPage.events[0]!));
+
+    const on = new GuardTelemetryListener({
+      server: server() as never,
+      guard: GUARD,
+      includeRaw: true,
+    });
+    const onPage = await on.poll({ startLedger: 500 });
+    assert.deepEqual(onPage.events[0]!.raw, rawLedgerEvent());
+  });
+
+  it("preserves raw across the unified stream's diagnostic tagging", async () => {
+    const source = blockedEvent();
+    const batch: GuardDiagnosticBatch = {
+      events: guardEventsFromDiagnostics([source], GUARD, { includeRaw: true }),
+      observedAt: "2026-09-27T00:00:00Z",
+    };
+    const seen: GuardEvent[] = [];
+    for await (const event of mergeGuardEventStreams([], [batch])) {
+      seen.push(event);
+    }
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0]!.raw, source);
   });
 });
 

@@ -34,6 +34,7 @@
  * answer would tell a caller their call was too expensive when the truth is that
  * it was never allowed.
  */
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 import { SorobanDataBuilder } from "@stellar/stellar-sdk";
 import { INCLUSION_FEE } from "./tx.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
@@ -248,6 +249,15 @@ export interface CostPreCheckConfig {
    * stroops. Omitted means "price it, never object to the price".
    */
   maxFeeStroops?: bigint;
+  /**
+   * Optional log sink for this pre-checker's decision points: the priced verdict
+   * and whether the ceiling was exceeded.
+   *
+   * Omitted — the default — the pre-checker says nothing at all. The cost
+   * decision is still returned either way; the logger only decides who hears
+   * about it.
+   */
+  logger?: GuardLoggerInput | undefined;
 }
 
 /** The two fee components, kept separate so they are never conflated. */
@@ -370,9 +380,11 @@ export function describeCostDecision(decision: CostDecision): string {
  */
 export class CostPreChecker {
   private readonly config: CostPreCheckConfig;
+  private readonly logger: GuardLogger;
 
   constructor(config: CostPreCheckConfig) {
     this.config = config;
+    this.logger = resolveLogger(config.logger);
   }
 
   /** Price a call. Equivalent to `(await this.checkWithCost(call)).cost`. */
@@ -400,7 +412,21 @@ export class CostPreChecker {
    */
   async checkWithCost(call: ContractCall): Promise<CostWithDecision> {
     const decision = await this.config.interceptor.check(call);
-    return { decision, cost: this.costOf(decision) };
+    const cost = this.costOf(decision);
+    // The one place a cost decision is produced, so the one place it is logged:
+    // `check()` and both one-shot helpers funnel through here, and a second log
+    // site would mean a caller could see the same decision twice.
+    if (cost.kind === "over_budget") {
+      this.logger.warn(`call exceeds the fee ceiling: ${describeCostDecision(cost)}`, {
+        totalFeeStroops: cost.totalFeeStroops.toString(),
+        feeCeilingStroops: cost.feeCeilingStroops.toString(),
+      });
+    } else if (cost.kind === "undetermined") {
+      this.logger.warn(`call could not be priced: ${cost.detail}`);
+    } else {
+      this.logger.debug(describeCostDecision(cost));
+    }
+    return { decision, cost };
   }
 
   /** The pure cost view of an already-obtained verdict. No network, no state. */

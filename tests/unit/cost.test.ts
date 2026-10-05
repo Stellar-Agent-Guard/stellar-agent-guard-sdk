@@ -23,10 +23,11 @@ import {
   type ResourceBreakdown,
 } from "../../src/cost.ts";
 import { INCLUSION_FEE } from "../../src/tx.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 import type { PreFlightDecision } from "../../src/preflight.ts";
 import type { ContractCall } from "../../src/tx.ts";
 
-const CALL: ContractCall = { contract: "C".padEnd(56, "A"), fn: "transfer", args: [] };
+const CALL: ContractCall = { contract: unsafeContractAddress("C".padEnd(56, "A")), fn: "transfer", args: [] };
 const RECORDED_RESOURCE_PAYLOAD = JSON.parse(
   readFileSync(new URL("../fixtures/simulation-resource-payload.json", import.meta.url), "utf8"),
 ) as unknown;
