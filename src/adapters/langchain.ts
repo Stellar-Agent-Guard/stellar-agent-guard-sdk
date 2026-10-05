@@ -19,6 +19,7 @@
 import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
+import { blockedInfoFor, runBlockedHook, type GuardBlockedHook } from "./shared.ts";
 
 /** The subset of LangChain's `ToolCallRequest` this adapter reads. */
 export interface LangChainToolCallRequest {
@@ -49,6 +50,16 @@ export interface LangChainGuardOptions {
   name?: string;
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (request: LangChainToolCallRequest, decision: PreFlightDecision) => void;
+  /**
+   * Operator alerting: called once per halt with a structured payload
+   * (`{ adapter, kind, reason, call, explanation }`), so a refusal reaches a
+   * webhook/log/dashboard rather than only the agent's transcript. Fires for a
+   * guard `blocked` verdict and for a fail-closed `undetermined` one, since both
+   * stop the tool body from running. A throwing callback is logged and
+   * swallowed — it never changes the halt. Omit it for the pre-existing
+   * behavior. See `src/adapters/shared.ts`.
+   */
+  onBlocked?: GuardBlockedHook;
   /**
    * Optional per-call observability, forwarded to the interceptor's
    * `check()`: one event per enforcement-stage attempt (probe → sign →
@@ -87,6 +98,10 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       });
       options.onDecision?.(request, decision);
       if (decision.allowed) return handler(request);
+
+      // Operator-facing half of the refusal, wired through the shared primitive
+      // so this adapter and ElizaOS cannot drift on the payload shape.
+      runBlockedHook(options.onBlocked, blockedInfoFor("langchain", call, decision));
 
       // The tool is never entered: no signing, no broadcast, no fee.
       return {
