@@ -47,6 +47,16 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
 - **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
 
+> ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
+> guardrail — it reports what the simulation predicts the guard will do, and it
+> can be wrong if the RPC lies. It does **not** replace the contract: every
+> authorized call is enforced on broadcast by `__check_auth`, and a malicious
+> RPC can feed a fake pre-flight verdict but cannot forge the agent's signature
+> or the guard's own decision event. See
+> [`docs/threat-model.md`](docs/threat-model.md) for the full threat model
+> (verdict-inversion, stale-cache verdicts, compromised runtime, fake-RPC
+> simulation, single-dependency supply chain).
+
 ## Quick Start
 
 > **A verdict is a prediction, not a settlement guarantee.** Before relying on a
@@ -134,7 +144,6 @@ const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6M
 const interceptor = new PreFlightInterceptor({
   server: new rpc.Server("https://soroban-testnet.stellar.org"),
   networkPassphrase: "Test SDF Network ; September 2015",
-  expectedNetwork: "Test SDF Network ; September 2015",
   guard: guardAddress, // Type-safe: validated as ContractAddress
   agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
   source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
@@ -145,11 +154,6 @@ const decision = await interceptor.check({
   fn: "transfer",
   args: [/* from, to, amount */],
 });
-
-// `expectedNetwork` binds the interceptor to the network it was configured for.
-// If the RPC server reports a different passphrase, construction (or first use)
-// fails with a typed `NetworkMismatchError` naming expected vs. actual. Leaving
-// it unset preserves legacy unchecked behavior — not recommended.
 
 if (decision.kind === "admissible") {
   console.log("Allowed! Resource fee:", decision.estimatedResourceFee);
@@ -222,7 +226,6 @@ const interceptor = new PreFlightInterceptor({
   guard,
   agent,
   source,
-  expectedNetwork: "Test SDF Network ; September 2015",
   cache: {
     ttlLedgers: 1, // maximum one approximate five-second ledger window
     policyRevision: () => readPolicyRevision(),
@@ -293,9 +296,9 @@ Time-dependent modules (preflight cache, transaction polling) accept an optional
 ### Pipeline step observability (`onStep`)
 
 `invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
-exactly as before — the hook is pure observability and the SDK itself never
-logs anything (and takes no logger dependency; what you do with the events is
-up to you):
+exactly as before — the hook is pure observability and writes nothing itself
+(what you do with the events is up to you; for the SDK's own diagnostics see
+[Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask)):
 
 ```ts
 const outcome = await invoke({
@@ -303,7 +306,6 @@ const outcome = await invoke({
   source,
   call,
   networkPassphrase,
-  expectedNetwork: "Test SDF Network ; September 2015",
   guardAuth,
   onStep(step) {
     // consumer decides how to display/log the event
@@ -326,9 +328,10 @@ a full `probe → sign → simulate → broadcast` sequence per attempt, each ta
 with its `attempt` index), and **callback exceptions are isolated**: a throwing
 `onStep` never breaks the pipeline, never turns a successful invoke into a
 failure, and never masks the original pipeline error — callback errors are
-swallowed silently, since the SDK is logger-agnostic and has no sink to report
-them to. Step names come from the same shared vocabulary the dry-run trace
-uses (`TRACE_STEP_NAMES`), so consumers of either see identical stage names.
+swallowed silently, because the callback is the caller's own code and not the
+SDK's sink to report through. Step names come from the same shared vocabulary
+the dry-run trace uses (`TRACE_STEP_NAMES`), so consumers of either see
+identical stage names.
 
 The LangChain adapter exposes the same capability:
 
@@ -341,6 +344,50 @@ const middleware = createLangChainGuardMiddleware({
   },
 });
 ```
+
+### Optional logging: the SDK is silent unless you ask
+
+A library that prints pollutes its host's logging pipeline — structured logs,
+level filtering, redirection — so **the SDK writes nothing by default.** The
+audit behind that claim, run for this change: `src/` contained exactly one
+`console.*` call, an env-gated debug dump in the invoke pipeline
+(`SAG_DEBUG_RESOURCES=1`). It is gone, and its description now goes to an
+injected logger, or nowhere. A unit test scans `src/` for console calls and
+direct stdout/stderr writes, so a new one fails `npm test` rather than quietly
+appearing in a host's output.
+
+What the SDK knows is still available, through an optional `logger` on every
+config that has a decision point — `PreFlightInterceptor`, `CostPreChecker`,
+`GuardTelemetryListener` and `invoke()`. Pass any object with the four levels;
+`console` itself satisfies the interface, as does a pino or winston child
+logger. Each call gets a complete message plus optional structured detail, so a
+logger that ignores the detail still reads well:
+
+```ts
+import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+const interceptor = new PreFlightInterceptor({
+  server,
+  networkPassphrase,
+  guard,
+  agent,
+  source,
+  logger: {
+    debug: (message, meta) => log.debug({ ...meta }, message), // stages, cache hits, retries
+    info: (message, meta) => log.info({ ...meta }, message), // a guard refusal
+    warn: (message, meta) => log.warn({ ...meta }, message), // undetermined, fee ceiling, coverage gap
+  },
+});
+
+const decision = await interceptor.check(call); // same verdict, same fees — now audible
+```
+
+A level the host omits is dropped rather than routed elsewhere, and a level that
+throws is isolated: a broken sink cannot turn an admissible verdict into an
+error, change a retry count, or fail a broadcast. Logging is observability, and
+observability never decides whether a transaction runs. `logger: console` is
+the one-liner that restores the removed `SAG_DEBUG_RESOURCES=1` behaviour
+deliberately, instead of a library making that choice for its host.
 
 ### Framework Middleware (LangChain & ElizaOS)
 
@@ -400,7 +447,26 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
 - **Framework adapters**:
   - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
   - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
+  - MCP: [`guardMcpToolHandler`](docs/examples/mcp.md) wraps a Model Context Protocol tool handler (`registerTool` / `tool` / `setRequestHandler(CallToolRequestSchema)`), and [`guardMcpCallTool`](docs/examples/mcp.md) wraps a client's `callTool` before the request leaves the process. A refusal is returned as an `isError: true` result and the tool body never runs. See [the MCP integration example](docs/examples/mcp.md).
   - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency.
+
+#### Operator alerting on every halt (`onBlocked`)
+
+A refusal is visible to the agent (its tool result says so), but not to the human watching dashboards — telemetry is a separate opt-in. Every adapter takes an optional `onBlocked` callback that fires once per halt, so a refusal can be wired to a webhook, log, or alert channel:
+
+```ts
+const middleware = createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall,
+  onBlocked: ({ adapter, kind, reason, call, explanation }) => {
+    console.warn(`[${adapter}] ${kind}: ${reason ?? "undetermined"} on ${call.fn} — ${explanation}`);
+  },
+});
+```
+
+The payload is the same on every adapter (`{ adapter, kind, reason, call, explanation }`): `kind` is `"blocked"` when the guard refused and `"undetermined"` when enforcement could not decide (in which case `reason` is `null` and `explanation` carries the failure detail — the halt still happens, because the adapter fails closed). The callback is called *after* the halt is decided and its errors are logged and swallowed, so a broken alerting sink can never turn a refusal into an executed action or a thrown error. Omit `onBlocked` for exactly the pre-existing behavior.
+
+> **ElizaOS note (0.2.x):** the ElizaOS adapter previously passed the raw `PreFlightDecision` to `onBlocked`; it now receives this structured payload, matching LangChain and MCP. Read `info.reason` / `info.explanation` (or `info.kind`) instead of `decision.reason` / `decision.explanation`.
 
 ### Policy validation before broadcast (validateGuardPolicy)
 
@@ -503,7 +569,6 @@ const debug = await invoke({
   source,
   call: blockedTransferCall,
   networkPassphrase,
-  expectedNetwork: "Test SDF Network ; September 2015",
   guardAuth: { guard, agent },
   dryRun: true,
 });
@@ -565,7 +630,6 @@ inspect `outcome.error` with `instanceof` when `outcome.kind === "error"`.
 import {
   BroadcastError,
   GuardError,
-  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "stellar-agent-guard-sdk";
@@ -577,8 +641,6 @@ if (outcome.kind === "error") {
     console.error("enforcement could not be determined");
   } else if (outcome.error instanceof BroadcastError) {
     console.error("submission failed", outcome.error.transactionHash);
-  } else if (outcome.error instanceof NetworkMismatchError) {
-    console.error("wrong network", outcome.error.expected, "vs", outcome.error.actual);
   } else if (outcome.error instanceof GuardError) {
     console.error(outcome.error.message);
   }
@@ -602,15 +664,36 @@ The one intentional behavior change is for callers already using `dryRun: true`:
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
 documented above. Non-dry-run callers keep their existing outcome shapes.
 
-### Network interlock (`expectedNetwork`)
+### Keep the dead-man switch alive (`startHeartbeat`)
 
-`PreFlightInterceptor`, `invoke()`, and the shared transaction config accept an optional
-`expectedNetwork: NetworkPassphrase` (or `network: 'testnet' | 'mainnet' | 'futurenet'`).
-When set, the SDK fetches the RPC server's network passphrase at construction (or first
-use) and fails with a typed `NetworkMismatchError` naming both the expected and actual
-passphrases if they differ. When unset, behavior is exactly the legacy unchecked path —
-documented as **not recommended**. The interlock is a guardrail, not a sandbox: an RPC
-server that lies about its passphrase is not defended against.
+An agent that stops heartbeating freezes. `startHeartbeat` schedules the `heartbeat()` calls and makes the failure modes visible instead of silent — an ad-hoc `setTimeout` loop drops a beat on an event-loop stall and turns an RPC blip into an unhandled rejection.
+
+```ts
+import { startHeartbeat } from "stellar-agent-guard-sdk";
+
+const hb = await startHeartbeat({
+  server,
+  guard: GUARD_ID,
+  signer: agentKeypair,        // Keypair or AgentSigner
+  intervalMs: 30_000,
+  maxSkewMs: 2_000,            // tolerated drift before a beat counts as missed
+  onBeat: ({ lateMs }) => { if (lateMs > 2_000) alert("heartbeat late"); },
+  onError: (error) => logger.error("heartbeat failed", error),
+  graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
+});
+
+// on shutdown:
+await hb.stop();
+```
+
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
+- A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
+
+The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
 ## API Reference
 
@@ -620,7 +703,6 @@ server that lies about its passphrase is not defended against.
 
 - `PreFlightInterceptor`
   - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
-  - Pass `expectedNetwork` to bind the interceptor to an expected network passphrase; mismatch throws `NetworkMismatchError`.
   - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
@@ -629,7 +711,8 @@ server that lies about its passphrase is not defended against.
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
-  - Accepts `expectedNetwork`; mismatch fails with `NetworkMismatchError` before broadcast.
+- `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
+- `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 
 #### Fee units: stroops and XLM
 
@@ -714,12 +797,12 @@ one-shot form.
 - `invoke(options)` / `invoke({ ...options, dryRun: true })` — Broadcasts an admissible result, or returns the full pre-broadcast dry-run trace.
 - `verifyAgentSignature(publicKey, payload, signature): boolean` — Verify-only Ed25519 check against a strkey or raw 32-byte key.
 - `GuardError`, `SimulationError`, `SigningError`, `BroadcastError`, `PolicyDecodeError`, and `ContractResponseError` — Typed failure hierarchy.
-- `NetworkMismatchError` — Thrown when `expectedNetwork` does not match the RPC server's reported passphrase; carries `expected` and `actual`.
 - `decodeCheckResult(raw): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
-- `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
+- `GuardLogger`, `GuardLoggerInput`, `GuardLogMeta`, `GUARD_LOG_LEVELS` — the optional, structurally-typed log sink shared by every config above; `SILENT_LOGGER` is what a config resolves to when none is supplied. See [Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask).
+- `explainReason(reason: string | number, locale?, overrides?): string` — Human-readable explanation of contract reason codes. The default call is unchanged; the optional `locale` catalog and per-reason `overrides` localise or reword a refusal without an i18n dependency. Reason keys, titles and remediation text: [`reasonMessages` / `reasonMessagesEn`](#reason-messages-issue-96).
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 - `dmsUrgency(status: GuardStatus, policy: PolicyConfig | null, nowSecs?: bigint, warnRatio = DMS_WARN_RATIO_DEFAULT): 'ok' | 'warn' | 'expired' | 'unknown'` — Dead-man countdown urgency for dashboards: `warn` from `warnRatio` (default `DMS_WARN_RATIO_DEFAULT` = 0.8) of the grace period, `expired` once the grace has elapsed. `unknown` exactly where `deadManRemaining` is `null` (no policy, switch disabled, never heartbeated — never ≠ expired).
@@ -745,6 +828,46 @@ const recentWindow = listener.recent({ fromLedger: 4_700_000 });
 ```
 
 `recent(filter?)` returns the retained events oldest-first, filtered by any of `stream`, `reason`, `fromLedger`, `toLedger`. The buffer is FIFO and non-durable: it holds only what this listener decoded in this process, and a restart empties it. Persistence across restarts is a cursor store (tracked separately), not something this buffer pretends to provide.
+
+#### Raw events for bug reports (issue #94)
+
+When a decoded verdict looks wrong, attach the **undecoded source event** to the SDK bug report. Decoding discards it by default — the raw payload carries XDR `ScVal`s and host-shaped objects, and retaining one per event is a memory decision — so it is opt-in:
+
+```ts
+// Committed feed: opt in on the listener.
+const listener = new GuardTelemetryListener({ server, guard: GUARD_ID, includeRaw: true });
+
+// Diagnostic feed: opt in at the decode site.
+const events = guardEventsFromDiagnostics(diagnosticEvents, GUARD_ID, { includeRaw: true });
+
+// Every event then carries `raw`: the `rpc.Api.EventResponse` for a committed
+// event, or the host-shaped diagnostic object for a blocked one.
+const event = (await listener.poll({ startLedger })).events[0];
+console.error(JSON.stringify(event.raw, (_key, value) =>
+  typeof value === "bigint" ? value.toString() : value));
+```
+
+When `includeRaw` is not set, `raw` is **absent** (undefined) — nothing is retained. Leave it off in a long-running fleet; turn it on for the debugging session or the bug-report window. The `id` field stays stable either way, so a raw event can be correlated with the decoded event it produced.
+
+#### Reason messages (issue #96)
+
+`reasonMessages` exposes each reason's numeric code and its stable title/body/remediation keys, and `reasonMessagesEn` holds the built-in English text — so a dashboard can render a table, and a consumer can key its own translations, without the SDK taking an i18n dependency:
+
+```ts
+import { reasonMessages, reasonMessagesEn, explainReason } from "stellar-agent-guard-sdk";
+
+for (const [reason, { code, titleKey, remediationKey }] of Object.entries(reasonMessages)) {
+  console.log(code, reasonMessagesEn[reason as keyof typeof reasonMessagesEn].title, remediationKey);
+}
+
+// Localise one reason; a missing key falls back to English.
+explainReason("per_tx_cap_exceeded", {
+  [reasonMessages.per_tx_cap_exceeded.bodyKey]: "Le montant dépasse le plafond par transaction.",
+});
+
+// Or override individual reasons outright.
+explainReason("paused", undefined, { paused: "Agent paused by the operator." });
+```
 
 #### Ship events to your logger
 
@@ -836,7 +959,6 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
-- **Network interlock is a guardrail, not a sandbox**: `expectedNetwork` catches a misconfigured RPC URL (testnet key + mainnet RPC, or the reverse) by comparing the server's reported passphrase against the expected one. It does not defend against an RPC server that lies about its passphrase; that boundary is honest and out of scope.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
 
 ## Enforcement scope — read this before relying on the caps
@@ -848,7 +970,7 @@ This boundary is an inherent property of the platform (the auth context does not
 ## Topics
 
 `stellar`, `soroban`, `ai-agents`, `guardrails`, `custom-account`, `pre-flight`,
-`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `telemetry`, `typescript`
+`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `mcp`, `telemetry`, `typescript`
 
 ## Maintainers
 
