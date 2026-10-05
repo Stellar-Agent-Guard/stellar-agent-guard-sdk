@@ -43,6 +43,8 @@
     "agent-frameworks",
     "langchain",
     "elizaos",
+    "mcp",
+    "model-context-protocol",
     "integration-bridge",
     "dex",
     "lending",
@@ -65,7 +67,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
-    "typecheck:examples": "tsc --noEmit -p tsconfig.json",
+    "check:strict-ratchet": "node scripts/check-strict-ratchet.mjs",
     "lint": "eslint .",
     "test": "node --import tsx scripts/run-tests.ts unit",
     "test:unit": "node --import tsx scripts/run-tests.ts unit",

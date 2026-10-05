@@ -41,6 +41,7 @@ import {
   unsafeContractAddress,
   unsafeAccountAddress,
   type ContractCall,
+  type GuardBlockedInfo,
   type LangChainToolCallRequest,
   type PreFlightDecision,
 } from "../src/index.ts";
@@ -144,6 +145,7 @@ export async function runLangChainExample(serverOverride?: rpc.Server) {
   });
 
   const decisionsObserved: PreFlightDecision[] = [];
+  const blockedInfos: GuardBlockedInfo[] = [];
 
   // Create LangChain middleware
   const middleware = createLangChainGuardMiddleware({
@@ -151,6 +153,11 @@ export async function runLangChainExample(serverOverride?: rpc.Server) {
     toContractCall,
     onDecision: (_req, decision) => {
       decisionsObserved.push(decision);
+    },
+    // Operator-facing half of a refusal: wire this to a webhook/log/alert
+    // channel so the human watching dashboards learns about the block too.
+    onBlocked: (info) => {
+      blockedInfos.push(info);
     },
   });
 
@@ -202,6 +209,7 @@ export async function runLangChainExample(serverOverride?: rpc.Server) {
     blockedToolRan,
     blockedResult,
     decisionsObserved,
+    blockedInfos,
   };
 }
 
