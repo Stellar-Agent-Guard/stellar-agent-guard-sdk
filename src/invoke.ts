@@ -818,9 +818,18 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
       }
 
       if (generalAttempt >= retry.maxAttempts) {
+        logger.warn(`invoke retry budget exhausted after ${generalAttempt} attempt(s)`, {
+          attempts: generalAttempt,
+          maxAttempts: retry.maxAttempts,
+          retryable: outcome.retryable,
+        });
         return new InvokeRetryError({ attempts: generalAttempt, lastOutcome: outcome });
       }
 
+      logger.debug(
+        `retrying invoke after a retryable failure (attempt ${generalAttempt} of ${retry.maxAttempts})`,
+        { attempt: generalAttempt, maxAttempts: retry.maxAttempts, retryable: outcome.retryable },
+      );
       await retry.sleep(fullJitterDelay(generalAttempt, retry));
     }
   });
