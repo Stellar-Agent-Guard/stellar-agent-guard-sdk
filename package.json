@@ -43,6 +43,8 @@
     "agent-frameworks",
     "langchain",
     "elizaos",
+    "mcp",
+    "model-context-protocol",
     "integration-bridge",
     "dex",
     "lending",
@@ -65,6 +67,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "check:strict-ratchet": "node scripts/check-strict-ratchet.mjs",
     "lint": "eslint .",
     "test": "node --import tsx scripts/run-tests.ts unit",
     "test:unit": "node --import tsx scripts/run-tests.ts unit",
@@ -83,8 +86,7 @@
     "vendor:refresh": "node --import tsx scripts/vendor-fixtures.ts",
     "policy-schema:bootstrap": "node --import tsx -e \"import { bootstrapAheadOfUpstream } from './scripts/vendor-fixtures.ts'; import { readFileSync } from 'node:fs'; const r = bootstrapAheadOfUpstream(readFileSync('scripts/policy-schema.bootstrap.json', 'utf8')); console.log('vendored', r.artifact.outputPath, 'sha256:' + r.digest);\"",
     "capture:rpc-fixtures": "node --import tsx scripts/capture-rpc-fixtures.ts",
-    "prepublishOnly": "npm run build",
-    "check:readme-snippets": "node --import tsx scripts/check-readme-snippets.ts"
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^17.0.1"

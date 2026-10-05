@@ -122,7 +122,7 @@ describe("ElizaOS Action.validate adapter against the live guard", () => {
     const validate = createGuardValidator({
       interceptor,
       toContractCall: (_message, state) => toContractCall((state ?? {}) as { to?: unknown; amount?: unknown }),
-      onBlocked: (decision) => blocked.push(decision.kind === "blocked" ? decision.reason : decision.kind),
+      onBlocked: (info) => blocked.push(info.reason ?? info.kind),
     });
 
     const verdict = await validate({}, {}, {
