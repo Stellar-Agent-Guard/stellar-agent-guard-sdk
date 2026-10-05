@@ -21,6 +21,7 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  AdapterConfigError,
   BroadcastError,
   ContractResponseError,
   GuardError,
@@ -141,22 +142,20 @@ export {
   InvokeRetryError,
   invoke,
   topicSymbols,
-} from "./invoke.ts";
-
-export type {
-  EnforcementOutcome,
-  GuardAuthorization,
-  InvokeDryRunResult,
-  InvokeDryRunStepName,
-  InvokeDryRunVerdict,
-  InvokeErrorCause,
-  InvokeErrorOutcome,
-  InvokeOptions,
-  InvokeOutcome,
-  InvokePipelineStep,
-  InvokeParams,
-  InvokeStepEvent,
-  RetryableInvokeFailure,
+  type EnforcementOutcome,
+  type FeeBumpConfig,
+  type GuardAuthorization,
+  type InvokeDryRunResult,
+  type InvokeDryRunStepName,
+  type InvokeDryRunVerdict,
+  type InvokeErrorCause,
+  type InvokeErrorOutcome,
+  type InvokeOptions,
+  type InvokeOutcome,
+  type InvokePipelineStep,
+  type InvokeParams,
+  type InvokeStepEvent,
+  type RetryableInvokeFailure,
 } from "./invoke.ts";
 
 export {
@@ -253,6 +252,7 @@ export {
   describeSimulationResources,
   describeSubmissionFailure,
   describeTransactionResult,
+  isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
@@ -308,7 +308,10 @@ export {
 } from "./heartbeat.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
-// so neither framework is a dependency of this package.
+// so neither framework is a dependency of this package. Options are validated
+// at construction time (see `src/adapters/validate.ts`), so a misconfigured
+// adapter throws `AdapterConfigError` before the first action rather than
+// failing mid-loop.
 export {
   createLangChainGuardMiddleware,
 } from "./adapters/langchain.ts";
@@ -329,6 +332,14 @@ export type {
   ElizaGuardOptions,
   ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+export {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./adapters/validate.ts";
 
 export {
   createVercelAIGuard,
