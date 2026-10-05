@@ -40,7 +40,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 
 - **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal; an opt-in short-lived cache can reduce repeated simulation RPC calls within the current ledger.
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
-- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
+- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded retry for stale ledger resource limits (`scecExceededLimit`) and minimum-fee rejections (`tx_insufficient_fee`).
 - **Framework adapters**:
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
@@ -188,11 +188,17 @@ if (!isContractAddress(userInput)) {
 
 #### Throw vs. Verdict Contract
 
+The same doctrine extends to adapter construction: **misconfiguration throws at construction; blocked actions return/throw as documented.** Adapter factories (`createLangChainGuardMiddleware`, `createGuardValidator`) validate their options synchronously before returning, so a missing `toContractCall`, an interceptor lacking a `check` method, or an empty options object fails fast at setup — never mid-loop on the first live tool call. See [Adapter options validation](#adapter-options-validation-fail-fast-at-construction) below.
+
 Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
 
 - **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
 - **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
 - Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+
+### Adapter options validation (fail-fast at construction)
+
+Adapter factories validate their options **synchronously at construction time**, before any action runs. A misconfigured adapter throws a typed `GuardError` (subclass `AdapterConfigError`) naming the offending field and its expected shape — it never surfaces as a mid-loop failure on the first production tool call.
 
 ### Fidelity & limits
 
@@ -1018,7 +1024,7 @@ This boundary is an inherent property of the platform (the auth context does not
 
 - GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
-- Security disclosures: see [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md) (Telegram, the Stellar ecosystem norm)
+- Security disclosures: see the local [SECURITY.md](SECURITY.md) for SDK issues; contract/protocol issues and deployed-instance incidents go to the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md)
 
 ## License
 
