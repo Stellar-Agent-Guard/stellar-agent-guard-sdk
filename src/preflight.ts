@@ -32,12 +32,15 @@ import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.
 import {
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
-  type PolicyConfig,
+  type ContractAddress,
+  type ReadonlyPolicyConfig,
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
+import { systemClock, type Clock } from "./clock.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -220,7 +223,7 @@ export interface CheckBatchOptions {
    * Policy configuration to enforce against during batch staging.
    * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
    */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
 
   /**
    * Initial committed amount already spent in the current rolling window.
@@ -293,7 +296,7 @@ export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
-  guard: string;
+  guard: ContractAddress;
   /**
    * The key registered as the account's agent, used to sign the auth entry: an
    * `AgentSigner` for any signing setup, or a plain Ed25519 `Keypair` for the
@@ -305,12 +308,26 @@ export interface PreFlightConfig {
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
   accountSigners?: Keypair[];
   /** Optional policy to use for batch staging (otherwise fetched from ledger). */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
    */
   cache?: PreFlightCacheOptions;
+  /**
+   * Optional log sink for this interceptor's decision points: each verdict, and
+   * every cache hit, store and invalidation.
+   *
+   * Omitted — the default — the interceptor says nothing at all. A verdict is
+   * still returned exactly as before; the logger changes only whether anyone is
+   * told about it.
+   */
+  logger?: GuardLoggerInput | undefined;
+  /**
+   * Inject a custom clock for time-dependent operations (cache TTL, etc.).
+   * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
+   */
+  clock?: Clock;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -370,12 +387,16 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  private readonly logger: GuardLogger;
+  private readonly clock: Clock;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
+    this.clock = config.clock ?? systemClock;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
+    this.logger = resolveLogger(config.logger);
   }
 
   private validateCacheOptions(): void {
@@ -424,7 +445,7 @@ export class PreFlightInterceptor {
       return null;
     }
 
-    const now = Date.now();
+    const now = this.clock.now();
     for (const [key, entry] of this.cache) {
       if (entry.ledger !== ledger || entry.expiresAt <= now) this.cache.delete(key);
     }
@@ -439,13 +460,20 @@ export class PreFlightInterceptor {
   /** Clear all cached verdicts, or only entries for `call` when provided. */
   invalidate(call?: ContractCall): void {
     if (!call) {
+      const cleared = this.cache.size;
       this.cache.clear();
+      this.logger.debug("pre-flight cache invalidated", { scope: "all", cleared });
       return;
     }
     const prefix = `${this.namespace}:${callFingerprint(call)}:`;
+    let cleared = 0;
     for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) this.cache.delete(key);
+      if (key.startsWith(prefix)) {
+        this.cache.delete(key);
+        cleared += 1;
+      }
     }
+    this.logger.debug("pre-flight cache invalidated", { scope: "call", cleared });
   }
 
   /**
@@ -463,8 +491,18 @@ export class PreFlightInterceptor {
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {
-        const now = Date.now();
+        const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
+          // A hit is worth a line of its own: it is the one verdict the caller
+          // gets without a simulation, so a host reading logs needs to be able
+          // to tell a reused verdict from a fresh one.
+          this.logger.debug("pre-flight verdict served from cache", {
+            guard: this.config.guard,
+            contract: call.contract,
+            fn: call.fn,
+            kind: cached.decision.kind,
+            ledger: context.ledger,
+          });
           return cached.decision;
         }
         this.cache.delete(context.key);
@@ -478,6 +516,7 @@ export class PreFlightInterceptor {
       guardAuth: { guard: this.config.guard, agent: this.config.agent },
       ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
       ...(options?.onStep ? { onStep: options.onStep } : {}),
+      ...(this.config.logger ? { logger: this.config.logger } : {}),
     });
 
     let decision: PreFlightDecision;
@@ -544,6 +583,37 @@ export class PreFlightInterceptor {
         ledger: context.ledger,
         expiresAt: context.expiresAt,
       });
+      this.logger.debug("pre-flight verdict cached", {
+        kind: decision.kind,
+        ledger: context.ledger,
+      });
+    }
+
+    // The verdict itself, at the level its severity deserves: a refusal is the
+    // guardrail working and is reported as information, a decision that could
+    // not be reached is a degraded state and is reported as a warning.
+    if (decision.kind === "blocked") {
+      this.logger.info(`guard refused the call (${decision.reason})`, {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+        reason: decision.reason,
+      });
+    } else if (decision.kind === "undetermined") {
+      this.logger.warn(`pre-flight could not determine enforcement: ${decision.detail}`, {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+      });
+    } else {
+      this.logger.debug("call admitted by the guard", {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+        // A string, not the raw bigint: a JSON logger cannot serialise one.
+        estimatedResourceFee: decision.estimatedResourceFee.toString(),
+        footprintKeys: decision.footprintKeys,
+      });
     }
     return decision;
   }
@@ -589,7 +659,7 @@ export class PreFlightInterceptor {
     }
 
     // Resolve policy and initial window spend for staging
-    let policy: PolicyConfig | null = options?.policy ?? this.config.policy ?? null;
+    let policy: ReadonlyPolicyConfig | null = options?.policy ?? this.config.policy ?? null;
     let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
 
     if (policy === null || options?.initialWindowSpent === undefined) {

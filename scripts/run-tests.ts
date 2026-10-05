@@ -30,6 +30,7 @@ import {
   TEST_PROJECTS,
   type TestProject,
 } from "../tests/test.config.ts";
+import { validatePhase2Env } from "../tests/integration/harness.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -95,6 +96,14 @@ function main(): void {
   if (plan.files.length === 0) {
     console.error(`no test files matched for project "${name}"`);
     process.exit(1);
+  }
+
+  if (plan.needsEnvFile) {
+    const envValidation = validatePhase2Env();
+    if (!envValidation.ok) {
+      console.error(envValidation.message);
+      process.exit(1);
+    }
   }
 
   console.log(`running ${plan.label} (${plan.files.length} file(s), node ${process.version})`);

@@ -25,6 +25,12 @@ import {
   SimulationError,
 } from "./errors.ts";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "./events.ts";
+import {
+  SILENT_LOGGER,
+  resolveLogger,
+  type GuardLogger,
+  type GuardLoggerInput,
+} from "./logger.ts";
 import type { TraceStepName, TraceStepStatus } from "./trace.ts";
 import {
   SIG_EXPIRATION_LEDGERS,
@@ -262,11 +268,25 @@ export interface InvokeParams {
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
    * including every attempt of the built-in stale-ledger retry. Omitting it
-   * leaves `invoke()` exactly as it was before this hook existed — the SDK
-   * itself never logs and takes no logger dependency; what a consumer does
-   * with the events is entirely the consumer's business.
+   * leaves `invoke()` exactly as it was before this hook existed; what a
+   * consumer does with the events is entirely the consumer's business.
    */
   onStep?: ((step: InvokeStepEvent) => void) | undefined;
+  /**
+   * Optional log sink. Omitted — the default — `invoke()` writes nothing
+   * anywhere: no console output, no stdout or stderr, no implicit
+   * process-level logger.
+   *
+   * Supplying one reports the same decision points `onStep` exposes (each stage
+   * attempt), plus the retry loop's attempts and the terminal outcome, at
+   * levels a host can filter: stage attempts and retries at `debug`, a guard
+   * refusal at `info`, anything that ended without a verdict at `warn`.
+   *
+   * A logger never changes behaviour — outcomes, retry counts and timings are
+   * identical with and without one — and a logger that throws is isolated, so
+   * a broken sink cannot decide whether a transaction runs.
+   */
+  logger?: GuardLoggerInput | undefined;
 }
 
 /**
@@ -293,10 +313,9 @@ export interface InvokeStepEvent {
 /**
  * Emit one step event to the caller's `onStep` callback.
  *
- * The callback is the caller's, and this SDK stays logger-agnostic — there is
- * deliberately no logger dependency to fall back on — so a throwing callback
- * is swallowed and the pipeline carries on: observability must never decide
- * whether a transaction runs. Two cases matter. A callback throw on the happy
+ * The callback is the caller's, and it is not routed anywhere: a `logger` is a
+ * separate sink, so a throwing callback is swallowed and the pipeline carries
+ * on: observability must never decide whether a transaction runs. Two cases matter. A callback throw on the happy
  * path must not turn a successful stage into a failed one. And when the stage
  * itself failed, the original error must survive untouched: swallowing here
  * means the callback's error simply vanishes, and `invoke()` rethrows the real
@@ -310,8 +329,38 @@ function emitStep(
   try {
     hook(event);
   } catch {
-    /* logger-agnostic policy: a broken consumer must not break the pipeline */
+    /* a broken consumer must not break the pipeline */
   }
+}
+
+/**
+ * The stage hook the pipeline actually uses: the caller's `onStep` and, when a
+ * logger was injected, a `debug` line for the same event.
+ *
+ * Returns `undefined` when neither sink is supplied, which is what keeps the
+ * default path free of timing work: `withStepTiming` runs the stage directly
+ * on `undefined`, adding no timers and emitting nothing. The two sinks are
+ * independent — a host may supply either, both, or neither — and a logger is
+ * compared against `SILENT_LOGGER` by identity so a caller that passed no
+ * logger is not taxed for a sink that writes nothing.
+ */
+function stepHook(
+  hook: ((step: InvokeStepEvent) => void) | undefined,
+  logger: GuardLogger,
+): ((step: InvokeStepEvent) => void) | undefined {
+  const logs = logger !== SILENT_LOGGER;
+  if (!hook && !logs) return undefined;
+  return (step: InvokeStepEvent): void => {
+    emitStep(hook, step);
+    if (logs) {
+      logger.debug(`pipeline step ${step.name} ${step.status}`, {
+        step: step.name,
+        status: step.status,
+        durationMs: step.durationMs,
+        attempt: step.attempt,
+      });
+    }
+  };
 }
 
 /**
@@ -677,6 +726,7 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   const sourceKey = await params.source.publicKey();
   return withAccountQueue(params.server, sourceKey, async () => {
     const retry = resolveRetryOptions(params.retry);
+    const logger = resolveLogger(params.logger);
     let attempts = 0;
 
     while (true) {
@@ -685,14 +735,57 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
       const outcome = await invokePipeline(params, attempts - 1);
 
       if (outcome.kind !== "error" || outcome.retryable === undefined) {
+        logTerminalOutcome(logger, outcome);
         return outcome;
       }
       if (attempts >= retry.maxAttempts) {
+        logger.warn(`invoke retry budget exhausted after ${attempts} attempt(s)`, {
+          attempts,
+          maxAttempts: retry.maxAttempts,
+          retryable: outcome.retryable,
+        });
         return new InvokeRetryError({ attempts, lastOutcome: outcome });
       }
 
+      logger.debug(
+        `retrying invoke after a retryable failure (attempt ${attempts} of ${retry.maxAttempts})`,
+        { attempt: attempts, maxAttempts: retry.maxAttempts, retryable: outcome.retryable },
+      );
       await retry.sleep(fullJitterDelay(attempts, retry));
     }
+  });
+}
+
+/**
+ * Report a terminal pipeline outcome at the level its severity deserves.
+ *
+ * Terminal means "this is the answer the caller is about to receive". A failure
+ * the retry loop is still going to retry is announced by the loop's own retry
+ * line instead, so one failure is never reported twice and a retry that
+ * eventually succeeds does not leave a warning behind.
+ */
+function logTerminalOutcome(logger: GuardLogger, outcome: InvokeOutcome): void {
+  // Unreachable from `invoke()` — a dry run returns before the retry loop — but
+  // the outcome union is shared, and a dry run is not a submission to report.
+  if (outcome.kind === "dry_run") return;
+  if (outcome.kind === "blocked") {
+    logger.info(`guard refused the call (${outcome.reason ?? "unstated"})`, {
+      reason: outcome.reason,
+      // A post-broadcast refusal was charged; a pre-broadcast one was free, and
+      // that distinction is the whole point of the pipeline order.
+      charged: outcome.charged === true,
+      transactionHash: outcome.transactionHash ?? null,
+    });
+    return;
+  }
+  if (outcome.kind === "error") {
+    logger.warn(`invoke ended without a verdict: ${outcome.detail}`, {
+      cause: outcome.cause ?? null,
+    });
+    return;
+  }
+  logger.debug("call admitted and submitted", {
+    transactionHash: outcome.submission?.hash ?? null,
   });
 }
 
@@ -828,6 +921,7 @@ export type EnforcementOutcome =
 /** One attempt: simulate → sign → enforce → submit. No retry logic lives here. */
 async function invokePipeline(params: InvokeParams, attempt: number): Promise<InvokeOutcome> {
   const { server } = params;
+  const onStep = stepHook(params.onStep, resolveLogger(params.logger));
   const enforced = await enforceCall(params, attempt);
   if (enforced.kind === "error") {
     // The guard never made a decision, so this is `undetermined` and not
@@ -872,7 +966,7 @@ async function invokePipeline(params: InvokeParams, attempt: number): Promise<In
   let submission: SubmissionResult;
   try {
     submission = await withStepTiming(
-      params.onStep,
+      onStep,
       { name: "broadcast", attempt },
       () =>
         submitAndPoll(server, assembled.transaction, [params.source], {
@@ -950,6 +1044,8 @@ export async function enforceCall(
   attempt: number = 0,
 ): Promise<EnforcementOutcome> {
   const { server, source, call, networkPassphrase } = params;
+  const logger = resolveLogger(params.logger);
+  const onStep = stepHook(params.onStep, logger);
 
   let operation: xdr.Operation;
   let expiration: number;
@@ -986,7 +1082,7 @@ export async function enforceCall(
       guard: params.guardAuth?.guard ?? null,
     });
     first = await withStepTiming(
-      params.onStep,
+      onStep,
       { name: "probe", attempt },
       () => server.simulateTransaction(probe),
       (response) => rpc.Api.isSimulationError(response),
@@ -1161,7 +1257,7 @@ export async function enforceCall(
 
   let signedAuth: xdr.SorobanAuthorizationEntry[];
   try {
-    signedAuth = await withStepTiming(params.onStep, { name: "sign", attempt }, signRequiredAuth);
+    signedAuth = await withStepTiming(onStep, { name: "sign", attempt }, signRequiredAuth);
   } catch (error) {
     // A signing-stage shape refusal is a result, not an exception: keep
     // reporting it exactly as the pipeline always has, word for word, with the
@@ -1186,7 +1282,7 @@ export async function enforceCall(
   let enforced: rpc.Api.SimulateTransactionResponse;
   try {
     const simulated = await withStepTiming(
-      params.onStep,
+      onStep,
       { name: "simulate", attempt },
       async () => {
         const authorized = Operation.invokeContractFunction({
@@ -1220,8 +1316,29 @@ export async function enforceCall(
       diagnosticEvents: [],
     };
   }
-  if (process.env["SAG_DEBUG_RESOURCES"] === "1") {
-    console.log(`[debug] enforced simulation:\n${describeSimulationResources(enforced, params.guardAuth?.guard ?? null)}`);
+  // This used to be an env-gated write straight to the host's stdout
+  // (`SAG_DEBUG_RESOURCES=1`). The description is the same; it now reaches an
+  // injected logger and otherwise goes nowhere, because a library does not get
+  // to decide where an application's output goes. The README's logging section
+  // shows the one-liner that deliberately restores the old behaviour.
+  //
+  // Two guards around it. The description is only rendered when a logger is
+  // attached, so the default path pays nothing for output nobody will read — and
+  // it is isolated, because rendering parses the simulation's XDR and a
+  // description that cannot be produced is not a reason to fail a call whose
+  // simulation just succeeded.
+  if (logger !== SILENT_LOGGER) {
+    try {
+      logger.debug(describeSimulationResources(enforced, params.guardAuth?.guard ?? null), {
+        guard: params.guardAuth?.guard ?? null,
+        stage: "simulate",
+      });
+    } catch {
+      logger.debug("enforced simulation succeeded (resource description unavailable)", {
+        guard: params.guardAuth?.guard ?? null,
+        stage: "simulate",
+      });
+    }
   }
   if (rpc.Api.isSimulationError(enforced)) {
     // NOTE: a simulation failure here is not automatically a block — see the

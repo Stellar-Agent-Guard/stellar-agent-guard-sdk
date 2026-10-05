@@ -1,0 +1,115 @@
+{
+  "_provenance": {
+    "sourceDoc": "stellar-agent-guard-contracts/SPEC.md §8",
+    "description": "Vendored rule-id vocabulary for granular policy validation failures matching SPEC §8 rules.",
+    "status": "hand-listed pending contract-level granular validation issue; swap-in point documented",
+    "updatedAt": "2026-09-29T20:55:00.000Z"
+  },
+  "rules": [
+    {
+      "id": "invalid_type",
+      "specSection": "§8 (type integrity)",
+      "description": "Policy object or property has wrong primitive or structural type."
+    },
+    {
+      "id": "missing_field",
+      "specSection": "§8 (completeness)",
+      "description": "Required policy field is missing, null, or undefined."
+    },
+    {
+      "id": "invalid_address",
+      "specSection": "§8 (Stellar address format)",
+      "description": "Address string does not decode to a valid Stellar strkey."
+    },
+    {
+      "id": "negative_amount",
+      "specSection": "§8 bullet 1",
+      "description": "Amounts, caps, durations, or timestamps are negative (< 0)."
+    },
+    {
+      "id": "window_requires_secs",
+      "specSection": "§8 bullet 2",
+      "description": "window_cap != 0 requires window_secs != 0."
+    },
+    {
+      "id": "recipient_cap_requires_window",
+      "specSection": "§8 bullet 3",
+      "description": "A per-recipient cap > 0 requires window_secs != 0."
+    },
+    {
+      "id": "active_window_inverted",
+      "specSection": "§8 bullet 4",
+      "description": "active_until must be 0 (never expires) or strictly greater than active_from."
+    },
+    {
+      "id": "empty_vector_noop",
+      "specSection": "§8 bullet 5",
+      "description": "Assets, recipients (with allow_any_recipient false), or protocols list is empty."
+    },
+    {
+      "id": "duplicate_asset",
+      "specSection": "§8 bullet 6",
+      "description": "Duplicate addresses within assets list are rejected."
+    },
+    {
+      "id": "duplicate_recipient",
+      "specSection": "§8 bullet 6",
+      "description": "Duplicate addresses within recipients list are rejected."
+    },
+    {
+      "id": "duplicate_blocked_recipient",
+      "specSection": "§8 bullet 6",
+      "description": "Duplicate addresses within blocked_recipients list are rejected."
+    },
+    {
+      "id": "duplicate_protocol",
+      "specSection": "§8 bullet 6",
+      "description": "Duplicate contract addresses within protocols list are rejected."
+    },
+    {
+      "id": "duplicate_protocol_function",
+      "specSection": "§8 (protocol rules)",
+      "description": "Duplicate function names in a protocol rule fns list are rejected."
+    },
+    {
+      "id": "empty_protocol_functions",
+      "specSection": "§8 (protocol rules)",
+      "description": "Protocol rule fns list is an empty array; use null to allow any function."
+    },
+    {
+      "id": "duplicate_recipient_window_cap",
+      "specSection": "§8 bullet 7",
+      "description": "Duplicate recipients within recipient_window_caps are rejected."
+    },
+    {
+      "id": "max_recipient_entries_exceeded",
+      "specSection": "§8 bullet 8",
+      "description": "Recipient lists exceed MAX_RECIPIENT_ENTRIES (256)."
+    },
+    {
+      "id": "recipient_conflict",
+      "specSection": "§8 bullet 9",
+      "description": "Address appears in both recipients and blocked_recipients."
+    },
+    {
+      "id": "self_as_asset",
+      "specSection": "§8 bullet 10",
+      "description": "The contract's own address cannot appear in assets."
+    },
+    {
+      "id": "self_as_protocol",
+      "specSection": "§8 bullet 10",
+      "description": "The contract's own address cannot appear in protocols."
+    },
+    {
+      "id": "self_as_recipient",
+      "specSection": "§8 bullet 10",
+      "description": "The contract's own address cannot appear in recipients or blocked_recipients."
+    },
+    {
+      "id": "self_as_recipient_cap",
+      "specSection": "§8 bullet 10",
+      "description": "The contract's own address cannot appear in recipient_window_caps."
+    }
+  ]
+}
