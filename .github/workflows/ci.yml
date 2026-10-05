@@ -1,4 +1,6 @@
-# Supply-chain gate: dependency-review-action on PRs (advisory-based).
+# The PR-time supply-chain gate lives in `.github/workflows/dependency-review.yml`
+# (advisory-based dependency-review-action). It is deliberately separate so its
+# status check cannot confuse the required `ci` check.
 # The repo's branch-protection ruleset requires a status check named exactly
 # `ci`. The job below is named `ci` — both the job name and its `name:` key — so
 # the check this workflow reports is the one the ruleset gates on.
@@ -51,12 +53,14 @@ on:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Weekly transitive-drift check: `npm audit --omit=dev` (informational).
+    # Mondays 06:00 UTC, alongside the links sweep and Dependabot.
+    - cron: "0 6 * * 1"
 
 # Read-only: CI inspects the repo and runs tests; it never writes to it.
 permissions:
   contents: read
-  pull-requests: write
-  actions: read
 
 jobs:
   ci:
@@ -68,16 +72,6 @@ jobs:
         with:
           # Full history, so the evidence gate can diff the PR against its base.
           fetch-depth: 0
-
-      # PR-time supply-chain gate. Advisory source is GitHub-managed
-      # (github/advisory-database); update cadence is GitHub's, not ours.
-      # Blocks PRs that introduce new high/critical vulnerable dependencies.
-      - name: dependency review
-        if: github.event_name == 'pull_request'
-        uses: actions/dependency-review-action@v4
-        with:
-          fail-on-severity: high
-          comment-summary-in-pr: on-failure
 
       - uses: actions/setup-node@v7
         with:
@@ -181,4 +175,32 @@ jobs:
       # number that is never a gate.
       - name: decode-path benchmarks (informational)
         run: npm run bench
+        continue-on-error: true
+
+  # Informational only, never gating: surfaces transitive dependency drift
+  # between PRs. The PR-time enforcement point is
+  # `.github/workflows/dependency-review.yml`, and that action only sees
+  # dependencies a PR newly introduces — a package that becomes vulnerable while
+  # its version is pinned has no PR to notice it, which is what this job is for.
+  # Scheduled only (see `on.schedule`); it is not part of any merge gate.
+  audit:
+    name: npm audit (informational)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      # `--omit=dev`: production dependencies only — the published package's
+      # supply chain, not the contributor toolchain. Reads the lockfile, so no
+      # install is needed. `continue-on-error` keeps an advisory from reddening
+      # the workflow: the severity policy lives in the PR-time gate; this is
+      # drift reporting.
+      - name: npm audit --omit=dev (informational)
+        run: npm audit --omit=dev
         continue-on-error: true
