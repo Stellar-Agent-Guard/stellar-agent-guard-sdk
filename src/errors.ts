@@ -50,17 +50,63 @@ export class SigningError extends GuardError {
   }
 }
 
+export interface BroadcastFailurePayload {
+  resultXdr: string | null;
+  resultCode: string | null;
+  message: string;
+  diagnosticEvents: unknown[];
+}
+
+export interface BroadcastFailureParams {
+  attempts: number;
+  lastFee: bigint;
+  failure: BroadcastFailurePayload;
+  detail?: string | undefined;
+}
+
 /** Submission failed after assembly, or the RPC rejected the send request. */
 export class BroadcastError extends GuardError {
+  readonly kind = "error" as const;
   /** Present once the RPC has assigned a hash; absent for pre-send failures. */
   readonly transactionHash: string | null;
+  readonly attempts?: number | undefined;
+  readonly lastFee?: bigint | undefined;
+  readonly failure?: BroadcastFailurePayload | undefined;
+  readonly detail?: string | undefined;
 
   constructor(
     message: string,
+    options?: { transactionHash?: string | null; cause?: unknown },
+  );
+  constructor(params: BroadcastFailureParams);
+  constructor(
+    messageOrParams: string | BroadcastFailureParams,
     options: { transactionHash?: string | null; cause?: unknown } = {},
   ) {
-    super(message, causeOptions(options.cause));
-    this.transactionHash = options.transactionHash ?? null;
+    if (typeof messageOrParams === "string") {
+      super(messageOrParams, causeOptions(options.cause));
+      this.name = "BroadcastError";
+      this.transactionHash = options.transactionHash ?? null;
+      this.attempts = undefined;
+      this.lastFee = undefined;
+      this.failure = undefined;
+      this.detail = undefined;
+    } else {
+      const detail = messageOrParams.detail ?? messageOrParams.failure.message;
+      super(
+        `stellar-agent-guard broadcast failed: minimum fee not met after ${messageOrParams.attempts} attempt(s) (last fee: ${messageOrParams.lastFee} stroops)\n${detail}`,
+      );
+      this.name = "BroadcastError";
+      this.transactionHash = null;
+      this.attempts = messageOrParams.attempts;
+      this.lastFee = messageOrParams.lastFee;
+      this.failure = messageOrParams.failure;
+      this.detail = detail;
+    }
+  }
+
+  get error(): BroadcastError {
+    return this;
   }
 }
 
