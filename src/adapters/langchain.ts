@@ -5,7 +5,7 @@
  * the tool execution as a callback, so a middleware that returns without calling
  * `handler(request)` means the tool body never runs. That is what makes this a
  * genuine pre-execution block rather than observability. See
- * `docs/integration-hooks.md` §1 for the source-pinned signatures.
+ * `docs/integration-hooks.md` $1 for the source-pinned signatures.
  *
  * Do **not** use the older callback system (`on_tool_start` / `onToolStart`):
  * those observe a call that has already been dispatched and cannot stop it.
@@ -15,10 +15,22 @@
  * a framework in, and so it keeps working across minor framework versions. The
  * one thing it does need from the host is how to turn a tool call into a guarded
  * contract call — which is application knowledge, supplied as `toContractCall`.
+ *
+ * Options are validated at construction time (see `src/adapters/validate.ts`):
+ * a misconfigured adapter throws `AdapterConfigError` before any action runs,
+ * rather than failing mid-loop on the first tool call.
  */
 import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
+import {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./validate.ts";
+import { blockedInfoFor, runBlockedHook, type GuardBlockedHook } from "./shared.ts";
 
 /** The subset of LangChain's `ToolCallRequest` this adapter reads. */
 export interface LangChainToolCallRequest {
@@ -50,6 +62,16 @@ export interface LangChainGuardOptions {
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (request: LangChainToolCallRequest, decision: PreFlightDecision) => void;
   /**
+   * Operator alerting: called once per halt with a structured payload
+   * (`{ adapter, kind, reason, call, explanation }`), so a refusal reaches a
+   * webhook/log/dashboard rather than only the agent's transcript. Fires for a
+   * guard `blocked` verdict and for a fail-closed `undetermined` one, since both
+   * stop the tool body from running. A throwing callback is logged and
+   * swallowed — it never changes the halt. Omit it for the pre-existing
+   * behavior. See `src/adapters/shared.ts`.
+   */
+  onBlocked?: GuardBlockedHook;
+  /**
    * Optional per-call observability, forwarded to the interceptor's
    * `check()`: one event per enforcement-stage attempt (probe → sign →
    * simulate) with timing, on the same shared step vocabulary and event shape
@@ -67,6 +89,19 @@ export interface LangChainGuardOptions {
  * decides before anything else touches the call.
  */
 export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
+  const issues: AdapterConfigIssue[] = [];
+  const interceptorIssue = validateInterceptor(options.interceptor);
+  if (interceptorIssue) issues.push(interceptorIssue);
+  const toCallIssue = validateRequiredFunction("toContractCall", options.toContractCall);
+  if (toCallIssue) issues.push(toCallIssue);
+  const nameIssue = validateOptionalFunction("name", options.name);
+  if (nameIssue) issues.push(nameIssue);
+  const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
+  if (onDecisionIssue) issues.push(onDecisionIssue);
+  const onStepIssue = validateOptionalFunction("onStep", options.onStep);
+  if (onStepIssue) issues.push(onStepIssue);
+  throwAdapterConfigError("langchain", issues);
+
   const name = options.name ?? "stellar-agent-guard";
 
   return {
@@ -87,6 +122,10 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       });
       options.onDecision?.(request, decision);
       if (decision.allowed) return handler(request);
+
+      // Operator-facing half of the refusal, wired through the shared primitive
+      // so this adapter and ElizaOS cannot drift on the payload shape.
+      runBlockedHook(options.onBlocked, blockedInfoFor("langchain", call, decision));
 
       // The tool is never entered: no signing, no broadcast, no fee.
       return {

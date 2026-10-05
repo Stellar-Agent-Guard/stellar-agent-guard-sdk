@@ -15,7 +15,8 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Added
 
-None.
+- `dmsUrgency()` and `DMS_WARN_RATIO_DEFAULT`: client-side `'ok' | 'warn' | 'expired' | 'unknown'` dead-man countdown urgency, with the same edge semantics as `deadManRemaining` (#132).
+- `policyDiff()` and the `PolicyChange` type: set-aware structured diff between two policies for operator display (#131).
 
 ### Changed
 
