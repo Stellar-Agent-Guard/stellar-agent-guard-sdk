@@ -259,6 +259,37 @@ reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
 
+### Cost Pre-Checking with Policy Context
+
+```ts
+import { CostPreChecker } from "stellar-agent-guard-sdk";
+
+const checker = new CostPreChecker({
+  interceptor,
+  maxFeeStroops: 50_000n,
+  policySource: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44", // opt-in policy source
+});
+
+const result = await checker.check({
+  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  fn: "transfer",
+  args: [/* from, to, amount */],
+});
+
+console.log("Cost verdict:", result.kind); // within_budget | over_budget | blocked | undetermined
+console.log("Policy context:", result.policyContext);
+```
+
+#### Policy Context Semantics
+
+When an opt-in `policySource` (contract address or `GuardPolicy`/`PolicyConfig`) is configured in options, `CostPreCheckResult` exposes additive `policyContext`:
+
+- `perTxCapOk`: Whether the transaction fits within the policy's per-transaction cap (`true` if within cap, `false` if `per_tx_cap_exceeded`, or `null` if not determinable).
+- `windowRemainingEstimate`: Estimated remaining budget in the current rolling window. **Always `null` when the contract does not expose sufficient window state.**
+  > `null` means "not available / cannot be determined from the current contract state", not "zero remaining budget". The SDK never fabricates a zero budget.
+- `reason`: The contract's policy block reason (e.g. `"window_cap_exceeded"` or `"per_tx_cap_exceeded"`), or `null` when allowed.
+- When no policy source is configured in options, `policyContext` is `null` (no policy call is made).
+
 ### Deterministic time control in tests (Clock injection)
 
 Time-dependent operations (cache TTL, transaction polling) support optional `Clock` injection for deterministic testing without real delays.
@@ -713,8 +744,8 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
-  - `constructor(options: CostPreCheckerOptions)`
-  - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
+  - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
+  - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
