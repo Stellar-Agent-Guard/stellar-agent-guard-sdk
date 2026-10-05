@@ -120,35 +120,68 @@ const U64_MAX = 2n ** 64n - 1n;
 // rejected by the validator pre-encode (cross-repo limit sync).
 const MAX_RECIPIENT_ENTRIES = 256;
 
-const ADDRESSES = [TOKEN, GUARD, RECIPIENT] as const;
+const CONTRACT_ADDRESSES = [TOKEN, GUARD] as const;
+const RECIPIENT_ADDRESSES = [RECIPIENT] as const;
+
+/** `count` deterministic, distinct account addresses for the boundary corpus. */
+function boundaryRecipients(count: number): AccountAddress[] {
+  const out: AccountAddress[] = [];
+  for (let i = 0; i < count; i += 1) {
+    if (i === 0) {
+      out.push(RECIPIENT);
+      continue;
+    }
+    const bytes = createHash("sha256").update(`recipient-${i}`).digest().subarray(0, 32);
+    out.push(unsafeAccountAddress(StrKey.encodeEd25519PublicKey(bytes)));
+  }
+  return out;
+}
 
 /**
  * Seeded policy generator. Applies `definePolicy`-equivalent normalization
  * first (see `normalizePolicy`) so that the generated policy is exactly what
  * the SDK would hand a caller — this is what makes P2 meaningful.
  */
+const GENERATED_FN_POOL = ["transfer", "approve", "swap", "mint"] as const;
+
 function* makePolicyGenerator(seed: number): Generator<PolicyConfig> {
   const rng = makeRng(seed);
   for (let i = 0; i < PROPERTY_ITERATIONS; i += 1) {
-    const assetsCount = Math.floor(rng() * 3);
-    const recipientsCount = Math.floor(rng() * 3);
-    const protocolsCount = Math.floor(rng() * 3);
-    const assets = Array.from({ length: assetsCount }, () => pick(rng, ADDRESSES));
-    const recipients = Array.from({ length: recipientsCount }, () => pick(rng, ADDRESSES));
-    const protocols = Array.from({ length: protocolsCount }, () => ({
-      contract: pick(rng, ADDRESSES),
-      fns: rng() < 0.33 ? null : rng() < 0.5 ? [] : ["transfer", "approve"].slice(0, 1 + Math.floor(rng() * 2)),
-    }));
+    const assetsCount = 1 + Math.floor(rng() * 3);
+    const recipientsCount = 1 + Math.floor(rng() * 3);
+    const assets = Array.from({ length: assetsCount }, () => pick(rng, CONTRACT_ADDRESSES));
+    const recipients = Array.from({ length: recipientsCount }, () => pick(rng, RECIPIENT_ADDRESSES));
+    const protocols: ProtocolRule[] = [];
+    const seenContracts = new Set<string>();
+    const protocolCount = Math.floor(rng() * (CONTRACT_ADDRESSES.length + 1));
+    for (let r = 0; r < protocolCount; r += 1) {
+      const contract = pick(rng, CONTRACT_ADDRESSES);
+      if (seenContracts.has(contract)) continue;
+      seenContracts.add(contract);
+      const fns =
+        rng() < 0.25
+          ? null
+          : [
+              ...new Set(
+                Array.from({ length: 1 + Math.floor(rng() * GENERATED_FN_POOL.length) }, () =>
+                  pick(rng, GENERATED_FN_POOL),
+                ),
+              ),
+            ];
+      protocols.push({ contract, fns });
+    }
+    const windowSecs = randBigInt(rng, 0n, U64_MAX);
+    const activeFrom = randBigInt(rng, 0n, U64_MAX);
     const raw: PolicyConfig = {
       per_tx_cap: randBigInt(rng, 0n, I128_MAX),
-      window_secs: randBigInt(rng, 0n, U64_MAX),
-      window_cap: randBigInt(rng, I128_MIN, I128_MAX),
+      window_secs: windowSecs,
+      window_cap: windowSecs === 0n ? 0n : randBigInt(rng, 0n, I128_MAX),
       assets,
       protocols,
       recipients,
       allow_any_recipient: rng() < 0.5,
-      active_from: randBigInt(rng, 0n, U64_MAX),
-      active_until: rng() < 0.5 ? 0n : randBigInt(rng, 0n, U64_MAX),
+      active_from: activeFrom,
+      active_until: rng() < 0.3 ? 0n : activeFrom === U64_MAX ? 0n : activeFrom + 1n,
       paused: rng() < 0.5,
       dms_grace_secs: randBigInt(rng, 0n, U64_MAX),
     };
@@ -163,7 +196,7 @@ function* makePolicyGenerator(seed: number): Generator<PolicyConfig> {
  * you is encodable") is exercised against the SDK's actual output shape.
  */
 function normalizePolicy(p: PolicyConfig): PolicyConfig {
-  const dedupe = (xs: string[]): string[] => [...new Set(xs)];
+  const dedupe = <T>(xs: readonly T[]): T[] => [...new Set(xs)];
   return {
     ...p,
     per_tx_cap: p.per_tx_cap < 0n ? 0n : p.per_tx_cap > I128_MAX ? I128_MAX : p.per_tx_cap,
@@ -562,17 +595,7 @@ describe("policy encode/decode properties (seeded)", () => {
       [
         "list at cardinality limit",
         samplePolicy({
-          recipients: Array.from({ length: MAX_RECIPIENT_ENTRIES }, (_, i) =>
-            // Deterministic distinct addresses: rotate through the known set
-            // and pad with a derived strkey-shaped value via Address round-trip.
-            i < ADDRESSES.length
-              ? ADDRESSES[i]!
-              : new Address(
-                  Buffer.from(
-                    createHash("sha256").update(`recipient-${i}`).digest(),
-                  ).subarray(0, 32),
-                ).toString(),
-          ),
+          recipients: boundaryRecipients(MAX_RECIPIENT_ENTRIES),
         }),
       ],
     ];
@@ -588,15 +611,7 @@ describe("policy encode/decode properties (seeded)", () => {
 
     it("P2: cardinality limit+1 is rejected by the validator pre-encode", () => {
       const overLimit = samplePolicy({
-        recipients: Array.from({ length: MAX_RECIPIENT_ENTRIES + 1 }, (_, i) =>
-          i < ADDRESSES.length
-            ? ADDRESSES[i]!
-            : new Address(
-                Buffer.from(
-                  createHash("sha256").update(`recipient-${i}`).digest(),
-                ).subarray(0, 32),
-              ).toString(),
-        ),
+        recipients: boundaryRecipients(MAX_RECIPIENT_ENTRIES + 1),
       });
       const failures = validateGuardPolicy(overLimit, {
         maxRecipientEntries: MAX_RECIPIENT_ENTRIES,
@@ -1179,10 +1194,6 @@ describe("freezePolicy", () => {
  * function-name sets de-duplicated within a rule — so a failure here is encoder
  * drift, not a bad input.
  */
-const PROPERTY_SEED = 0x5eedc0de;
-const PROPERTY_ITERATIONS = 1000;
-const I128_MAX = 2n ** 127n - 1n;
-const U64_MAX = 2n ** 64n - 1n;
 
 /**
  * The committed `PolicyConfig` field list, spelled out deliberately rather than
