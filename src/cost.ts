@@ -523,9 +523,11 @@ function computePolicyContext(
  */
 export class CostPreChecker {
   private readonly config: CostPreCheckConfig;
+  private readonly logger: GuardLogger;
 
   constructor(config: CostPreCheckConfig) {
     this.config = config;
+    this.logger = resolveLogger(config.logger);
   }
 
   /** Price a call. Equivalent to `(await this.checkWithCost(call, options)).cost`. */

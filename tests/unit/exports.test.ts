@@ -52,6 +52,7 @@ describe("package module format and export-map", () => {
       "invoke",
       "enforceCall",
       "decodeAuthDecision",
+      "serializeEvent",
       "describePolicy",
       "policyToScVal",
       "GUARD_EVENT_TOPICS",

@@ -45,6 +45,8 @@ export {
   GUARD_REASONS,
   explainReason,
   isGuardReason,
+  reasonMessages,
+  reasonMessagesEn,
   reasonName,
   reasonNameFromCode,
 } from "./reasons.ts";
@@ -53,6 +55,9 @@ export type {
   GuardBlockedErrorParams,
   GuardReason,
   GuardReasonName,
+  ReasonMessage,
+  ReasonMessageCatalog,
+  ReasonMessageText,
 } from "./reasons.ts";
 
 export {
@@ -79,6 +84,11 @@ export {
   validateGuardPolicy,
 } from "./policy.ts";
 
+export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
+export { policyDiff } from "./policy-diff.ts";
+export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
+export type { DmsUrgency } from "./dms.ts";
+
 export type {
   AccountAddress,
   CheckResult,
@@ -97,7 +107,24 @@ export type {
 } from "./policy.ts";
 
 export {
+  POLICY_SCHEMA_PATH,
+  SCHEMA_DIALECT,
+  SCHEMA_RULE_ID_ANNOTATION,
+  SCHEMA_VS_CODE_RULES,
+  ruleFromAnnotation,
+  ruleForKeyword,
+  validateGuardPolicyAgainstSchema,
+} from "./policy-schema.ts";
+
+export type {
+  SchemaKeyword,
+  SchemaPolicyFailure,
+  SchemaValidationOptions,
+} from "./policy-schema.ts";
+
+export {
   decodeAuthDecision,
+  decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
 } from "./events.ts";
@@ -188,18 +215,23 @@ export {
   DEFAULT_JITTER_FRACTION,
   GuardEventRingBuffer,
   GuardTelemetryListener,
+  InMemoryCursorStore,
   computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
   guardEventsFromDiagnostics,
+  guardEventsFromFailedTransaction,
   isAllowedDecision,
   mergeGuardEventStreams,
+  serializeEvent,
   telemetryFromDecision,
+  type CursorStore,
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardEventBufferOptions,
   type GuardEventContext,
+  type GuardEventDecodeOptions,
   type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardEventStream,
@@ -267,6 +299,17 @@ export {
   type GuardWasmVerification,
 } from "./wasm.ts";
 
+export {
+  HeartbeatIntervalError,
+  startHeartbeat,
+  submitHeartbeat,
+  type HeartbeatBeat,
+  type HeartbeatHandle,
+  type HeartbeatOptions,
+  type HeartbeatSubmission,
+  type SubmitHeartbeatParams,
+} from "./heartbeat.ts";
+
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
 export {
@@ -289,3 +332,50 @@ export type {
   ElizaGuardOptions,
   ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+export {
+  createVercelAIGuard,
+  wrapToolWithGuard,
+  type VercelAIGuardOptions,
+  type VercelAIToolCallInput,
+  type VercelAIToolLike,
+} from "./adapters/vercelai.ts";
+
+export {
+  guardMcpCallTool,
+  guardMcpToolHandler,
+} from "./adapters/mcp.ts";
+
+export type {
+  McpCallTool,
+  McpGuardOptions,
+  McpToolCallRequest,
+  McpToolHandler,
+  McpToolResult,
+} from "./adapters/mcp.ts";
+
+// The operator alerting primitive every adapter shares (`onBlocked`).
+// Exported so a consumer can type its sink and build the payload itself.
+export {
+  blockedInfoFor,
+  runBlockedHook,
+} from "./adapters/shared.ts";
+
+export type {
+  BlockedHookLogger,
+  GuardAdapterName,
+  GuardBlockedHook,
+  GuardBlockedInfo,
+} from "./adapters/shared.ts";
+
+// Optional logging. `SILENT_LOGGER` is the default every config resolves to
+// when no logger is supplied: the SDK writes nothing unless a host asks.
+export {
+  GUARD_LOG_LEVELS,
+  SILENT_LOGGER,
+  resolveLogger,
+  type GuardLogger,
+  type GuardLoggerInput,
+  type GuardLogLevel,
+  type GuardLogMeta,
+} from "./logger.ts";
