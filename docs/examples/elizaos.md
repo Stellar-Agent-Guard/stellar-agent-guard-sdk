@@ -66,10 +66,9 @@ const baseAction: ElizaActionLike = {
 const action = guardAction(baseAction, {
   interceptor,
   toContractCall,
-  onBlocked: (decision) => {
-    if (decision.kind === "blocked") {
-      console.warn(`[guard refusal] ${decision.reason}: ${decision.explanation}`);
-    }
+  onBlocked: (info) => {
+    // Operator alerting: fires once per halt with { adapter, kind, reason, call, explanation }.
+    console.warn(`[guard refusal] adapter=${info.adapter} ${info.reason ?? info.kind}: ${info.explanation}`);
   },
 });
 
@@ -99,7 +98,7 @@ validate() => true (action admitted to execution set)
 
 ### Blocked Run (Captured via `onBlocked`)
 ```text
-[guard refusal] per_tx_cap_exceeded: The transfer amount exceeds the per-transaction spend limit configured for this account.
+[guard refusal] adapter=elizaos per_tx_cap_exceeded: The transfer amount exceeds the policy's per-transaction cap.
 validate() => false (action excluded from candidate pool)
 ```
 

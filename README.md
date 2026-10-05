@@ -17,11 +17,11 @@
 
 # Stellar Agent Guard — SDK
 
-<!-- 📚 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) ** -->
+<!-- 📚 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) -->
 
 **Non-custodial TypeScript SDK and pre-flight policy interception firewall for AI agents on Stellar.**
 
-An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaAOS).
+An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
 
 **Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
 
@@ -41,10 +41,21 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 - **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal; an opt-in short-lived cache can reduce repeated simulation RPC calls within the current ledger.
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
 - **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
-- `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
-- `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
-- `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
-- `GuardTelemetryListener`: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+- **Framework adapters**:
+  - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
+  - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
+  - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
+- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+
+> ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
+> guardrail — it reports what the simulation predicts the guard will do, and it
+> can be wrong if the RPC lies. It does **not** replace the contract: every
+> authorized call is enforced on broadcast by `__check_auth`, and a malicious
+> RPC can feed a fake pre-flight verdict but cannot forge the agent's signature
+> or the guard's own decision event. See
+> [`docs/threat-model.md`](docs/threat-model.md) for the full threat model
+> (verdict-inversion, stale-cache verdicts, compromised runtime, fake-RPC
+> simulation, single-dependency supply chain).
 
 ## Quick Start
 
@@ -59,17 +70,17 @@ npm install stellar-agent-guard-sdk
 ```
 
 > **Module Format & Environment Note:**
-# `stellar-agent-guard-sdk` is published strictly as **pure ESM** (`"type": "module"`) targeting **Node.js >= 24.0.0** (declared in `engines`).
-#
-# If your project or toolchain runs in CommonJS (e.g. legacy LangChain setups, Jest configs, or `.cjs` scripts), load the SGK using the dynamic `await import()` pattern:
-#
-# ```javascript
-# // CommonJS (.cjs or package without "type": "module")
-# async function run() {
-#   const { PreFlightInterceptor, CostPreChecker } = await import("stellar-agent-guard-sdk");
-#   // use interceptor, cost pre-checker, etc.
-# }
-# ```
+> `stellar-agent-guard-sdk` is published strictly as **pure ESM** (`"type": "module"`) targeting **Node.js >= 24.0.0** (declared in `engines`).
+>
+> If your project or toolchain runs in CommonJS (e.g. legacy LangChain setups, Jest configs, or `.cjs` scripts), load the SDK using the dynamic `await import()` pattern:
+>
+> ```javascript
+> // CommonJS (.cjs or package without "type": "module")
+> async function run() {
+>   const { PreFlightInterceptor, CostPreChecker } = await import("stellar-agent-guard-sdk");
+>   // use interceptor, cost pre-checker, etc.
+> }
+> ```
 
 *(Or build locally from source with Node 24+)*
 
@@ -90,11 +101,11 @@ value:
 
 ```bash
 cp .env.phase2.example .env.phase2   # then fill in the values
-npm run deploy:phase2
+npm run deploy:phase2                # or provision a fresh instance and write it for you
 npm run test:integration
 ```
 
-`tests/integration/harness.ts` validates the file up front. When it ir
+`tests/integration/harness.ts` validates the file up front. When it is
 incomplete it fails once with **every** missing key named — not one key per run,
 which would make setup a guessing game of five round trips:
 
@@ -285,7 +296,9 @@ Time-dependent modules (preflight cache, transaction polling) accept an optional
 ### Pipeline step observability (`onStep`)
 
 `invoke()` accepts an **optional** `onStep` callback. When omitted, behavior is
-*exactly* as before — the hook is pure observability and the SDK itself never logs anything (and takes no logger dependency; what you do with the events is up to you):
+exactly as before — the hook is pure observability and writes nothing itself
+(what you do with the events is up to you; for the SDK's own diagnostics see
+[Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask)):
 
 ```ts
 const outcome = await invoke({
@@ -310,11 +323,17 @@ Event shape (`InvokeStepEvent`):
 | `durationMs` | Elapsed time of **this stage attempt** in milliseconds — not the total `invoke()` duration. Always `0` on `start`. |
 | `attempt` | 0-based retry index. `0` for the first pass; `1` on the built-in stale-ledger re-run. Always present. |
 
-> **Note:** The above documentation is truncated in this file. The complete documentation including the full `onStep` section is available in the published package and on GitHub.
+The callback is optional, receives every stage attempt (a retried invoke emits
+a full `probe → sign → simulate → broadcast` sequence per attempt, each tagged
+with its `attempt` index), and **callback exceptions are isolated**: a throwing
+`onStep` never breaks the pipeline, never turns a successful invoke into a
+failure, and never masks the original pipeline error — callback errors are
+swallowed silently, because the callback is the caller's own code and not the
+SDK's sink to report through. Step names come from the same shared vocabulary
+the dry-run trace uses (`TRACE_STEP_NAMES`), so consumers of either see
+identical stage names.
 
-### Injectable transport: custom RPC Server instance
-
-All three surfaces — `PreFlightInterceptor`, `CostPreChecker`, and `invoke()` — accept a shared configuration shape that lets you either pass a pre-built `SorobanRpc.Server` instance or a URL string:
+The LangChain adapter exposes the same capability:
 
 ```ts
 const middleware = createLangChainGuardMiddleware({
@@ -326,6 +345,50 @@ const middleware = createLangChainGuardMiddleware({
 });
 ```
 
+### Optional logging: the SDK is silent unless you ask
+
+A library that prints pollutes its host's logging pipeline — structured logs,
+level filtering, redirection — so **the SDK writes nothing by default.** The
+audit behind that claim, run for this change: `src/` contained exactly one
+`console.*` call, an env-gated debug dump in the invoke pipeline
+(`SAG_DEBUG_RESOURCES=1`). It is gone, and its description now goes to an
+injected logger, or nowhere. A unit test scans `src/` for console calls and
+direct stdout/stderr writes, so a new one fails `npm test` rather than quietly
+appearing in a host's output.
+
+What the SDK knows is still available, through an optional `logger` on every
+config that has a decision point — `PreFlightInterceptor`, `CostPreChecker`,
+`GuardTelemetryListener` and `invoke()`. Pass any object with the four levels;
+`console` itself satisfies the interface, as does a pino or winston child
+logger. Each call gets a complete message plus optional structured detail, so a
+logger that ignores the detail still reads well:
+
+```ts
+import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+const interceptor = new PreFlightInterceptor({
+  server,
+  networkPassphrase,
+  guard,
+  agent,
+  source,
+  logger: {
+    debug: (message, meta) => log.debug({ ...meta }, message), // stages, cache hits, retries
+    info: (message, meta) => log.info({ ...meta }, message), // a guard refusal
+    warn: (message, meta) => log.warn({ ...meta }, message), // undetermined, fee ceiling, coverage gap
+  },
+});
+
+const decision = await interceptor.check(call); // same verdict, same fees — now audible
+```
+
+A level the host omits is dropped rather than routed elsewhere, and a level that
+throws is isolated: a broken sink cannot turn an admissible verdict into an
+error, change a retry count, or fail a broadcast. Logging is observability, and
+observability never decides whether a transaction runs. `logger: console` is
+the one-liner that restores the removed `SAG_DEBUG_RESOURCES=1` behaviour
+deliberately, instead of a library making that choice for its host.
+
 ### Framework Middleware (LangChain & ElizaOS)
 
 When deploying fleets of hundreds or thousands of autonomous agents derived from identical templates or scheduled loops, fixed poll intervals (e.g. exactly every 5s) cause all instances to poll RPC nodes in lockstep phase. This creates synchronized traffic spikes (thundering herds) against public Soroban RPC endpoints, triggering aggressive HTTP 429 rate limits and cascade backpressure errors.
@@ -334,47 +397,255 @@ When deploying fleets of hundreds or thousands of autonomous agents derived from
 
 ```ts
 // Follow event telemetry with full jitter (default)
-for await (const events of listener.w
+for await (const events of listener.watch({
+  pollIntervalMs: 5_000,
+  jitter: "full", // uniformly distributed in [4000ms, 5000ms]
+})) {
+  console.log(`Received ${events.length} guard event(s)`);
+}
+```
+
+### Aborting a watch: what cancellation does and does not cover
+
+`watch({ signal })` ends the stream — aborting is a normal exit, never a throw.
+Abort is honoured at **loop boundaries**: before the first request (an
+already-aborted listener issues no RPC call at all, not even the
+`getLatestLedger` probe that resolves a default `startLedger`), before each
+poll, and during the delay between polls. The default delay's timer is cleared
+on abort, so a stopped listener leaves no open handle behind for a Node process
+or a test suite to hang on.
 
 ```ts
-import { rpc } from "@stellar/stellar-sdk";
-import { PreFlightInterceptor, CostPreChecker, invoke } from "stellar-agent-guard-sdk";
+const controller = new AbortController();
+for await (const events of listener.watch({ signal: controller.signal })) {
+  handle(events);
+}
+// Runtime teardown, a new tool call, or a shutdown hook:
+controller.abort(); // the loop ends, and no further getEvents is issued
+```
 
-// Enterprise/agent deployments route RPC through proxies (auth headers, mTLS, latency shielding).
-// Build the Server instance with your proxy configuration before passing it in.
-const server = new rpc.Server("https://rpc-proxy.example.com", {
-  allowHttp: false,
-});
+**One limitation, stated rather than papered over: a request already in flight
+is not cancelled.** `@stellar/stellar-sdk` ^17 (the version this package
+depends on, `dependencies` in `package.json`) declares
+`getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, and
+its internal JSON-RPC `postObject` helper takes no per-request config, so there
+is no supported way to plumb a signal through to the socket. The listener
+consequently stops *issuing* requests immediately but cannot cancel one already
+sent: the worst case between `signal.abort()` and the iterator ending is **one
+request duration** — never a whole poll interval. The rejection of that
+in-flight request (or of an abort-aware `sleep`) is swallowed as teardown, so an
+aborted watch ends quietly in a `for await` loop instead of surfacing an
+`AbortError` or an unhandled rejection.
 
-// The injected instance is used verbatim — no fresh Server is constructed from a URL.
-const interceptor = new PreFlightInterceptor({
-  server,
-  networkPassphrase: "Test SDF Network ; September 2015",
-  guard: "CAPADGEK457RHKN4RYVUMGJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
-  agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
-  source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
-});
+Revisit this when the SDK adds per-request signals to `getEvents`; until then,
+read `signal` as *stop soon and stop asking*, not *cancel the socket*.
 
-// Or pass a URL string and the SDK will construct the Server for you:
-const interceptor2 = new PreFlightInterceptor({
-  url: "https://soroban-testnet.stellar.org",
-  networkPassphrase: "Test SDF Network ; September 2015",
-  guard: "CAPADGEK457RHKN4RYVUMGJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
-  agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
-  source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
+### Framework Middleware (LangChain & ElizaOS)
+
+Plug-and-play middleware intercepts agent actions before tools are executed:
+
+- **Framework adapters**:
+  - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
+  - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
+  - MCP: [`guardMcpToolHandler`](docs/examples/mcp.md) wraps a Model Context Protocol tool handler (`registerTool` / `tool` / `setRequestHandler(CallToolRequestSchema)`), and [`guardMcpCallTool`](docs/examples/mcp.md) wraps a client's `callTool` before the request leaves the process. A refusal is returned as an `isError: true` result and the tool body never runs. See [the MCP integration example](docs/examples/mcp.md).
+  - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency.
+
+#### Operator alerting on every halt (`onBlocked`)
+
+A refusal is visible to the agent (its tool result says so), but not to the human watching dashboards — telemetry is a separate opt-in. Every adapter takes an optional `onBlocked` callback that fires once per halt, so a refusal can be wired to a webhook, log, or alert channel:
+
+```ts
+const middleware = createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall,
+  onBlocked: ({ adapter, kind, reason, call, explanation }) => {
+    console.warn(`[${adapter}] ${kind}: ${reason ?? "undetermined"} on ${call.fn} — ${explanation}`);
+  },
 });
 ```
 
-**Mutual exclusion validation:** You must provide exactly one of `server` or `url`. Providing both throws a typed error. Providing neither throws a typed error.
+The payload is the same on every adapter (`{ adapter, kind, reason, call, explanation }`): `kind` is `"blocked"` when the guard refused and `"undetermined"` when enforcement could not decide (in which case `reason` is `null` and `explanation` carries the failure detail — the halt still happens, because the adapter fails closed). The callback is called *after* the halt is decided and its errors are logged and swallowed, so a broken alerting sink can never turn a refusal into an executed action or a thrown error. Omit `onBlocked` for exactly the pre-existing behavior.
 
-**Why inject a Server instance?**
+> **ElizaOS note (0.2.x):** the ElizaOS adapter previously passed the raw `PreFlightDecision` to `onBlocked`; it now receives this structured payload, matching LangChain and MCP. Read `info.reason` / `info.explanation` (or `info.kind`) instead of `decision.reason` / `decision.explanation`.
 
-- **Proxy routing**: Enterprise deployments route RPC through proxies that add auth headers, mTLS, or latency shielding. Configure the proxy *bufore* constructing the `SorobanRpc.Server` instance, then pass it in.
-- **Deterministic testing**: Unit tests can build fake Server objects that assert calls land on them, instead of mocking URL strings scattered throughout the test suite.
+### Policy validation before broadcast (validateGuardPolicy)
 
-**What SDK 17 actually supports**
+Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
+This provides a **fail-before-broadcast** safety rail that catches configuration errors before burning transaction fees or facing on-chain contract rejections.
 
-As of `Stellar/stellar-sdk` v17, the `SorobanRpc.Server` constructor accepts `(serverUrl: string, options?: ServerOptions)` where `ServerOptions` includes `allowHttp`. It does **not** expose a custom `fetch` function injection option. Therefore, the only lever for custom transport behavior is instance injection. To route through a proxy, configure the proxy at the HTTP agent level or via a network layer before constructing the `SorobanRpc.Server`.
+Unlike fail-fast validators, `validateGuardPolicy` returns **all** failures at once (`PolicyFailure[]`), which is critical for dashboard form UX where an operator needs to see all field-level issues simultaneously. The failure `rule` identifiers align with SPEC §8 rules:
+
+```ts
+import {
+  validateGuardPolicy,
+  type PolicyConfig,
+  type PolicyFailure,
+} from "stellar-agent-guard-sdk";
+
+const draftPolicy: PolicyConfig = {
+  per_tx_cap: 10_000n,
+  window_secs: 0n,         // Incompatible with window_cap > 0
+  window_cap: 50_000n,
+  assets: [],              // Empty assets vector is a no-op
+  protocols: [],
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  allow_any_recipient: false,
+  active_from: 1000n,
+  active_until: 500n,      // Inverted active window (active_until <= active_from)
+  paused: false,
+  dms_grace_secs: 0n,
+};
+
+const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
+  guardAddress: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+});
+
+if (failures.length > 0) {
+  for (const failure of failures) {
+    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+  }
+  // Safe-exit before encode or broadcast
+} else {
+  // Proceed with policyToScVal(draftPolicy) and broadcast
+}
+```
+
+### Policy encode/decode round trip
+
+`decodePolicy` is the canonical read-side counterpart to `policyToScVal`. It returns
+`bigint` for every integer field, keeps `ProtocolRule.fns: null` distinct from an empty
+array, normalizes Stellar addresses, and rejects missing, duplicate, unknown, unsorted, or
+wrongly typed fields with a path-bearing `PolicyDecodeError`.
+
+```ts
+import {
+  decodePolicy,
+  policyToScVal,
+  type PolicyConfig,
+} from "stellar-agent-guard-sdk";
+
+const policy: PolicyConfig = {
+  per_tx_cap: 1_000n,
+  window_secs: 60n,
+  window_cap: 150n,
+  assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
+  protocols: [
+    {
+      contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      fns: ["transfer"],
+    },
+  ],
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  allow_any_recipient: false,
+  active_from: 0n,
+  active_until: 0n,
+  paused: false,
+  dms_grace_secs: 0n,
+};
+
+const encoded = policyToScVal(policy);
+const decoded = decodePolicy(encoded); // exactly equal to policy
+```
+
+The decoder accepts the direct `ScVal::Map` returned by the deployed `policy()` read and
+also the one-element `Vec` representation used by some RPC/host surfaces for
+`Some(PolicyConfig)`. `ScVal::Void` means no policy is installed and therefore throws
+rather than fabricating a default-deny config. Canonical u64/i128 variants are range
+checked exactly; base-10 `ScVal::String` integers are accepted as a deliberate
+compatibility path for stringly-typed RPC/telemetry payloads and normalized to `bigint`.
+
+### Debug a blocked transfer with `invoke({ dryRun: true })`
+
+Dry run executes the real probe, authorization signing, and enforced-simulation path,
+then returns the verdict, diagnostics, network-derived fees, and per-stage timings. It
+stops before final transaction assembly and cannot call `sendTransaction`, so its result
+has no transaction hash or submission object.
+
+```ts
+import { invoke } from "stellar-agent-guard-sdk";
+
+const debug = await invoke({
+  server,
+  source,
+  call: blockedTransferCall,
+  networkPassphrase,
+  guardAuth: { guard, agent },
+  dryRun: true,
+});
+
+if (debug.kind === "dry_run") {
+  console.log({
+    admissible: debug.admissible,
+    verdict: debug.verdict,
+    reason: debug.reason,
+    fees: debug.fees,
+  });
+  console.table(debug.steps);
+}
+```
+
+A blocked or undetermined dry run reports an explicit all-zero **charged** fee breakdown;
+an admissible dry run reports the simulation's resource fee plus the SDK's 100-stroop
+inclusion floor. Missing, negative, malformed, unsafe-number, or out-of-u64-range fee
+payloads are `ContractResponseError` failures and remain undetermined—never free.
+`steps[].ok` describes whether a stage completed, not whether policy approved the call;
+the separate `verdict` field is the policy answer. The `probe → sign → simulate` stages
+are measured through the same `onStep` hook a live invocation uses, so a dry-run trace
+and an `onStep` trace are the same measurement of the same code.
+
+### Troubleshooting agent authentication
+
+`verifyAgentSignature` lets an agent runtime check that a signature belongs to the key it
+believes is registered before entering an agent loop. The helper is verify-only: it never
+accepts, signs with, stores, or derives a private key. Other SDK APIs continue to accept
+caller-created `Keypair` objects for transaction/authorization signing as before.
+
+```ts
+import { verifyAgentSignature } from "stellar-agent-guard-sdk";
+
+function signerMatches(
+  registeredPublicKey: string | Uint8Array,
+  hostSignaturePayload: Uint8Array,
+  signature: Uint8Array,
+): boolean {
+  return verifyAgentSignature(
+    registeredPublicKey,
+    hostSignaturePayload,
+    signature,
+  );
+}
+```
+
+`hostSignaturePayload` must be the exact 32-byte host digest covered by the signature;
+the helper verifies those bytes without re-hashing and is not SEP-53 message signing. A
+successful result proves only the key/payload/signature relationship—it does not validate
+network ID, invocation, nonce, expiration ledger, or transaction freshness.
+
+### Typed errors and 0.1.x migration
+
+All SDK-owned errors now share a `GuardError` base. `invoke()` remains result-oriented:
+inspect `outcome.error` with `instanceof` when `outcome.kind === "error"`.
+
+```ts
+import {
+  BroadcastError,
+  GuardError,
+  SigningError,
+  SimulationError,
+} from "stellar-agent-guard-sdk";
+
+if (outcome.kind === "error") {
+  if (outcome.error instanceof SigningError) {
+    console.error("agent signer is wrong or unavailable");
+  } else if (outcome.error instanceof SimulationError) {
+    console.error("enforcement could not be determined");
+  } else if (outcome.error instanceof BroadcastError) {
+    console.error("submission failed", outcome.error.transactionHash);
+  } else if (outcome.error instanceof GuardError) {
+    console.error(outcome.error.message);
+  }
+}
+```
 
 A pipeline stage that throws — a dropped RPC connection, say — is reported the same way:
 as `kind: "error"` carrying the original error as the typed error's `cause`, never as a
@@ -393,6 +664,37 @@ The one intentional behavior change is for callers already using `dryRun: true`:
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
 documented above. Non-dry-run callers keep their existing outcome shapes.
 
+### Keep the dead-man switch alive (`startHeartbeat`)
+
+An agent that stops heartbeating freezes. `startHeartbeat` schedules the `heartbeat()` calls and makes the failure modes visible instead of silent — an ad-hoc `setTimeout` loop drops a beat on an event-loop stall and turns an RPC blip into an unhandled rejection.
+
+```ts
+import { startHeartbeat } from "stellar-agent-guard-sdk";
+
+const hb = await startHeartbeat({
+  server,
+  guard: GUARD_ID,
+  signer: agentKeypair,        // Keypair or AgentSigner
+  intervalMs: 30_000,
+  maxSkewMs: 2_000,            // tolerated drift before a beat counts as missed
+  onBeat: ({ lateMs }) => { if (lateMs > 2_000) alert("heartbeat late"); },
+  onError: (error) => logger.error("heartbeat failed", error),
+  graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
+});
+
+// on shutdown:
+await hb.stop();
+```
+
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
+- A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
+
+The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
+
 ## API Reference
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`docs/deprecations.md`](docs/deprecations.md). Release process and versioning checklist: [`docs/releasing.md`](docs/releasing.md).
@@ -409,6 +711,8 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
+- `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
+- `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 
 #### Fee units: stroops and XLM
 
@@ -420,19 +724,57 @@ money-adjacent output in a security tool is not acceptable) and with no trailing
 zeros:
 
 ```ts
-import { createLangChainGuardMiddleware } from "stellar-agent-guard-sdk";
+import { formatFee } from "stellar-agent-guard-sdk";
 
-const middleware = createLangChainGuardMiddleware({
-  interceptor,
-  guard,
-  agent,
-});
+cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
+formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+
+formatFee(1n);             // "0.0000001" — one stroop
+formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 ```
 
-### Telemetry
+#### `CostPreChecker` resource breakdown
+
+Priced `within_budget` and `over_budget` results may include a `breakdown` parsed from the same Soroban simulation that produced `resourceFeeStroops`:
 
 ```ts
-import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+if (decision.kind === "within_budget" && decision.breakdown) {
+  console.log(decision.breakdown);
+  // {
+  //   instructions,       // SorobanResources.instructions
+  //   diskReadBytes,      // SorobanResources.diskReadBytes
+  //   writeBytes,         // SorobanResources.writeBytes
+  //   readOnlyEntries,    // footprint.readOnly.length
+  //   readWriteEntries,   // footprint.readWrite.length
+  //   storageEntries      // readOnlyEntries + readWriteEntries
+  // }
+}
+```
+
+`breakdown` is `undefined` when the simulation is undetermined, malformed, or missing any required resource field; the SDK never fabricates zero values. The stellar-sdk v17 Soroban resource payload has no `memBytes` field, so this API reports the actual `writeBytes`/disk resource fields rather than relabeling them as memory usage.
+
+#### One simulation per check: prefer `checkWithCost`
+
+`PreFlightInterceptor.check()` answers *may this proceed?* and
+`CostPreChecker.check()` answers *what will it cost?* — but calling both runs the
+enforced simulation **twice**, against two ledger snapshots. The extra RPC is the
+lesser problem: the fee reported for a call can then differ from the fee implied
+by the verdict that was actually enforced, so the price no longer corresponds to
+the approved decision.
+
+`CostPreChecker.checkWithCost()` returns both from a **single** simulation:
+
+```ts
+const { decision, cost } = await costChecker.checkWithCost(call);
+
+if (decision.kind === "blocked") {
+  console.log("refused:", decision.reason);        // nothing was charged
+} else if (cost.kind === "over_budget") {
+  console.log("too expensive:", formatFee(cost.totalFeeStroops), "XLM");
+} else if (decision.allowed) {
+  console.log("approved at", formatFee(cost.totalFeeStroops), "XLM");
+}
+```
 
 Prefer this over calling `interceptor.check(call)` and `costChecker.check(call)`
 in sequence. That two-call pattern still works and its types are unchanged, but
@@ -446,6 +788,7 @@ one-shot form.
   - `constructor(options: GuardTelemetryListenerOptions)`
   - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover).
   - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
+  - `serializeEvent(event: GuardEvent): string` — Canonical single-line JSON for deterministic JSON-lines log shipping. Fixed key order, drops `undefined`, keeps `null`, renders `bigint` as a decimal string. Contract: [`docs/event-schema.md`](docs/event-schema.md#canonical-json-serialization--serializeevent).
 - `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX.
 - `POLICY_RULE_IDS` — Canonical array of SPEC §8 validation rule identifiers.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct.
@@ -458,9 +801,12 @@ one-shot form.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
-- `explainReason(reason: string | number): string` — Human-readable explanation of contract reason codes.
+- `GuardLogger`, `GuardLoggerInput`, `GuardLogMeta`, `GUARD_LOG_LEVELS` — the optional, structurally-typed log sink shared by every config above; `SILENT_LOGGER` is what a config resolves to when none is supplied. See [Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask).
+- `explainReason(reason: string | number, locale?, overrides?): string` — Human-readable explanation of contract reason codes. The default call is unchanged; the optional `locale` catalog and per-reason `overrides` localise or reword a refusal without an i18n dependency. Reason keys, titles and remediation text: [`reasonMessages` / `reasonMessagesEn`](#reason-messages-issue-96).
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
+- `dmsUrgency(status: GuardStatus, policy: PolicyConfig | null, nowSecs?: bigint, warnRatio = DMS_WARN_RATIO_DEFAULT): 'ok' | 'warn' | 'expired' | 'unknown'` — Dead-man countdown urgency for dashboards: `warn` from `warnRatio` (default `DMS_WARN_RATIO_DEFAULT` = 0.8) of the grace period, `expired` once the grace has elapsed. `unknown` exactly where `deadManRemaining` is `null` (no policy, switch disabled, never heartbeated — never ≠ expired).
+- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; protocols match by contract and report `fns` changes at paths like `protocols[0].fns[1]`.
 
 #### Dashboard-style snapshot (issue #68)
 
@@ -483,13 +829,64 @@ const recentWindow = listener.recent({ fromLedger: 4_700_000 });
 
 `recent(filter?)` returns the retained events oldest-first, filtered by any of `stream`, `reason`, `fromLedger`, `toLedger`. The buffer is FIFO and non-durable: it holds only what this listener decoded in this process, and a restart empties it. Persistence across restarts is a cursor store (tracked separately), not something this buffer pretends to provide.
 
+#### Raw events for bug reports (issue #94)
+
+When a decoded verdict looks wrong, attach the **undecoded source event** to the SDK bug report. Decoding discards it by default — the raw payload carries XDR `ScVal`s and host-shaped objects, and retaining one per event is a memory decision — so it is opt-in:
+
+```ts
+// Committed feed: opt in on the listener.
+const listener = new GuardTelemetryListener({ server, guard: GUARD_ID, includeRaw: true });
+
+// Diagnostic feed: opt in at the decode site.
+const events = guardEventsFromDiagnostics(diagnosticEvents, GUARD_ID, { includeRaw: true });
+
+// Every event then carries `raw`: the `rpc.Api.EventResponse` for a committed
+// event, or the host-shaped diagnostic object for a blocked one.
+const event = (await listener.poll({ startLedger })).events[0];
+console.error(JSON.stringify(event.raw, (_key, value) =>
+  typeof value === "bigint" ? value.toString() : value));
+```
+
+When `includeRaw` is not set, `raw` is **absent** (undefined) — nothing is retained. Leave it off in a long-running fleet; turn it on for the debugging session or the bug-report window. The `id` field stays stable either way, so a raw event can be correlated with the decoded event it produced.
+
+#### Reason messages (issue #96)
+
+`reasonMessages` exposes each reason's numeric code and its stable title/body/remediation keys, and `reasonMessagesEn` holds the built-in English text — so a dashboard can render a table, and a consumer can key its own translations, without the SDK taking an i18n dependency:
+
+```ts
+import { reasonMessages, reasonMessagesEn, explainReason } from "stellar-agent-guard-sdk";
+
+for (const [reason, { code, titleKey, remediationKey }] of Object.entries(reasonMessages)) {
+  console.log(code, reasonMessagesEn[reason as keyof typeof reasonMessagesEn].title, remediationKey);
+}
+
+// Localise one reason; a missing key falls back to English.
+explainReason("per_tx_cap_exceeded", {
+  [reasonMessages.per_tx_cap_exceeded.bodyKey]: "Le montant dépasse le plafond par transaction.",
+});
+
+// Or override individual reasons outright.
+explainReason("paused", undefined, { paused: "Agent paused by the operator." });
+```
+
+#### Ship events to your logger
+
+`serializeEvent(event)` gives you one canonical JSON line per event, so a log pipeline gets a stable, diffable record with no logger dependency in the SDK:
+
+```ts
+import { serializeEvent } from "stellar-agent-guard-sdk";
+
+for await (const event of listener.watchAll({ diagnostics })) {
+  logger.info(serializeEvent(event)); // one deterministic JSON line per event
+}
+```
+
+Key order, the drop-`undefined`/keep-`null` policy, and the `bigint`-to-decimal-string normalization are documented in [`docs/event-schema.md`](docs/event-schema.md#canonical-json-serialization--serializeevent).
+
 ## Architecture
 
 Stellar Agent Guard operates across three dedicated repositories:
 
-listener.on("event", (event) => {
-  console.log(event);
-});
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                      Operator (Browser / Freighter)                     │
@@ -573,7 +970,7 @@ This boundary is an inherent property of the platform (the auth context does not
 ## Topics
 
 `stellar`, `soroban`, `ai-agents`, `guardrails`, `custom-account`, `pre-flight`,
-`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `telemetry`, `typescript`
+`spend-limits`, `cost-estimation`, `langchain`, `elizaos`, `mcp`, `telemetry`, `typescript`
 
 ## Maintainers
 
@@ -594,4 +991,18 @@ This boundary is an inherent property of the platform (the auth context does not
 
 ## License
 
-MIT
+Licensed under [MIT](LICENSE). This is unaudited security tooling that gates real fund access — see the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md) before considering mainnet use.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR process, and
+project structure — including the strict one-commit-per-logical-unit rule and the
+[TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
+(`npm run check:strict-ratchet`).
+
+Looking for something to work on? The
+[issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
+holds scoped issues with Summary / Acceptance Criteria / Tech Stack — good first tasks for
+the Drips Stellar Wave contributor sprints.
+
+![Contributors](https://contrib.rocks/image?repo=aigbagbobila/stellar-agent-guard-sdk)

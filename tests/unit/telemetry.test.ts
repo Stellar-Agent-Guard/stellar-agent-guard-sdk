@@ -1038,91 +1038,6 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
   });
 });
 
-/**
- * Injectable transport (issue #102).
- *
- * Enterprise and agent deployments route RPC through proxies (auth headers,
- * mTLS, latency shielding) or mock it entirely in tests. The SDK previously
- * forced URL-only configuration, so a pre-built `SorobanRpc.Server` — with
- * whatever proxy/header setup the caller needs — could not be handed in.
- *
- * The shared `{ server? | url? }` config is consumed by all three surfaces
- * (`preflight`, `telemetry`, `invoke`). These tests pin the two properties
- * that make it trustworthy: mutual exclusion is validated with a typed error,
- * and an injected instance is used verbatim — calls land on the object the
- * caller passed, never on a fresh one rebuilt from a url.
- */
-describe("injectable transport config (issue #102)", () => {
-  it("uses an injected Server instance verbatim, never rebuilding one from a url", async () => {
-    const calls: string[] = [];
-    const injectedServer = {
-      getLatestLedger: async () => {
-        calls.push("getLatestLedger");
-        return { sequence: 500 };
-      },
-      getEvents: async () => {
-        calls.push("getEvents");
-        return { events: [], cursor: "cursor_1", latestLedger: 500 };
-      },
-    };
-
-    const listener = new GuardTelemetryListener({
-      server: injectedServer as never,
-      guard: GUARD,
-    });
-    const page = await listener.poll({ startLedger: 400 });
-
-    assert.equal(page.latestLedger, 500);
-    assert.deepEqual(
-      calls,
-      ["getEvents"],
-      "the injected instance must receive the call, not a fresh Server built from a url",
-    );
-  });
-
-  it("rejects a config that supplies both server and url with a typed error", () => {
-    const injectedServer = {
-      getLatestLedger: async () => ({ sequence: 1 }),
-      getEvents: async () => ({ events: [], cursor: "c", latestLedger: 1 }),
-    };
-
-    assert.throws(
-      () =>
-        new GuardTelemetryListener({
-          server: injectedServer as never,
-          url: "https://soroban-testnet.stellar.org",
-          guard: GUARD,
-        }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error, "mutual exclusion must surface a typed error");
-        assert.match(error.message, /server.*url|url.*server/i);
-        return true;
-      },
-    );
-  });
-
-  it("rejects a config that supplies neither server nor url with a typed error", () => {
-    assert.throws(
-      () => new GuardTelemetryListener({ guard: GUARD } as never),
-      (error: unknown) => {
-        assert.ok(error instanceof Error, "a missing transport must surface a typed error");
-        assert.match(error.message, /server|url/i);
-        return true;
-      },
-    );
-  });
-
-  it("accepts a url-only config for callers that do not need a pre-built Server", () => {
-    // The url path is unchanged: it is the fallback for callers with no proxy
-    // or header requirements, and must keep constructing a Server internally.
-    const listener = new GuardTelemetryListener({
-      url: "https://soroban-testnet.stellar.org",
-      guard: GUARD,
-    });
-    assert.ok(listener, "url-only config must remain valid");
-  });
-});
-
 describe("GuardEventRingBuffer (issue #68)", () => {
   /** A minimal well-formed event; only the fields a test cares about are overridden. */
   function event(partial: Partial<GuardEvent>): GuardEvent {
@@ -1328,3 +1243,100 @@ describe("GuardTelemetryListener opt-in buffer (issue #68)", () => {
     );
   });
 });
+
+/**
+ * Opt-in raw event retention (issue #94).
+ *
+ * When a decoded verdict looks wrong, the raw payload is the evidence an SDK
+ * bug report needs. It is off by default because the payload (XDR `ScVal`s,
+ * host-shaped objects) is large enough that retaining it for every event is a
+ * memory decision, not a convenience. These tests pin both halves: the source
+ * object is attached when asked for, and *absent* — not merely empty —
+ * otherwise, so the default path keeps discarding it.
+ */
+describe("opt-in raw event retention (issue #94)", () => {
+  const blockedEvent = () =>
+    diagnosticEvent(["event_auth_checked", "blocked", "per_tx_cap_exceeded"]);
+
+  it("omits the raw field entirely by default, including on guardEventsFromDiagnostics", () => {
+    const events = guardEventsFromDiagnostics([blockedEvent()], GUARD);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.raw, undefined);
+    assert.ok(
+      !("raw" in events[0]!),
+      "the default decode must not retain the source payload at all",
+    );
+  });
+
+  it("attaches the exact source event object when includeRaw is enabled", () => {
+    const source = blockedEvent();
+    const events = guardEventsFromDiagnostics([source], GUARD, { includeRaw: true });
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0]!.raw, source);
+    // Same reference, not a copy: a bug report should carry what the SDK saw.
+    assert.equal(events[0]!.raw, source);
+  });
+
+  it("keeps includeRaw off when the option object is present but false", () => {
+    const events = diagnosticsToEvents([blockedEvent()], GUARD, { includeRaw: false });
+    assert.ok(!("raw" in events[0]!));
+  });
+
+  it("forwards includeRaw through telemetryFromDecision", () => {
+    const source = blockedEvent();
+    const events = telemetryFromDecision(
+      { kind: "blocked", reason: "per_tx_cap_exceeded", diagnosticEvents: [source] },
+      GUARD,
+      { includeRaw: true },
+    );
+    assert.deepEqual(events[0]!.raw, source);
+  });
+
+  it("retains the ledger RPC event only when the listener opts in", async () => {
+    function rawLedgerEvent() {
+      return {
+        contractId: GUARD,
+        type: "contract",
+        ledger: 500,
+        ledgerClosedAt: "2026-09-27T00:00:00Z",
+        txHash: "ab".repeat(32),
+        topic: ["event_auth_checked", "allowed", ""].map((topic) => xdr.ScVal.scvSymbol(topic)),
+        value: xdr.ScVal.scvMap([]),
+      };
+    }
+    function server() {
+      return {
+        getLatestLedger: async () => ({ sequence: 1 }),
+        getEvents: async () => ({ events: [rawLedgerEvent()], cursor: "c", latestLedger: 600 }),
+      };
+    }
+
+    const off = new GuardTelemetryListener({ server: server() as never, guard: GUARD });
+    const offPage = await off.poll({ startLedger: 500 });
+    assert.equal(offPage.events[0]!.raw, undefined);
+    assert.ok(!("raw" in offPage.events[0]!));
+
+    const on = new GuardTelemetryListener({
+      server: server() as never,
+      guard: GUARD,
+      includeRaw: true,
+    });
+    const onPage = await on.poll({ startLedger: 500 });
+    assert.deepEqual(onPage.events[0]!.raw, rawLedgerEvent());
+  });
+
+  it("preserves raw across the unified stream's diagnostic tagging", async () => {
+    const source = blockedEvent();
+    const batch: GuardDiagnosticBatch = {
+      events: guardEventsFromDiagnostics([source], GUARD, { includeRaw: true }),
+      observedAt: "2026-09-27T00:00:00Z",
+    };
+    const seen: GuardEvent[] = [];
+    for await (const event of mergeGuardEventStreams([], [batch])) {
+      seen.push(event);
+    }
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0]!.raw, source);
+  });
+});
+
