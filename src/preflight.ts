@@ -37,9 +37,9 @@ import {
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
-import { RpcTimeoutError, withAbortAndTimeout } from "./rpc.ts";
 import { systemClock, type Clock } from "./clock.ts";
 
 /**
@@ -274,20 +274,6 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  */
 export interface PreFlightCheckOptions {
   onStep?: (step: InvokeStepEvent) => void;
-  /**
-   * Caller-supplied cancellation signal. When aborted, the check resolves
-   * promptly with an `undetermined(cause: 'aborted')` verdict rather than
-   * hanging on a partitioned RPC. Cancellation is local-only: the underlying
-   * HTTP request may continue server-side.
-   */
-  signal?: AbortSignal;
-  /**
-   * Wall-clock budget in milliseconds for the entire check. On expiry the
-   * check resolves with `undetermined(cause: 'timeout')`. Defaults to
-   * `DEFAULT_RPC_TIMEOUT_MS` (30_000) — a bounded halt is a decision; an
-   * unbounded one is a hang.
-   */
-  timeoutMs?: number;
 }
 
 export interface PreFlightCacheOptions {
@@ -329,19 +315,20 @@ export interface PreFlightConfig {
    */
   cache?: PreFlightCacheOptions;
   /**
+   * Optional log sink for this interceptor's decision points: each verdict, and
+   * every cache hit, store and invalidation.
+   *
+   * Omitted — the default — the interceptor says nothing at all. A verdict is
+   * still returned exactly as before; the logger changes only whether anyone is
+   * told about it.
+   */
+  logger?: GuardLoggerInput | undefined;
+  /**
    * Inject a custom clock for time-dependent operations (cache TTL, etc.).
    * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
    */
   clock?: Clock;
 }
-
-/**
- * Default wall-clock budget applied to check/invoke/cost RPC entry points when
- * the caller does not supply `timeoutMs`. Chosen to be generous enough for a
- * congested ledger close but short enough that a partitioned RPC cannot stall
- * an agent's tool-loop indefinitely.
- */
-export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
 
 /** Alias used by the README's constructor terminology. */
 export type PreFlightInterceptorOptions = PreFlightConfig;
@@ -400,14 +387,8 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  private readonly logger: GuardLogger;
   private readonly clock: Clock;
-
-  /**
-   * Default timeout applied when a per-call `timeoutMs` is not supplied.
-   * `null` disables the default (opt-out for callers that manage their own
-   * budget).
-   */
-  private readonly defaultTimeoutMs: number | null;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
@@ -415,7 +396,7 @@ export class PreFlightInterceptor {
     this.clock = config.clock ?? systemClock;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
-    this.defaultTimeoutMs = DEFAULT_RPC_TIMEOUT_MS;
+    this.logger = resolveLogger(config.logger);
   }
 
   private validateCacheOptions(): void {
@@ -479,13 +460,20 @@ export class PreFlightInterceptor {
   /** Clear all cached verdicts, or only entries for `call` when provided. */
   invalidate(call?: ContractCall): void {
     if (!call) {
+      const cleared = this.cache.size;
       this.cache.clear();
+      this.logger.debug("pre-flight cache invalidated", { scope: "all", cleared });
       return;
     }
     const prefix = `${this.namespace}:${callFingerprint(call)}:`;
+    let cleared = 0;
     for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) this.cache.delete(key);
+      if (key.startsWith(prefix)) {
+        this.cache.delete(key);
+        cleared += 1;
+      }
     }
+    this.logger.debug("pre-flight cache invalidated", { scope: "call", cleared });
   }
 
   /**
@@ -495,33 +483,9 @@ export class PreFlightInterceptor {
    * Accepts per-call `options` (e.g. `onStep` observability) without any
    * effect on the verdict itself; existing single-argument callers are
    * unaffected.
-   *
-   * Cancellation and timeouts are reported as `undetermined` verdicts (not
-   * thrown) because `check()` answers a verdict question: "may this proceed?"
-   * A hung RPC is not a policy refusal, so it must not be reported as
-   * `blocked`; but it also must not be reported as `admissible`. The
-   * `undetermined` kind already carries that meaning, and callers that want a
-   * throw use `assertAllowed`, which converts it to `PreFlightUndeterminedError`.
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
-
-    const timeoutMs = options?.timeoutMs ?? this.defaultTimeoutMs ?? undefined;
-    const signal = options?.signal;
-
-    // Fast path: an already-aborted signal must not dispatch any RPC call.
-    if (signal?.aborted) {
-      return {
-        allowed: false,
-        kind: "undetermined",
-        detail: "pre-flight check aborted before RPC dispatch",
-        error: new RpcTimeoutError({
-          stage: "preflight",
-          cause: "aborted",
-          timeoutMs,
-        }),
-      };
-    }
 
     const context = await this.cacheContext(call);
     if (context) {
@@ -529,38 +493,31 @@ export class PreFlightInterceptor {
       if (cached) {
         const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
+          // A hit is worth a line of its own: it is the one verdict the caller
+          // gets without a simulation, so a host reading logs needs to be able
+          // to tell a reused verdict from a fresh one.
+          this.logger.debug("pre-flight verdict served from cache", {
+            guard: this.config.guard,
+            contract: call.contract,
+            fn: call.fn,
+            kind: cached.decision.kind,
+            ledger: context.ledger,
+          });
           return cached.decision;
         }
         this.cache.delete(context.key);
       }
     }
-    let outcome: Awaited<ReturnType<typeof enforceCall>>;
-    try {
-      outcome = await withAbortAndTimeout(
-        (innerSignal) =>
-          enforceCall({
-            server: this.config.server,
-            source: this.config.source,
-            call,
-            networkPassphrase: this.config.networkPassphrase,
-            guardAuth: { guard: this.config.guard, agent: this.config.agent },
-            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-            ...(options?.onStep ? { onStep: options.onStep } : {}),
-            signal: innerSignal,
-          }),
-        { signal, timeoutMs },
-      );
-    } catch (cause) {
-      if (cause instanceof RpcTimeoutError) {
-        return {
-          allowed: false,
-          kind: "undetermined",
-          detail: cause.message,
-          error: cause,
-        };
-      }
-      throw cause;
-    }
+    const outcome = await enforceCall({
+      server: this.config.server,
+      source: this.config.source,
+      call,
+      networkPassphrase: this.config.networkPassphrase,
+      guardAuth: { guard: this.config.guard, agent: this.config.agent },
+      ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+      ...(options?.onStep ? { onStep: options.onStep } : {}),
+      ...(this.config.logger ? { logger: this.config.logger } : {}),
+    });
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
@@ -626,6 +583,37 @@ export class PreFlightInterceptor {
         ledger: context.ledger,
         expiresAt: context.expiresAt,
       });
+      this.logger.debug("pre-flight verdict cached", {
+        kind: decision.kind,
+        ledger: context.ledger,
+      });
+    }
+
+    // The verdict itself, at the level its severity deserves: a refusal is the
+    // guardrail working and is reported as information, a decision that could
+    // not be reached is a degraded state and is reported as a warning.
+    if (decision.kind === "blocked") {
+      this.logger.info(`guard refused the call (${decision.reason})`, {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+        reason: decision.reason,
+      });
+    } else if (decision.kind === "undetermined") {
+      this.logger.warn(`pre-flight could not determine enforcement: ${decision.detail}`, {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+      });
+    } else {
+      this.logger.debug("call admitted by the guard", {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+        // A string, not the raw bigint: a JSON logger cannot serialise one.
+        estimatedResourceFee: decision.estimatedResourceFee.toString(),
+        footprintKeys: decision.footprintKeys,
+      });
     }
     return decision;
   }
@@ -655,11 +643,6 @@ export class PreFlightInterceptor {
    * When contract-side `check_batch` lands in `stellar-agent-guard-contracts`, `checkBatch`
    * will route to that entrypoint for atomic on-chain simulation, and this sequential
    * staging implementation will serve as the fallback for contracts on earlier ABI versions.
-   *
-   * Cancellation/timeout: `checkBatch` accepts `signal` and `timeoutMs` and
-   * applies them per-call. A batch is not atomic off-chain, so a mid-batch
-   * abort/timeout yields `undetermined` for the remaining calls and the
-   * overall batch is not admissible.
    */
   async checkBatch(
     calls: ContractCall[],
@@ -699,7 +682,7 @@ export class PreFlightInterceptor {
     const verdicts: PreFlightDecision[] = [];
 
     for (const call of calls) {
-      const decision = await this.check(call, options);
+      const decision = await this.check(call);
 
       if (decision.kind === "admissible") {
         const amount = extractTransferAmount(call);
@@ -747,18 +730,9 @@ export class PreFlightInterceptor {
    * Throws `GuardBlockedError` for both `blocked` and `undetermined` — an
    * interceptor that returned happily on `undetermined` would hand an agent a
    * green light the chain never gave.
-   *
-   * Unlike `check()`, which reports cancellation/timeout as an `undetermined`
-   * verdict, `assertAllowed` throws. The asymmetry is deliberate: `check()`
-   * answers a verdict question and must keep verdicts distinct; `assertAllowed`
-   * is a pipeline gate, and a pipeline that cannot obtain a verdict must fail
-   * loudly rather than silently continue.
    */
-  async assertAllowed(
-    call: ContractCall,
-    options?: PreFlightCheckOptions,
-  ): Promise<PreFlightDecision & { allowed: true }> {
-    const decision = await this.check(call, options);
+  async assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }> {
+    const decision = await this.check(call);
     if (decision.allowed) return decision;
     if (decision.kind === "blocked") {
       const rawEvent = decision.diagnosticEvents?.[0];
@@ -802,12 +776,8 @@ export class PreFlightInterceptor {
 }
 
 /** One-shot form, for callers that do not want to hold an interceptor. */
-export function preflight(
-  config: PreFlightConfig,
-  call: ContractCall,
-  options?: PreFlightCheckOptions,
-): Promise<PreFlightDecision> {
-  return new PreFlightInterceptor(config).check(call, options);
+export function preflight(config: PreFlightConfig, call: ContractCall): Promise<PreFlightDecision> {
+  return new PreFlightInterceptor(config).check(call);
 }
 
 /** One-shot form for batch pre-flight checks. */
@@ -818,3 +788,4 @@ export function preflightBatch(
 ): Promise<PreFlightBatchDecision> {
   return new PreFlightInterceptor(config).checkBatch(calls, options);
 }
+

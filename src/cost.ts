@@ -34,10 +34,9 @@
  * answer would tell a caller their call was too expensive when the truth is that
  * it was never allowed.
  */
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 import { SorobanDataBuilder } from "@stellar/stellar-sdk";
 import { INCLUSION_FEE } from "./tx.ts";
-import { RpcTimeoutError } from "./errors.ts";
-import { withAbortAndTimeout } from "./rpc-abort.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
 
@@ -246,26 +245,19 @@ export interface CostPreCheckConfig {
    */
   interceptor: Pick<PreFlightInterceptor, "check">;
   /**
-   * Cancellation signal plumbed to the underlying RPC call. When aborted, the
-   * pending `check` settles promptly with an `undetermined` verdict whose
-   * `detail` names the abort — the verdict-style entry point never throws.
-   *
-   * Note: cancellation is local-only. stellar-sdk v17 does not accept a
-   * `signal` on `simulateTransaction`/`getTransaction`, so the underlying HTTP
-   * request continues server-side; see `rpc-abort.ts` for the honest note.
-   */
-  signal?: AbortSignal;
-  /**
-   * Upper bound on how long a single RPC call may take, in milliseconds.
-   * Defaults to `DEFAULT_RPC_TIMEOUT_MS` (30s) — an unbounded halt is not a
-   * fail-closed decision, it is a hang. Set to `0` to disable.
-   */
-  timeoutMs?: number;
-  /**
    * Refuse (as `over_budget`) when the estimated *total* fee exceeds this many
    * stroops. Omitted means "price it, never object to the price".
    */
   maxFeeStroops?: bigint;
+  /**
+   * Optional log sink for this pre-checker's decision points: the priced verdict
+   * and whether the ceiling was exceeded.
+   *
+   * Omitted — the default — the pre-checker says nothing at all. The cost
+   * decision is still returned either way; the logger only decides who hears
+   * about it.
+   */
+  logger?: GuardLoggerInput | undefined;
 }
 
 /** The two fee components, kept separate so they are never conflated. */
@@ -347,13 +339,6 @@ export function feeBreakdown(resourceFeeStroops: bigint): FeeBreakdown {
 }
 
 /**
- * Default RPC timeout. A hung RPC must not stall the agent's tool-loop
- * indefinitely; 30s is generous enough for a healthy network and short enough
- * that a partition surfaces as a decision rather than a hang.
- */
-export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
-
-/**
  * Is the estimated total over the caller's ceiling?
  *
  * A missing ceiling is not a zero ceiling: `null`/`undefined` means "no
@@ -395,9 +380,11 @@ export function describeCostDecision(decision: CostDecision): string {
  */
 export class CostPreChecker {
   private readonly config: CostPreCheckConfig;
+  private readonly logger: GuardLogger;
 
   constructor(config: CostPreCheckConfig) {
     this.config = config;
+    this.logger = resolveLogger(config.logger);
   }
 
   /** Price a call. Equivalent to `(await this.checkWithCost(call)).cost`. */
@@ -424,33 +411,22 @@ export class CostPreChecker {
    * unchanged.
    */
   async checkWithCost(call: ContractCall): Promise<CostWithDecision> {
-    const timeoutMs =
-      this.config.timeoutMs === 0
-        ? undefined
-        : (this.config.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS);
-    let decision: PreFlightDecision;
-    try {
-      decision = await withAbortAndTimeout(
-        (signal) => this.config.interceptor.check(call, { signal }),
-        { signal: this.config.signal, timeoutMs },
-      );
-    } catch (error) {
-      // Verdict-style entry point: a timeout/abort is not a thrown error, it is
-      // an `undetermined` verdict. Rationale (documented asymmetry): `check`
-      // answers "may I proceed?" and must always answer; `invoke` drives a
-      // pipeline and a caller that cannot distinguish "no" from "did not
-      // finish" cannot retry safely, so it throws a typed `RpcTimeoutError`.
-      if (error instanceof RpcTimeoutError || isAbortError(error)) {
-        decision = {
-          kind: "undetermined",
-          allowed: false,
-          detail: `rpc ${error instanceof RpcTimeoutError ? "timeout" : "aborted"}: ${error.message}`,
-        } as PreFlightDecision;
-      } else {
-        throw error;
-      }
+    const decision = await this.config.interceptor.check(call);
+    const cost = this.costOf(decision);
+    // The one place a cost decision is produced, so the one place it is logged:
+    // `check()` and both one-shot helpers funnel through here, and a second log
+    // site would mean a caller could see the same decision twice.
+    if (cost.kind === "over_budget") {
+      this.logger.warn(`call exceeds the fee ceiling: ${describeCostDecision(cost)}`, {
+        totalFeeStroops: cost.totalFeeStroops.toString(),
+        feeCeilingStroops: cost.feeCeilingStroops.toString(),
+      });
+    } else if (cost.kind === "undetermined") {
+      this.logger.warn(`call could not be priced: ${cost.detail}`);
+    } else {
+      this.logger.debug(describeCostDecision(cost));
     }
-    return { decision, cost: this.costOf(decision) };
+    return { decision, cost };
   }
 
   /** The pure cost view of an already-obtained verdict. No network, no state. */
@@ -507,15 +483,6 @@ export function precheckCost(
   call: ContractCall,
 ): Promise<CostDecision> {
   return new CostPreChecker(config).check(call);
-}
-
-/** Narrow an unknown thrown value to an abort-shaped error. */
-function isAbortError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    (error as { name?: unknown }).name === "AbortError"
-  );
 }
 
 /**

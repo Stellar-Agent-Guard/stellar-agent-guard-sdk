@@ -58,7 +58,6 @@ import {
 import {
   BroadcastError,
   ContractResponseError,
-  RpcTimeoutError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -70,77 +69,6 @@ const SIG_EXPIRATION_LEDGERS = 10_000;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
 const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
-
-/**
- * Default RPC deadline, in milliseconds, applied when a caller does not pass
- * `timeoutMs` explicitly.
- *
- * A hung RPC (network partition, stalled server) would otherwise leave
- * `check()`/`invoke()` pending forever, which turns a fail-closed halt into an
- * unbounded hang — not a decision. A generous default keeps the safety posture
- * (bounded) without tripping on ordinary slow ledgers. Callers that need
- * unbounded behaviour can pass `timeoutMs: 0` (disabled) or a larger value.
- */
-export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
-
-/**
- * Shared abort/timeout plumbing for every RPC call this module makes.
- *
- * `stellar-sdk` v17 does not thread an `AbortSignal` through
- * `simulateTransaction`/`sendTransaction`/`getTransaction`, so cancellation is
- * **local-only**: the promise settles promptly, but the underlying HTTP request
- * continues server-side until it completes or the server times it out. This is
- * documented rather than hidden — callers must not assume the RPC has stopped
- * work just because this helper rejected.
- *
- * Behaviour:
- * - an already-aborted `signal` rejects immediately, before the RPC is invoked;
- * - a mid-flight abort rejects promptly with `RpcTimeoutError` (cause `abort`);
- * - `timeoutMs` (default {@link DEFAULT_RPC_TIMEOUT_MS}) rejects with
- *   `RpcTimeoutError` (cause `timeout`); `0` disables the deadline;
- * - the timer and abort listener are always cleaned up, so no leak survives a
- *   settled call.
- */
-export async function withRpcDeadline<T>(
-  operation: () => Promise<T>,
-  options: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined } = {},
-): Promise<T> {
-  const { signal } = options;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
-
-  if (signal?.aborted) {
-    throw new RpcTimeoutError("RPC call aborted before it started", { cause: "abort" });
-  }
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let onAbort: (() => void) | undefined;
-
-  const guard = new Promise<never>((_resolve, reject) => {
-    if (timeoutMs > 0) {
-      timer = setTimeout(() => {
-        reject(
-          new RpcTimeoutError(`RPC call exceeded ${timeoutMs}ms`, {
-            cause: "timeout",
-            timeoutMs,
-          }),
-        );
-      }, timeoutMs);
-    }
-    if (signal) {
-      onAbort = () => {
-        reject(new RpcTimeoutError("RPC call aborted", { cause: "abort" }));
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-    }
-  });
-
-  try {
-    return await Promise.race([operation(), guard]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-    if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-  }
-}
 
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
@@ -495,11 +423,10 @@ export interface SimulationOutcome {
 export async function simulateSigned(
   server: rpc.Server,
   transaction: Transaction,
-  options: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined } = {},
 ): Promise<SimulationOutcome> {
   let raw: rpc.Api.SimulateTransactionResponse;
   try {
-    raw = await withRpcDeadline(() => server.simulateTransaction(transaction), options);
+    raw = await server.simulateTransaction(transaction);
   } catch (error) {
     throw new SimulationError("signed transaction simulation request failed", {
       stage: "simulate",
@@ -814,8 +741,6 @@ export async function submitAndPoll(
     pollAttempts?: number | undefined;
     pollIntervalMs?: number | undefined;
     clock?: Clock | undefined;
-    signal?: AbortSignal | undefined;
-    timeoutMs?: number | undefined;
   } = {},
 ): Promise<SubmissionResult> {
   const clock = options.clock ?? systemClock;
@@ -837,10 +762,7 @@ export async function submitAndPoll(
 
   let sent: Awaited<ReturnType<rpc.Server["sendTransaction"]>>;
   try {
-    sent = await withRpcDeadline(() => server.sendTransaction(transaction), {
-      signal: options.signal,
-      timeoutMs: options.timeoutMs,
-    });
+    sent = await server.sendTransaction(transaction);
   } catch (error) {
     throw new BroadcastError("transaction submission request failed", { cause: error });
   }
@@ -865,10 +787,7 @@ export async function submitAndPoll(
     await clock.sleep(interval);
     let result: Awaited<ReturnType<rpc.Server["getTransaction"]>>;
     try {
-      result = await withRpcDeadline(() => server.getTransaction(sent.hash), {
-        signal: options.signal,
-        timeoutMs: options.timeoutMs,
-      });
+      result = await server.getTransaction(sent.hash);
     } catch (error) {
       throw new BroadcastError(`could not poll transaction ${sent.hash}`, {
         transactionHash: sent.hash,
