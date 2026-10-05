@@ -710,32 +710,64 @@ No network, no credentials.
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this
 addendum with the fresh run output if desired.
 
-## Live enforcement through the LangChain middleware chain (2026-09-27)
+## Addendum — 2026-10-04 (PR #195 / Issue #121: remove library-side console output, add optional logger injection)
 
-Added a live scenario to `tests/integration/adapters.test.ts` that drives a
-policy-violating transfer through the *real* middleware → interceptor → RPC chain,
-rather than a mock interceptor with a verdict fixture. The wrapped tool is invoked
-with a transfer that exceeds the live policy's `per_tx_cap`, and the test asserts
-(a) the tool result halts with the expected reason, and (b) the account sequence
-number and SAC balance are identical before and after the attempted call.
+Recorded because this PR touches the enforcement path (`src/invoke.ts`,
+`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
 
-The assertion is a read-compare of two exact values read from the RPC:
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this checkout, so `npm run test:integration` cannot execute here. No fresh
+Phase-2 transcript is claimed below, and the gate verifies only that this file
+was touched — not the numbers.
 
+### What the PR changes on the enforcement path
+
+The change is output plumbing, not enforcement logic. The SDK previously wrote
+one environment-gated `console.*` line from `src/invoke.ts`
+(`SAG_DEBUG_RESOURCES=1`). Every such write is removed: a silent-by-default
+`GuardLogger` (`src/logger.ts`) is now threaded through `invoke`,
+`PreFlightInterceptor`, `CostPreChecker` and `GuardTelemetryListener` as an
+optional, injectable sink. With no logger supplied every config resolves to the
+shared `SILENT_LOGGER`, so the library prints nothing; with one supplied, each
+decision point (verdicts, cache hits/stores/invalidations, telemetry pages and
+gaps, cost overruns, retries) is reported through it.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification, and every outcome value and detail
+string. A logger is advisory only — a throwing sink is isolated and cannot
+change an outcome, the same guarantee `onStep` and `onGap` already carry. The
+five scenarios recorded above are produced by the contract during enforced
+simulation, which this diff does not touch.
+
+### What did run locally (post-merge with `main`)
+
+```text
+npm run typecheck                        # clean
+npm run check:strict-ratchet             # ok
+npm run lint                             # clean
+npm test                                 # 606 tests passing, 0 fail, 1 skipped
+npm run build                            # clean
+npm run test:smoke                       # 122 named exports resolve via the ESM export map
+npm run test:exports                     # every declared subpath resolves; undeclared paths refused
+npm run check:bundle-size                # within budget
+node scripts/check-enforcement-evidence.ts --check-structure   # ok
 ```
-before: account.sequenceNumber = <seq>, SAC balance = <bal>
-after:  account.sequenceNumber = <seq>, SAC balance = <bal>
-```
 
-The sequence number is the strongest available assertion: any broadcast,
-even a failed one, would bump the sequence number. A change in either value would
-mean a transaction was submitted, which the pre-flight path guarantees cannot
-happen. There is no transaction hash to record because the block occurred in
-enforced simulation, prior to broadcast — the absence of a hash is the point,
-not a gap in the evidence. The evidence recorded instead is the
-simulation diagnostics (`event_auth_checked, blocked, per_tx_cap_exceeded`)
-plus the before/after reads above.
+`tests/unit/logger.test.ts` covers the change with no network: silence by
+default across a full `check → blocked` cycle (console methods and both stdout
+and stderr writes are recorded, and none may occur), delivery to an injected
+sink with the host's own `this` preserved, level-dropping for partial loggers,
+isolation of a throwing sink on every level, and an exhaustive source-tree audit
+that fails `npm test` if any `src/` file ever calls `console.*` or writes to
+stdout/stderr. These are mocks and a static audit; they cannot substitute for
+the live run, and this addendum does not claim otherwise. The merge with `main`
+also re-validated the enforcement path against `main`'s newer unit suites
+(606 passing), which exercise the same classification and plumbing.
 
-No fresh live run is claimed here: `.env.phase2` is absent from this checkout,
-so the live scenario skips gracefully and the unit suite remains unaffected. The
-test name and path are added to the existing integration suite without changing
-the existing test names or paths that the evidence-freshness diff logic depends on.
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.
+

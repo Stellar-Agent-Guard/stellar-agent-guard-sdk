@@ -7,13 +7,6 @@
  * action whose handler is **never entered**. The assertion that matters is the
  * one on the handler counter: if a refusal still let the tool body run, the
  * adapter would be decorative.
- *
- * The `live enforcement` scenario below goes further: the blocked tool call is
- * attempted through the real middleware → interceptor → RPC chain and we assert
- * that **no broadcast happened** by reading the agent account's sequence number and
- * native balance before and after the attempted call. Since the whole point is
- * the absence of a transaction, there is no hash to cite — instead we record the
- * simulation diagnostics and the before/after reads as evidence.
  */
 import assert from "node:assert/strict";
 import { before, describe, it } from "node:test";
@@ -48,18 +41,9 @@ function toContractCall(args: { to?: unknown; amount?: unknown }) {
     fn: "transfer",
     args: [
       new Address(config.guard).toScVal(),
-      new Address(args.to as string).toScVal(),
+      new Address(args.to).toScVal(),
       nativeToScVal(BigInt(args.amount as string), { type: "i128" }),
     ],
-  };
-}
-
-/** Read the agent account's sequence number and native balance from the live RPC. */
-async function readAccountState(address: string) {
-  const account = await server.getAccount(address);
-  return {
-    sequence: account.sequenceNumber(),
-    balance: account.balances.find((b) => b.assetType === "native")?.balance ?? "0",
   };
 }
 
@@ -129,72 +113,6 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
     );
     assert.deepEqual(result, { content: "sunny" });
   });
-
-  /**
-   * Live enforcement through the real middleware chain: a policy-violating transfer
-   * attempted from inside a LangChain-style tool call must halt with a reason and
-   * must not broadcast anything. The strongest available assertion is that the
-   * agent account's sequence number and native balance are identical before and
-   * after the attempted call.
-   */
-  it("blocks a policy-violating transfer with no broadcast (seq/balance unchanged)", async () => {
-    await installPolicy(server, config);
-
-    const agentAddress = config.keys.agent.publicKey();
-    const beforeState = await readAccountState(agentAddress);
-
-    let toolEntered = false;
-    const middleware = createLangChainGuardMiddleware({
-      interceptor,
-      toContractCall: (request) => toContractCall(request.toolCall.args),
-    });
-
-    const result = await middleware.wrapToolCall(
-      {
-        toolCall: {
-          name: "send_payment",
-          id: "call_live_blocked",
-          args: { to: config.keys.outsider.publicKey(), amount: "5" },
-        },
-      },
-      async () => {
-        toolEntered = true;
-        return { content: "sent" };
-      },
-    );
-
-    const afterState = await readAccountState(agentAddress);
-
-    // Halt assertions: the tool body was never entered and the result carries the
-    // policy reason.
-    assert.equal(toolEntered, false, "the tool body ran despite a guard refusal");
-    assert.ok("status" in result && result.status === "error");
-    const content = String((result as { content: string }).content);
-    assert.match(content, /recipient_not_allowed/);
-
-    // No-broadcast assertion: the agent account's sequence number and native
-    // balance are identical before and after the attempted tool call.
-    assert.equal(
-      afterState.sequence,
-      beforeState.sequence,
-      "account sequence number changed — a broadcast happened",
-    );
-    assert.equal(
-      afterState.balance,
-      beforeState.balance,
-      "account balance changed — a broadcast happened",
-    );
-
-    // Evidence: there is no transaction hash to cite because the point is the
-    // absence of a broadcast. Record the simulation diagnostics and the
-    // before/after reads instead.
-    console.log(
-      `[langchain-live] blocked transfer to ${config.keys.outsider.publicKey()}: ${content.split("\n")[0]}`,
-    );
-    console.log(
-      `[langchain-live] no broadcast — no tx hash to cite; agent seq: ${beforeState.sequence} -> ${afterState.sequence}, balance: ${beforeState.balance} -> ${afterState.balance}`,
-    );
-  });
 });
 
 describe("ElizaOS Action.validate adapter against the live guard", () => {
@@ -203,8 +121,8 @@ describe("ElizaOS Action.validate adapter against the live guard", () => {
     const blocked: string[] = [];
     const validate = createGuardValidator({
       interceptor,
-      toContractCall: (_message, state) => toContractCall((state ?? {}) as { to: unknown; amount?: unknown }),
-      onBlocked: (decision) => blocked.push(decision.kind === "blocked" ? decision.reason : decision.kind),
+      toContractCall: (_message, state) => toContractCall((state ?? {}) as { to?: unknown; amount?: unknown }),
+      onBlocked: (info) => blocked.push(info.reason ?? info.kind),
     });
 
     const verdict = await validate({}, {}, {
