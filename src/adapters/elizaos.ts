@@ -22,9 +22,20 @@
  * observable through `onDecision` (and `onBlocked`, which is called for both),
  * not through the return value. This is the documented contract the shared
  * verdict-fixture harness asserts against.
+ * Options are validated at construction time (see `src/adapters/validate.ts`):
+ * a misconfigured adapter throws `AdapterConfigError` before any action runs,
+ * rather than failing mid-loop on the first tool call.
  */
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
+import {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./validate.ts";
+import { blockedInfoFor, runBlockedHook, type GuardBlockedHook } from "./shared.ts";
 
 /** The subset of ElizaOS's `Validator` signature this adapter implements. */
 export type ElizaValidator = (
@@ -52,11 +63,15 @@ export interface ElizaGuardOptions {
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (decision: PreFlightDecision) => void;
   /**
-   * Called with the refusal, because a `false` verdict is silent by design: the
-   * runtime simply drops the action. Without this, a blocked action leaves no
-   * trace anywhere.
+   * Operator alerting: called once per halt with the same structured payload
+   * every adapter uses (`{ adapter, kind, reason, call, explanation }`). A
+   * `false` verdict is silent by design — the runtime simply drops the action —
+   * so without this a blocked action leaves no trace anywhere. Fires for a
+   * `blocked` verdict and for a fail-closed `undetermined` one; a throwing
+   * callback is logged and swallowed rather than breaking the halt. See
+   * `src/adapters/shared.ts`.
    */
-  onBlocked?: (decision: PreFlightDecision & { allowed: false }) => void;
+  onBlocked?: GuardBlockedHook;
 }
 
 /**
@@ -67,6 +82,19 @@ export interface ElizaGuardOptions {
  * `false`, so the action never executes either way.
  */
 export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator {
+  const issues: AdapterConfigIssue[] = [];
+  const interceptorIssue = validateInterceptor(options.interceptor);
+  if (interceptorIssue) issues.push(interceptorIssue);
+  const toCallIssue = validateRequiredFunction("toContractCall", options.toContractCall);
+  if (toCallIssue) issues.push(toCallIssue);
+  const baseValidateIssue = validateOptionalFunction("baseValidate", options.baseValidate);
+  if (baseValidateIssue) issues.push(baseValidateIssue);
+  const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
+  if (onDecisionIssue) issues.push(onDecisionIssue);
+  const onBlockedIssue = validateOptionalFunction("onBlocked", options.onBlocked);
+  if (onBlockedIssue) issues.push(onBlockedIssue);
+  throwAdapterConfigError("elizaos", issues);
+
   return async (runtime, message, state, handlerOptions) => {
     if (options.baseValidate) {
       const baseOk = await options.baseValidate(runtime, message, state, handlerOptions);
@@ -80,9 +108,7 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
     options.onDecision?.(decision);
     if (decision.allowed) return true;
 
-    // `blocked` and `undetermined` both fail closed: the action is dropped.
-    // The distinction is visible to `onDecision`/`onBlocked`, not the return.
-    options.onBlocked?.(decision);
+    runBlockedHook(options.onBlocked, blockedInfoFor("elizaos", call, decision));
     return false;
   };
 }
