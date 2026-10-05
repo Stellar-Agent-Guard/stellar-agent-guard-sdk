@@ -93,6 +93,7 @@ export type {
   AccountAddress,
   CheckResult,
   ContractAddress,
+  DeepReadonly,
   GuardPolicy,
   GuardStatus,
   PolicyConfig,
