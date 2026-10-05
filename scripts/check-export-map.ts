@@ -124,10 +124,13 @@ function run(): void {
       cwd: ROOT,
       encoding: "utf8",
     }) as string;
-    const packed = JSON.parse(packOutput) as Array<{
-      filename: string;
-      files?: Array<{ path: string }>;
-    }>;
+    // `npm pack --json` changed shape across npm majors: npm <= 11 emits an
+    // array of pack results, npm 12 an object keyed by package name. Accept
+    // both so this gate is version-independent.
+    const parsed = JSON.parse(packOutput) as
+      | Array<{ filename: string; files?: Array<{ path: string }> }>
+      | Record<string, { filename: string; files?: Array<{ path: string }> }>;
+    const packed = Array.isArray(parsed) ? parsed : Object.values(parsed);
     const first = packed[0];
     if (!first) fail("npm pack produced no tarball");
     const packedPaths = new Set((first.files ?? []).map((file) => file.path));
