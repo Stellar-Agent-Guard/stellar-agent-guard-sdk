@@ -26,6 +26,14 @@ export type ElizaValidator = (
   options?: unknown,
 ) => Promise<boolean>;
 
+export type GuardedElizaValidator = ElizaValidator & {
+  /**
+   * Clears the memoized verdicts for this validator. Call this when the
+   * underlying action intent mutates to force a fresh simulation.
+   */
+  clearVerdictCache: () => void;
+};
+
 /** The subset of the `Action` interface this adapter reads. */
 export interface ElizaActionLike {
   name: string;
@@ -62,8 +70,15 @@ export interface ElizaGuardOptions {
  * Fails closed: a refusal and an undetermined enforcement run both return
  * `false`, so the action never executes either way.
  */
-export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator {
-  return async (runtime, message, state, handlerOptions) => {
+export function createGuardValidator(options: ElizaGuardOptions): GuardedElizaValidator {
+  const cache = new Map<string, boolean>();
+
+  const validator = async (
+    runtime: unknown,
+    message: unknown,
+    state?: unknown,
+    handlerOptions?: unknown,
+  ) => {
     if (options.baseValidate) {
       const baseOk = await options.baseValidate(runtime, message, state, handlerOptions);
       if (!baseOk) return false; // the action was not applicable in the first place
@@ -72,13 +87,32 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
     const call = options.toContractCall(message, state);
     if (!call) return true; // not a fund-moving action; nothing for the guard to say
 
+    let cacheKey: string | null = null;
+    if (options.cacheVerdicts) {
+      cacheKey = canonicalizeCall(call);
+      const cached = cache.get(cacheKey);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
+
     const decision = await options.interceptor.check(call);
     options.onDecision?.(decision);
-    if (decision.allowed) return true;
+    
+    if (decision.allowed) {
+      if (options.cacheVerdicts && cacheKey) cache.set(cacheKey, true);
+      return true;
+    }
 
     runBlockedHook(options.onBlocked, blockedInfoFor("elizaos", call, decision));
     return false;
   };
+
+  validator.clearVerdictCache = () => {
+    cache.clear();
+  };
+
+  return validator;
 }
 
 /**
@@ -95,7 +129,7 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
 export function guardAction<T extends ElizaActionLike>(
   action: T,
   options: Omit<ElizaGuardOptions, "baseValidate">,
-): Omit<T, "validate"> & { validate: ElizaValidator } {
+): Omit<T, "validate"> & { validate: GuardedElizaValidator } {
   return {
     ...action,
     validate: createGuardValidator({ ...options, baseValidate: action.validate }),
