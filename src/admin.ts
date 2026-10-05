@@ -14,7 +14,7 @@
  */
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { invoke, type InvokeOutcome } from "./invoke.ts";
-import { policyToScVal, type ContractAddress, type PolicyConfig } from "./policy.ts";
+import { policyToScVal, type ContractAddress, type ReadonlyPolicyConfig } from "./policy.ts";
 import type { AdminSigner, ContractCall } from "./tx.ts";
 
 export const DEFAULT_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -47,7 +47,7 @@ export function agentPubkeyToScVal(newAgent: string | Uint8Array | Keypair): xdr
 }
 
 /** Build a contract call for set_policy, reusing canonical policyToScVal. */
-export function buildSetPolicyCall(guard: ContractAddress, policy: PolicyConfig): ContractCall {
+export function buildSetPolicyCall(guard: ContractAddress, policy: ReadonlyPolicyConfig): ContractCall {
   return {
     contract: guard,
     fn: "set_policy",
@@ -97,7 +97,7 @@ export interface AdminOpParams {
 }
 
 export interface SetPolicyParams extends AdminOpParams {
-  policy: PolicyConfig;
+  policy: ReadonlyPolicyConfig;
 }
 
 export interface RotateAgentKeyParams extends AdminOpParams {
