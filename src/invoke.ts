@@ -77,6 +77,11 @@ export const INVOKE_ERROR_CAUSES = {
   sequenceNumberCollision: "sequence_number_collision",
 } as const;
 
+/**
+ * Coarse machine-readable classification for a non-policy `invoke()` failure —
+ * a member of `INVOKE_ERROR_CAUSES`: `undetermined` (the guard did not rule)
+ * or one of the two retryable causes once the retry budget is spent.
+ */
 export type InvokeErrorCause =
   (typeof INVOKE_ERROR_CAUSES)[keyof typeof INVOKE_ERROR_CAUSES];
 
@@ -155,6 +160,10 @@ export class InvokeRetryError extends Error {
   }
 }
 
+/**
+ * The policy answer a dry run reports: the same three arms a pre-flight
+ * decision carries (`admissible` / `blocked` / `undetermined`), as strings.
+ */
 export type InvokeDryRunVerdict = "admissible" | "blocked" | "undetermined";
 
 /**
@@ -196,6 +205,13 @@ export interface InvokeDryRunResult {
   steps: InvokePipelineStep[];
 }
 
+/**
+ * Everything `invoke()` can return: a dry run (`dry_run`), a broadcast
+ * (`allowed`), a refusal (`blocked` — free before broadcast, charged only after
+ * inclusion), or a failure (`error`: an `InvokeErrorOutcome`, or an
+ * `InvokeRetryError` when the retry budget is exhausted). Narrow on `kind`;
+ * the `error` arm carries a typed `error` for `instanceof`.
+ */
 export type InvokeOutcome =
   | InvokeDryRunResult
   | { kind: "allowed"; submission: SubmissionResult }
@@ -248,6 +264,12 @@ export interface InvokePollOptions {
   pollIntervalMs?: number;
 }
 
+/**
+ * What one invocation needs: the RPC server, the fee-paying source, the call,
+ * the network passphrase, and — when the call requires the smart account's own
+ * authorization — `guardAuth`. `dryRun: true` stops before broadcast; `retry`,
+ * `onStep`, and the poll options are all optional.
+ */
 export interface InvokeParams {
   server: rpc.Server;
   /** Classic account that pays the fee and supplies the sequence number. */
@@ -712,6 +734,47 @@ function reserveNextSequence(
   return next.toString();
 }
 
+/**
+ * Run the full invocation pipeline for a guarded account: probe → sign →
+ * enforced simulation → broadcast, with bounded full-jitter retries for stale
+ * ledger resource limits.
+ *
+ * Result-shaped, not throw-shaped: a refusal and a failure both come back as
+ * `kind`-tagged outcomes (`InvokeOutcome`), so an agent loop branches instead
+ * of catching. `dryRun: true` executes everything up to assembly and returns an
+ * `InvokeDryRunResult` — structurally incapable of broadcasting.
+ *
+ * Overloads narrow the result: `dryRun: true` promises `InvokeDryRunResult`,
+ * `dryRun` omitted promises a non-dry-run outcome.
+ *
+ * @example
+ * ```ts
+ * import { Keypair, rpc } from "@stellar/stellar-sdk";
+ * import { invoke, isContractAddress } from "stellar-agent-guard-sdk";
+ *
+ * const guard = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+ * if (!isContractAddress(guard)) throw new Error(`bad guard address: ${guard}`);
+ *
+ * const outcome = await invoke({
+ *   server: new rpc.Server("https://soroban-testnet.stellar.org"),
+ *   source: Keypair.random(),
+ *   networkPassphrase: "Test SDF Network ; September 2015",
+ *   call: { contract: guard, fn: "transfer", args: [] },
+ *   guardAuth: { guard, agent: Keypair.random() },
+ *   dryRun: true, // probe → sign → enforced simulation; never broadcasts
+ * });
+ *
+ * if (outcome.kind === "dry_run") {
+ *   outcome.verdict; // => "admissible", or the refusal verdict
+ *   outcome.fees.totalFeeStroops; // => the fees the dry run charged
+ *   outcome.steps; // => the stage trace: probe → sign → simulate
+ * }
+ * ```
+ *
+ * Network-bound by nature: running this example for real needs a funded
+ * testnet account (`.env.phase2`) — it is exercised by the invoke suite in
+ * `tests/unit/invoke.test.ts`.
+ */
 export function invoke(params: InvokeParams & { dryRun: true }): Promise<InvokeDryRunResult>;
 export function invoke(
   params: InvokeParams & { dryRun?: false },

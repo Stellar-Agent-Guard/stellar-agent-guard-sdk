@@ -51,6 +51,12 @@ export interface VercelAIToolCallInput {
   input: unknown;
 }
 
+/**
+ * Configuration for `wrapToolWithGuard` and `createVercelAIGuard`: the
+ * interceptor that decides, the translation from a tool call to the contract
+ * call it would make, and an optional observer for every decision — the same
+ * options shape the LangChain and ElizaOS adapters take.
+ */
 export interface VercelAIGuardOptions {
   interceptor: PreFlightInterceptor;
   /**

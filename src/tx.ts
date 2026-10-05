@@ -70,6 +70,7 @@ const SIG_EXPIRATION_LEDGERS = 10_000;
 const INCLUSION_FEE = "100";
 const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
 
+/** One contract invocation: the contract to call, the function symbol, and its `ScVal` arguments. */
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
   contract: ContractAddress;
@@ -195,6 +196,11 @@ export function guardStorageLedgerKeys(guard: string): xdr.LedgerKey[] {
   return keys;
 }
 
+/**
+ * The subset of a classic transaction signer this SDK uses: the public key,
+ * plus optional envelope- and auth-entry-signing hooks so remote/HSM signers
+ * (Freighter-style) can participate without importing `Keypair`.
+ */
 export interface AdminSigner {
   /** Return public key (G...) of the admin */
   publicKey(): string | Promise<string>;
@@ -259,18 +265,6 @@ export function toAgentSigner(signer: AgentSigner | Keypair): AgentSigner {
 }
 
 /**
- * Build and sign the guard's authorization entry for one call.
- *
- * `nonce` and `signatureExpirationLedger` are written into the signed payload,
- * so the returned entry is only valid for that nonce — build a fresh entry per
- * submission rather than reusing one.
- *
- * Async because an `AgentSigner` may be: a remote or threshold signer resolves
- * its signatures as a promise. The single-`Keypair` path still resolves
- * immediately, so this is a source-compatible widening for `await`ing callers
- * and a signature change for callers that used the return value synchronously.
- */
-/**
  * Credential kinds the host may demand for this account.
  *
  * Which one arrives is not the caller's choice — the RPC reports what the call
@@ -287,6 +281,18 @@ export type GuardCredentialType =
   | "sorobanCredentialsAddress"
   | "sorobanCredentialsAddressV2";
 
+/**
+ * Build and sign the guard's authorization entry for one call.
+ *
+ * `nonce` and `signatureExpirationLedger` are written into the signed payload,
+ * so the returned entry is only valid for that nonce — build a fresh entry per
+ * submission rather than reusing one.
+ *
+ * Async because an `AgentSigner` may be: a remote or threshold signer resolves
+ * its signatures as a promise. The single-`Keypair` path still resolves
+ * immediately, so this is a source-compatible widening for `await`ing callers
+ * and a signature change for callers that used the return value synchronously.
+ */
 export async function buildGuardAuthEntry(params: {
   guard: string;
   call: ContractCall;
@@ -406,6 +412,7 @@ export async function signAccountAuthEntry(params: {
   return entry;
 }
 
+/** One simulation's outcome: the raw RPC response, plus the refusal summary when enforcement blocked during simulation (`null` otherwise). */
 export interface SimulationOutcome {
   /** Raw simulation response, for callers that need events or cost data. */
   raw: rpc.Api.SimulateTransactionResponse;
@@ -591,6 +598,7 @@ function resultXdrToString(result: unknown): string | null {
   return String(value);
 }
 
+/** A broadcast transaction as the network reports it: hash, status, ledger, events — plus the failure arm when the network rejected it after broadcast. */
 export interface SubmissionResult {
   hash: string;
   status: string;

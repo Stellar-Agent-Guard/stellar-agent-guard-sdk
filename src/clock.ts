@@ -16,15 +16,17 @@
  * interface threads a testable time source through all time-dependent logic.
  *
  * @example
- * // Production code uses the system clock (default)
- * const guard = createGuardInterceptor(config); // uses systemClock
+ * ```ts
+ * import { FakeClock, systemClock } from "stellar-agent-guard-sdk";
  *
- * // Tests use a fake clock
- * const clock = new FakeClock();
- * const guard = createGuardInterceptor({ ...config, clock });
- * await someAsyncWork();
- * clock.advance(5000); // skip 5 seconds deterministically
- * // Verify the behavior at the new time without any real wait
+ * // Production: no clock is injected, so the system clock is the default.
+ * systemClock.now(); // real time
+ *
+ * // Tests: a FakeClock makes time-dependent code deterministic.
+ * const clock = new FakeClock(0);
+ * clock.advance(5_000); // one approximate ledger window later — instantly
+ * clock.now(); // => 5000
+ * ```
  */
 
 /** Minimal abstraction for time-dependent operations. */
@@ -59,18 +61,21 @@ export const systemClock: Clock = {
  * - Control all time-dependent operations without real delays
  *
  * @example
- * const clock = new FakeClock(1000); // Start at t=1000ms
- * const promise = someModuleThatSleeps(clock, 5000);
- * expect(clock.now()).toBe(1000);
+ * ```ts
+ * import { FakeClock } from "stellar-agent-guard-sdk";
  *
- * clock.advance(2000); // Advance to t=3000ms
- * // All pending sleeps up to t=3000ms are resolved
- * expect(clock.now()).toBe(3000);
+ * const clock = new FakeClock(1000); // start at t=1000ms
+ * let settled = false;
+ * const pending = clock.sleep(5000).then(() => { settled = true; });
  *
- * clock.advance(3000); // Advance to t=6000ms
- * // The 5000ms sleep completes
- * await promise; // Settled without real wait
- * expect(clock.now()).toBe(6000);
+ * clock.advance(4999); // t=5999ms — one millisecond short of the due time
+ * await Promise.resolve(); // flush microtasks
+ * settled; // => false — nothing settles before its due time
+ *
+ * clock.advance(1); // t=6000ms — the sleep is due
+ * await pending; // settles now, with zero waiting in real time
+ * clock.now(); // => 6000
+ * ```
  */
 export class FakeClock implements Clock {
   private currentTime: number;

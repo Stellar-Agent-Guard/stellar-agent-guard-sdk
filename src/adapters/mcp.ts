@@ -58,6 +58,12 @@ export type McpCallTool<T extends McpToolResult = McpToolResult> = (
   request: McpToolCallRequest,
 ) => Promise<T>;
 
+/**
+ * Configuration for `guardMcpToolHandler` and `guardMcpCallTool`: the
+ * interceptor that decides, the translation from a tool call to the contract
+ * call it would make, and the decision/halt observability hooks — the same
+ * options shape the LangChain, ElizaOS and Vercel AI adapters take.
+ */
 export interface McpGuardOptions {
   interceptor: PreFlightInterceptor;
   /**

@@ -102,6 +102,13 @@ export interface SubmitHeartbeatParams {
   pollIntervalMs?: number;
 }
 
+/**
+ * Configuration for `startHeartbeat`: the account to beat for, how often, the
+ * observation callbacks, and the seams (`submit`, `now`, `wait`) a test or a
+ * custom transport can replace. An interval longer than a third of the
+ * policy's dead-man grace window is rejected before the first beat with
+ * `HeartbeatIntervalError`.
+ */
 export interface HeartbeatOptions {
   /** The guard smart account to keep alive. */
   guard: string;
