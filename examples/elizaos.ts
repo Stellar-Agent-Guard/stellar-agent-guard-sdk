@@ -29,7 +29,7 @@ import {
   unsafeAccountAddress,
   type ContractCall,
   type ElizaActionLike,
-  type PreFlightDecision,
+  type GuardBlockedInfo,
 } from "../src/index.ts";
 
 export const EXAMPLE_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
@@ -128,7 +128,7 @@ export async function runElizaOSExample(serverOverride?: rpc.Server) {
     source,
   });
 
-  const blockedDecisions: Array<PreFlightDecision & { allowed: false }> = [];
+  const blockedDecisions: GuardBlockedInfo[] = [];
 
   // Define base ElizaOS action
   let baseValidateRan = 0;
@@ -152,8 +152,8 @@ export async function runElizaOSExample(serverOverride?: rpc.Server) {
   const action = guardAction(rawTransferAction, {
     interceptor,
     toContractCall,
-    onBlocked: (decision) => {
-      blockedDecisions.push(decision);
+    onBlocked: (info) => {
+      blockedDecisions.push(info);
     },
   });
 
@@ -205,8 +205,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log("[Run 2: Blocked] Validation verdict (false => dropped):", res.blockedVerdict);
     if (res.blockedDecisions.length > 0) {
       const b = res.blockedDecisions[0]!;
-      console.log("[Run 2: Blocked] Reason:", b.kind === "blocked" ? b.reason : b.kind);
-      console.log("[Run 2: Blocked] Explanation:", b.kind === "blocked" ? b.explanation : b.detail);
+      console.log(`[Run 2: Blocked] adapter=${b.adapter} kind=${b.kind}`);
+      console.log("[Run 2: Blocked] Reason:", b.reason ?? b.kind);
+      console.log("[Run 2: Blocked] Explanation:", b.explanation);
     }
   });
 }

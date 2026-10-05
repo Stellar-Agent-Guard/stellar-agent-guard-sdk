@@ -16,6 +16,7 @@
  */
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
+import { blockedInfoFor, runBlockedHook, type GuardBlockedHook } from "./shared.ts";
 
 /** The subset of ElizaOS's `Validator` signature this adapter implements. */
 export type ElizaValidator = (
@@ -51,26 +52,15 @@ export interface ElizaGuardOptions {
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (decision: PreFlightDecision) => void;
   /**
-   * Called with the refusal, because a `false` verdict is silent by design: the
-   * runtime simply drops the action. Without this, a blocked action leaves no
-   * trace anywhere.
+   * Operator alerting: called once per halt with the same structured payload
+   * every adapter uses (`{ adapter, kind, reason, call, explanation }`). A
+   * `false` verdict is silent by design — the runtime simply drops the action —
+   * so without this a blocked action leaves no trace anywhere. Fires for a
+   * `blocked` verdict and for a fail-closed `undetermined` one; a throwing
+   * callback is logged and swallowed rather than breaking the halt. See
+   * `src/adapters/shared.ts`.
    */
-  onBlocked?: (decision: PreFlightDecision & { allowed: false }) => void;
-  /**
-   * ElizaOS may invoke the validator multiple times for the same action during
-   * one decision cycle (revalidation after state tweaks) — each call re-simulates.
-   * Turn this on to cache verdicts per action shape.
-   * Default: false.
-   */
-  cacheVerdicts?: boolean;
-}
-
-function canonicalizeCall(call: ContractCall): string {
-  return JSON.stringify({
-    c: call.contract,
-    f: call.fn,
-    a: call.args.map((a) => a.toXDR("base64")),
-  });
+  onBlocked?: GuardBlockedHook;
 }
 
 /**
@@ -114,8 +104,7 @@ export function createGuardValidator(options: ElizaGuardOptions): GuardedElizaVa
       return true;
     }
 
-    options.onBlocked?.(decision);
-    if (options.cacheVerdicts && cacheKey) cache.set(cacheKey, false);
+    runBlockedHook(options.onBlocked, blockedInfoFor("elizaos", call, decision));
     return false;
   };
 
