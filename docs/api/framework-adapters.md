@@ -19,7 +19,7 @@ const middleware = createLangChainGuardMiddleware({
 
 Halts execution by returning without calling `handler(request)` if the interceptor blocks the planned action.
 
-When the interceptor returns an `undetermined` verdict, the LangChain middleware throws a `GuardUndeterminedError` carrying the verdict's `cause`, so the caller must handle the fail-closed signal explicitly.
+When the interceptor returns an `undetermined` verdict, the LangChain middleware returns an error `ToolMessage` (as it does for `blocked`) whose content carries the verdict's `detail`, and the tool body is never entered. It never throws for a guard verdict.
 
 ## ElizaOS
 
@@ -47,9 +47,9 @@ Both adapters consume the same interceptor verdicts but map them to different re
 | -------------------------------- | ----------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | `admissible`                      | Calls `handler(request)` and returns its result (pass).                                                  | Returns `true` and the action proceeds to execution (pass).                                                  |
 | `blocked(reason)`                 | Returns without calling `handler(request)`; the block message carries the verdict's `reason` (halt-with-message). | Returns `false`; the action is filtered out and the validator context carries the verdict's `reason` (halt-with-message).  |
-| `undetermined(cause)`              | Throws a `GuardUndeterminedError` carrying the verdict's `cause` (throw).                                                | Returns `false` (fail-closed) and surfaces the verdict's `cause` through the validator context (halt-with-message). |
+| `undetermined(cause)`              | Returns an error `ToolMessage` carrying the verdict's `detail`; the tool body never runs (halt-with-message).            | Returns `false` (fail-closed); `onBlocked` surfaces `undetermined` (halt-with-message). |
 
-Adapter-specific mapping errors (e.g. `toContractCall` returning `null` or a malformed call) are covered by the same harness and follow the documented behavior for each adapter.
+Adapter-specific mapping errors (e.g. `toContractCall` returning `null` or a malformed call) are covered by the same test file and follow the documented behavior for each adapter: a `null` call means the action moves no funds, so it is passed through untouched.
 
 ## Vercel AI SDK
 

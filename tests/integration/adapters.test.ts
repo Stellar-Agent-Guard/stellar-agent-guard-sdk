@@ -8,6 +8,12 @@
  * one on the handler counter: if a refusal still let the tool body run, the
  * adapter would be decorative.
  *
+ * The one exception is the `undetermined` row: that verdict only arises from a
+ * failed enforcement run (an RPC error or an unpriceable simulation), which
+ * cannot be produced deterministically against the live guard. That row carries
+ * a fixed verdict and tests the adapters' fail-closed mapping, while the
+ * `admissible` and `blocked` rows still drive the live contract.
+ *
  * The verdict-fixture table below is the shared harness. Both adapters'
  * test blocks consume the same rows, so a divergence in behaviour for a given
  * verdict shows up as a review-visible diff in the expected-behaviour columns
@@ -16,7 +22,7 @@
 import assert from "node:assert/strict";
 import { before, describe, it } from "node:test";
 import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
-import { PreFlightInterceptor } from "../../src/preflight.ts";
+import { PreFlightInterceptor, type PreFlightDecision } from "../../src/preflight.ts";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
 import { createGuardValidator, guardAction } from "../../src/adapters/elizaos.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
@@ -29,7 +35,7 @@ let interceptor: PreFlightInterceptor;
 before(async () => {
   config = await loadPhase2Config();
   server = new rpc.Server(config.rpcUrl);
-  interceptor = new PreFlightInterceptor( {
+  interceptor = new PreFlightInterceptor({
     server,
     networkPassphrase: "Test SDF Network ; September 2015",
     guard: unsafeContractAddress(config.guard),
@@ -73,6 +79,12 @@ interface VerdictRow {
   name: string;
   /** The args to hand the adapter, or null to exercise the mapping-error path. */
   args: { to: unknown; amount?: unknown } | null;
+  /**
+   * A fixed verdict for rows whose verdict cannot be produced deterministically
+   * against the live guard. When set, the row runs against this decision instead
+   * of the live interceptor — the adapters' mapping is what is under test.
+   */
+  fixedVerdict?: PreFlightDecision;
   /** LangChain expected behaviour. */
   langchain: {
     /** Whether the tool body is entered. */
@@ -91,7 +103,7 @@ interface VerdictRow {
   };
 }
 
-const VERDICT_TABLE: VerdictRow [] = [
+const VERDICT_TABLE: VerdictRow[] = [
   {
     name: "admissible",
     args: { to: "recipient", amount: "5" },
@@ -109,12 +121,21 @@ const VERDICT_TABLE: VerdictRow [] = [
     elizaos: { validate: false, onBlocked: ["recipient_not_allowed"] },
   },
   {
-    name: "undetermined(mapping_error)",
-    args: null,
+    name: "undetermined(cause)",
+    args: { to: "recipient", amount: "5" },
+    // See the file header: an `undetermined` run cannot be forced against the
+    // live guard, so the verdict is supplied directly and the adapters' mapping
+    // is asserted. The message asserted below is the adapter's own
+    // `describeRefusal` text for an undetermined decision.
+    fixedVerdict: {
+      allowed: false,
+      kind: "undetermined",
+      detail: "enforced simulation failed: rpc unavailable",
+    },
     langchain: {
       toolEntered: false,
       error: true,
-      matches: /undetermined/,
+      matches: /could not determine/,
     },
     elizaos: { validate: false, onBlocked: ["undetermined"] },
   },
@@ -136,13 +157,24 @@ function resolveArgs(row: VerdictRow):
   return { to, amount: row.args.amount };
 }
 
+/**
+ * The interceptor a row runs against: the live one for verdicts the guard can be
+ * made to return, a fixed-verdict stand-in for the `undetermined` row.
+ */
+function interceptorForRow(row: VerdictRow): PreFlightInterceptor {
+  if (!row.fixedVerdict) return interceptor;
+  return {
+    check: async () => row.fixedVerdict as PreFlightDecision,
+  } as unknown as PreFlightInterceptor;
+}
+
 describe("LangChain wrapToolCall adapter against the live guard", () => {
   for (const row of VERDICT_TABLE) {
     it(`${row.name}: toolEntered=${row.langchain.toolEntered}, error=${row.langchain.error}`, async () => {
-      await installPolicy(server, config);
+      if (!row.fixedVerdict) await installPolicy(server, config);
       let toolEntered = false;
       const middleware = createLangChainGuardMiddleware({
-        interceptor,
+        interceptor: interceptorForRow(row),
         toContractCall: () => {
           const args = resolveArgs(row);
           if (args === null) return null;
@@ -196,20 +228,21 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
 describe("ElizaOS Action.validate adapter against the live guard", () => {
   for (const row of VERDICT_TABLE) {
     it(`${row.name}: validate=${row.elizaos.validate}, onBlocked=${JSON.stringify(row.elizaos.onBlocked ?? [])}`, async () => {
-      await installPolicy(server, config);
+      if (!row.fixedVerdict) await installPolicy(server, config);
       const blocked: string[] = [];
       const validate = createGuardValidator({
-        interceptor,
-        toContractCall: (_message, state) => {
-          const args = resolveArgs(row);
-          if (args === null) return null;
-          return toContractCall((state ?? {}) as { to: unknown; amount?: unknown });
-        },
+        interceptor: interceptorForRow(row),
+        // The state the runtime hands `validate` is the only place the args live,
+        // so the mapper reads it (and returns `null` when there is no state).
+        toContractCall: (_message, state) =>
+          state === null || state === undefined
+            ? null
+            : toContractCall(state as { to: unknown; amount?: unknown }),
         onBlocked: (decision) =>
           blocked.push(decision.kind === "blocked" ? decision.reason : decision.kind),
       });
 
-      const verdict = await validate({}, {}, resolveArgs(row) ?? {});
+      const verdict = await validate({}, {}, resolveArgs(row));
 
       assert.equal(verdict, row.elizaos.validate);
       assert.deepEqual(blocked, row.elizaos.onBlocked ?? []);
@@ -243,5 +276,36 @@ describe("ElizaOS Action.validate adapter against the live guard", () => {
     const verdict = await action.validate({}, {});
     assert.equal(verdict, false);
     assert.equal(baseCalls, 1, "the action's own validate must still be consulted");
+  });
+});
+
+describe("mapping errors (toContractCall returns null)", () => {
+  /**
+   * A `null` call means "this action moves no funds" — the documented behaviour
+   * is to pass it through untouched rather than invent a verdict, and the same
+   * rule applies to both adapters. The live-refusal paths are covered by the
+   * verdict table above.
+   */
+  it("LangChain passes the tool straight through", async () => {
+    const middleware = createLangChainGuardMiddleware({
+      interceptor,
+      toContractCall: () => null,
+    });
+    const result = await middleware.wrapToolCall(
+      { toolCall: { name: "send_payment", id: "lc_mapping_error", args: { to: 42 } } },
+      async () => ({ content: "sent" }),
+    );
+    assert.deepEqual(result, { content: "sent" });
+  });
+
+  it("ElizaOS returns true and reports nothing", async () => {
+    const blocked: string[] = [];
+    const validate = createGuardValidator({
+      interceptor,
+      toContractCall: () => null,
+      onBlocked: (decision) => blocked.push(decision.kind),
+    });
+    assert.equal(await validate({}, {}, { to: 42 }), true);
+    assert.deepEqual(blocked, []);
   });
 });

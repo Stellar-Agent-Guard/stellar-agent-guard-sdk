@@ -27,9 +27,9 @@
  * | `undetermined(cause)` | returns a `LangChainToolMessage` with `status: "error"`; the tool never runs.  |
  *
  * The adapter never throws for a guard verdict — it fails closed by returning a
- * refusal message. This differs from the ElizaAOS validator, which returns a boolean
- * and throws on `undetermined`; the shared harness in `tests/integration/adapters.test.ts`
- * pins both contracts side by side.
+ * refusal message. This differs from the ElizaOS validator, which returns a boolean
+ * and fails closed (returns `false`) on `undetermined`; the shared harness in
+ * `tests/integration/adapters.test.ts` pins both contracts side by side.
  */
 import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";

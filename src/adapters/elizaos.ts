@@ -5,7 +5,7 @@
  * the same `(runtime, message, state, options)` triple the handler receives and
  * admits the action to the eligible set only when it returns truthy. Composing
  * the guard into `validate` therefore stops the handler from ever running — see
- * `docs/integration-hooks.md` ¦2 for the source-pinned signatures and the three
+ * `docs/integration-hooks.md` §2 for the source-pinned signatures and the three
  * call sites that enforce it.
  *
  * Wrapping `handler` instead would be weaker: by the time a handler runs, the
