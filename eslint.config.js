@@ -11,7 +11,7 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist/**", "node_modules/**", "coverage/**"] },
+  { ignores: ["dist/**", "node_modules/**", "coverage/**", ".kilo/**"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
@@ -28,5 +28,11 @@ export default tseslint.config(
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrorsIgnorePattern: "^_" },
       ],
     },
+  },
+  {
+    // Plain-JS Node scripts have no tsconfig coverage, so `no-undef` cannot be
+    // resolved by a type checker and needs the environment declared instead.
+    files: ["scripts/**/*.mjs"],
+    languageOptions: { globals: { process: "readonly", console: "readonly" } },
   },
 );

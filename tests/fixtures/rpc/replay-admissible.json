@@ -1,0 +1,22 @@
+{
+  "header": {
+    "source": "synthetic XDR replay fixture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "createdAt": "2026-10-01T00:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Successful simulation with an explicit guard allowed decision"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "A call whose guard authorization returned allowed"
+  },
+  "simulationResponse": {
+    "events": [
+      "AAAAAQAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAMAAAAPAAAAEmV2ZW50X2F1dGhfY2hlY2tlZAAAAAAADwAAAAdhbGxvd2VkAAAAAA8AAAAAAAAAAQ=="
+    ]
+  },
+  "expected": {
+    "verdict": "admissible"
+  }
+}

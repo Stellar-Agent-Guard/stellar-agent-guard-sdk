@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { before, describe, it } from "node:test";
 import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { PreFlightInterceptor, PreFlightUndeterminedError } from "../../src/preflight.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import {
   guardTokenBalance,
@@ -30,7 +31,7 @@ let interceptor: PreFlightInterceptor;
 /** Positional args for a SAC `transfer` out of the guarded account. */
 function transferCall(to: string, amount: bigint) {
   return {
-    contract: config.token,
+    contract: unsafeContractAddress(config.token),
     fn: "transfer",
     args: [
       new Address(config.guard).toScVal(),
@@ -51,7 +52,7 @@ before(async () => {
   interceptor = new PreFlightInterceptor({
     server,
     networkPassphrase: "Test SDF Network ; September 2015",
-    guard: config.guard,
+    guard: unsafeContractAddress(config.guard),
     agent: config.keys.agent,
     source: config.keys.agent,
   });
@@ -127,7 +128,7 @@ describe("PreFlightInterceptor against the live guard", () => {
     // A call to a function that does not exist is not a policy decision — the
     // guard never rules on it. Reporting that as "the guard blocked you" would
     // be a false claim about the security boundary.
-    const call = { contract: config.token, fn: "no_such_function", args: [] };
+    const call = { contract: unsafeContractAddress(config.token), fn: "no_such_function", args: [] };
 
     const decision = await interceptor.check(call);
     assert.equal(decision.allowed, false);
