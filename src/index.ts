@@ -310,6 +310,7 @@ export {
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package.
 export {
+  AGENT_HALT_GUIDANCE,
   createLangChainGuardMiddleware,
 } from "./adapters/langchain.ts";
 
