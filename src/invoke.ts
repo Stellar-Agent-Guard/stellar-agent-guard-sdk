@@ -771,6 +771,7 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   const sourceKey = await params.source.publicKey();
   return withAccountQueue(params.server, sourceKey, async () => {
     const retry = resolveRetryOptions(params.retry);
+    const logger = resolveLogger(params.logger);
 
     const configuredFeeMax =
       params.feeBump?.maxAttempts ??
@@ -994,6 +995,7 @@ async function invokePipeline(
   options?: { inclusionFee?: bigint | undefined },
 ): Promise<PipelineOutcome> {
   const { server } = params;
+  const onStep = stepHook(params.onStep, resolveLogger(params.logger));
   const enforced = await enforceCall(
     {
       ...params,
