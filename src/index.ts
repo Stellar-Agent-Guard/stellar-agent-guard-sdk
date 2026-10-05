@@ -21,6 +21,7 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  AdapterConfigError,
   BroadcastError,
   ContractResponseError,
   GuardError,
@@ -308,7 +309,10 @@ export {
 } from "./heartbeat.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
-// so neither framework is a dependency of this package.
+// so neither framework is a dependency of this package. Options are validated
+// at construction time (see `src/adapters/validate.ts`), so a misconfigured
+// adapter throws `AdapterConfigError` before the first action rather than
+// failing mid-loop.
 export {
   createLangChainGuardMiddleware,
 } from "./adapters/langchain.ts";
@@ -329,6 +333,14 @@ export type {
   ElizaGuardOptions,
   ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+export {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./adapters/validate.ts";
 
 export {
   createVercelAIGuard,

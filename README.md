@@ -188,11 +188,17 @@ if (!isContractAddress(userInput)) {
 
 #### Throw vs. Verdict Contract
 
+The same doctrine extends to adapter construction: **misconfiguration throws at construction; blocked actions return/throw as documented.** Adapter factories (`createLangChainGuardMiddleware`, `createGuardValidator`) validate their options synchronously before returning, so a missing `toContractCall`, an interceptor lacking a `check` method, or an empty options object fails fast at setup — never mid-loop on the first live tool call. See [Adapter options validation](#adapter-options-validation-fail-fast-at-construction) below.
+
 Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
 
 - **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
 - **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
 - Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+
+### Adapter options validation (fail-fast at construction)
+
+Adapter factories validate their options **synchronously at construction time**, before any action runs. A misconfigured adapter throws a typed `GuardError` (subclass `AdapterConfigError`) naming the offending field and its expected shape — it never surfaces as a mid-loop failure on the first production tool call.
 
 ### Fidelity & limits
 
