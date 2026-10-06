@@ -1257,8 +1257,48 @@ export class GuardTelemetryListener {
     // start ledger. Teardown gets no requests at all, not one.
     if (signal?.aborted) return;
 
-    if (cursor === undefined && startLedger === undefined) {
+    // ── Start position ──────────────────────────────────────────────────────
+    // An explicit `startFrom` outranks every implicit source of position: a
+    // caller-supplied `cursor` and the cursor store both lose to it, because a
+    // caller who stated where to begin stated it more recently than either.
+    const startFrom = params.startFrom;
+    const limit = params.limit !== undefined ? { limit: params.limit } : {};
+    if (startFrom !== undefined) {
+      if (cursor !== undefined) {
+        this.logger.debug("telemetry startFrom overrides the supplied cursor", {
+          guard: this.config.guard,
+          startFrom: typeof startFrom === "string" ? startFrom : startFrom.ledger,
+        });
+      }
+      cursor = undefined;
+      startLedger = undefined;
+    } else if (cursor === undefined && startLedger === undefined) {
       cursor = (await this.activeCursorStore.load()) ?? undefined;
+    }
+
+    try {
+      if (startFrom === "latest") {
+        // Resolve the head cursor and drop the page that established it: "from
+        // now" asks for what happens next, so the page the probe reads is the
+        // backlog this mode promises not to replay. Only the cursor is kept.
+        cursor = (await this.poll(limit)).cursor;
+      } else if (startFrom === "oldest-available") {
+        // Retention is host state, not a constant, so ask for the oldest range
+        // the RPC still holds and begin there. The probe's page is discarded and
+        // the loop below re-reads it from the boundary, so no event is missed and
+        // none is delivered twice.
+        const probe = await this.poll({ startLedger: 1, ...limit });
+        startLedger = probe.oldestLedger ?? 1;
+      } else if (startFrom !== undefined) {
+        // `{ ledger }`: a range request, exactly as if `startLedger` had been
+        // passed directly.
+        startLedger = startFrom.ledger;
+      }
+    } catch (error) {
+      // A start probe is still a request in flight: an abort that lands while it
+      // is pending is teardown, not a telemetry failure.
+      if (signal?.aborted) return;
+      throw error;
     }
 
     // `expectedFrom` is the earliest ledger the listener has not yet confirmed
