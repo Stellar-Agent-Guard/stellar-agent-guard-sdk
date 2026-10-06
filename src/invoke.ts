@@ -31,7 +31,6 @@ import {
   BroadcastError,
   ContractResponseError,
   GuardError,
-  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -46,6 +45,7 @@ import type { TraceStepName, TraceStepStatus } from "./trace.ts";
 import {
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
+  assertExpectedNetwork,
   buildGuardAuthEntry,
   buildInitialEnvelope,
   describeSimulationResources,
@@ -61,6 +61,7 @@ import {
   type AdminSigner,
   type AgentSigner,
   type ContractCall,
+  type ExpectedNetwork,
   type SubmissionResult,
 } from "./tx.ts";
 
@@ -323,11 +324,13 @@ export interface InvokeParams {
   /**
    * Expected network passphrase. When set, the pipeline fetches the server's
    * own network passphrase at first use and fails with a typed
-   * `NetworkMismatchError` unless it matches. Default: `undefined` = unchecked
-   * (legacy behavior; explicitly NOT recommended — pass this in production so
-   * a misconfigured RPC URL cannot silently sign for the wrong network).
+   * `NetworkMismatchError` unless it matches. Accepts a full passphrase or the
+   * aliases `"testnet"`, `"mainnet"`, `"futurenet"`. Default: `undefined` =
+   * unchecked (legacy behavior; explicitly NOT recommended — pass this in
+   * production so a misconfigured RPC URL cannot silently sign for the wrong
+   * network).
    */
-  expectedNetwork?: string | undefined;
+  expectedNetwork?: ExpectedNetwork;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -678,60 +681,6 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
   // allowing a production retry policy to be disabled by an out-of-range sample.
   const normalized = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1) : 0;
   return Math.floor(window * normalized);
-}
-
-/**
- * Cache of the server's reported network passphrase, keyed by the `rpc.Server`
- * instance so the fetch happens at most once per server per process. The
- * promise is cached (not just the resolved value) so concurrent invocations
- * share a single in-flight `getNetwork()` call.
- */
-const serverNetworkPassphrases = new WeakMap<rpc.Server, Promise<string>>();
-
-/**
- * Fetch (and memoize) the network passphrase the server reports for itself.
- *
- * `rpc.Server.getNetwork()` is the only honest source for "which network is
- * this RPC actually on?" — the URL is a hint, not a fact. A failure to fetch
- * is surfaced as a typed `NetworkMismatchError` with `actual: null` so the
- * caller can distinguish "RPC unreachable" from "RPC on the wrong network".
- */
-async function fetchServerNetworkPassphrase(server: rpc.Server): Promise<string> {
-  let cached = serverNetworkPassphrases.get(server);
-  if (!cached) {
-    cached = server.getNetwork().then((info) => info.passphrase);
-    serverNetworkPassphrases.set(server, cached);
-  }
-  return cached;
-}
-
-/**
- * Enforce the network interlock, if the caller opted in.
- *
- * `expectedNetwork === undefined` is the documented legacy behavior: no fetch,
- * no check, exactly as `invoke()` behaved before this option existed. When set,
- * the server's own passphrase is fetched (memoized) and compared; a mismatch
- * throws a typed `NetworkMismatchError` naming both the expected and actual
- * passphrases.
- */
-async function assertExpectedNetwork(
-  server: rpc.Server,
-  expectedNetwork: string | undefined,
-): Promise<void> {
-  if (expectedNetwork === undefined) return;
-  let actual: string | null = null;
-  try {
-    actual = await fetchServerNetworkPassphrase(server);
-  } catch (cause) {
-    throw new NetworkMismatchError({
-      expected: expectedNetwork,
-      actual: null,
-      cause,
-    });
-  }
-  if (actual !== expectedNetwork) {
-    throw new NetworkMismatchError({ expected: expectedNetwork, actual });
-  }
 }
 
 /**

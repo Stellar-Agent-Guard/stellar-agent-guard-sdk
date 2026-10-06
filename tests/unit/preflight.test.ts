@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Account, Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
+import { Account, Address, Keypair, Networks, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
   InvalidInputError,
   PreFlightInterceptor,
@@ -15,6 +15,7 @@ import {
   type PreFlightDecision,
 } from "../../src/preflight.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
+import { NetworkMismatchError } from "../../src/errors.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
@@ -1029,5 +1030,92 @@ describe("PreFlightInterceptor.checkBatch()", () => {
         return true;
       },
     );
+  });
+});
+
+/** A mock server with a `getNetwork()` seam for the network-interlock tests. */
+function createNetworkServer(options: { passphrase?: string; reject?: unknown } = {}) {
+  const server = createMockServer();
+  let networkCalls = 0;
+  (server as unknown as { getNetwork: () => Promise<{ passphrase: string }> }).getNetwork =
+    async () => {
+      networkCalls++;
+      if (options.reject !== undefined) throw options.reject;
+      return { passphrase: options.passphrase ?? Networks.TESTNET };
+    };
+  return { server, networkCalls: () => networkCalls };
+}
+
+describe("PreFlightInterceptor network interlock (issue #113)", () => {
+  function interceptorFor(server: rpc.Server, expectedNetwork: string | undefined) {
+    return new PreFlightInterceptor({
+      server,
+      networkPassphrase: Networks.TESTNET,
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      ...(expectedNetwork !== undefined ? { expectedNetwork } : {}),
+    });
+  }
+
+  it("fails with a typed NetworkMismatchError naming both passphrases (testnet key + mainnet RPC)", async () => {
+    const { server } = createNetworkServer({ passphrase: Networks.PUBLIC });
+    const interceptor = interceptorFor(server, "testnet");
+
+    await assert.rejects(interceptor.check(validTransferCall()), (err: unknown) => {
+      assert.ok(err instanceof NetworkMismatchError, "expected NetworkMismatchError");
+      assert.equal(err.expected, Networks.TESTNET);
+      assert.equal(err.actual, Networks.PUBLIC);
+      return true;
+    });
+    assert.equal(
+      (server as unknown as { requestCount: number }).requestCount,
+      0,
+      "the interlock must fail before any simulation RPC call",
+    );
+  });
+
+  it("fails in the reverse direction (mainnet key + testnet RPC)", async () => {
+    const { server } = createNetworkServer({ passphrase: Networks.TESTNET });
+    const interceptor = interceptorFor(server, "mainnet");
+
+    await assert.rejects(interceptor.check(validTransferCall()), (err: unknown) => {
+      assert.ok(err instanceof NetworkMismatchError);
+      assert.equal(err.expected, Networks.PUBLIC);
+      assert.equal(err.actual, Networks.TESTNET);
+      return true;
+    });
+  });
+
+  it("accepts a matching short alias and proceeds to simulation", async () => {
+    const { server, networkCalls } = createNetworkServer({ passphrase: Networks.TESTNET });
+    const interceptor = interceptorFor(server, "testnet");
+
+    const decision = await interceptor.check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+    assert.equal(networkCalls(), 1, "getNetwork() is memoized per server instance");
+  });
+
+  it("reports actual: null when the server passphrase cannot be read", async () => {
+    const cause = new Error("rpc unreachable");
+    const { server } = createNetworkServer({ reject: cause });
+    const interceptor = interceptorFor(server, "testnet");
+
+    await assert.rejects(interceptor.check(validTransferCall()), (err: unknown) => {
+      assert.ok(err instanceof NetworkMismatchError);
+      assert.equal(err.actual, null);
+      assert.equal(err.expected, Networks.TESTNET);
+      assert.equal(err.cause, cause);
+      return true;
+    });
+  });
+
+  it("performs no network check when expectedNetwork is unset (legacy behavior)", async () => {
+    const { server, networkCalls } = createNetworkServer();
+    const interceptor = interceptorFor(server, undefined);
+
+    const decision = await interceptor.check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+    assert.equal(networkCalls(), 0, "unset expectedNetwork must not call getNetwork()");
   });
 });

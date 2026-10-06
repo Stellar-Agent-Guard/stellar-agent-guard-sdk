@@ -46,6 +46,7 @@ import {
   Account,
   Address,
   Keypair,
+  Networks,
   SorobanDataBuilder,
   StrKey,
   Transaction,
@@ -58,6 +59,7 @@ import {
 import {
   BroadcastError,
   ContractResponseError,
+  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -895,3 +897,80 @@ export function buildInitialEnvelope(params: {
 }
 
 export { SIG_EXPIRATION_LEDGERS, INCLUSION_FEE };
+
+/**
+ * A caller-required Stellar network passphrase, or one of the short aliases
+ * `"testnet"`, `"mainnet"` and `"futurenet"`. `undefined` disables the network
+ * interlock and preserves legacy behavior exactly.
+ *
+ * The same type is shared by the pre-flight interceptor and `invoke()` so the
+ * three entry surfaces cannot drift apart.
+ */
+export type ExpectedNetwork = string | undefined;
+
+/** Short aliases resolved to the passphrases `Networks` publishes. */
+const NETWORK_ALIASES: Record<string, string> = {
+  mainnet: Networks.PUBLIC,
+  testnet: Networks.TESTNET,
+  futurenet: Networks.FUTURENET,
+};
+
+/** Expand a short network alias to its full passphrase; any other value passes through. */
+export function resolveExpectedNetwork(expectedNetwork: string): string {
+  return NETWORK_ALIASES[expectedNetwork.trim().toLowerCase()] ?? expectedNetwork;
+}
+
+/**
+ * Cache of the server's reported network passphrase, keyed by the `rpc.Server`
+ * instance so the fetch happens at most once per server per process. The
+ * *promise* is cached (not just its resolved value), so concurrent callers share
+ * one in-flight `getNetwork()` request. A rejected promise is evicted so a
+ * transient RPC failure does not poison every later check.
+ */
+const serverNetworkPassphrases = new WeakMap<rpc.Server, Promise<string>>();
+
+async function fetchServerNetworkPassphrase(server: rpc.Server): Promise<string> {
+  let cached = serverNetworkPassphrases.get(server);
+  if (!cached) {
+    cached = server.getNetwork().then((info) => info.passphrase);
+    cached.catch(() => {
+      serverNetworkPassphrases.delete(server);
+    });
+    serverNetworkPassphrases.set(server, cached);
+  }
+  return cached;
+}
+
+/**
+ * Enforce the network interlock when the caller opted in.
+ *
+ * `expectedNetwork === undefined` skips the fetch entirely: no request, no
+ * comparison, exactly the behavior of `invoke()`/`PreFlightInterceptor` before
+ * this option existed. When set, the server's own passphrase is fetched
+ * (memoized) and compared; a mismatch — or a failure to read it — throws a typed
+ * `NetworkMismatchError` naming both passphrases.
+ */
+export async function assertExpectedNetwork(
+  server: rpc.Server,
+  expectedNetwork: ExpectedNetwork,
+): Promise<void> {
+  if (expectedNetwork === undefined) return;
+  const expected = resolveExpectedNetwork(expectedNetwork);
+  let actual: string;
+  try {
+    actual = await fetchServerNetworkPassphrase(server);
+  } catch (cause) {
+    throw new NetworkMismatchError(
+      `network interlock could not read the RPC server's passphrase ` +
+        `(expected ${JSON.stringify(expected)})`,
+      { expected, actual: null, cause },
+    );
+  }
+  if (actual !== expected) {
+    throw new NetworkMismatchError(
+      `network passphrase mismatch: expected ${JSON.stringify(expected)}, ` +
+        `server reports ${JSON.stringify(actual)}`,
+      { expected, actual },
+    );
+  }
+}

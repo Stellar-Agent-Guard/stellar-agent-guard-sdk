@@ -160,3 +160,28 @@ export class AdapterConfigError extends GuardError {
     this.adapter = options.adapter;
   }
 }
+
+/**
+ * The RPC server's network passphrase did not match the caller's `expectedNetwork`.
+ *
+ * Raised by the network interlock before any transaction is signed or simulated,
+ * so a misconfigured RPC URL (testnet key + mainnet RPC, or the reverse) fails
+ * loudly instead of silently operating on the wrong chain. `actual` is `null`
+ * when the server's passphrase could not be read at all, which lets a caller
+ * tell "the RPC is unreachable" apart from "the RPC is on the wrong network".
+ */
+export class NetworkMismatchError extends GuardError {
+  /** The passphrase the caller required (`undefined` never reaches here). */
+  readonly expected: string;
+  /** The passphrase the server reported, or `null` when it could not be read. */
+  readonly actual: string | null;
+
+  constructor(
+    message: string,
+    options: { expected: string; actual: string | null; cause?: unknown },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.expected = options.expected;
+    this.actual = options.actual;
+  }
+}
