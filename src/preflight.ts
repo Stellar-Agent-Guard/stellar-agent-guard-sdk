@@ -27,7 +27,7 @@
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { GuardError, SimulationError } from "./errors.ts";
-import { enforceCall } from "./invoke.ts";
+import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
 import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
   extractTransferAmount,
@@ -36,7 +36,7 @@ import {
   type ReadonlyPolicyConfig,
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
-import type { InvokeStepEvent } from "./invoke.ts";
+import type { EnforcementOutcome, InvokeStepEvent } from "./invoke.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
@@ -271,9 +271,28 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  * simulate; `check()` never broadcasts), using the same `InvokeStepEvent`
  * shape and shared trace vocabulary as `invoke()`'s `onStep`. Entirely
  * optional — omitting it changes nothing about the check.
+ *
+ * `signal` and `timeoutMs` bound the RPC calls the check makes (the ledger
+ * lookup and the probe/enforced simulations). An already-aborted signal
+ * returns before any RPC call is made; a mid-flight abort or a fired timeout
+ * returns the check's fail-closed `undetermined` verdict carrying a typed
+ * `RpcTimeoutError` — the guard reached no decision, which is exactly what
+ * `undetermined` means, so a bound can never produce an `admissible` verdict.
+ * Both default to the pipeline's shared behaviour: no signal, and
+ * `DEFAULT_RPC_TIMEOUT_MS` for the timeout.
  */
 export interface PreFlightCheckOptions {
   onStep?: (step: InvokeStepEvent) => void;
+  /**
+   * Caller-owned cancellation; aborts the RPC calls the check makes. A fired
+   * signal yields an `undetermined` verdict, never a throw.
+   */
+  signal?: AbortSignal | undefined;
+  /**
+   * Bound on each RPC call, in milliseconds; `0` disables the timeout. A fired
+   * timeout yields the same `undetermined` verdict as an abort.
+   */
+  timeoutMs?: number | undefined;
 }
 
 export interface PreFlightCacheOptions {
@@ -508,16 +527,35 @@ export class PreFlightInterceptor {
         this.cache.delete(context.key);
       }
     }
-    const outcome = await enforceCall({
-      server: this.config.server,
-      source: this.config.source,
-      call,
-      networkPassphrase: this.config.networkPassphrase,
-      guardAuth: { guard: this.config.guard, agent: this.config.agent },
-      ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-      ...(options?.onStep ? { onStep: options.onStep } : {}),
-      ...(this.config.logger ? { logger: this.config.logger } : {}),
-    });
+    // A bound that fired is a verdict, not a crash: the guard never reached a
+    // decision, so the check returns its fail-closed `undetermined` arm (the
+    // same arm any other unrunnable simulation takes) carrying the typed
+    // `RpcTimeoutError`. `invoke()` reports the same error through its own
+    // `error` outcome instead — a verdict question versus a pipeline question.
+    let outcome: EnforcementOutcome;
+    try {
+      outcome = await withRpcAbort(
+        {
+          stage: "pre-flight",
+          signal: options?.signal,
+          timeoutMs: options?.timeoutMs,
+        },
+        () =>
+          enforceCall({
+            server: this.config.server,
+            source: this.config.source,
+            call,
+            networkPassphrase: this.config.networkPassphrase,
+            guardAuth: { guard: this.config.guard, agent: this.config.agent },
+            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+            ...(options?.onStep ? { onStep: options.onStep } : {}),
+            ...(this.config.logger ? { logger: this.config.logger } : {}),
+          }),
+      );
+    } catch (error) {
+      if (!(error instanceof RpcTimeoutError)) throw error;
+      outcome = timeoutOutcome(error);
+    }
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {

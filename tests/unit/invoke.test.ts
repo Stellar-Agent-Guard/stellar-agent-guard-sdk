@@ -24,6 +24,7 @@ import {
 } from "../../src/invoke.ts";
 import { BroadcastError } from "../../src/tx.ts";
 import { SimulationError } from "../../src/errors.ts";
+import { RpcTimeoutError } from "../../src/invoke.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
 import type { InvokeStepEvent } from "../../src/invoke.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
@@ -108,6 +109,8 @@ function blockedEnforcement(): unknown {
 interface MockServerOptions {
   /** Overrides every simulation (probe and enforced). */
   simulate?: (call: number) => unknown;
+  /** Overrides only the discovery probe (the 1st simulation per attempt). */
+  probe?: (attempt: number) => unknown;
   /** Overrides only the enforced simulation (the 2nd one per attempt). */
   enforced?: (attempt: number) => unknown;
   /** Overrides sendTransaction; receives the 1-based send count. */
@@ -146,6 +149,7 @@ function createMockServer(options: MockServerOptions = {}) {
       const call = ++simulations;
       if (options.simulate) return options.simulate(call);
       // Odd calls are the discovery probe; even calls are the enforced run.
+      if (call % 2 === 1 && options.probe) return options.probe(Math.floor(call / 2));
       if (call % 2 === 0 && options.enforced) return options.enforced(Math.floor(call / 2) - 1);
       return probeSuccess();
     },
@@ -554,6 +558,94 @@ describe("invoke() without onStep: default behavior unchanged", () => {
     assert.equal(outcome.kind, "error");
     assert.ok(outcome.error instanceof SimulationError);
     assert.equal(outcome.error.cause, boom);
+  });
+});
+
+describe("invoke() abortSignal + timeoutMs", () => {
+  it("returns without any RPC call when the signal is already aborted", async () => {
+    const server = createMockServer();
+    const controller = new AbortController();
+    controller.abort();
+
+    const outcome = await invoke(
+      makeParams(server, { signal: controller.signal }),
+    );
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof RpcTimeoutError);
+    assert.equal(outcome.error.cause, "timeout");
+    // The pipeline must short-circuit before touching the RPC at all.
+    assert.equal(server.simulationCount, 0);
+    assert.equal(server.sendCount, 0);
+    assert.equal(server.accountLookupCount, 0);
+  });
+
+  it("rejects promptly when aborted mid-flight", async () => {
+    const controller = new AbortController();
+    let releaseProbe!: () => void;
+    const probeGate = new Promise<void>((resolve) => {
+      releaseProbe = resolve;
+    });
+    const server = createMockServer({
+      probe: async () => {
+        await probeGate;
+        return probeSuccess();
+      },
+    });
+
+    const pending = invoke(makeParams(server, { signal: controller.signal }));
+    await new Promise((resolve) => setImmediate(resolve));
+    controller.abort();
+    releaseProbe();
+
+    const outcome = await pending;
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof RpcTimeoutError);
+    assert.equal(outcome.error.cause, "timeout");
+    // The abort happened during the probe: no signing or broadcast followed.
+    assert.equal(server.sendCount, 0);
+  });
+
+  it("fires a typed timeout with fake timers", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const server = createMockServer({
+      probe: () => new Promise(() => {}),
+    });
+
+    const pending = invoke(makeParams(server, { timeoutMs: 5_000 }));
+    await Promise.resolve();
+    t.mock.timers.tick(5_000);
+    const outcome = await pending;
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof RpcTimeoutError);
+    assert.equal(outcome.error.cause, "timeout");
+    assert.equal(server.sendCount, 0);
+  });
+
+  it("does not time out when the pipeline finishes within the budget", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const server = createMockServer();
+
+    const pending = invoke(makeParams(server, { timeoutMs: 30_000 }));
+    await drainWithMockedTimers(t.mock.timers, pending);
+    const outcome = await pending;
+
+    assert.equal(outcome.kind, "allowed");
+  });
+
+  it("clears the timeout timer on success so no stray timer survives", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const server = createMockServer();
+
+    const pending = invoke(makeParams(server, { timeoutMs: 30_000 }));
+    await drainWithMockedTimers(t.mock.timers, pending);
+    await pending;
+
+    // If the timeout timer were left armed, ticking past the budget would
+    // surface as an unhandled rejection; the run must already be settled.
+    t.mock.timers.tick(60_000);
+    await new Promise((resolve) => setImmediate(resolve));
   });
 });
 
