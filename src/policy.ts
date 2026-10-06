@@ -13,34 +13,9 @@
  * caps are `i128` and silently narrowing them to `number` would lose precision
  * on exactly the values a spend guard exists to compare.
  */
-/**
- * Property-test constraints for this module (see
- * `tests/property/policy-encode-decode.test.ts`):
- *
- * - Determinism of `policyToScVal` and encodability of `validateGuardPolicy`
- *   output are load-bearing invariants. A property violation here is a bug to
- *   fix in `src/policy.ts`, not to downgrade: the contract's on-chain decode
- *   depends on canonical sorted-struct key order (see `sortedScMap`), and any
- *   policy the SDK's validator accepts must be encodable by `policyToScVal`.
- * - The shared seeded generator module
- *   (`tests/property/generators/policy.ts`) is the single source of random
- *   policies for both the round-trip property and the encode/decode property
- *   set; do not fork it.
- * - The recipient-entry cardinality limit is vendored from the contract's
- *   `MAX_RECIPIENT_ENTRIES` (see `DEFAULT_MAX_RECIPIENT_ENTRIES` below) and is
- *   kept in sync with the contracts repo's property-test runtime discipline
- *   (bounded iterations, seed printed on failure).
- */
 import { Address, nativeToScVal, rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
 import type { ContractCall } from "./tx.ts";
-
-/**
- * Maximum recipient-list entries accepted by `validateGuardPolicy` when the
- * caller does not pass `maxRecipientEntries` — vendored from the contract's
- * `MAX_RECIPIENT_ENTRIES` per SPEC §8. Keep in step with the contracts repo.
- */
-export const DEFAULT_MAX_RECIPIENT_ENTRIES = 256;
 
 /**
  * Branded types for address validation at compile time.
@@ -247,11 +222,7 @@ export interface PolicyFailure {
 export interface ValidatePolicyOptions {
   /** Guard contract address used to enforce self-address rejection rules. */
   guardAddress?: ContractAddress | string;
-  /**
-   * Maximum allowed recipient entries (default:
-   * `DEFAULT_MAX_RECIPIENT_ENTRIES`, vendored from the contract's
-   * `MAX_RECIPIENT_ENTRIES` per SPEC §8).
-   */
+  /** Maximum allowed recipient entries (default: 256 per SPEC §8). */
   maxRecipientEntries?: number;
 }
 
@@ -285,12 +256,6 @@ export type CheckResult =
  * `HostError: Error(Object, InvalidInput) — ScMap was not sorted by key for
  * conversion to host object`. Sorting by the symbol text is the same order the
  * host's `Symbol` comparison uses.
- *
- * Determinism: for a given `PolicyConfig`, the emitted XDR is byte-identical
- * across calls. This is a load-bearing invariant — the contract's typed-struct
- * conversion walks the map in key order, so any accidental key-order
- * instability would break on-chain decode parity (see the parity-vector
- * issue). The property tests assert this directly.
  */
 export function policyToScVal(policy: ReadonlyPolicyConfig): xdr.ScVal {
   const entries: Array<{ key: string; val: xdr.ScVal }> = [
@@ -818,7 +783,7 @@ export function validateGuardPolicy(
 
   const raw = policy as Record<string, unknown>;
   const failures: PolicyFailure[] = [];
-  const maxRecipientEntries = options.maxRecipientEntries ?? DEFAULT_MAX_RECIPIENT_ENTRIES;
+  const maxRecipientEntries = options.maxRecipientEntries ?? 256;
   const guardAddress = options.guardAddress ? normalizeStellarAddress(options.guardAddress) : null;
 
   // 1. per_tx_cap (SPEC §8 bullet 1)
@@ -1323,3 +1288,4 @@ export function validateGuardPolicy(
 
   return failures;
 }
+
