@@ -3,11 +3,11 @@
 <img src="Gemini_Generated_Image_mvimg2mvimg2mvim.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
 <p align="center">
-<a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml">
-<img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/actions/workflows/ci.yml">
+<img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </a>
-<a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/live-suite.yml">
-<img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/live-suite.yml/badge.svg" alt="Live suite"/>
+<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/actions/workflows/live-suite.yml">
+<img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/actions/workflows/live-suite.yml/badge.svg" alt="Live suite"/>
 </a>
 <a href="https://www.npmjs.com/package/stellar-agent-guard-sdk">
 <img src="https://img.shields.io/npm/v/stellar-agent-guard-sdk" alt="npm version"/>
