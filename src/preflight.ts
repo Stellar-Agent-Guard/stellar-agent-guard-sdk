@@ -38,8 +38,8 @@ import {
 import { GuardBlockedError, explainReason } from "./reasons.ts";
 import type { InvokeStepEvent } from "./invoke.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
-import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
-import type { AgentSigner, ContractCall } from "./tx.ts";
+import { parseSimulationResourceFee, toAgentSigner, assertExpectedNetwork } from "./tx.ts";
+import type { AgentSigner, ContractCall, ExpectedNetwork } from "./tx.ts";
 import { systemClock, type Clock } from "./clock.ts";
 
 /**
@@ -328,6 +328,18 @@ export interface PreFlightConfig {
    * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
    */
   clock?: Clock;
+  /**
+   * Opt-in network interlock. When set, the interceptor fetches the server's own
+   * network passphrase before its first check and fails with a typed
+   * `NetworkMismatchError` unless it matches. Accepts a full passphrase or the
+   * aliases `"testnet"`, `"mainnet"` and `"futurenet"`.
+   *
+   * Default: `undefined` = unchecked (legacy behavior). This is explicitly NOT
+   * recommended: leaving it unset means a misconfigured RPC URL (testnet key +
+   * mainnet RPC, or the reverse) is not caught. The interlock is a guardrail,
+   * not a sandbox — an RPC that lies about its passphrase is not defended.
+   */
+  expectedNetwork?: ExpectedNetwork;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -486,6 +498,10 @@ export class PreFlightInterceptor {
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
+    // The interlock runs before the cache lookup and before any simulation: a
+    // misconfigured RPC URL must fail before a key is used for the wrong chain,
+    // and a cached verdict must not bypass the check.
+    await assertExpectedNetwork(this.config.server, this.config.expectedNetwork);
 
     const context = await this.cacheContext(call);
     if (context) {
@@ -515,6 +531,9 @@ export class PreFlightInterceptor {
       networkPassphrase: this.config.networkPassphrase,
       guardAuth: { guard: this.config.guard, agent: this.config.agent },
       ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+      ...(this.config.expectedNetwork !== undefined
+        ? { expectedNetwork: this.config.expectedNetwork }
+        : {}),
       ...(options?.onStep ? { onStep: options.onStep } : {}),
       ...(this.config.logger ? { logger: this.config.logger } : {}),
     });

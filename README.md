@@ -144,6 +144,7 @@ const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6M
 const interceptor = new PreFlightInterceptor({
   server: new rpc.Server("https://soroban-testnet.stellar.org"),
   networkPassphrase: "Test SDF Network ; September 2015",
+  expectedNetwork: "testnet", // network interlock: fail on a mismatched RPC URL
   guard: guardAddress, // Type-safe: validated as ContractAddress
   agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
   source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
@@ -163,6 +164,20 @@ if (decision.kind === "admissible") {
   console.log("Undetermined (fails closed)");
 }
 ```
+#### Network interlock
+
+`expectedNetwork` binds an entry surface (`PreFlightInterceptor`, `invoke()`) to
+the network you believe you are talking to: before doing any work the SDK reads
+the server's own passphrase and throws a typed `NetworkMismatchError` — naming
+both the expected and actual passphrases — when it does not match. It accepts a
+full passphrase or the short aliases `"testnet"`, `"mainnet"` and `"futurenet"`.
+Leaving it unset preserves legacy behavior exactly, and is explicitly **not**
+recommended: a testnet key paired with a mainnet RPC URL (or the reverse) is the
+classic footgun this catches.
+
+> **Limitation:** the network interlock is a guardrail, not a sandbox — an RPC
+> that lies about its passphrase is not defended against.
+
 #### Adapter verdict handling
 
 Both framework adapters wrap the same `PreFlightInterceptor` but expose different contracts, so the same verdict maps to different observable behavior per adapter. The table below is the source of truth enforced by the shared adapter test harness (`tests/integration/adapters.test.ts`); each row is one adapter × one verdict, and the expected-behavior columns differ only where the adapter contracts say they differ.

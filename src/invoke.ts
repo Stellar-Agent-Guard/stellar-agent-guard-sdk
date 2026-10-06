@@ -1,4 +1,14 @@
 /**
+ * Network interlock: bind the invocation pipeline to an expected network
+ * passphrase so a misconfigured RPC URL (testnet key + mainnet RPC, or the
+ * reverse) fails loudly with a typed `NetworkMismatchError` instead of
+ * silently signing against the wrong network.
+ *
+ * See `docs/concepts/network-interlock.md` for the honest boundary: this is a
+ * guardrail, not a sandbox — an RPC that lies about its passphrase is not
+ * defended against.
+ */
+/**
  * The full invocation pipeline for a guarded account, in the order the Stellar
  * host actually requires:
  *
@@ -35,6 +45,7 @@ import type { TraceStepName, TraceStepStatus } from "./trace.ts";
 import {
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
+  assertExpectedNetwork,
   buildGuardAuthEntry,
   buildInitialEnvelope,
   describeSimulationResources,
@@ -50,6 +61,7 @@ import {
   type AdminSigner,
   type AgentSigner,
   type ContractCall,
+  type ExpectedNetwork,
   type SubmissionResult,
 } from "./tx.ts";
 
@@ -309,6 +321,16 @@ export interface InvokeParams {
   maxRetries?: number | undefined;
   /** Custom inclusion fee (used internally during fee-bump retries). */
   fee?: bigint | string | undefined;
+  /**
+   * Expected network passphrase. When set, the pipeline fetches the server's
+   * own network passphrase at first use and fails with a typed
+   * `NetworkMismatchError` unless it matches. Accepts a full passphrase or the
+   * aliases `"testnet"`, `"mainnet"`, `"futurenet"`. Default: `undefined` =
+   * unchecked (legacy behavior; explicitly NOT recommended — pass this in
+   * production so a misconfigured RPC URL cannot silently sign for the wrong
+   * network).
+   */
+  expectedNetwork?: ExpectedNetwork;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -763,6 +785,11 @@ export function invoke(
 ): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
 export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+  // The interlock runs before anything else — before the account queue, before
+  // any signing, before any simulation. A mismatched network must fail before
+  // a key is ever used to sign for the wrong chain.
+  await assertExpectedNetwork(params.server, params.expectedNetwork);
+
   // A dry run performs exactly one pass: it never reaches broadcast, so there
   // is no stale-ledger rejection to retry, no sleep to justify, and nothing to
   // serialize against the account queue.
@@ -1145,6 +1172,10 @@ export async function enforceCall(
   params: InvokeParams,
   attempt: number = 0,
 ): Promise<EnforcementOutcome> {
+  // `enforceCall` is exported and callable directly (the pre-flight interceptor
+  // uses it), so the interlock is enforced here too — not only in `invoke()`.
+  await assertExpectedNetwork(params.server, params.expectedNetwork);
+
   const { server, source, call, networkPassphrase } = params;
   const logger = resolveLogger(params.logger);
   const onStep = stepHook(params.onStep, logger);
