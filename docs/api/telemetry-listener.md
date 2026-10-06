@@ -17,9 +17,13 @@ constructor(options: GuardTelemetryListenerOptions)
 | `failedTx` | `boolean` | `false` | Opt in to failed-transaction diagnostics as a third event stream. |
 | `rpcUrl` | `string` | `undefined` | RPC URL, used only for error messages. |
 | `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for page summaries, coverage gaps, and failed or aborted polls. |
+| `counters` | `GuardTelemetryCountersOptions` | `undefined` (no counters) | Opt in to sliding-window counters over allowed/blocked decisions; without it `stats()` returns `null` and no counter state is allocated. |
+| `clock` | `() => number` | `Date.now` | Clock the counters consult for `windowMs` eviction; injectable so tests need no wall-clock waits. |
 | `buffer` | `{ max: number }` | `undefined` (no buffer) | Opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`. ⚠ In-memory and non-durable. |
 | `includeRaw` | `boolean` | `false` | Opt in to attaching the raw RPC payload to every committed event (issue #94). ⚠ Memory cost; leave off in a long-running fleet. |
 | `cursorStore` | `CursorStore` | `undefined` | Opt in to persisting the watch cursor across restarts; without one a restart resumes from the head (skipping events emitted while the process was dead). |
+
+`GuardTelemetryCountersOptions`: exactly one of `windowEvents` (keep the last N decisions; no clock) or `windowMs` (time-based eviction via `clock`) — supplying both, or neither, throws at construction.
 
 ## Methods
 
@@ -78,11 +82,12 @@ throwing callback, so it is not swallowed.
 Aborting ends the stream as a normal exit, never a throw:
 
 - an abort before the first pull issues no RPC call at all — not even the
-  `getLatestLedger` probe that resolves a default `startLedger`;
-- an abort between pages prevents the next poll and does not serve out the
+  `getLatestLedger` probe that resolves a default `startLedger;
+-
+  an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
-- an abort while a request is in flight lets that request's rejection go
+- an abort while a request is in flight lets that request's rejection go 
   quietly as teardown instead of surfacing an `AbortError` or an unhandled
   rejection.
 
@@ -94,11 +99,31 @@ request duration**, never a full poll interval. The README's
 [“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
 section states the same boundary for consumers.
 
+### `stats(): GuardTelemetryStats | null`
+
+When `counters` is configured, returns a snapshot of the sliding-window counters:
+
+```ts
+interface GuardTelemetryStats {
+  allowed: number;
+  blocked: number;
+  byReason: Record<string, number>;
+  windowStart: number;
+}
+```
+
+Counts are maintained over the configured window (`windowEvents` events or
+`windowMs` milliseconds) and updated on every event from the unified stream.
+The returned object is a deep snapshot: mutating it never affects the listener's
+state. When `counters` is not set, `stats()` returns `null` and no counter
+structures are allocated.
+
 ## Event identity
 
 Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 
-- `ledger:<txHash>:<topic>` for a committed event;
+-
+  `ledger:<txHash>:<topic>` for a committed event;
 - `diag:<sha256>` for a diagnostic (blocked) event, which has no transaction to
   anchor on because it was rolled back before broadcast.
 

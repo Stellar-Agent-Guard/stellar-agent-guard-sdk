@@ -45,7 +45,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
-- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes. Opt-in sliding-window counters expose agent self-monitoring via `stats()`.
 
 > ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
 > guardrail — it reports what the simulation predicts the guard will do, and it
@@ -814,9 +814,13 @@ Per-call overrides, `check(call, options?: CostPreCheckOptions)`: `maxFeeStroops
 | `failedTx` | `boolean` | `false` | Opt in to scanning failed-transaction diagnostics as a third stream. |
 | `rpcUrl` | `string` | `undefined` | RPC URL, used only for error messages. |
 | `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for page summaries, coverage gaps, and failed or aborted polls. |
+| `counters` | `GuardTelemetryCountersOptions` | `undefined` (no counters) | Opt in to sliding-window counters over allowed/blocked decisions; without it `stats()` returns `null` and no counter state is allocated. |
+| `clock` | `() => number` | `Date.now` | Clock the counters consult for `windowMs` eviction; injectable so tests need no wall-clock waits. |
 | `buffer` | `{ max: number }` | `undefined` (no buffer) | Opt in to retaining the most recent `max` events for `recent()` snapshots. ⚠ In-memory and non-durable: a restart empties it. |
 | `includeRaw` | `boolean` | `false` | ⚠ Opt in to attaching the raw RPC payload to every committed event; a memory decision for long-running processes. |
 | `cursorStore` | `CursorStore` | `undefined` | Opt in to persisting the watch cursor across restarts; without one a restart resumes from the head. |
+
+`GuardTelemetryCountersOptions`: exactly one of `windowEvents` (default `undefined`; keep the last N decisions, no clock consulted) or `windowMs` (default `undefined`; time-based eviction via `clock`). `clock?` (default `Date.now`) is used for `windowMs` eviction and `windowStart`. Supplying both, or neither, throws at construction. `stats()` returns a `GuardTelemetryStats` snapshot (`allowed`, `blocked`, `byReason`, `windowStart`), or `null` when `counters` is unset.
 
 #### `InvokeOptions` (`InvokeParams`)
 
