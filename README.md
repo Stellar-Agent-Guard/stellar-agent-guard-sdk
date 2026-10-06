@@ -769,6 +769,76 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`docs/deprecations.md`](docs/deprecations.md). Release process and versioning checklist: [`docs/releasing.md`](docs/releasing.md).
 
+### Constructor options
+
+One table per public class, covering every constructor option: name, type, default
+and a one-line semantics. Defaults are verified against the source
+(`src/preflight.ts`, `src/cost.ts`, `src/telemetry.ts`, `src/invoke.ts`) rather
+than guessed; ⚠ marks the safety-relevant options.
+
+#### `PreFlightInterceptorOptions` (`PreFlightConfig`)
+
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC server used to simulate the call. |
+| `networkPassphrase` | `string` | required | Stellar network passphrase (testnet: `"Test SDF Network ; September 2015"`). |
+| `guard` | `ContractAddress` (`C...`) | required | The guarded smart account whose policy is enforced. |
+| `agent` | `AgentSigner \| Keypair` | required | Key registered as the account's agent; signs the auth entry. |
+| `source` | `Keypair` | required | Classic account that pays fees and supplies the sequence number. |
+| `accountSigners` | `Keypair[]` | `undefined` (none) | Extra authorizers for non-guard requirements (e.g. an admin on a policy call). |
+| `policy` | `ReadonlyPolicyConfig \| null` | `undefined` (fetched from the ledger) | Policy to use for batch staging. |
+| `cache` | `PreFlightCacheOptions` | `undefined` (disabled) | ⚠ Opt-in short-lived verdict cache. A cached verdict can be staler than one admitted transfer. |
+| `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for each verdict and every cache hit/store/invalidation. |
+| `clock` | `Clock` | system clock | Injectable clock for cache TTL; use a `FakeClock` in tests for deterministic timing. |
+
+`PreFlightCacheOptions`: `ttlMs?` (default `undefined`; the effective value is capped at one ledger close, ~5 s), `ttlLedgers?` (default `undefined`; ledger spelling of `ttlMs`), `policyRevision?` (default `undefined`; supplying it invalidates a cached entry on a policy change even before the TTL elapses).
+
+#### `CostPreCheckerOptions` (`CostPreCheckConfig`)
+
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `interceptor` | `Pick<PreFlightInterceptor, "check">` | required | The pre-flight interceptor whose simulation prices the call. |
+| `maxFeeStroops` | `bigint` | `undefined` (no ceiling) | Refuse (as `over_budget`) when the estimated total fee exceeds this many stroops. |
+| `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for the priced verdict and whether the ceiling was exceeded. |
+| `policySource` | `string \| PolicyConfig \| null` | `undefined` (`policyContext: null`) | Opt-in policy source (contract address or policy) that populates additive `policyContext`. |
+| `policy` | `string \| PolicyConfig \| null` | `undefined` | Alias for `policySource`. |
+
+Per-call overrides, `check(call, options?: CostPreCheckOptions)`: `maxFeeStroops?` (default: the constructor ceiling) and `policySource?` / `policy?` (default: the constructor policy source).
+
+#### `GuardTelemetryListenerOptions` (`GuardTelemetryConfig`)
+
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC server to follow. |
+| `guard` | `string` | required | Guard contract address. |
+| `failedTx` | `boolean` | `false` | Opt in to scanning failed-transaction diagnostics as a third stream. |
+| `rpcUrl` | `string` | `undefined` | RPC URL, used only for error messages. |
+| `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for page summaries, coverage gaps, and failed or aborted polls. |
+| `buffer` | `{ max: number }` | `undefined` (no buffer) | Opt in to retaining the most recent `max` events for `recent()` snapshots. ⚠ In-memory and non-durable: a restart empties it. |
+| `includeRaw` | `boolean` | `false` | ⚠ Opt in to attaching the raw RPC payload to every committed event; a memory decision for long-running processes. |
+| `cursorStore` | `CursorStore` | `undefined` | Opt in to persisting the watch cursor across restarts; without one a restart resumes from the head. |
+
+#### `InvokeOptions` (`InvokeParams`)
+
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC server used to simulate and broadcast. |
+| `source` | `Keypair \| AdminSigner` | required | Classic account that pays the fee and supplies the sequence number. |
+| `call` | `ContractCall` | required | The call to probe, sign, simulate and broadcast. |
+| `networkPassphrase` | `string` | required | Stellar network passphrase. |
+| `guardAuth` | `GuardAuthorization \| null` | `undefined` | Present when the call requires the smart account's own authorization. |
+| `accountSigners` | `Array<Keypair \| AdminSigner>` | `undefined` | Extra classic-account authorizers available to sign (e.g. an admin). |
+| `dryRun` | `boolean` | `false` | ⚠ Skip broadcast even if the enforced simulation passes; returns the full pre-broadcast trace. |
+| `retry` | `InvokeRetryOptions` | `{ maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 2000 }` | Bounded full-jitter retries for stale ledger resource limits. |
+| `pollAttempts` | `number` | `20` | Ledger-status polls after a pending broadcast. |
+| `pollIntervalMs` | `number` | `3000` | Delay between ledger-status polls. |
+| `pollOptions` | `{ pollAttempts?; pollIntervalMs? }` | `undefined` | Groups the two poll knobs; takes precedence over the flat `pollAttempts` / `pollIntervalMs`. |
+| `feeBump` | `FeeBumpConfig` | `{ maxAttempts: 3, feeMultiplier: 2, initialInclusionFee: 100n }` | Fee-bump retry when broadcast hits min-fee. |
+| `maxRetries` | `number` | `undefined` | Overall maximum retries across retryable classes; bounds total attempts. |
+| `fee` | `bigint \| string` | `undefined` | Custom inclusion fee (used internally during fee-bump retries). |
+| `onStep` | `(step: InvokeStepEvent) => void` | `undefined` | Per-stage observability hook (`probe → sign → simulate → broadcast`); callback exceptions are isolated and omitting it changes nothing. |
+| `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for stage attempts, retries and the terminal outcome. |
+
 ### Interception & Execution
 
 - `PreFlightInterceptor`

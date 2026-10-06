@@ -14,10 +14,14 @@ constructor(options: PreFlightInterceptorOptions)
 | --- | --- | --- | --- |
 | `server` | `rpc.Server` | required | Soroban RPC server instance used for simulation. |
 | `networkPassphrase` | `string` | required | Stellar network passphrase (testnet: `"Test SDF Network ; September 2015"`). |
-| `guard` | `string` | required | Custom account contract address (`C...`). |
-| `agent` | `Keypair` | required | Keypair registered as the agent in the guard. |
-| `source` | `Keypair` | required | Keypair paying for transaction fees. |
-| `cache` | `PreFlightCacheOptions` | undefined (disabled) | Optional short-lived verdict cache. ⚠ Enabling the cache means a verdict may be stale relative to the current ledger/policy state. |
+| `guard` | `ContractAddress` (`C...`) | required | The guarded smart account whose policy is enforced. |
+| `agent` | `AgentSigner \| Keypair` | required | Key registered as the account's agent; signs the auth entry. |
+| `source` | `Keypair` | required | Classic account that pays fees and supplies the sequence number. |
+| `accountSigners` | `Keypair[]` | `undefined` (none) | Authorizers for non-guard requirements (e.g. an admin on a policy call). |
+| `policy` | `ReadonlyPolicyConfig \| null` | `undefined` (fetched from the ledger) | Policy to use for batch staging. |
+| `cache` | `PreFlightCacheOptions` | `undefined` (disabled) | Opt-in short-lived verdict cache. ⚠ Enabling the cache means a verdict may be stale relative to the current ledger/policy state. |
+| `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for each verdict and every cache hit/store/invalidation. |
+| `clock` | `Clock` | system clock | Injectable clock for cache TTL; use a `FakeClock` in tests. |
 
 ### Optional cache
 
