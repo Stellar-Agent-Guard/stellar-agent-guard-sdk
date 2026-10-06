@@ -40,7 +40,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 
 - **Pre-flight policy interception (`PreFlightInterceptor`)**: Intercepts contract calls before broadcast, simulates auth authorization, and returns a discriminated `admissible`, `blocked`, or `undetermined` verdict. Never throws on policy refusal; an opt-in short-lived cache can reduce repeated simulation RPC calls within the current ledger.
 - **In-process cost pre-checking (`CostPreChecker`)**: Prices transaction execution from simulation results, reporting resource fees, inclusion fees, and total fees against an optional ceiling.
-- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded exponential-backoff retry for stale ledger resource limits (`scecExceededLimit`).
+- **Autonomous transaction execution (`invoke()`)**: Executes the full Soroban lifecycle: probe simulation, auth signing for custom accounts, enforced simulation, and broadcast with bounded retry for stale ledger resource limits (`scecExceededLimit`) and minimum-fee rejections (`tx_insufficient_fee`).
 - **Framework adapters**:
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
@@ -163,6 +163,39 @@ if (decision.kind === "admissible") {
   console.log("Undetermined (fails closed)");
 }
 ```
+#### Adapter verdict handling
+
+Both framework adapters wrap the same `PreFlightInterceptor` but expose different contracts, so the same verdict maps to different observable behavior per adapter. The table below is the source of truth enforced by the shared adapter test harness (`tests/integration/adapters.test.ts`); each row is one adapter × one verdict, and the expected-behavior columns differ only where the adapter contracts say they differ.
+
+| Verdict | LangChain (`createLangChainGuardMiddleware`) | ElizaOS (`createGuardValidator`) |
+|---|---|---|
+| `admissible` | Passes through; the wrapped tool handler runs. | Returns `true`; the action is a candidate for execution. |
+| `blocked(reason)` | Halts the tool call and returns a `ToolMessage` carrying the contract `reason` and explanation; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
+| `undetermined(cause)` | Halts the tool call with a formatted `ToolMessage` (fails closed); the tool handler never runs. | Returns `false` (fails closed); the action is excluded from candidate execution. |
+| Mapping error (`toContractCall` returns `null`/malformed) | Halts with a formatted `ToolMessage` describing the mapping failure; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
+
+
+#### Branded Address Types (v0.2.0+)
+
+This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
+
+**Type Guards:**
+
+```ts
+import { 
+  isContractAddress,    // Validates C... addresses
+  isAccountAddress,     // Validates G... addresses
+  isStrKeyAddress,      // Validates any StrKey (C... or G...)
+  isPublicKeyHex,       // Validates 64-char hex public keys
+} from "stellar-agent-guard-sdk";
+
+// Runtime validation before use
+if (!isContractAddress(userInput)) {
+  throw new Error("Expected contract address (C...)");
+}
+```
+
+**Migration:** If upgrading from an earlier version, see [MIGRATION.md](./MIGRATION.md) for guidance on updating your code to use typed addresses.
 
 #### Branded Address Types (v0.2.0+)
 
@@ -188,11 +221,17 @@ if (!isContractAddress(userInput)) {
 
 #### Throw vs. Verdict Contract
 
+The same doctrine extends to adapter construction: **misconfiguration throws at construction; blocked actions return/throw as documented.** Adapter factories (`createLangChainGuardMiddleware`, `createGuardValidator`) validate their options synchronously before returning, so a missing `toContractCall`, an interceptor lacking a `check` method, or an empty options object fails fast at setup — never mid-loop on the first live tool call. See [Adapter options validation](#adapter-options-validation-fail-fast-at-construction) below.
+
 Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
 
 - **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
 - **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
 - Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+
+### Adapter options validation (fail-fast at construction)
+
+Adapter factories validate their options **synchronously at construction time**, before any action runs. A misconfigured adapter throws a typed `GuardError` (subclass `AdapterConfigError`) naming the offending field and its expected shape — it never surfaces as a mid-loop failure on the first production tool call.
 
 ### Fidelity & limits
 
@@ -252,6 +291,37 @@ window can change after a simulation while a cached result is still being
 reused, so callers that cannot tolerate that tradeoff should leave caching off,
 use a shorter TTL, provide a policy revision, and invalidate after policy or
 account-state changes.
+
+### Cost Pre-Checking with Policy Context
+
+```ts
+import { CostPreChecker } from "stellar-agent-guard-sdk";
+
+const checker = new CostPreChecker({
+  interceptor,
+  maxFeeStroops: 50_000n,
+  policySource: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44", // opt-in policy source
+});
+
+const result = await checker.check({
+  contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+  fn: "transfer",
+  args: [/* from, to, amount */],
+});
+
+console.log("Cost verdict:", result.kind); // within_budget | over_budget | blocked | undetermined
+console.log("Policy context:", result.policyContext);
+```
+
+#### Policy Context Semantics
+
+When an opt-in `policySource` (contract address or `GuardPolicy`/`PolicyConfig`) is configured in options, `CostPreCheckResult` exposes additive `policyContext`:
+
+- `perTxCapOk`: Whether the transaction fits within the policy's per-transaction cap (`true` if within cap, `false` if `per_tx_cap_exceeded`, or `null` if not determinable).
+- `windowRemainingEstimate`: Estimated remaining budget in the current rolling window. **Always `null` when the contract does not expose sufficient window state.**
+  > `null` means "not available / cannot be determined from the current contract state", not "zero remaining budget". The SDK never fabricates a zero budget.
+- `reason`: The contract's policy block reason (e.g. `"window_cap_exceeded"` or `"per_tx_cap_exceeded"`), or `null` when allowed.
+- When no policy source is configured in options, `policyContext` is `null` (no policy call is made).
 
 ### Deterministic time control in tests (Clock injection)
 
@@ -445,8 +515,8 @@ read `signal` as *stop soon and stop asking*, not *cancel the socket*.
 Plug-and-play middleware intercepts agent actions before tools are executed:
 
 - **Framework adapters**:
-  - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses or the verdict is undetermined, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation. The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
-  - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused actions return boolean `false`, excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
+  - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses (`blocked`) or the verdict is `undetermined`, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation (fails closed). The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
+  - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused (`blocked`) and `undetermined` actions both return boolean `false` (fails closed), excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
   - MCP: [`guardMcpToolHandler`](docs/examples/mcp.md) wraps a Model Context Protocol tool handler (`registerTool` / `tool` / `setRequestHandler(CallToolRequestSchema)`), and [`guardMcpCallTool`](docs/examples/mcp.md) wraps a client's `callTool` before the request leaves the process. A refusal is returned as an `isError: true` result and the tool body never runs. See [the MCP integration example](docs/examples/mcp.md).
   - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency.
 
@@ -707,8 +777,8 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
-  - `constructor(options: CostPreCheckerOptions)`
-  - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
+  - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
+  - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
@@ -724,57 +794,35 @@ money-adjacent output in a security tool is not acceptable) and with no trailing
 zeros:
 
 ```ts
-import { formatFee } from "stellar-agent-guard-sdk";
+import { startHeartbeat } from "stellar-agent-guard-sdk";
 
-cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
-formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+const hb = await startHeartbeat({
+  server,
+  guard: GUARD_ID,
+  signer: agentKeypair,        // Keypair or AgentSigner
+  intervalMs: 30_000,
+  maxSkewMs: 2_000,            // tolerated drift before a beat counts as missed
+  onBeat: ({ lateMs }) => { if (lateMs > 2_000) alert("heartbeat late"); },
+  onError: (error) => logger.error("heartbeat failed", error),
+  graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
+});
 
-formatFee(1n);             // "0.0000001" — one stroop
-formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
+// on shutdown:
+await hb.stop();
 ```
 
-#### `CostPreChecker` resource breakdown
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
+- A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
 
-Priced `within_budget` and `over_budget` results may include a `breakdown` parsed from the same Soroban simulation that produced `resourceFeeStroops`:
+The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
-```ts
-if (decision.kind === "within_budget" && decision.breakdown) {
-  console.log(decision.breakdown);
-  // {
-  //   instructions,       // SorobanResources.instructions
-  //   diskReadBytes,      // SorobanResources.diskReadBytes
-  //   writeBytes,         // SorobanResources.writeBytes
-  //   readOnlyEntries,    // footprint.readOnly.length
-  //   readWriteEntries,   // footprint.readWrite.length
-  //   storageEntries      // readOnlyEntries + readWriteEntries
-  // }
-}
-```
+## API Reference
 
-`breakdown` is `undefined` when the simulation is undetermined, malformed, or missing any required resource field; the SDK never fabricates zero values. The stellar-sdk v17 Soroban resource payload has no `memBytes` field, so this API reports the actual `writeBytes`/disk resource fields rather than relabeling them as memory usage.
-
-#### One simulation per check: prefer `checkWithCost`
-
-`PreFlightInterceptor.check()` answers *may this proceed?* and
-`CostPreChecker.check()` answers *what will it cost?* — but calling both runs the
-enforced simulation **twice**, against two ledger snapshots. The extra RPC is the
-lesser problem: the fee reported for a call can then differ from the fee implied
-by the verdict that was actually enforced, so the price no longer corresponds to
-the approved decision.
-
-`CostPreChecker.checkWithCost()` returns both from a **single** simulation:
-
-```ts
-const { decision, cost } = await costChecker.checkWithCost(call);
-
-if (decision.kind === "blocked") {
-  console.log("refused:", decision.reason);        // nothing was charged
-} else if (cost.kind === "over_budget") {
-  console.log("too expensive:", formatFee(cost.totalFeeStroops), "XLM");
-} else if (decision.allowed) {
-  console.log("approved at", formatFee(cost.totalFeeStroops), "XLM");
-}
-```
+The complete SDK API reference lives in [`docs/api-reference.md`](docs/api-reference.md) — method signatures, options, return shapes and examples for `PreFlightInterceptor`, `CostPreChecker`, `GuardTelemetryListener`, `validateGuardPolicy`, the framework adapters and the `invoke()` pipeline. The README keeps this stub so the npm landing page stays readable; the reference itself grows alongside the other `docs/` guides.
 
 Prefer this over calling `interceptor.check(call)` and `costChecker.check(call)`
 in sequence. That two-call pattern still works and its types are unchanged, but
@@ -987,7 +1035,7 @@ This boundary is an inherent property of the platform (the auth context does not
 
 - GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
-- Security disclosures: see [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md) (Telegram, the Stellar ecosystem norm)
+- Security disclosures: see the local [SECURITY.md](SECURITY.md) for SDK issues; contract/protocol issues and deployed-instance incidents go to the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md)
 
 ## License
 
@@ -999,6 +1047,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR proce
 project structure — including the strict one-commit-per-logical-unit rule and the
 [TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
 (`npm run check:strict-ratchet`).
+
+Before changing the public surface, the dependency set, or the runtime the SDK runs
+in, read [`docs/design-principles.md`](docs/design-principles.md): fail-closed
+verdicts, no secret handling, one runtime dependency, additive-only 0.x surface,
+a browser-safe core, and logger-optional silence. Departures are maintainer
+decisions (`tier:maintainer-decision`), not silent exceptions.
 
 Looking for something to work on? The
 [issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
