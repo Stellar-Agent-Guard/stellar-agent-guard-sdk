@@ -1340,3 +1340,88 @@ describe("opt-in raw event retention (issue #94)", () => {
   });
 });
 
+describe("GuardTelemetryListener counters", () => {
+  const decisionEvent = (result: "allowed" | "blocked", reason: string | null, index: number): GuardEvent => ({
+    id: `diag:${index.toString(16).padStart(64, "0")}`,
+    kind: "auth_checked",
+    topic: "event_auth_checked",
+    source: "diagnostic",
+    stream: "diagnostic",
+    contractId: GUARD,
+    ledger: null,
+    ledgerClosedAt: null,
+    observedAt: new Date(index).toISOString(),
+    transactionHash: null,
+    decision: { result, reason, source: "diagnostic" } as GuardEvent["decision"],
+    data: {},
+  });
+
+  it("does not allocate counters by default and returns null from stats()", () => {
+    const listener = new GuardTelemetryListener();
+    assert.equal(listener.stats(), null);
+  });
+
+  it("counts allowed and blocked decisions by reason over a count-window", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 20 } });
+    const reasons = ["per_tx_cap_exceeded", "window_cap_exceeded", "recipient_not_allowed"];
+    for (let i = 0; i < 20; i++) {
+      const blocked = i % 2 === 0;
+      listener.observe(
+        decisionEvent(blocked ? "blocked" : "allowed", blocked ? reasons[(i / 2) % 3]! : null, i),
+      );
+    }
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.allowed, 10);
+    assert.equal(stats!.blocked, 10);
+    assert.deepEqual(stats!.byReason, {
+      per_tx_cap_exceeded: 4,
+      window_cap_exceeded: 3,
+      recipient_not_allowed: 3,
+    });
+  });
+
+  it("evicts old events once the count window is exceeded", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 5 } });
+    for (let i = 0; i < 5; i++) {
+      listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", i));
+    }
+    for (let i = 5; i < 10; i++) {
+      listener.observe(decisionEvent("allowed", null, i));
+    }
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.allowed, 5);
+    assert.equal(stats!.blocked, 0);
+    assert.deepEqual(stats!.byReason, {});
+  });
+
+  it("returns a deep-copied snapshot that callers cannot mutate", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 0));
+    const first = listener.stats();
+    assert.ok(first);
+    first!.allowed = 999;
+    first!.byReason.per_tx_cap_exceeded = 999;
+    const second = listener.stats();
+    assert.equal(second!.allowed, 0);
+    assert.equal(second!.byReason.per_tx_cap_exceeded, 1);
+  });
+
+  it("supports a time-window with an injected clock", () => {
+    let now = 0;
+    const listener = new GuardTelemetryListener( {
+      counters: { windowMs: 1000 },
+      clock: () => now,
+    });
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 0));
+    now = 500;
+    listener.observe(decisionEvent("allowed", null, 1));
+    now = 1500;
+    listener.observe(decisionEvent("allowed", null, 2));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.allowed, 2);
+    assert.equal(stats!.blocked, 0);
+  });
+});

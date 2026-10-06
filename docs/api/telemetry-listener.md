@@ -10,7 +10,7 @@ constructor(options: GuardTelemetryListenerOptions)
 
 ### Options
 
-- `server: rpc.Server` — Soroban RPC server
+- `server: rpc.Server` — soroban RPC server
 - `guard: string` — Guard contract address
 - `failedTx?: boolean` — opt in to failed-transaction diagnostics as a third event stream; defaults to `false`.
 - `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
@@ -72,11 +72,12 @@ throwing callback, so it is not swallowed.
 Aborting ends the stream as a normal exit, never a throw:
 
 - an abort before the first pull issues no RPC call at all — not even the
-  `getLatestLedger` probe that resolves a default `startLedger`;
-- an abort between pages prevents the next poll and does not serve out the
+  `getLatestLedger` probe that resolves a default `startLedger;
+-
+  an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
-- an abort while a request is in flight lets that request's rejection go
+- an abort while a request is in flight lets that request's rejection go 
   quietly as teardown instead of surfacing an `AbortError` or an unhandled
   rejection.
 
@@ -88,11 +89,32 @@ request duration**, never a full poll interval. The README's
 [“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
 section states the same boundary for consumers.
 
+### `stats(): CounterSnapshot | null`
+
+When `counters` is configured, returns a snapshot of the sliding-window counters:
+
+```ts
+interface CounterSnapshot {
+  allowed: number;
+  blocked: number;
+  byReason: Record<string, number>;
+  windowStart: number;
+  windowEvents?: number;
+}
+```
+
+Counts are maintained over the configured window (`windowEvents` events or
+`windowMs` milliseconds) and updated on every event from the unified stream.
+The returned object is a deep snapshot: mutating it never affects the listener's
+state. When `counters` is not set, `stats()` returns `null` and no counter
+structures are allocated.
+
 ## Event identity
 
 Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 
-- `ledger:<txHash>:<topic>` for a committed event;
+-
+  `ledger:<txHash>:<topic>` for a committed event;
 - `diag:<sha256>` for a diagnostic (blocked) event, which has no transaction to
   anchor on because it was rolled back before broadcast.
 

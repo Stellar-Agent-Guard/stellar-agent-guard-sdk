@@ -45,7 +45,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
-- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes. Opt-in sliding-window counters expose agent self-monitoring via `stats()`.
 
 > ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
 > guardrail — it reports what the simulation predicts the guard will do, and it
@@ -174,6 +174,28 @@ Both framework adapters wrap the same `PreFlightInterceptor` but expose differen
 | `undetermined(cause)` | Halts the tool call with a formatted `ToolMessage` (fails closed); the tool handler never runs. | Returns `false` (fails closed); the action is excluded from candidate execution. |
 | Mapping error (`toContractCall` returns `null`/malformed) | Halts with a formatted `ToolMessage` describing the mapping failure; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
 
+
+#### Branded Address Types (v0.2.0+)
+
+This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
+
+**Type Guards:**
+
+```ts
+import { 
+  isContractAddress,    // Validates C... addresses
+  isAccountAddress,     // Validates G... addresses
+  isStrKeyAddress,      // Validates any StrKey (C... or G...)
+  isPublicKeyHex,       // Validates 64-char hex public keys
+} from "stellar-agent-guard-sdk";
+
+// Runtime validation before use
+if (!isContractAddress(userInput)) {
+  throw new Error("Expected contract address (C...)");
+}
+```
+
+**Migration:** If upgrading from an earlier version, see [MIGRATION.md](./MIGRATION.md) for guidance on updating your code to use typed addresses.
 
 #### Branded Address Types (v0.2.0+)
 
@@ -772,57 +794,35 @@ money-adjacent output in a security tool is not acceptable) and with no trailing
 zeros:
 
 ```ts
-import { formatFee } from "stellar-agent-guard-sdk";
+import { startHeartbeat } from "stellar-agent-guard-sdk";
 
-cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
-formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+const hb = await startHeartbeat({
+  server,
+  guard: GUARD_ID,
+  signer: agentKeypair,        // Keypair or AgentSigner
+  intervalMs: 30_000,
+  maxSkewMs: 2_000,            // tolerated drift before a beat counts as missed
+  onBeat: ({ lateMs }) => { if (lateMs > 2_000) alert("heartbeat late"); },
+  onError: (error) => logger.error("heartbeat failed", error),
+  graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
+});
 
-formatFee(1n);             // "0.0000001" — one stroop
-formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
+// on shutdown:
+await hb.stop();
 ```
 
-#### `CostPreChecker` resource breakdown
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
+- A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
 
-Priced `within_budget` and `over_budget` results may include a `breakdown` parsed from the same Soroban simulation that produced `resourceFeeStroops`:
+The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
-```ts
-if (decision.kind === "within_budget" && decision.breakdown) {
-  console.log(decision.breakdown);
-  // {
-  //   instructions,       // SorobanResources.instructions
-  //   diskReadBytes,      // SorobanResources.diskReadBytes
-  //   writeBytes,         // SorobanResources.writeBytes
-  //   readOnlyEntries,    // footprint.readOnly.length
-  //   readWriteEntries,   // footprint.readWrite.length
-  //   storageEntries      // readOnlyEntries + readWriteEntries
-  // }
-}
-```
+## API Reference
 
-`breakdown` is `undefined` when the simulation is undetermined, malformed, or missing any required resource field; the SDK never fabricates zero values. The stellar-sdk v17 Soroban resource payload has no `memBytes` field, so this API reports the actual `writeBytes`/disk resource fields rather than relabeling them as memory usage.
-
-#### One simulation per check: prefer `checkWithCost`
-
-`PreFlightInterceptor.check()` answers *may this proceed?* and
-`CostPreChecker.check()` answers *what will it cost?* — but calling both runs the
-enforced simulation **twice**, against two ledger snapshots. The extra RPC is the
-lesser problem: the fee reported for a call can then differ from the fee implied
-by the verdict that was actually enforced, so the price no longer corresponds to
-the approved decision.
-
-`CostPreChecker.checkWithCost()` returns both from a **single** simulation:
-
-```ts
-const { decision, cost } = await costChecker.checkWithCost(call);
-
-if (decision.kind === "blocked") {
-  console.log("refused:", decision.reason);        // nothing was charged
-} else if (cost.kind === "over_budget") {
-  console.log("too expensive:", formatFee(cost.totalFeeStroops), "XLM");
-} else if (decision.allowed) {
-  console.log("approved at", formatFee(cost.totalFeeStroops), "XLM");
-}
-```
+The complete SDK API reference lives in [`docs/api-reference.md`](docs/api-reference.md) — method signatures, options, return shapes and examples for `PreFlightInterceptor`, `CostPreChecker`, `GuardTelemetryListener`, `validateGuardPolicy`, the framework adapters and the `invoke()` pipeline. The README keeps this stub so the npm landing page stays readable; the reference itself grows alongside the other `docs/` guides.
 
 Prefer this over calling `interceptor.check(call)` and `costChecker.check(call)`
 in sequence. That two-call pattern still works and its types are unchanged, but
@@ -1047,6 +1047,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR proce
 project structure — including the strict one-commit-per-logical-unit rule and the
 [TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
 (`npm run check:strict-ratchet`).
+
+Before changing the public surface, the dependency set, or the runtime the SDK runs
+in, read [`docs/design-principles.md`](docs/design-principles.md): fail-closed
+verdicts, no secret handling, one runtime dependency, additive-only 0.x surface,
+a browser-safe core, and logger-optional silence. Departures are maintainer
+decisions (`tier:maintainer-decision`), not silent exceptions.
 
 Looking for something to work on? The
 [issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
