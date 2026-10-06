@@ -21,6 +21,7 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  AdapterConfigError,
   BroadcastError,
   ContractResponseError,
   GuardError,
@@ -45,6 +46,8 @@ export {
   GUARD_REASONS,
   explainReason,
   isGuardReason,
+  reasonMessages,
+  reasonMessagesEn,
   reasonName,
   reasonNameFromCode,
 } from "./reasons.ts";
@@ -53,12 +56,16 @@ export type {
   GuardBlockedErrorParams,
   GuardReason,
   GuardReasonName,
+  ReasonMessage,
+  ReasonMessageCatalog,
+  ReasonMessageText,
 } from "./reasons.ts";
 
 export {
+  POLICY_RULE_IDS,
+  deadManRemaining,
   decodeCheckResult,
   decodePolicy,
-  deadManRemaining,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -68,7 +75,6 @@ export {
   isDeadManFrozen,
   isPublicKeyHex,
   isStrKeyAddress,
-  POLICY_RULE_IDS,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
@@ -89,6 +95,7 @@ export type {
   CheckResult,
   ContractAddress,
   DeepReadonly,
+  GuardPolicy,
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
@@ -136,22 +143,20 @@ export {
   InvokeRetryError,
   invoke,
   topicSymbols,
-} from "./invoke.ts";
-
-export type {
-  EnforcementOutcome,
-  GuardAuthorization,
-  InvokeDryRunResult,
-  InvokeDryRunStepName,
-  InvokeDryRunVerdict,
-  InvokeErrorCause,
-  InvokeErrorOutcome,
-  InvokeOptions,
-  InvokeOutcome,
-  InvokePipelineStep,
-  InvokeParams,
-  InvokeStepEvent,
-  RetryableInvokeFailure,
+  type EnforcementOutcome,
+  type FeeBumpConfig,
+  type GuardAuthorization,
+  type InvokeDryRunResult,
+  type InvokeDryRunStepName,
+  type InvokeDryRunVerdict,
+  type InvokeErrorCause,
+  type InvokeErrorOutcome,
+  type InvokeOptions,
+  type InvokeOutcome,
+  type InvokePipelineStep,
+  type InvokeParams,
+  type InvokeStepEvent,
+  type RetryableInvokeFailure,
 } from "./invoke.ts";
 
 export {
@@ -198,8 +203,11 @@ export {
 export type {
   CostDecision,
   CostPreCheckConfig,
+  CostPreCheckOptions,
+  CostPreCheckResult,
   CostWithDecision,
   FeeBreakdown,
+  PolicyContext,
   ResourceBreakdown,
 } from "./cost.ts";
 
@@ -207,19 +215,23 @@ export {
   DEFAULT_JITTER_FRACTION,
   GuardEventRingBuffer,
   GuardTelemetryListener,
+  InMemoryCursorStore,
   computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
   guardEventsFromDiagnostics,
+  guardEventsFromFailedTransaction,
   isAllowedDecision,
   mergeGuardEventStreams,
   serializeEvent,
   telemetryFromDecision,
+  type CursorStore,
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardEventBufferOptions,
   type GuardEventContext,
+  type GuardEventDecodeOptions,
   type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardEventStream,
@@ -244,6 +256,7 @@ export {
   describeSimulationResources,
   describeSubmissionFailure,
   describeTransactionResult,
+  isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
@@ -287,8 +300,22 @@ export {
   type GuardWasmVerification,
 } from "./wasm.ts";
 
+export {
+  HeartbeatIntervalError,
+  startHeartbeat,
+  submitHeartbeat,
+  type HeartbeatBeat,
+  type HeartbeatHandle,
+  type HeartbeatOptions,
+  type HeartbeatSubmission,
+  type SubmitHeartbeatParams,
+} from "./heartbeat.ts";
+
 // Framework adapters. Both are written structurally against their host's hook,
-// so neither framework is a dependency of this package.
+// so neither framework is a dependency of this package. Options are validated
+// at construction time (see `src/adapters/validate.ts`), so a misconfigured
+// adapter throws `AdapterConfigError` before the first action rather than
+// failing mid-loop.
 export {
   createLangChainGuardMiddleware,
 } from "./adapters/langchain.ts";
@@ -311,9 +338,56 @@ export type {
 } from "./adapters/elizaos.ts";
 
 export {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./adapters/validate.ts";
+
+export {
   createVercelAIGuard,
   wrapToolWithGuard,
   type VercelAIGuardOptions,
   type VercelAIToolCallInput,
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
+
+export {
+  guardMcpCallTool,
+  guardMcpToolHandler,
+} from "./adapters/mcp.ts";
+
+export type {
+  McpCallTool,
+  McpGuardOptions,
+  McpToolCallRequest,
+  McpToolHandler,
+  McpToolResult,
+} from "./adapters/mcp.ts";
+
+// The operator alerting primitive every adapter shares (`onBlocked`).
+// Exported so a consumer can type its sink and build the payload itself.
+export {
+  blockedInfoFor,
+  runBlockedHook,
+} from "./adapters/shared.ts";
+
+export type {
+  BlockedHookLogger,
+  GuardAdapterName,
+  GuardBlockedHook,
+  GuardBlockedInfo,
+} from "./adapters/shared.ts";
+
+// Optional logging. `SILENT_LOGGER` is the default every config resolves to
+// when no logger is supplied: the SDK writes nothing unless a host asks.
+export {
+  GUARD_LOG_LEVELS,
+  SILENT_LOGGER,
+  resolveLogger,
+  type GuardLogger,
+  type GuardLoggerInput,
+  type GuardLogLevel,
+  type GuardLogMeta,
+} from "./logger.ts";
