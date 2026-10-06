@@ -27,7 +27,7 @@
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { GuardError, SimulationError } from "./errors.ts";
-import { enforceCall } from "./invoke.ts";
+import { enforceCall, withRpcAbort } from "./invoke.ts";
 import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
   extractTransferAmount,
@@ -271,9 +271,19 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  * simulate; `check()` never broadcasts), using the same `InvokeStepEvent`
  * shape and shared trace vocabulary as `invoke()`'s `onStep`. Entirely
  * optional — omitting it changes nothing about the check.
+ *
+ * `signal` and `timeoutMs` bound the RPC calls the check makes (the ledger
+ * lookup and the probe/enforced simulations). An already-aborted signal
+ * rejects before any RPC call; a mid-flight abort or a fired timeout rejects
+ * with an `RpcTimeoutError`. Both default to the pipeline's shared behaviour:
+ * no signal, and `DEFAULT_RPC_TIMEOUT_MS` for the timeout.
  */
 export interface PreFlightCheckOptions {
   onStep?: (step: InvokeStepEvent) => void;
+  /** Caller-owned cancellation; aborts the RPC calls the check makes. */
+  signal?: AbortSignal | undefined;
+  /** Bound on each RPC call, in milliseconds; `0` disables the timeout. */
+  timeoutMs?: number | undefined;
 }
 
 export interface PreFlightCacheOptions {
@@ -508,16 +518,24 @@ export class PreFlightInterceptor {
         this.cache.delete(context.key);
       }
     }
-    const outcome = await enforceCall({
-      server: this.config.server,
-      source: this.config.source,
-      call,
-      networkPassphrase: this.config.networkPassphrase,
-      guardAuth: { guard: this.config.guard, agent: this.config.agent },
-      ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-      ...(options?.onStep ? { onStep: options.onStep } : {}),
-      ...(this.config.logger ? { logger: this.config.logger } : {}),
-    });
+    const outcome = await withRpcAbort(
+      {
+        stage: "pre-flight",
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      },
+      () =>
+        enforceCall({
+          server: this.config.server,
+          source: this.config.source,
+          call,
+          networkPassphrase: this.config.networkPassphrase,
+          guardAuth: { guard: this.config.guard, agent: this.config.agent },
+          ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+          ...(options?.onStep ? { onStep: options.onStep } : {}),
+          ...(this.config.logger ? { logger: this.config.logger } : {}),
+        }),
+    );
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {

@@ -91,28 +91,23 @@ export const DEFAULT_RPC_TIMEOUT_MS = 30_000;
  * bug — the caller's decision (fail closed) is what matters, and it is made
  * promptly.
  */
-export class RpcTimeoutError extends Error {
+export class RpcTimeoutError extends GuardError {
   readonly kind = "timeout" as const;
   /** Which pipeline stage was in flight when the bound fired. */
   readonly stage: string;
   /** True when the caller's own `AbortSignal` fired; false for a timeout. */
   readonly aborted: boolean;
-  override readonly cause?: unknown;
 
-  constructor(params: {
-    stage: string;
-    aborted: boolean;
-    timeoutMs?: number;
-    cause?: unknown;
-  }) {
+  constructor(params: { stage: string; aborted: boolean; timeoutMs?: number }) {
     const reason = params.aborted
       ? "aborted by caller signal"
       : `exceeded timeout of ${params.timeoutMs}ms`;
-    super(`RPC call during '${params.stage}' ${reason}`);
-    this.name = "RpcTimeoutError";
+    // The classified cause the pipeline surfaces for an abort or a timeout:
+    // callers branch on `cause === "timeout"`. The `stage` and `aborted` fields
+    // carry the detail, so nothing is lost to the single coarse cause.
+    super(`RPC call during '${params.stage}' ${reason}`, { cause: "timeout" });
     this.stage = params.stage;
     this.aborted = params.aborted;
-    if (params.cause !== undefined) this.cause = params.cause;
   }
 }
 
@@ -145,7 +140,7 @@ export async function withRpcAbort<T>(
   const timeoutMs = params.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
 
   if (signal?.aborted) {
-    throw new RpcTimeoutError({ stage, aborted: true, cause: signal.reason });
+    throw new RpcTimeoutError({ stage, aborted: true });
   }
 
   if (timeoutMs <= 0 && !signal) return run();
@@ -162,7 +157,7 @@ export async function withRpcAbort<T>(
       if (settled) return;
       settled = true;
       cleanup();
-      reject(new RpcTimeoutError({ stage, aborted: true, cause: signal?.reason }));
+      reject(new RpcTimeoutError({ stage, aborted: true }));
     };
 
     if (signal) signal.addEventListener("abort", onAbort, { once: true });
@@ -909,6 +904,30 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   // serialize against the account queue.
   if (params.dryRun) return invokeDryRun(params);
 
+  try {
+    // Every RPC the pipeline makes sits inside this bound: an already-aborted
+    // signal short-circuits before the account is looked up, and a mid-flight
+    // abort or a fired timeout rejects promptly with `RpcTimeoutError`.
+    return await withRpcAbort(
+      { stage: "invoke", signal: params.signal, timeoutMs: params.timeoutMs },
+      () => invokeWithQueue(params),
+    );
+  } catch (error) {
+    if (error instanceof RpcTimeoutError) {
+      // A bound that fired is a fail-closed *decision*, not a crash: the guard
+      // never reached a verdict, which is exactly the `error` arm's meaning.
+      return {
+        kind: "error",
+        detail: error.message,
+        error,
+        diagnosticEvents: [],
+      };
+    }
+    throw error;
+  }
+}
+
+async function invokeWithQueue(params: InvokeParams): Promise<InvokeOutcome> {
   const sourceKey = await params.source.publicKey();
   return withAccountQueue(params.server, sourceKey, async () => {
     const retry = resolveRetryOptions(params.retry);

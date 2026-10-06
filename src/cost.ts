@@ -360,6 +360,14 @@ export interface CostPreCheckOptions {
   policy?: string | PolicyConfig | null | undefined;
   /** Override the fee ceiling in stroops for this check. */
   maxFeeStroops?: bigint | undefined;
+  /**
+   * Caller-owned cancellation for the underlying enforced simulation. An
+   * already-aborted signal rejects before any RPC call; a mid-flight abort
+   * rejects with an `RpcTimeoutError`.
+   */
+  signal?: AbortSignal | undefined;
+  /** Bound on the underlying RPC call, in milliseconds; `0` disables it. */
+  timeoutMs?: number | undefined;
 }
 
 /**
@@ -570,7 +578,10 @@ export class CostPreChecker {
     call: ContractCall,
     options?: CostPreCheckOptions,
   ): Promise<CostWithDecision> {
-    const decision = await this.config.interceptor.check(call);
+    const decision = await this.config.interceptor.check(call, {
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
     const policySource =
       options?.policySource ?? options?.policy ?? this.config.policySource ?? this.config.policy;
     const policyContext = computePolicyContext(policySource, decision, call);
