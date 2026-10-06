@@ -566,6 +566,16 @@ export interface GuardTelemetryConfig {
    */
   logger?: GuardLoggerInput | undefined;
   /**
+   * Opt-in sliding-window counters over allowed/blocked decisions (issue #68).
+   * Omitted → no counter state is allocated and `stats()` returns `null`.
+   */
+  counters?: GuardTelemetryCountersOptions;
+  /**
+   * Clock the counters consult for `windowMs` eviction. Defaults to
+   * `Date.now`; injectable so tests need no wall-clock waits.
+   */
+  clock?: (() => number) | undefined;
+  /**
    * Opt-in: retain the most recent events for `recent()` snapshots (issue #68).
    * Omitted → no buffer is allocated and `recent()` always returns `[]`.
    */
@@ -1108,6 +1118,20 @@ export class InMemoryCursorStore implements CursorStore {
   }
 }
 
+/**
+ * Config for a listener used purely for local state (counters, `recent()`),
+ * with no RPC transport. A host that only wants `observe()`/`stats()` does not
+ * need a `server` and should not have to fabricate one.
+ */
+export interface GuardTelemetryLocalConfig {
+  /** Opt-in sliding-window counters over allowed/blocked decisions. */
+  counters?: GuardTelemetryCountersOptions;
+  /** Clock the counters consult for `windowMs` eviction. */
+  clock?: (() => number) | undefined;
+  /** Optional log sink. */
+  logger?: GuardLoggerInput | undefined;
+}
+
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
   private readonly logger: GuardLogger;
@@ -1146,11 +1170,34 @@ export class GuardTelemetryListener {
    */
   private readonly processedFailedTx = new Set<string>();
 
-  constructor(config: GuardTelemetryConfig) {
-    this.config = config;
-    this.logger = resolveLogger(config.logger);
-    this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
-    this.activeCursorStore = config.cursorStore ?? new InMemoryCursorStore();
+  /**
+   * Null unless `config.counters` is set: with no counters requested, no
+   * sliding-window state is allocated and `stats()` returns `null`.
+   */
+  private readonly counters: GuardDecisionCounters | null;
+
+  constructor(config: GuardTelemetryConfig | GuardTelemetryLocalConfig = {}) {
+    const resolved = config as GuardTelemetryConfig;
+    this.config = resolved;
+    this.logger = resolveLogger(resolved.logger);
+    this.buffer = resolved.buffer ? new GuardEventRingBuffer(resolved.buffer.max) : null;
+    this.activeCursorStore = resolved.cursorStore ?? new InMemoryCursorStore();
+    this.counters = resolved.counters
+      ? new GuardDecisionCounters({
+          ...resolved.counters,
+          ...(resolved.clock ? { clock: resolved.clock } : {}),
+        })
+      : null;
+  }
+
+  /**
+   * Feed one decoded event through the listener's opt-in state (currently the
+   * sliding-window decision counters). Public so a host that decodes events
+   * itself — e.g. from its own simulation diagnostics — can include them in
+   * `stats()` without standing up a `watchAll()` stream.
+   */
+  observe(event: GuardEvent): void {
+    this.counters?.record(event);
   }
 
   /**
