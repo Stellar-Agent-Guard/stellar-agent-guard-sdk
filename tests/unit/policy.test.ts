@@ -1304,6 +1304,16 @@ describe("freezePolicy", () => {
  */
 
 /**
+ * The issue-#48 corpus keeps its own seed and budget: the 1000-case stream
+ * below is what these three assertions were calibrated against. The issue-#163
+ * property suite above runs a smaller, separately seeded corpus. Both draw the
+ * random stream from the same `mulberry32` PRNG, so the generator is shared
+ * rather than forked — only the seed and the iteration budget differ.
+ */
+const ROUND_TRIP_SEED = 0x5eedc0de;
+const ROUND_TRIP_ITERATIONS = 1000;
+
+/**
  * The committed `PolicyConfig` field list, spelled out deliberately rather than
  * derived: this is the assertion that catches a field added to the type but
  * omitted from the encoder.
@@ -1451,7 +1461,7 @@ function replayContext(assertion: string, iteration: number, policy: PolicyConfi
   const json = JSON.stringify(policy, (_key, value) =>
     typeof value === "bigint" ? value.toString() : value,
   );
-  return `property ${assertion} failed at seed 0x${PROPERTY_SEED.toString(16)} iteration ${iteration}\npolicy: ${json}`;
+  return `property ${assertion} failed at seed 0x${ROUND_TRIP_SEED.toString(16)} iteration ${iteration}\npolicy: ${json}`;
 }
 
 function failAt(assertion: string, iteration: number, policy: PolicyConfig, error: unknown): never {
@@ -1461,8 +1471,8 @@ function failAt(assertion: string, iteration: number, policy: PolicyConfig, erro
 
 describe("policyToScVal property tests (seeded, issue #48)", () => {
   it("encodes exactly the committed field set, sorted, with well-formed rule maps", () => {
-    const rand = mulberry32(PROPERTY_SEED);
-    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+    const rand = mulberry32(ROUND_TRIP_SEED);
+    for (let iteration = 0; iteration < ROUND_TRIP_ITERATIONS; iteration += 1) {
       const policy = randomPolicy(rand);
       try {
         const entries = mapEntries(policyToScVal(policy));
@@ -1507,8 +1517,8 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
   });
 
   it("round-trips every policy through decodePolicy without loss", () => {
-    const rand = mulberry32(PROPERTY_SEED);
-    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+    const rand = mulberry32(ROUND_TRIP_SEED);
+    for (let iteration = 0; iteration < ROUND_TRIP_ITERATIONS; iteration += 1) {
       const policy = randomPolicy(rand);
       try {
         assert.deepEqual(decodePolicy(policyToScVal(policy)), policy);
@@ -1519,8 +1529,8 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
   });
 
   it("re-encodes a decoded policy to identical XDR", () => {
-    const rand = mulberry32(PROPERTY_SEED);
-    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+    const rand = mulberry32(ROUND_TRIP_SEED);
+    for (let iteration = 0; iteration < ROUND_TRIP_ITERATIONS; iteration += 1) {
       const policy = randomPolicy(rand);
       try {
         const encoded = policyToScVal(policy);
