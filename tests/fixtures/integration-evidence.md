@@ -8,6 +8,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 **Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
 **Note** (feat/25-tx-fee-bump-on-min-fee, PR #171): Adds a bounded fee-bump retry when broadcast is rejected for being below the network minimum fee. The retry re-prepares the transaction and re-runs the enforced simulation (including the guard's `__check_auth` and policy verdict) before any re-broadcast, so a block can never be relaxed by it; it only affects the post-verdict broadcast path. The scenarios recorded below (allowed, `per_tx_cap_exceeded`, rolling-window cap) do not depend on the min-fee retry path. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
 
+**Note** (feat/issue-39-feat-policy-decodecheckresult-exhaustive-tests, PR #229): `decodeCheckResult` is now total and fail-closed — an unknown enum tag, a `Blocked` reason the contract does not define, a malformed `ScVec`, or a non-`ScVal` input resolves to the typed `undetermined` verdict instead of throwing `ContractResponseError`. The scenarios recorded below all return well-formed `Allowed`/`Blocked` payloads whose reasons are part of the contract's own vocabulary, and their verdicts are unchanged; the new fail-closed path is covered by unit tests in `tests/unit/policy.test.ts` and `tests/unit/errors.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
+
 ## Instance under test
 
 | | |
