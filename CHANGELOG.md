@@ -86,3 +86,4 @@ None.
 
 [unreleased]: https://github.com/stellar-agent-guard/stellar-agent-guard-sdk/commits/main
 [0.1.0]: https://www.npmjs.com/package/stellar-agent-guard-sdk/v/0.1.0
+
