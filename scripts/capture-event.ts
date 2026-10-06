@@ -139,8 +139,8 @@ async function main(): Promise<void> {
     networkPassphrase: TESTNET_PASSPHRASE,
     guardAuth: { guard: unsafeContractAddress(guard), agent },
   });
-  if (heartbeat.kind !== "allowed") {
-    throw new Error(`heartbeat was not allowed: ${json(heartbeat)}`);
+  if (heartbeat instanceof Error || heartbeat.kind !== "allowed") {
+    throw new Error(`heartbeat was not allowed: ${heartbeat instanceof Error ? heartbeat.message : json(heartbeat)}`);
   }
   console.log(`    tx ${heartbeat.submission.hash} (ledger ${heartbeat.submission.ledger})`);
 
@@ -184,8 +184,8 @@ async function main(): Promise<void> {
     networkPassphrase: TESTNET_PASSPHRASE,
     guardAuth: { guard: unsafeContractAddress(guard), agent },
   });
-  if (blocked.kind !== "blocked") {
-    throw new Error(`expected a pre-broadcast block, got: ${json(blocked)}`);
+  if (blocked instanceof Error || blocked.kind !== "blocked") {
+    throw new Error(`expected a pre-broadcast block, got: ${blocked instanceof Error ? blocked.message : json(blocked)}`);
   }
   console.log(`    reason reported by invoke(): ${blocked.reason}`);
   for (const summary of summarizeDiagnosticEvents(blocked.diagnosticEvents)) {

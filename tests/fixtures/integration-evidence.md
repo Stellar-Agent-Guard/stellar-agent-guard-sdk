@@ -6,6 +6,7 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 **Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
 **Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
 **Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
+**Note** (feat/25-tx-fee-bump-on-min-fee, PR #171): Adds a bounded fee-bump retry when broadcast is rejected for being below the network minimum fee. The retry re-prepares the transaction and re-runs the enforced simulation (including the guard's `__check_auth` and policy verdict) before any re-broadcast, so a block can never be relaxed by it; it only affects the post-verdict broadcast path. The scenarios recorded below (allowed, `per_tx_cap_exceeded`, rolling-window cap) do not depend on the min-fee retry path. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
 
 ## Instance under test
 
@@ -709,4 +710,87 @@ No network, no credentials.
 
 **A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this
 addendum with the fresh run output if desired.
+
+## Addendum — 2026-10-04 (PR #195 / Issue #121: remove library-side console output, add optional logger injection)
+
+Recorded because this PR touches the enforcement path (`src/invoke.ts`,
+`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
+this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this checkout, so `npm run test:integration` cannot execute here. No fresh
+Phase-2 transcript is claimed below, and the gate verifies only that this file
+was touched — not the numbers.
+
+### What the PR changes on the enforcement path
+
+The change is output plumbing, not enforcement logic. The SDK previously wrote
+one environment-gated `console.*` line from `src/invoke.ts`
+(`SAG_DEBUG_RESOURCES=1`). Every such write is removed: a silent-by-default
+`GuardLogger` (`src/logger.ts`) is now threaded through `invoke`,
+`PreFlightInterceptor`, `CostPreChecker` and `GuardTelemetryListener` as an
+optional, injectable sink. With no logger supplied every config resolves to the
+shared `SILENT_LOGGER`, so the library prints nothing; with one supplied, each
+decision point (verdicts, cache hits/stores/invalidations, telemetry pages and
+gaps, cost overruns, retries) is reported through it.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, credential
+kinds answered, the probe → sign → enforced-simulation ordering, resource
+assembly, submission, block classification, and every outcome value and detail
+string. A logger is advisory only — a throwing sink is isolated and cannot
+change an outcome, the same guarantee `onStep` and `onGap` already carry. The
+five scenarios recorded above are produced by the contract during enforced
+simulation, which this diff does not touch.
+
+### What did run locally (post-merge with `main`)
+
+```text
+npm run typecheck                        # clean
+npm run check:strict-ratchet             # ok
+npm run lint                             # clean
+npm test                                 # 606 tests passing, 0 fail, 1 skipped
+npm run build                            # clean
+npm run test:smoke                       # 122 named exports resolve via the ESM export map
+npm run test:exports                     # every declared subpath resolves; undeclared paths refused
+npm run check:bundle-size                # within budget
+node scripts/check-enforcement-evidence.ts --check-structure   # ok
+```
+
+`tests/unit/logger.test.ts` covers the change with no network: silence by
+default across a full `check → blocked` cycle (console methods and both stdout
+and stderr writes are recorded, and none may occur), delivery to an injected
+sink with the host's own `this` preserved, level-dropping for partial loggers,
+isolation of a throwing sink on every level, and an exhaustive source-tree audit
+that fails `npm test` if any `src/` file ever calls `console.*` or writes to
+stdout/stderr. These are mocks and a static audit; they cannot substitute for
+the live run, and this addendum does not claim otherwise. The merge with `main`
+also re-validated the enforcement path against `main`'s newer unit suites
+(606 passing), which exercise the same classification and plumbing.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.
+
+## Addendum — 2026-10-05 (PR #172: policy context on the cost pre-check)
+
+This PR reaches the enforcement-path file list through `src/policy.ts` by exactly
+one addition: the type alias `export type GuardPolicy = PolicyConfig`, plus its
+re-export from `src/index.ts`. It introduces no value, no runtime statement and
+no new branch — the alias is erased at compile time, so policy encoding,
+validation and block classification are byte-for-byte what the run above
+exercised.
+
+Everything else in the PR is additive and sits *after* the verdict it reports
+on: `policyContext` is computed in `src/cost.ts` from the decision the
+interceptor already returned plus the caller's own opt-in policy source, and is
+attached to the returned cost decision. It is never read by, and cannot feed
+back into, the authorization path. The `logger` field on `CostPreCheckConfig`
+restored by this PR is advisory only, under the same guarantee the PR #195
+addendum above states: a logger cannot change an outcome.
+
+No fresh live run was performed for this change, and this addendum does not
+claim one. The five scenarios recorded above are produced by the guard contract
+during enforced simulation; no line this PR touches participates in that, so the
+recorded results remain valid for them.
 

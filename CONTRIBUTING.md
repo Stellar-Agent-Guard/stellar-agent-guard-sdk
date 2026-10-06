@@ -53,6 +53,8 @@ git show --stat HEAD
 
 **Solo-maintainer bypass policy.** As a solo-maintained repository, PRs require a green `ci` check but no second-party review; the maintainer's named-actor bypass on `main-protection` is used deliberately for merges, and that is documented here as standard procedure — not an emergency exception. Ordinary PRs still go through the full `ci` required-check gate; the bypass only removes the structurally-unsatisfiable second-reviewer requirement. If a second maintainer joins in future, they should be added as a required reviewer and this section revisited.
 
+**Reviewer line.** Review every PR against [`docs/design-principles.md`](docs/design-principles.md) — the fail-closed, no-secrets, single-dependency, additive-0.x, browser-safe-core, and logger-silence commitments. A change that departs from a principle does not pass review on its own; it needs a maintainer decision recorded in the PR and labelled `tier:maintainer-decision`, per the label taxonomy below.
+
 Do not modify the ruleset to work around a required check that is legitimately blocked.
 
 CI reports **one required check**, plus a scheduled workflow that is deliberately not
@@ -140,7 +142,25 @@ npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
+node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
 ```
+
+## TypeScript strictness ratchet
+
+`tsconfig.json` enables `strict`, `noUncheckedIndexedAccess` and
+`exactOptionalPropertyTypes`, and they stay on. `noUncheckedIndexedAccess` makes
+an indexed read yield `T | undefined` — the TypeScript-side mirror of the
+contract's `parse_call` bounds checks — and `exactOptionalPropertyTypes` stops an
+omitted optional property and an explicitly-`undefined` one from being
+interchangeable, which is where options-object footguns hide.
+
+Turning a flag off makes `npm run typecheck` *easier* to pass, so typecheck alone
+cannot stop a regression. `npm run check:strict-ratchet` (`scripts/check-strict-ratchet.mjs`)
+is the ratchet: it resolves `tsconfig.json` and `tsconfig.build.json` through
+`extends` and exits non-zero, naming the file and flag, if any of the three is not
+exactly `true`. It runs as a step of the required `ci` check, so a config edit
+that disables one is caught before merge. Fix the call site; do not turn the flag
+back off.
 
 ## Cross-editor standardization
 

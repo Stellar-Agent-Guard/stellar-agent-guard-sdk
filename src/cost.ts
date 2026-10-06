@@ -34,10 +34,33 @@
  * answer would tell a caller their call was too expensive when the truth is that
  * it was never allowed.
  */
-import { SorobanDataBuilder } from "@stellar/stellar-sdk";
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
+import { SorobanDataBuilder, scValToNative, type xdr } from "@stellar/stellar-sdk";
 import { INCLUSION_FEE } from "./tx.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
+import type { PolicyConfig } from "./policy.ts";
+
+/** Additive policy context exposed when a policy source is configured. */
+export interface PolicyContext {
+  /**
+   * Whether the transaction is within the policy's per-transaction cap.
+   * `true` if within cap, `false` if per-tx cap exceeded, or `null` if not determinable.
+   */
+  perTxCapOk: boolean | null;
+  /**
+   * Estimated remaining budget in the current rolling window.
+   * `null` when the contract does not expose sufficient window state.
+   *
+   * NOTE: null means "not available / cannot be determined from current contract state",
+   * NOT "zero remaining budget". The SDK never fabricates a zero budget.
+   */
+  windowRemainingEstimate: number | null;
+  /**
+   * The policy reason if the check was blocked or exceeded a constraint; `null` if allowed.
+   */
+  reason: string | null;
+}
 
 /**
  * Stroops in one XLM. Stellar defines 10^7 stroops per lumen, fixed by the
@@ -247,7 +270,26 @@ export interface CostPreCheckConfig {
    * Refuse (as `over_budget`) when the estimated *total* fee exceeds this many
    * stroops. Omitted means "price it, never object to the price".
    */
-  maxFeeStroops?: bigint;
+  maxFeeStroops?: bigint | undefined;
+  /**
+   * Optional log sink for this pre-checker's decision points: the priced verdict
+   * and whether the ceiling was exceeded.
+   *
+   * Omitted — the default — the pre-checker says nothing at all. The cost
+   * decision is still returned either way; the logger only decides who hears
+   * about it.
+   */
+  logger?: GuardLoggerInput | undefined;
+  /**
+   * Opt-in policy source (contract address string or PolicyConfig/GuardPolicy).
+   * When provided, `policyContext` is populated with policy-relative context.
+   * When omitted or null, `policyContext` is `null`.
+   */
+  policySource?: string | PolicyConfig | null | undefined;
+  /**
+   * Optional policy or contract address. Alias for `policySource`.
+   */
+  policy?: string | PolicyConfig | null | undefined;
 }
 
 /** The two fee components, kept separate so they are never conflated. */
@@ -268,15 +310,20 @@ export type CostDecision =
       footprintKeys: number;
       /** The ceiling this was judged against, or `null` when none was given. */
       feeCeilingStroops: bigint | null;
-    } & FeeBreakdown & CostResultBreakdown)
+      /** Additive policy-relative context when a policy source is configured; null otherwise. */
+      policyContext: PolicyContext | null;
+    } & FeeBreakdown &
+      CostResultBreakdown)
   | ({
       kind: "over_budget";
       /** Not allowed to proceed *at this price* — the guard itself may allow it. */
       allowed: false;
       footprintKeys: number;
       feeCeilingStroops: bigint;
-    } & FeeBreakdown & CostResultBreakdown)
-  | {
+      policyContext: PolicyContext | null;
+    } & FeeBreakdown &
+      CostResultBreakdown)
+  | ({
       kind: "blocked";
       /** The guard refused. This is not a cost problem. */
       allowed: false;
@@ -287,8 +334,9 @@ export type CostDecision =
       resourceFeeStroops: bigint;
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
-    } & CostResultBreakdown
-  | {
+      policyContext: PolicyContext | null;
+    } & CostResultBreakdown)
+  | ({
       kind: "undetermined";
       /** Enforcement could not reach a decision; treated as not-allowed. */
       allowed: false;
@@ -296,7 +344,23 @@ export type CostDecision =
       resourceFeeStroops: bigint;
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
-    } & CostResultBreakdown;
+      policyContext: PolicyContext | null;
+    } & CostResultBreakdown);
+
+/** Type alias matching documentation nomenclature. */
+export type CostPreCheckResult = CostDecision;
+
+/**
+ * Per-call options for cost checking, including fee ceilings and opt-in policy context.
+ */
+export interface CostPreCheckOptions {
+  /** Opt-in policy source (contract address or PolicyConfig/GuardPolicy). */
+  policySource?: string | PolicyConfig | null | undefined;
+  /** Optional policy or contract address. Alias for `policySource`. */
+  policy?: string | PolicyConfig | null | undefined;
+  /** Override the fee ceiling in stroops for this check. */
+  maxFeeStroops?: bigint | undefined;
+}
 
 /**
  * One interceptor verdict and the cost of the exact simulation that produced it.
@@ -343,22 +407,119 @@ export function exceedsCeiling(
 }
 
 /** A compact, log-friendly rendering of a cost decision. */
-export function describeCostDecision(decision: CostDecision): string {
+export function describeCostDecision(
+  decision:
+    | CostDecision
+    | {
+        kind: "within_budget" | "over_budget" | "blocked" | "undetermined";
+        allowed: boolean;
+        totalFeeStroops: bigint;
+        resourceFeeStroops?: bigint | undefined;
+        inclusionFeeStroops?: bigint | undefined;
+        feeCeilingStroops?: bigint | null | undefined;
+        reason?: string | undefined;
+        policyContext?: PolicyContext | null | undefined;
+      },
+): string {
   switch (decision.kind) {
     case "within_budget": {
       const ceiling =
-        decision.feeCeilingStroops === null
+        decision.feeCeilingStroops === null || decision.feeCeilingStroops === undefined
           ? "no ceiling"
           : `ceiling ${decision.feeCeilingStroops}`;
-      return `within budget: ${decision.totalFeeStroops} stroops (${decision.resourceFeeStroops} resource + ${decision.inclusionFeeStroops} inclusion), ${ceiling}`;
+      return `within budget: ${decision.totalFeeStroops} stroops (${decision.resourceFeeStroops ?? 0n} resource + ${decision.inclusionFeeStroops ?? 0n} inclusion), ${ceiling}`;
     }
     case "over_budget":
       return `over budget: ${decision.totalFeeStroops} stroops exceeds ceiling ${decision.feeCeilingStroops}`;
     case "blocked":
-      return `blocked before broadcast (${decision.reason}): 0 stroops charged`;
+      return `blocked before broadcast (${decision.reason ?? "unknown"}): 0 stroops charged`;
     case "undetermined":
       return "undetermined: not priced, not executed";
   }
+}
+
+/** Extract transfer amount from a call if it represents a token transfer. */
+function extractCallAmount(call: ContractCall): bigint | null {
+  if (call.fn === "transfer" && call.args.length >= 3) {
+    try {
+      const val = scValToNative(call.args[2] as xdr.ScVal);
+      if (typeof val === "bigint") return val;
+      if (typeof val === "number") return BigInt(val);
+    } catch {
+      return null;
+    }
+  }
+  if (call.fn === "transfer_from" && call.args.length >= 4) {
+    try {
+      const val = scValToNative(call.args[3] as xdr.ScVal);
+      if (typeof val === "bigint") return val;
+      if (typeof val === "number") return BigInt(val);
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Derive additive policy-relative context from the live check response.
+ *
+ * When no policy source is configured, returns null.
+ * When a policy source is supplied:
+ *  - perTxCapOk: true if admissible or window_cap_exceeded; false if per_tx_cap_exceeded;
+ *    or evaluated against policy.per_tx_cap if a static policy is provided.
+ *  - windowRemainingEstimate: null when the contract does not expose sufficient window state.
+ *    NOTE: null means unknown/unavailable, NEVER zero budget.
+ *  - reason: the policy block reason or null if permitted.
+ */
+function computePolicyContext(
+  policySource: string | PolicyConfig | null | undefined,
+  decision: PreFlightDecision,
+  call: ContractCall,
+): PolicyContext | null {
+  if (!policySource) {
+    return null;
+  }
+
+  const policy =
+    typeof policySource === "object" && policySource !== null && "per_tx_cap" in policySource
+      ? (policySource as PolicyConfig)
+      : null;
+
+  if (decision.kind === "admissible") {
+    return {
+      perTxCapOk: true,
+      windowRemainingEstimate: null,
+      reason: null,
+    };
+  }
+
+  if (decision.kind === "blocked") {
+    let perTxCapOk: boolean | null = null;
+    if (decision.reason === "per_tx_cap_exceeded") {
+      perTxCapOk = false;
+    } else if (decision.reason === "window_cap_exceeded") {
+      perTxCapOk = true;
+    } else if (policy) {
+      const amount = extractCallAmount(call);
+      if (amount !== null) {
+        perTxCapOk = amount <= policy.per_tx_cap;
+      }
+    }
+
+    return {
+      perTxCapOk,
+      windowRemainingEstimate: null,
+      reason: decision.reason,
+    };
+  }
+
+  // decision.kind === "undetermined"
+  return {
+    perTxCapOk: null,
+    windowRemainingEstimate: null,
+    reason: null,
+  };
 }
 
 /**
@@ -367,17 +528,24 @@ export function describeCostDecision(decision: CostDecision): string {
  * Runs the same enforcement question the pre-flight interceptor runs — one
  * simulation of the real `__check_auth` — and reports the result in cost terms.
  * Nothing is broadcast, so calling this repeatedly costs only RPC time.
+ *
+ * When an opt-in policy source is configured, returns additive `policyContext`.
  */
 export class CostPreChecker {
   private readonly config: CostPreCheckConfig;
+  private readonly logger: GuardLogger;
 
   constructor(config: CostPreCheckConfig) {
     this.config = config;
+    this.logger = resolveLogger(config.logger);
   }
 
-  /** Price a call. Equivalent to `(await this.checkWithCost(call)).cost`. */
-  async check(call: ContractCall): Promise<CostDecision> {
-    return (await this.checkWithCost(call)).cost;
+  /** Price a call. Equivalent to `(await this.checkWithCost(call, options)).cost`. */
+  async check(
+    call: ContractCall,
+    options?: CostPreCheckOptions,
+  ): Promise<CostDecision> {
+    return (await this.checkWithCost(call, options)).cost;
   }
 
   /**
@@ -398,13 +566,38 @@ export class CostPreChecker {
    * Additive: `check()`, `precheckCost()` and `PreFlightInterceptor.check()` are
    * unchanged.
    */
-  async checkWithCost(call: ContractCall): Promise<CostWithDecision> {
+  async checkWithCost(
+    call: ContractCall,
+    options?: CostPreCheckOptions,
+  ): Promise<CostWithDecision> {
     const decision = await this.config.interceptor.check(call);
-    return { decision, cost: this.costOf(decision) };
+    const policySource =
+      options?.policySource ?? options?.policy ?? this.config.policySource ?? this.config.policy;
+    const policyContext = computePolicyContext(policySource, decision, call);
+    const ceiling = options?.maxFeeStroops ?? this.config.maxFeeStroops ?? null;
+    const cost = this.costOf(decision, policyContext, ceiling);
+    // The one place a cost decision is produced, so the one place it is logged:
+    // `check()` and both one-shot helpers funnel through here, and a second log
+    // site would mean a caller could see the same decision twice.
+    if (cost.kind === "over_budget") {
+      this.logger.warn(`call exceeds the fee ceiling: ${describeCostDecision(cost)}`, {
+        totalFeeStroops: cost.totalFeeStroops.toString(),
+        feeCeilingStroops: cost.feeCeilingStroops.toString(),
+      });
+    } else if (cost.kind === "undetermined") {
+      this.logger.warn(`call could not be priced: ${cost.detail}`);
+    } else {
+      this.logger.debug(describeCostDecision(cost));
+    }
+    return { decision, cost };
   }
 
   /** The pure cost view of an already-obtained verdict. No network, no state. */
-  private costOf(decision: PreFlightDecision): CostDecision {
+  private costOf(
+    decision: PreFlightDecision,
+    policyContext: PolicyContext | null = null,
+    ceiling: bigint | null = this.config.maxFeeStroops ?? null,
+  ): CostDecision {
     if (decision.kind === "blocked") {
       return {
         kind: "blocked",
@@ -415,6 +608,7 @@ export class CostPreChecker {
         resourceFeeStroops: 0n,
         inclusionFeeStroops: 0n,
         totalFeeStroops: 0n,
+        policyContext,
       };
     }
     if (decision.kind === "undetermined") {
@@ -425,11 +619,11 @@ export class CostPreChecker {
         resourceFeeStroops: 0n,
         inclusionFeeStroops: 0n,
         totalFeeStroops: 0n,
+        policyContext,
       };
     }
 
     const fees = feeBreakdown(decision.estimatedResourceFee);
-    const ceiling = this.config.maxFeeStroops ?? null;
     if (exceedsCeiling(fees.totalFeeStroops, ceiling)) {
       return {
         kind: "over_budget",
@@ -437,6 +631,7 @@ export class CostPreChecker {
         ...fees,
         footprintKeys: decision.footprintKeys,
         feeCeilingStroops: ceiling as bigint,
+        policyContext,
         ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
       };
     }
@@ -446,6 +641,7 @@ export class CostPreChecker {
       ...fees,
       footprintKeys: decision.footprintKeys,
       feeCeilingStroops: ceiling,
+      policyContext,
       ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
     };
   }
@@ -455,8 +651,9 @@ export class CostPreChecker {
 export function precheckCost(
   config: CostPreCheckConfig,
   call: ContractCall,
+  options?: CostPreCheckOptions,
 ): Promise<CostDecision> {
-  return new CostPreChecker(config).check(call);
+  return new CostPreChecker(config).check(call, options);
 }
 
 /**
@@ -466,6 +663,7 @@ export function precheckCost(
 export function precheckCostWithDecision(
   config: CostPreCheckConfig,
   call: ContractCall,
+  options?: CostPreCheckOptions,
 ): Promise<CostWithDecision> {
-  return new CostPreChecker(config).checkWithCost(call);
+  return new CostPreChecker(config).checkWithCost(call, options);
 }
