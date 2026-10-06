@@ -36,6 +36,13 @@ import { ContractResponseError, PolicyDecodeError } from "./errors.ts";
 import type { ContractCall } from "./tx.ts";
 
 /**
+ * Maximum recipient-list entries accepted by `validateGuardPolicy` when the
+ * caller does not pass `maxRecipientEntries` — vendored from the contract's
+ * `MAX_RECIPIENT_ENTRIES` per SPEC §8. Keep in step with the contracts repo.
+ */
+export const DEFAULT_MAX_RECIPIENT_ENTRIES = 256;
+
+/**
  * Branded types for address validation at compile time.
  * These use TypeScript's nominal typing (brand pattern) to distinguish
  * between contract addresses (C...), account addresses (G...), and raw
