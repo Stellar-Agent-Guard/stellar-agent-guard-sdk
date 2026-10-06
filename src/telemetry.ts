@@ -782,6 +782,24 @@ export interface GuardTelemetryWatchParams {
    */
   cursor?: string;
   /**
+   * Where to start the stream, mapping to `getEvents` start-cursor semantics.
+   *
+   * - `{ ledger: number }` — begin at that ledger (backfill after a cursor-store
+   *   gap). Sent as `startLedger` on the first request.
+   * - `'latest'` — fetch the current cursor without yielding backlog: the first
+   *   request resolves the head cursor and only *new* events from that point on
+   *   are delivered. **No history is replayed**; consumers wanting replay pass a
+   *   ledger or use the default.
+   * - `'oldest-available'` — begin at the RPC's oldest retained ledger, so the
+   *   listener backfills everything the host still holds.
+   *
+   * An explicit `startFrom` **overrides** a supplied `cursor` (with a log-line
+   * note), because the caller has stated a start position more recently than the
+   * stored cursor was written. Omitting `startFrom` leaves the existing
+   * `cursor` / `startLedger` behaviour untouched.
+   */
+  startFrom?: { ledger: number } | "latest" | "oldest-available";
+  /**
    * The ledger a supplied `cursor` points at. Without it the resume point cannot
    * be reconstructed from the cursor, so no gap can be proven and none is
    * reported (an announced unknown is not better than a silent guess).

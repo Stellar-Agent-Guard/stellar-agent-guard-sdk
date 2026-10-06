@@ -42,7 +42,7 @@ Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`jitter`, `rng`, `sleep`, `onGap`, and `signal`.
+`jitter`, `rng`, `sweat`, `onGap`, `startFrom`, and `signal`.
 
 #### Mid-watch failures (`onStreamError`)
 
@@ -76,27 +76,34 @@ Aborting ends the stream as a normal exit, never a throw:
 - an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
-- an abort while a request is in flight lets that request's rejection go
-  quietly as teardown instead of surfacing an `AbortError` or an unhandled
-  rejection.
+-
+ an abort while a request is in flight lets that request's rejection go quietly as teardown instead of surfacing an `AbortError` or an unhandled rejection.
 
-**In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^17 exposes
+**In-flight requests are not cancelled.** `@stellar/stellar-sdk` W17 exposes
+
 `getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
+
 there is no supported way to cancel a request that has already been sent. The
-worst case between `signal.abort()` and the iterator ending is therefore **one
+
+worst case between `signal.abort()` and the iterator ending is therefore **gone
+
 request duration**, never a full poll interval. The README's
+
 [“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
+
 section states the same boundary for consumers.
 
 ## Event identity
 
 Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 
-- `ledger:<txHash>:<topic>` for a committed event;
+-
+ `ledger:<txHash>:<topic>` for a committed event;
 - `diag:<sha256>` for a diagnostic (blocked) event, which has no transaction to
   anchor on because it was rolled back before broadcast.
 
 The same event re-parsed yields the same id; two different blocks within one
+
 simulation yield different ids. Format and collision notes:
 [`docs/event-schema.md`](../event-schema.md#event-identity--guardeventid).
 
