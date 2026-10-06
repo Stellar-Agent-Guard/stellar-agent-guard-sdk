@@ -77,24 +77,13 @@ function samplePolicy(overrides: Partial<PolicyConfig> = {}): PolicyConfig {
 }
 
 // ---------------------------------------------------------------------------
-// Shared seeded generator module (single source of truth).
+// Seeded generators for the properties below (single source of truth).
 //
-// This module is the input source for BOTH the round-trip property issue and
-// this issue's widened property set. Do not fork generators: any new property
-// must draw from `makePolicyGenerator` below.
+// These draw the random stream from the `mulberry32` PRNG this file already
+// uses for the round-trip property (issue #48) — one PRNG for the whole file,
+// one generator entry point (`makePolicyGenerator`), so a widened property set
+// extends the existing generator instead of forking a second one.
 // ---------------------------------------------------------------------------
-
-/** Deterministic PRNG (mulberry32) — seeded, reproducible, no deps. */
-function makeRng(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b_79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 0x1_0000_0000;
-  };
-}
 
 function pick<T>(rng: () => number, xs: readonly T[]): T {
   return xs[Math.floor(rng() * xs.length)]!;
@@ -145,7 +134,7 @@ function boundaryRecipients(count: number): AccountAddress[] {
 const GENERATED_FN_POOL = ["transfer", "approve", "swap", "mint"] as const;
 
 function* makePolicyGenerator(seed: number): Generator<PolicyConfig> {
-  const rng = makeRng(seed);
+  const rng = mulberry32(seed);
   for (let i = 0; i < PROPERTY_ITERATIONS; i += 1) {
     const assetsCount = 1 + Math.floor(rng() * 3);
     const recipientsCount = 1 + Math.floor(rng() * 3);
