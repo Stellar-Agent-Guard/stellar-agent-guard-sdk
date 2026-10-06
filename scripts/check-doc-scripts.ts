@@ -1,8 +1,8 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const ROOT = resolve(fileURLToPath(import.meta.url), '..');
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /**
  * Docs that may reference `npm run <name>` scripts.
@@ -56,13 +56,16 @@ function collectMarkdownFiles(): string[] {
 function scanFile(file: string): Finding[] {
   const content = readFileSync(file, 'utf8');
   const findings: Finding[] = [];
-  const lines = content.split(/\r\n?\n/);
+  const lines = content.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    if (line === undefined) continue;
     NPM_RUN_REGEX.lastIndex = 0;
     let match: RegExpExecArray | null;
     while ((match = NPM_RUN_REGEX.exec(line)) !== null) {
-      findings.push({ file, line: i + 1, script: match[1] });
+      const script = match[1];
+      if (script === undefined) continue;
+      findings.push({ file, line: i + 1, script });
     }
   }
   return findings;
