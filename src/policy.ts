@@ -329,28 +329,7 @@ export function definePolicy(
     throw new PolicyValidationError(failures);
   }
 
-  return freezePolicy(merged);
-}
-
-/**
- * Shallow-freeze a policy and its nested arrays. Nested objects inside
- * `protocols` / `recipient_window_caps` are frozen too so a caller cannot
- * mutate a validated policy after construction.
- */
-function freezePolicy(policy: PolicyConfig): PolicyConfig {
-  Object.freeze(policy.assets);
-  Object.freeze(policy.recipients);
-  Object.freeze(policy.protocols);
-  for (const rule of policy.protocols) {
-    if (rule.fns !== null) Object.freeze(rule.fns);
-    Object.freeze(rule);
-  }
-  if (policy.blocked_recipients) Object.freeze(policy.blocked_recipients);
-  if (policy.recipient_window_caps) {
-    for (const cap of policy.recipient_window_caps) Object.freeze(cap);
-    Object.freeze(policy.recipient_window_caps);
-  }
-  return Object.freeze(policy);
+  return freezePolicy(merged) as PolicyConfig;
 }
 
 /**
