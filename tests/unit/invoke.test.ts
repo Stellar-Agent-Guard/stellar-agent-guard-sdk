@@ -24,7 +24,7 @@ import {
 } from "../../src/invoke.ts";
 import { BroadcastError } from "../../src/tx.ts";
 import { SimulationError } from "../../src/errors.ts";
-import { RpcTimeoutError } from "../../src/rpc.ts";
+import { RpcTimeoutError } from "../../src/invoke.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
 import type { InvokeStepEvent } from "../../src/invoke.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";

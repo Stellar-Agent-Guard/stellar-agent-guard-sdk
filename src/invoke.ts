@@ -97,6 +97,8 @@ export class RpcTimeoutError extends GuardError {
   readonly stage: string;
   /** True when the caller's own `AbortSignal` fired; false for a timeout. */
   readonly aborted: boolean;
+  /** The budget that fired, in milliseconds; absent when the bound was a signal abort. */
+  readonly timeoutMs?: number | undefined;
 
   constructor(params: { stage: string; aborted: boolean; timeoutMs?: number }) {
     const reason = params.aborted
@@ -108,6 +110,7 @@ export class RpcTimeoutError extends GuardError {
     super(`RPC call during '${params.stage}' ${reason}`, { cause: "timeout" });
     this.stage = params.stage;
     this.aborted = params.aborted;
+    if (params.timeoutMs !== undefined) this.timeoutMs = params.timeoutMs;
   }
 }
 
@@ -433,7 +436,7 @@ export interface InvokeParams {
   fee?: bigint | string | undefined;
   /**
    * Caller-owned cancellation. When aborted, the pipeline stops at the next
-   * RPC boundary and returns an `undetermined` outcome carrying an
+   * RPC boundary and `invoke()` returns its `error` outcome carrying an
    * `RpcTimeoutError` (see `RpcTimeoutError` for the local-only cancellation
    * caveat). An already-aborted signal short-circuits before any RPC call.
    */
@@ -916,12 +919,7 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
     if (error instanceof RpcTimeoutError) {
       // A bound that fired is a fail-closed *decision*, not a crash: the guard
       // never reached a verdict, which is exactly the `error` arm's meaning.
-      return {
-        kind: "error",
-        detail: error.message,
-        error,
-        diagnosticEvents: [],
-      };
+      return timeoutOutcome(error);
     }
     throw error;
   }
@@ -1647,21 +1645,26 @@ export async function enforceCall(
 }
 
 /**
- * Wrap an `EnforcementOutcome` so a timeout/abort surfaces as the pipeline's
- * `undetermined` error arm rather than an exception.
+ * Convert a fired cancel/timeout into the pipeline's `error`/`undetermined` arm
+ * rather than letting it escape as an exception.
  *
  * The asymmetry with `invoke()` is deliberate and documented in the README:
  * `check()`/`cost()` answer a *verdict* question, so a timeout is reported as
- * `undetermined(cause: 'timeout')` — the guard made no decision, and the
- * caller's fail-closed policy takes over. `invoke()` drives a *pipeline* that
- * has already committed to broadcasting, so a timeout there is a typed throw
- * (`RpcTimeoutError`) the caller must handle explicitly.
+ * `undetermined` carrying the typed `RpcTimeoutError` — the guard made no
+ * decision, and the caller's fail-closed policy takes over. `invoke()` drives a
+ * *pipeline* that was already committed to broadcasting, so a timeout there
+ * surfaces through `invoke()`'s own `error` outcome, which the caller must
+ * handle explicitly. Either way the error class is the same one — callers
+ * branch on `instanceof RpcTimeoutError`, never on a message.
+ *
+ * The `RpcTimeoutError` is carried as-is (not re-wrapped) so `instanceof`,
+ * `stage` and `aborted` survive the trip to the caller.
  */
-export function timeoutOutcome(error: RpcTimeoutError): EnforcementOutcome {
+export function timeoutOutcome(error: RpcTimeoutError): InvokeErrorOutcome {
   return {
     kind: "error",
     detail: error.message,
-    error: new SimulationError(error.message, { stage: "probe", cause: error }),
+    error,
     diagnosticEvents: [],
   };
 }

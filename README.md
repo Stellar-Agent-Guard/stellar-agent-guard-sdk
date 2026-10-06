@@ -510,6 +510,47 @@ aborted watch ends quietly in a `for await` loop instead of surfacing an
 Revisit this when the SDK adds per-request signals to `getEvents`; until then,
 read `signal` as *stop soon and stop asking*, not *cancel the socket*.
 
+### Bounding a check or an invoke (`signal` and `timeoutMs`)
+
+`check()`, `CostPreChecker.check()` and `invoke()` each accept two optional
+caller-owned bounds on the RPC calls they make:
+
+- `signal?: AbortSignal` — your runtime's cancellation (a tool-loop deadline, a
+  shutdown hook, a user's "stop"). An **already-aborted** signal returns before
+  any RPC call is issued.
+- `timeoutMs?: number` — a per-RPC-call budget in milliseconds. It defaults to
+  `DEFAULT_RPC_TIMEOUT_MS` (**30s**), because a network partition that leaves a
+  guardrail call pending forever is a hang, not a fail-closed decision. Pass
+  `timeoutMs: 0` to opt out and rely on `signal` alone.
+
+**The typed error is the same; where it surfaces is deliberately not.** A bound
+that fires raises one class, `RpcTimeoutError` (carrying `stage` and whether it
+was an `aborted` signal or a timeout), but the entry points answer different
+questions:
+
+| Call | Fired bound |
+| --- | --- |
+| `check()` / `CostPreChecker.check()` | the fail-closed `undetermined` **verdict** (`decision.error instanceof RpcTimeoutError`) — the guard reached no decision, which is what `undetermined` already means |
+| `invoke()` | `invoke`'s `error` **outcome** (`outcome.error instanceof RpcTimeoutError`) — the pipeline never reached broadcast |
+
+```ts
+const decision = await interceptor.check(call, { timeoutMs: 5_000 });
+if (decision.kind === "undetermined" && decision.error instanceof RpcTimeoutError) {
+  // Fail closed: the guard could not be reached in time.
+}
+```
+
+Branch on the class, never on `detail`.
+
+**One limitation, stated rather than papered over: the request itself is never
+cancelled.** `@stellar/stellar-sdk` ^17's `Server` methods take no
+`AbortSignal`, so the SDK races the in-flight promise against your signal and
+the timeout. The HTTP request therefore continues server-side until it completes
+or the connection drops; the bound cancels *your wait*, not the socket. What it
+changes is bounded: a fired bound can only stop the SDK from waiting — it can
+never relax a verdict, a cap or a block reason, and a call that is neither
+aborted nor timed out behaves exactly as it did before.
+
 ### Framework Middleware (LangChain & ElizaOS)
 
 Plug-and-play middleware intercepts agent actions before tools are executed:
@@ -773,14 +814,14 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
 
 - `PreFlightInterceptor`
   - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
-  - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
+  - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
   - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
   - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run: the bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
 - `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 

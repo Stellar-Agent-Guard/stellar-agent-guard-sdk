@@ -14,7 +14,7 @@ import {
   type PreFlightCacheOptions,
   type PreFlightDecision,
 } from "../../src/preflight.ts";
-import { RpcTimeoutError } from "../../src/rpc.ts";
+import { RpcTimeoutError } from "../../src/invoke.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
@@ -368,48 +368,71 @@ describe("interceptor.check() input validation and zero RPC round-trips", () => 
 });
 
 describe("abortSignal + timeoutMs plumbing", () => {
-  it("already-aborted signal returns without any RPC call", async () => {
+  it("already-aborted signal returns an undetermined verdict without any RPC call", async () => {
     const mockServer = createMockServer();
     const interceptor = createTestInterceptor(mockServer);
     const controller = new AbortController();
     controller.abort();
 
-    await assert.rejects(
-      async () => interceptor.check(validTransferCall(), { signal: controller.signal }),
-      (err: unknown) => {
-        assert(err instanceof Error);
-        return true;
-      },
-    );
+    // A verdict question is answered with a verdict: the guard reached no
+    // decision, so the check fails closed on its `undetermined` arm instead of
+    // throwing at the caller.
+    const decision = await interceptor.check(validTransferCall(), { signal: controller.signal });
 
+    assert.equal(decision.kind, "undetermined");
+    const error = decision.error;
+    assert.ok(error instanceof RpcTimeoutError);
+    assert.equal(error.stage, "pre-flight");
+    assert.equal(error.aborted, true);
     assert.equal(mockServer.requestCount, 0, "No RPC calls should be attempted when signal is already aborted");
   });
 
-  it("mid-flight abort rejects promptly", async () => {
+  it("mid-flight abort returns an undetermined verdict promptly", async () => {
     const controller = new AbortController();
     const mockServer = createMockServer({ simulateDelayMs: 10_000, simulateSignal: controller.signal });
     const interceptor = createTestInterceptor(mockServer);
 
+    const started = Date.now();
     const pending = interceptor.check(validTransferCall(), { signal: controller.signal });
     setTimeout(() => controller.abort(), 10);
+    const decision = await pending;
 
-    await assert.rejects(async () => pending, (err: unknown) => {
-      assert(err instanceof Error);
-      return true;
-    });
+    assert.equal(decision.kind, "undetermined");
+    const error = decision.error;
+    assert.ok(error instanceof RpcTimeoutError);
+    assert.equal(error.aborted, true, "a caller abort is reported as an abort, not a timeout");
+    assert.ok(
+      Date.now() - started < 5_000,
+      "the verdict must arrive on the abort, not on the 10s simulation",
+    );
   });
 
-  it("timeoutMs fires a typed RpcTimeoutError", async () => {
+  it("timeoutMs fires a typed RpcTimeoutError as an undetermined verdict", async () => {
     const mockServer = createMockServer({ simulateDelayMs: 10_000 });
     const interceptor = createTestInterceptor(mockServer);
 
-    await assert.rejects(
-      async () => interceptor.check(validTransferCall(), { timeoutMs: 10 }),
-      (err: unknown) => {
-        assert(err instanceof RpcTimeoutError);
-        return true;
-      },
-    );
+    const decision = await interceptor.check(validTransferCall(), { timeoutMs: 10 });
+
+    assert.equal(decision.kind, "undetermined");
+    const error = decision.error;
+    assert.ok(error instanceof RpcTimeoutError);
+    assert.equal(error.aborted, false);
+    assert.equal(error.timeoutMs, 10);
+    assert.equal(error.cause, "timeout");
+  });
+
+  it("a furnished signal that never fires leaves the verdict path untouched", async () => {
+    const controller = new AbortController();
+    const mockServer = createMockServer();
+    const interceptor = createTestInterceptor(mockServer);
+
+    const decision = await interceptor.check(validTransferCall(), {
+      signal: controller.signal,
+      timeoutMs: 30_000,
+    });
+
+    assert.equal(decision.kind, "admissible");
+    assert.ok(mockServer.requestCount > 0);
   });
 });
 

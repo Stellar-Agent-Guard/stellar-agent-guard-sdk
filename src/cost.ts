@@ -362,11 +362,15 @@ export interface CostPreCheckOptions {
   maxFeeStroops?: bigint | undefined;
   /**
    * Caller-owned cancellation for the underlying enforced simulation. An
-   * already-aborted signal rejects before any RPC call; a mid-flight abort
-   * rejects with an `RpcTimeoutError`.
+   * already-aborted signal returns before any RPC call; a mid-flight abort or a
+   * fired timeout yields a fail-closed `undetermined` verdict (and therefore an
+   * `undetermined` cost decision) carrying the typed `RpcTimeoutError`.
    */
   signal?: AbortSignal | undefined;
-  /** Bound on the underlying RPC call, in milliseconds; `0` disables it. */
+  /**
+   * Bound on the underlying RPC call, in milliseconds; `0` disables it. A fired
+   * timeout is reported exactly like an abort — never as an admissible verdict.
+   */
   timeoutMs?: number | undefined;
 }
 

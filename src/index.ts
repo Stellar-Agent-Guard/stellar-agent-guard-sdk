@@ -138,10 +138,12 @@ export type {
 
 export {
   DEFAULT_INVOKE_RETRY_OPTIONS,
+  DEFAULT_RPC_TIMEOUT_MS,
   enforceCall,
   INVOKE_ERROR_CAUSES,
   InvokeRetryError,
   invoke,
+  RpcTimeoutError,
   topicSymbols,
   type EnforcementOutcome,
   type FeeBumpConfig,
