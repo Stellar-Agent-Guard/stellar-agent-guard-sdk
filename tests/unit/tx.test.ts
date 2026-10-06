@@ -15,8 +15,10 @@ import { describe, it } from "node:test";
 import { Keypair, SorobanDataBuilder, scValToNative, xdr } from "@stellar/stellar-sdk";
 import { ContractResponseError } from "../../src/errors.ts";
 import {
+  BroadcastError,
   buildGuardAuthEntry,
   describeSimulationResources,
+  isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
@@ -367,5 +369,99 @@ describe("AgentSigner", () => {
       credentialType: "sorobanCredentialsAddressV2",
     });
     assert.equal(entry.credentials.type, "sorobanCredentialsAddressV2");
+  });
+});
+
+describe("isMinimumFeeBroadcastFailure", () => {
+  it("recognises structured result=txInsufficientFee", () => {
+    assert.equal(
+      isMinimumFeeBroadcastFailure({
+        resultXdr: null,
+        resultCode: "result=txInsufficientFee",
+        message: '{"status":"ERROR"}',
+        diagnosticEvents: [],
+      }),
+      true,
+    );
+  });
+
+  it("recognises tx_insufficient_fee in the failure message", () => {
+    assert.equal(
+      isMinimumFeeBroadcastFailure({
+        resultXdr: null,
+        resultCode: null,
+        message: '{"result":"tx_insufficient_fee"}',
+        diagnosticEvents: [],
+      }),
+      true,
+    );
+  });
+
+  it("recognises tx too cheap in the failure message", () => {
+    assert.equal(
+      isMinimumFeeBroadcastFailure({
+        resultXdr: null,
+        resultCode: null,
+        message: "transaction rejected: tx too cheap for current ledger",
+        diagnosticEvents: [],
+      }),
+      true,
+    );
+  });
+
+  it("recognises min-fee in the failure message", () => {
+    assert.equal(
+      isMinimumFeeBroadcastFailure({
+        resultXdr: null,
+        resultCode: null,
+        message: "fee 100 below min-fee 250",
+        diagnosticEvents: [],
+      }),
+      true,
+    );
+  });
+
+  it("does not treat stale-ledger resource failure as a minimum-fee failure", () => {
+    assert.equal(isMinimumFeeBroadcastFailure(staleLedgerFailure), false);
+  });
+
+  it("does not treat a guard block as a minimum-fee failure", () => {
+    assert.equal(isMinimumFeeBroadcastFailure(guardBlockFailure), false);
+  });
+
+  it("does not treat an unrelated failure (e.g. bad seq) as a minimum-fee failure", () => {
+    assert.equal(
+      isMinimumFeeBroadcastFailure({
+        resultXdr: null,
+        resultCode: "tx_bad_seq",
+        message: "sequence mismatch",
+        diagnosticEvents: [],
+      }),
+      false,
+    );
+  });
+});
+
+describe("BroadcastError", () => {
+  it("formats message with attempt count and last fee", () => {
+    const error = new BroadcastError({
+      attempts: 3,
+      lastFee: 400n,
+      failure: {
+        resultXdr: null,
+        resultCode: "result=txInsufficientFee",
+        message: "tx too cheap",
+        diagnosticEvents: [],
+      },
+    });
+
+    assert.equal(error.name, "BroadcastError");
+    assert.equal(error.kind, "error");
+    assert.equal(error.attempts, 3);
+    assert.equal(error.lastFee, 400n);
+    assert.equal(error.error, error);
+    assert.match(error.message, /3 attempt\(s\)/);
+    assert.match(error.message, /400 stroops/);
+    assert.ok(error instanceof Error);
   });
 });
