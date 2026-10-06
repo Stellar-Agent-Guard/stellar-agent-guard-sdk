@@ -279,8 +279,41 @@ export interface InvokePollOptions {
   pollIntervalMs?: number;
 }
 
+/** Thrown when a transport config supplies both `server` and `url`, or neither. */
+export class RpcConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RpcConfigError";
+  }
+}
+
+/**
+ * Resolve the RPC transport for an invocation.
+ *
+ * Exactly one of `server` or `url` must be supplied. An injected `server` is
+ * returned verbatim — the pipeline never rebuilds one from a `url` — which is
+ * the lever for routing RPC through a proxy (auth headers, mTLS) or handing the
+ * pipeline a mock in tests. Supplying both, or neither, throws `RpcConfigError`.
+ */
+export function resolveServer(config: {
+  server?: rpc.Server | undefined;
+  url?: string | undefined;
+}): rpc.Server {
+  const hasServer = config.server !== undefined && config.server !== null;
+  const hasUrl = config.url !== undefined && config.url !== null && config.url !== "";
+  if (hasServer && hasUrl) {
+    throw new RpcConfigError("Provide either `server` or `url`, but not both.");
+  }
+  if (hasServer) return config.server as rpc.Server;
+  if (hasUrl) return new rpc.Server(config.url as string);
+  throw new RpcConfigError("Provide either `server` or `url`.");
+}
+
 export interface InvokeParams {
-  server: rpc.Server;
+  /** Pre-built `rpc.Server` instance; mutually exclusive with `url`. */
+  server?: rpc.Server | undefined;
+  /** RPC endpoint URL; mutually exclusive with `server`. */
+  url?: string | undefined;
   /** Classic account that pays the fee and supplies the sequence number. */
   source: Keypair | AdminSigner;
   call: ContractCall;
@@ -768,8 +801,23 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   // serialize against the account queue.
   if (params.dryRun) return invokeDryRun(params);
 
+  let server: rpc.Server;
+  try {
+    server = resolveServer(params);
+  } catch (cause) {
+    // A transport config with both levers (or neither) fails before anything
+    // reaches the network, so it is reported as the same typed probe failure a
+    // refused connection would produce — and no RPC call is made.
+    return {
+      kind: "error",
+      detail: cause instanceof Error ? cause.message : String(cause),
+      error: new SimulationError("authorization probe failed", { stage: "probe", cause }),
+      diagnosticEvents: [],
+    };
+  }
+
   const sourceKey = await params.source.publicKey();
-  return withAccountQueue(params.server, sourceKey, async () => {
+  return withAccountQueue(server, sourceKey, async () => {
     const retry = resolveRetryOptions(params.retry);
     const logger = resolveLogger(params.logger);
 
@@ -1003,7 +1051,7 @@ async function invokePipeline(
   attempt: number,
   options?: { inclusionFee?: bigint | undefined },
 ): Promise<PipelineOutcome> {
-  const { server } = params;
+  const server = resolveServer(params);
   const onStep = stepHook(params.onStep, resolveLogger(params.logger));
   const enforced = await enforceCall(
     {
@@ -1145,7 +1193,8 @@ export async function enforceCall(
   params: InvokeParams,
   attempt: number = 0,
 ): Promise<EnforcementOutcome> {
-  const { server, source, call, networkPassphrase } = params;
+  const { source, call, networkPassphrase } = params;
+  const server = resolveServer(params);
   const logger = resolveLogger(params.logger);
   const onStep = stepHook(params.onStep, logger);
 

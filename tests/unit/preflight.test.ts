@@ -1031,3 +1031,50 @@ describe("PreFlightInterceptor.checkBatch()", () => {
     );
   });
 });
+
+describe("injectable transport: pre-built rpc.Server instance", () => {
+  it("uses the injected Server instance verbatim and never constructs a fresh one from a url", async () => {
+    const mockServer = createMockServer();
+    const interceptor = createTestInterceptor(mockServer);
+
+    // The injected object is the one that receives the calls.
+    const decision = await interceptor.check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+    assert(mockServer.requestCount > 0, "calls must land on the injected Server");
+  });
+
+  it("rejects configuration that supplies both server and url", () => {
+    const mockServer = createMockServer();
+    assert.throws(
+      () =>
+        new PreFlightInterceptor( {
+          server: mockServer,
+          url: "https://rpc.example.org",
+          networkPassphrase: "Test SDF Network ; September 2015",
+          guard: VALID_GUARD,
+          agent: Keypair.random(),
+          source: Keypair.random(),
+        }),
+      (err: unknown) => {
+        assert(err instanceof InvalidInputError);
+        return true;
+      },
+    );
+  });
+
+  it("rejects configuration that supplies neither server nor url", () => {
+    assert.throws(
+      () =>
+        new PreFlightInterceptor( {
+          networkPassphrase: "Test SDF Network ; September 2015",
+          guard: VALID_GUARD,
+          agent: Keypair.random(),
+          source: Keypair.random(),
+        }),
+      (err: unknown) => {
+        assert(err instanceof InvalidInputError);
+        return true;
+      },
+    );
+  });
+});
