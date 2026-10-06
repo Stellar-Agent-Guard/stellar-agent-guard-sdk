@@ -772,3 +772,25 @@ this branch before merge** and replace this addendum with the fresh run output.
 No credentials, deployment or policy change are needed beyond what the suite
 already does.
 
+## Addendum — 2026-10-05 (PR #172: policy context on the cost pre-check)
+
+This PR reaches the enforcement-path file list through `src/policy.ts` by exactly
+one addition: the type alias `export type GuardPolicy = PolicyConfig`, plus its
+re-export from `src/index.ts`. It introduces no value, no runtime statement and
+no new branch — the alias is erased at compile time, so policy encoding,
+validation and block classification are byte-for-byte what the run above
+exercised.
+
+Everything else in the PR is additive and sits *after* the verdict it reports
+on: `policyContext` is computed in `src/cost.ts` from the decision the
+interceptor already returned plus the caller's own opt-in policy source, and is
+attached to the returned cost decision. It is never read by, and cannot feed
+back into, the authorization path. The `logger` field on `CostPreCheckConfig`
+restored by this PR is advisory only, under the same guarantee the PR #195
+addendum above states: a logger cannot change an outcome.
+
+No fresh live run was performed for this change, and this addendum does not
+claim one. The five scenarios recorded above are produced by the guard contract
+during enforced simulation; no line this PR touches participates in that, so the
+recorded results remain valid for them.
+

@@ -53,6 +53,8 @@ git show --stat HEAD
 
 **Solo-maintainer bypass policy.** As a solo-maintained repository, PRs require a green `ci` check but no second-party review; the maintainer's named-actor bypass on `main-protection` is used deliberately for merges, and that is documented here as standard procedure — not an emergency exception. Ordinary PRs still go through the full `ci` required-check gate; the bypass only removes the structurally-unsatisfiable second-reviewer requirement. If a second maintainer joins in future, they should be added as a required reviewer and this section revisited.
 
+**Reviewer line.** Review every PR against [`docs/design-principles.md`](docs/design-principles.md) — the fail-closed, no-secrets, single-dependency, additive-0.x, browser-safe-core, and logger-silence commitments. A change that departs from a principle does not pass review on its own; it needs a maintainer decision recorded in the PR and labelled `tier:maintainer-decision`, per the label taxonomy below.
+
 Do not modify the ruleset to work around a required check that is legitimately blocked.
 
 CI reports **one required check**, plus a scheduled workflow that is deliberately not
