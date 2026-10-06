@@ -226,6 +226,9 @@ export interface ValidatePolicyOptions {
   maxRecipientEntries?: number;
 }
 
+/** Type alias for PolicyConfig matching contract documentation and external vocabulary. */
+export type GuardPolicy = PolicyConfig;
+
 export interface GuardStatus {
   has_policy: boolean;
   admin_frozen: boolean;
