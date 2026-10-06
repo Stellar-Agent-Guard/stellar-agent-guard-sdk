@@ -293,7 +293,13 @@ export interface PreFlightCacheOptions {
 }
 
 export interface PreFlightConfig {
-  server: rpc.Server;
+  /**
+   * Pre-built `rpc.Server` instance, used verbatim. Mutually exclusive with
+   * `url`; the hook for routing RPC through a proxy (auth headers, mTLS).
+   */
+  server?: rpc.Server | undefined;
+  /** RPC endpoint URL; the SDK constructs an `rpc.Server` from it. */
+  url?: string | undefined;
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
   guard: ContractAddress;
@@ -382,8 +388,40 @@ function configFingerprint(config: PreFlightConfig): string {
   return hash.digest("hex");
 }
 
+/**
+ * Resolve the interceptor's RPC transport.
+ *
+ * Exactly one of `server` or `url` must be supplied. An injected `server` is
+ * used verbatim — the interceptor never rebuilds one from a `url` — which is
+ * how a caller routes RPC through a proxy (auth headers, mTLS) or passes a
+ * mock. Supplying both, or neither, is an `InvalidInputError`.
+ */
+function resolvePreFlightServer(config: {
+  server?: rpc.Server | undefined;
+  url?: string | undefined;
+}): rpc.Server {
+  const hasServer = config.server !== undefined && config.server !== null;
+  const hasUrl = config.url !== undefined && config.url !== null && config.url !== "";
+  if (hasServer && hasUrl) {
+    throw new InvalidInputError(
+      "server",
+      "mutually_exclusive",
+      "supply either `server` or `url`, not both",
+    );
+  }
+  if (hasServer) return config.server as rpc.Server;
+  if (hasUrl) return new rpc.Server(config.url as string);
+  throw new InvalidInputError(
+    "server",
+    "required",
+    "supply either a pre-built `server` or a `url`",
+  );
+}
+
 export class PreFlightInterceptor {
   private readonly config: PreFlightConfig;
+  /** The `rpc.Server` this interceptor talks to (the injected instance verbatim). */
+  private readonly server: rpc.Server;
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
@@ -392,6 +430,7 @@ export class PreFlightInterceptor {
 
   constructor(config: PreFlightConfig) {
     this.config = config;
+    this.server = resolvePreFlightServer(config);
     this.cacheOptions = config.cache;
     this.clock = config.clock ?? systemClock;
     this.validateCacheOptions();
@@ -438,7 +477,7 @@ export class PreFlightInterceptor {
 
     let ledger: number;
     try {
-      const latest = await this.config.server.getLatestLedger();
+      const latest = await this.server.getLatestLedger();
       ledger = latest.sequence;
     } catch {
       // Without a trustworthy ledger marker, do not reuse a cached verdict.
@@ -509,7 +548,7 @@ export class PreFlightInterceptor {
       }
     }
     const outcome = await enforceCall({
-      server: this.config.server,
+      server: this.server,
       source: this.config.source,
       call,
       networkPassphrase: this.config.networkPassphrase,
@@ -664,7 +703,7 @@ export class PreFlightInterceptor {
 
     if (policy === null || options?.initialWindowSpent === undefined) {
       try {
-        const fetched = await fetchGuardPolicyAndWindow(this.config.server, this.config.guard);
+        const fetched = await fetchGuardPolicyAndWindow(this.server, this.config.guard);
         if (policy === null) {
           policy = fetched.policy;
         }

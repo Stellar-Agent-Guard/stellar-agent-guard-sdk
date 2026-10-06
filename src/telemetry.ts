@@ -549,8 +549,49 @@ export class GuardEventRingBuffer {
   }
 }
 
-export interface GuardTelemetryConfig {
-  server: rpc.Server;
+/**
+ * Shared RPC transport configuration for the telemetry surface.
+ *
+ * Exactly one of `server` or `url` must be supplied:
+ * - `server` — a pre-built `rpc.Server` instance, used verbatim. This is the
+ *   hook enterprise/agent deployments need to route RPC through a proxy (auth
+ *   headers, mTLS, latency shielding): configure the `Server` first, pass it in.
+ * - `url` — an RPC endpoint URL; the SDK constructs an `rpc.Server` from it.
+ *
+ * Supplying both, or neither, raises `GuardServerConfigError`.
+ */
+export interface GuardServerConfig {
+  /** A pre-built `rpc.Server` instance. Mutually exclusive with `url`. */
+  server?: rpc.Server | undefined;
+  /** An RPC endpoint URL the SDK constructs an `rpc.Server` from. */
+  url?: string | undefined;
+}
+
+/** Thrown when a transport config supplies both `server` and `url`, or neither. */
+export class GuardServerConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GuardServerConfigError";
+  }
+}
+
+/**
+ * Validate a `{ server | url }` transport config and return the `rpc.Server`
+ * to use: `server` verbatim (never rebuilt from `url`), else a `Server` built
+ * from `url`. Both or neither throws `GuardServerConfigError`.
+ */
+export function resolveServerConfig(config: GuardServerConfig): rpc.Server {
+  const hasServer = config.server !== undefined && config.server !== null;
+  const hasUrl = config.url !== undefined && config.url !== null && config.url !== "";
+  if (hasServer && hasUrl) {
+    throw new GuardServerConfigError("Provide either `server` or `url`, but not both.");
+  }
+  if (hasServer) return config.server as rpc.Server;
+  if (hasUrl) return new rpc.Server(config.url as string);
+  throw new GuardServerConfigError("Provide either `server` or `url`.");
+}
+
+export interface GuardTelemetryConfig extends GuardServerConfig {
   /** The guard contract to follow. */
   guard: string;
   /** Opt in to scanning failed transaction diagnostics as a third stream. */
@@ -975,6 +1016,8 @@ export class InMemoryCursorStore implements CursorStore {
 
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
+  /** The `rpc.Server` this listener talks to (the injected instance verbatim). */
+  private readonly server: rpc.Server;
   private readonly logger: GuardLogger;
 
   /** The persistence adapter this listener is using (defaults to in-memory). */
@@ -1013,6 +1056,7 @@ export class GuardTelemetryListener {
 
   constructor(config: GuardTelemetryConfig) {
     this.config = config;
+    this.server = resolveServerConfig(config);
     this.logger = resolveLogger(config.logger);
     this.buffer = config.buffer ? new GuardEventRingBuffer(config.buffer.max) : null;
     this.activeCursorStore = config.cursorStore ?? new InMemoryCursorStore();
@@ -1094,7 +1138,7 @@ export class GuardTelemetryListener {
     params: { cursor?: string; startLedger?: number; limit?: number } = {},
   ): Promise<FailedTxPollResult> {
     if (params.cursor === undefined && params.startLedger === undefined) {
-      const latest = await this.config.server.getLatestLedger();
+      const latest = await this.server.getLatestLedger();
       return { events: [], cursor: String(latest.sequence) };
     }
 
@@ -1111,7 +1155,7 @@ export class GuardTelemetryListener {
         };
 
     try {
-      const response = await this.config.server.getTransactions(request);
+      const response = await this.server.getTransactions(request);
       const events: GuardEvent[] = [];
       for (const tx of response.transactions) {
         if (tx.status !== rpc.Api.GetTransactionStatus.FAILED) continue;
@@ -1147,11 +1191,11 @@ export class GuardTelemetryListener {
     if (!params.cursor && params.startLedger === undefined) {
       // Default to the current head: replaying a year of history by accident is
       // a mean surprise, and callers that want history pass `startLedger`.
-      const latest = await this.config.server.getLatestLedger();
+      const latest = await this.server.getLatestLedger();
       (request as { startLedger: number }).startLedger = latest.sequence;
     }
 
-    const response = await this.config.server.getEvents(request);
+    const response = await this.server.getEvents(request);
     const events: GuardEvent[] = [];
     // Kept rather than merely skipped: an event this listener cannot interpret
     // is a coverage fact a host may need to see, and counting it is the only
@@ -1252,7 +1296,7 @@ export class GuardTelemetryListener {
       expectedFrom = params.resumeLedger === undefined ? null : params.resumeLedger + 1;
     } else {
       if (startLedger === undefined) {
-        const latest = await this.config.server.getLatestLedger();
+        const latest = await this.server.getLatestLedger();
         startLedger = Math.max(1, latest.sequence - 1);
       }
       expectedFrom = startLedger;

@@ -1189,3 +1189,110 @@ describe("invoke() fee-bump retry lifecycle", () => {
     assert.equal(sendCalls.length, 2);
   });
 });
+
+/**
+ * Injectable transport (issue #58): callers may hand `invoke()` a pre-built
+ * `rpc.Server` instance (or a `url` to construct one), and the pipeline must
+ * use the injected instance verbatim — no fresh Server built from a URL.
+ *
+ * The mock below is a plain object, not a URL-backed Server, so any code path
+ * that tried to reconstruct from `url` would fail loudly (no `url` is set).
+ */
+describe("invoke() injectable transport", () => {
+  it("uses an injected Server instance verbatim, not one built from url", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const server = createMockServer();
+    const { events, callback } = recorder();
+
+    // No `url` is supplied: the only way the pipeline can reach RPC is through
+    // the injected instance. If it tried to build a Server from a URL it would
+    // have nothing to build from.
+    const pending = invoke(makeParams(server, { onStep: callback }));
+    await drainWithMockedTimers(t.mock.timers, pending);
+    const outcome = await pending;
+
+    assert.equal(outcome.kind, "allowed");
+    // Every RPC call landed on the injected object.
+    assert.equal(server.simulationCount, 2);
+    assert.equal(server.sendCount, 1);
+    assert.equal(server.accountLookupCount, 1);
+    assert.deepEqual(
+      events.map((event) => [event.name, event.status]),
+      SUCCESSFUL_ATTEMPT,
+    );
+  });
+
+  it("rejects a config that supplies both server and url with a typed error", async () => {
+    const server = createMockServer();
+    const params = makeParams(server) as InvokeParams & { url?: string };
+    // Force both levers on: the shared config type must reject the ambiguity.
+    params.url = "https://rpc.example.invalid";
+
+    const outcome = await invoke(params);
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.stage, "probe");
+    // The injected server must not have been touched: validation runs first.
+    assert.equal(server.simulationCount, 0);
+    assert.equal(server.sendCount, 0);
+  });
+
+  it("rejects a config that supplies neither server nor url with a typed error", async () => {
+    const server = createMockServer();
+    const params = makeParams(server) as InvokeParams & { server?: rpc.Server };
+    // Strip the injected server: with no url either, the config is unusable.
+    delete params.server;
+
+    const outcome = await invoke(params);
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(outcome.error instanceof SimulationError);
+    assert.equal(outcome.error.stage, "probe");
+    assert.equal(server.simulationCount, 0);
+    assert.equal(server.sendCount, 0);
+  });
+
+  it("lets a fake Server object drive the pipeline with no URL string in the test", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    // A hand-rolled object, not a URL-backed Server: proof that unit tests can
+    // adopt the injectable transport instead of scattering RPC URLs.
+    const calls: string[] = [];
+    const fake = {
+      async getAccount() {
+        calls.push("getAccount");
+        return new Account(Keypair.random().publicKey(), "100");
+      },
+      async getLatestLedger() {
+        calls.push("getLatestLedger");
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        calls.push("simulateTransaction");
+        return probeSuccess();
+      },
+      async sendTransaction() {
+        calls.push("sendTransaction");
+        return { status: "PENDING", hash: "0".repeat(64) };
+      },
+      async getTransaction() {
+        calls.push("getTransaction");
+        return { status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 42 };
+      },
+    } as unknown as rpc.Server;
+
+    const pending = invoke(makeParams(fake));
+    await drainWithMockedTimers(t.mock.timers, pending);
+    const outcome = await pending;
+
+    assert.equal(outcome.kind, "allowed");
+    assert.deepEqual(calls, [
+      "getAccount",
+      "getLatestLedger",
+      "simulateTransaction",
+      "simulateTransaction",
+      "sendTransaction",
+      "getTransaction",
+    ]);
+  });
+});
