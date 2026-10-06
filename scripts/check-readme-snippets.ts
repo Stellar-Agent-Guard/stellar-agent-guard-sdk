@@ -32,8 +32,9 @@
  * Conventions:
  *   - a block whose info string carries `no-check` is skipped, and its reason is
  *     echoed to the log so a reviewer can see exactly what is not compiled;
- *   - `bash` blocks are documentation for humans and are reported as manual —
- *     they are never executed here.
+ *   - every fenced `ts` or `bash` block is extracted: `ts` blocks are compiled,
+ *     and `bash` blocks are documentation for humans — reported as manual and
+ *     never executed here, so the count of what was *not* checked stays visible.
  *
  * The programme is written inside the repo root so NodeNext resolution,
  * `"type": "module"` and the bare `stellar-agent-guard-sdk` specifier all behave
@@ -72,28 +73,38 @@ const COMPILER_OPTIONS: ts.CompilerOptions = {
   paths: { [PACKAGE_NAME]: [join(SRC, 'index.ts')] },
 };
 
-interface Snippet {
+/** A fenced block the audit knows about: `ts` is compiled, `bash` is manual. */
+export interface Snippet {
   index: number;
   /** 1-based line in README.md of the first code line inside the fence. */
   line: number;
   code: string;
+  /** Fence language. Only `ts` blocks are typechecked; `bash` blocks are manual. */
+  lang: 'ts' | 'bash';
   skipped: boolean;
   justification?: string;
 }
 
-/** Split the markdown into fenced ts blocks, tracking where each block starts. */
-function extractSnippets(markdown: string): Snippet[] {
+/**
+ * Split the markdown into the fenced `ts` and `bash` blocks, tracking where each
+ * block starts. Every other fence language is ignored.
+ */
+export function extractSnippets(markdown: string): Snippet[] {
   const lines = markdown.split(/\r?\n/);
   const snippets: Snippet[] = [];
   let index = 0;
   let i = 0;
   while (i < lines.length) {
-    const fence = lines[i]?.match(/^\s*```(\S*)\s*$/);
+    // The info string is everything after the backticks: `ts`, `ts no-check: why`,
+    // `bash`. Matching it loosely is deliberate — the `no-check: <reason>` form
+    // carries spaces, and a stricter pattern silently drops those blocks instead
+    // of reporting them, which is the one outcome this script must never produce.
+    const fence = lines[i]?.match(/^\s*```(.*)$/);
     if (!fence) {
       i += 1;
       continue;
     }
-    const info = (fence[1] ?? '').toLowerCase();
+    const info = (fence[1] ?? '').trim().toLowerCase();
     const startLine = i + 2; // the line after the opening fence, 1-based
     const body: string[] = [];
     i += 1;
@@ -103,13 +114,15 @@ function extractSnippets(markdown: string): Snippet[] {
     }
     i += 1; // consume the closing fence
 
-    if (!/^(ts|typescript)$/.test(info.split(/[\s:]/)[0] ?? '')) continue;
+    const language = info.split(/[\s:]/)[0] ?? '';
+    if (!/^(ts|typescript|bash)$/.test(language)) continue;
 
     const justification = info.match(/no-check(?::\s*(.*))?/)?.[1]?.trim();
     snippets.push({
       index: index++,
       line: startLine,
       code: body.join('\n'),
+      lang: language === 'bash' ? 'bash' : 'ts',
       skipped: /no-check/.test(info),
       ...(justification ? { justification } : {}),
     });
@@ -223,19 +236,26 @@ function compile(
 function main(): void {
   const markdown = readFileSync(README, 'utf-8');
   const snippets = extractSnippets(markdown);
-  if (snippets.length === 0) {
+  const ts = snippets.filter((s) => s.lang === 'ts');
+  const bash = snippets.filter((s) => s.lang === 'bash');
+  if (ts.length === 0) {
     console.error('no fenced ts blocks found in README.md');
     process.exitCode = 1;
     return;
   }
 
-  const checked = snippets.filter((s) => !s.skipped);
-  const skipped = snippets.filter((s) => s.skipped);
+  const checked = ts.filter((s) => !s.skipped);
+  const skipped = ts.filter((s) => s.skipped);
   console.log(
-    `README snippets: ${snippets.length} ts block(s), ${checked.length} typechecked, ${skipped.length} marked no-check.`,
+    `README snippets: ${ts.length} ts block(s) ` +
+      `(${checked.length} typechecked, ${skipped.length} marked no-check), ` +
+      `${bash.length} bash block(s) reported as manual and never executed.`,
   );
   for (const s of skipped) {
     console.log(`  skipping ts block at line ${s.line}: ${s.justification ?? 'no-check'}`);
+  }
+  for (const s of bash) {
+    console.log(`  bash block at line ${s.line}: manual, not executed`);
   }
   if (checked.length === 0) {
     console.error('no typecheckable ts blocks found in README.md');
@@ -243,7 +263,7 @@ function main(): void {
     return;
   }
 
-  const imports = collectImports(snippets);
+  const imports = collectImports(ts);
   const dir = mkdtempSync(join(ROOT, '.readme-snippets-'));
   const failures: string[] = [];
 
@@ -273,8 +293,14 @@ function main(): void {
 
   console.log(
     `README snippet typecheck passed: ${checked.length} ts block(s) compiled against src/` +
-      (skipped.length > 0 ? ` (${skipped.length} skipped)` : ''),
+      (skipped.length > 0 ? ` (${skipped.length} skipped)` : '') +
+      (bash.length > 0 ? `, ${bash.length} bash block(s) manual` : ''),
   );
 }
 
-main();
+// The extractor is exported so `tests/unit/check-readme-snippets.test.ts` can
+// pin the block/label/line bookkeeping; the CLI body runs only when this file is
+// the process entry point, so importing it in a test never compiles the README.
+if (process.argv[1] !== undefined && resolve(process.argv[1]) === import.meta.filename) {
+  main();
+}
