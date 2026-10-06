@@ -81,21 +81,49 @@ baseline across machines.
 Two of the four targets are dominated by `tinybench`'s own per-iteration
 bookkeeping rather than by the SDK: `decodeCheckResult` completes in well under a
 microsecond per payload, so a single-shot sample mostly measures the harness.
-Every target therefore also has a `hot loop x100` variant that repeats the
-operation 100 times per sample, which amortises that bookkeeping and makes
-sub-microsecond work comparable across runs.
+Those two targets — `decodeCheckResult` and `guardEventsFromDiagnostics` — also
+have a `hot loop x100` variant that repeats the operation 100 times per sample,
+which amortises that bookkeeping and makes sub-microsecond work comparable across
+runs.
 
 The hot-loop figures are not per-operation numbers — divide the reported
 `median ms/op` by 100 for the per-operation cost. `HOT_LOOP_ITERATIONS` in
 `benches/check-decode.bench.ts` is the multiplier, and the bench prints it at the
 top of every run so a captured log is self-describing.
 
+The two policy targets deliberately have no hot-loop variant. Their per-op cost
+is already milliseconds — `npm run bench` measures ~39 ms for `policyToScVal` and
+~109 ms for `decodePolicy` over the 8192-entry allowlist on the author's machine
+— so tinybench measures them fine single-shot, well above its bookkeeping floor.
+A `x100` sample of those two would be ~3.9 s and ~10.9 s, and `tinybench` runs at
+least 64 samples per task (plus 16 warmup samples), so the two variants alone
+would add roughly 5 and 15 minutes to `npm run bench`; a bench containing just
+those two tasks was measured and did not finish inside 15 minutes, which is the
+`timeout-minutes` on the informational `bench` CI job.
+
+## Measured on the author's machine
+
+One `npm run bench` run, captured verbatim (Node 24.18.0, macOS 25.5, arm64).
+These are for same-machine before/after comparison only; the committed baseline
+above is a different machine and is not comparable to them.
+
+| Target | ops/sec (mean) | median ms/op |
+| --- | ---: | ---: |
+| `policyToScVal` (8192-entry allowlist) | 26 | 38.6413 |
+| `decodePolicy` (8192-entry allowlist) | 9 | 109.4246 |
+| `decodeCheckResult` (20 fixture outcomes) | 3,903,620 | 0.0003 |
+| `guardEventsFromDiagnostics` (20 diagnostic events) | 3,631 | 0.2534 |
+| `decodeCheckResult hot loop x100` | 51,774 | 0.0187 |
+| `guardEventsFromDiagnostics hot loop x100` | 32 | 29.3894 |
+
+The whole run finishes in ~42 s wall time.
+
 ## What was measured, and what was not
 
 This issue asked for decode-path work to be justified by bench numbers rather
-than asserted. Measuring the four targets with the hot-loop harness produced a
-negative result that is worth recording, because it is the reason no decode-path
-code changed here:
+than asserted. Measuring the four targets with the harness (hot-loop variants
+where they help) produced a negative result that is worth recording, because it
+is the reason no decode-path code changed here:
 
 - **`decodeAuthDecision` is not a hot spot.** The 20-event
   `guardEventsFromDiagnostics` target sits at roughly 0.48 ms, and the
