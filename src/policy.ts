@@ -248,12 +248,8 @@ export interface ValidatePolicyOptions {
   maxRecipientEntries?: number;
 }
 
-/**
- * Vendored copy of the contract's `MAX_RECIPIENT_ENTRIES` (SPEC §8). Kept in
- * sync with `stellar-agent-guard-contracts`; the property tests exercise
- * exactly this cardinality boundary (limit OK, limit + 1 rejected pre-encode).
- */
-export const DEFAULT_MAX_RECIPIENT_ENTRIES = 256;
+/** Type alias for PolicyConfig matching contract documentation and external vocabulary. */
+export type GuardPolicy = PolicyConfig;
 
 export interface GuardStatus {
   has_policy: boolean;
