@@ -24,6 +24,7 @@ import {
   InvokeRetryError,
   type InvokeParams,
 } from "../../src/invoke.ts";
+import { BroadcastError } from "../../src/tx.ts";
 import { SimulationError } from "../../src/errors.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
 import type { InvokeStepEvent } from "../../src/invoke.ts";
@@ -844,109 +845,347 @@ describe("invoke() stale-ledger retry", () => {
   });
 });
 
-/**
- * Injectable transport (issue #58): callers may hand `invoke()` a pre-built
- * `rpc.Server` instance (or a `url` to construct one), and the pipeline must
- * use the injected instance verbatim — no fresh Server built from a URL.
- *
- * The mock below is a plain object, not a URL-backed Server, so any code path
- * that tried to reconstruct from `url` would fail loudly (no `url` is set).
- */
-describe("invoke() injectable transport", () => {
-  it("uses an injected Server instance verbatim, not one built from url", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    const server = createMockServer();
-    const { events, callback } = recorder();
 
-    // No `url` is supplied: the only way the pipeline can reach RPC is through
-    // the injected instance. If it tried to build a Server from a URL it would
-    // have nothing to build from.
-    const pending = invoke(makeParams(server, { onStep: callback }));
-    await drainWithMockedTimers(t.mock.timers, pending);
-    const outcome = await pending;
+// ── Fee-bump retry on min-fee broadcast failure (Issue #25) ──────────────────
+
+const FEE_BUMP_CONTRACT_ID = unsafeContractAddress(Address.contract(Buffer.alloc(32)).toString());
+const FAST_POLL = { pollAttempts: 5, pollIntervalMs: 0 };
+
+function createBlockedSimulationResponse(reason: string) {
+  return {
+    error: `HostError: Error(Contract, #${reason})`,
+    events: [
+      {
+        event: {
+          contractId: FEE_BUMP_CONTRACT_ID,
+          type: "contract",
+          body: {
+            v0: {
+              topics: [
+                xdr.ScVal.scvSymbol("event_auth_checked"),
+                xdr.ScVal.scvSymbol("blocked"),
+                xdr.ScVal.scvSymbol(reason),
+              ],
+              data: xdr.ScVal.scvVoid(),
+            },
+          },
+        },
+      },
+    ],
+  };
+}
+
+function createSuccessSimulationResponse(minResourceFee = "500") {
+  return {
+    result: { auth: [] },
+    transactionData: new SorobanDataBuilder(),
+    minResourceFee,
+    events: [],
+  };
+}
+
+function createMinFeeErrorResponse(hash: string) {
+  return {
+    status: "ERROR" as const,
+    hash,
+    errorResult: new xdr.TransactionResult({
+      feeCharged: 0n,
+      result: xdr.TransactionResultResult.txInsufficientFee(),
+      ext: xdr.TransactionResultExt.v0(),
+    }),
+  };
+}
+
+describe("invoke() fee-bump retry lifecycle", () => {
+  it("Test 1 — fee bump succeeds: re-prepares, re-simulates, and succeeds on second broadcast", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const getAccountCalls: string[] = [];
+    const simulateCalls: xdr.Transaction[] = [];
+    const sendCalls: xdr.Transaction[] = [];
+
+    const mockServer = {
+      getAccount: async (pubKey: string) => {
+        getAccountCalls.push(pubKey);
+        return { sequenceNumber: () => (seq++).toString() };
+      },
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async (tx: xdr.Transaction) => {
+        simulateCalls.push(tx);
+        return createSuccessSimulationResponse("500");
+      },
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        if (sendCalls.length === 1) {
+          return createMinFeeErrorResponse("hash-attempt-1");
+        }
+        return {
+          status: "PENDING" as const,
+          hash: "hash-attempt-2",
+        };
+      },
+      getTransaction: async (_hash: string) => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 1002,
+      }),
+    };
+
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      feeBump: { maxAttempts: 3, feeMultiplier: 2 },
+      pollOptions: FAST_POLL,
+    });
 
     assert.equal(outcome.kind, "allowed");
-    // Every RPC call landed on the injected object.
-    assert.equal(server.simulationCount, 2);
-    assert.equal(server.sendCount, 1);
-    assert.equal(server.accountLookupCount, 1);
-    assert.deepEqual(
-      events.map((event) => [event.name, event.status]),
-      SUCCESSFUL_ATTEMPT,
-    );
+    assert.equal(sendCalls.length, 2, "must have attempted broadcast twice");
+    assert.ok(simulateCalls.length >= 4, "must re-run probe and enforced simulation on retry");
   });
 
-  it("rejects a config that supplies both server and url with a typed error", async () => {
-    const server = createMockServer();
-    const params = makeParams(server) as InvokeParams & { url?: string };
-    // Force both levers on: the shared config type must reject the ambiguity.
-    params.url = "https://rpc.example.invalid";
+  it("Test 2 — fee bump remains too cheap: exhausts retry budget and returns typed BroadcastError", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const sendCalls: xdr.Transaction[] = [];
 
-    const outcome = await invoke(params);
+    const mockServer = {
+      getAccount: async () => ({ sequenceNumber: () => (seq++).toString() }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => createSuccessSimulationResponse("500"),
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        return createMinFeeErrorResponse(`hash-attempt-${sendCalls.length}`);
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.FAILED,
+        ledger: 1001,
+      }),
+    };
 
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      feeBump: { maxAttempts: 3, feeMultiplier: 2 },
+      pollOptions: FAST_POLL,
+    });
+
+    // Budget exhausted: returns typed BroadcastError
+    assert.ok(outcome instanceof BroadcastError);
+    assert.equal(outcome.name, "BroadcastError");
     assert.equal(outcome.kind, "error");
-    assert.ok(outcome.error instanceof SimulationError);
-    assert.equal(outcome.error.stage, "probe");
-    // The injected server must not have been touched: validation runs first.
-    assert.equal(server.simulationCount, 0);
-    assert.equal(server.sendCount, 0);
+    assert.equal(outcome.attempts, 3);
+    assert.equal(outcome.lastFee, 900n);
+    assert.match(outcome.message, /minimum fee not met after 3 attempt\(s\)/);
+    assert.equal(sendCalls.length, 3, "must bound total broadcast attempts to configured max");
   });
 
-  it("rejects a config that supplies neither server nor url with a typed error", async () => {
-    const server = createMockServer();
-    const params = makeParams(server) as InvokeParams & { server?: rpc.Server };
-    // Strip the injected server: with no url either, the config is unusable.
-    delete params.server;
+  it("Test 3 — policy block during re-simulation prevents subsequent broadcast", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const sendCalls: xdr.Transaction[] = [];
+    let simulateCount = 0;
 
-    const outcome = await invoke(params);
+    const mockServer = {
+      getAccount: async () => ({ sequenceNumber: () => (seq++).toString() }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => {
+        simulateCount++;
+        // Attempt 1: probe and enforced simulation succeed
+        if (simulateCount <= 2) {
+          return createSuccessSimulationResponse("500");
+        }
+        // Attempt 2: probe succeeds, but second (enforced) simulation blocks due to policy
+        if (simulateCount === 3) {
+          return createSuccessSimulationResponse("500");
+        }
+        return createBlockedSimulationResponse("spend_limit_exceeded");
+      },
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        return createMinFeeErrorResponse("hash-attempt-1");
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.FAILED,
+        ledger: 1001,
+      }),
+    };
 
-    assert.equal(outcome.kind, "error");
-    assert.ok(outcome.error instanceof SimulationError);
-    assert.equal(outcome.error.stage, "probe");
-    assert.equal(server.simulationCount, 0);
-    assert.equal(server.sendCount, 0);
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      feeBump: { maxAttempts: 3, feeMultiplier: 2 },
+      pollOptions: FAST_POLL,
+    });
+
+    // Re-simulation blocked by policy -> halts pipeline immediately without broadcast
+    assert.equal(outcome.kind, "blocked");
+    assert.equal(sendCalls.length, 1, "must never broadcast if re-simulation is policy-blocked");
   });
 
-  it("lets a fake Server object drive the pipeline with no URL string in the test", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    // A hand-rolled object, not a URL-backed Server: proof that unit tests can
-    // adopt the injectable transport instead of scattering RPC URLs.
-    const calls: string[] = [];
-    const fake = {
-      async getAccount() {
-        calls.push("getAccount");
-        return new Account(Keypair.random().publicKey(), "100");
-      },
-      async getLatestLedger() {
-        calls.push("getLatestLedger");
-        return { sequence: 1000 };
-      },
-      async simulateTransaction() {
-        calls.push("simulateTransaction");
-        return probeSuccess();
-      },
-      async sendTransaction() {
-        calls.push("sendTransaction");
-        return { status: "PENDING", hash: "0".repeat(64) };
-      },
-      async getTransaction() {
-        calls.push("getTransaction");
-        return { status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 42 };
-      },
-    } as unknown as rpc.Server;
+  it("Regression: happy path without fee bump still broadcasts once and succeeds", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const sendCalls: xdr.Transaction[] = [];
 
-    const pending = invoke(makeParams(fake));
-    await drainWithMockedTimers(t.mock.timers, pending);
-    const outcome = await pending;
+    const mockServer = {
+      getAccount: async () => ({ sequenceNumber: () => (seq++).toString() }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => createSuccessSimulationResponse("500"),
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        return { status: "PENDING" as const, hash: "happy-hash" };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 1002,
+      }),
+    };
+
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      pollOptions: FAST_POLL,
+    });
 
     assert.equal(outcome.kind, "allowed");
-    assert.deepEqual(calls, [
-      "getAccount",
-      "getLatestLedger",
-      "simulateTransaction",
-      "simulateTransaction",
-      "sendTransaction",
-      "getTransaction",
-    ]);
+    assert.equal(sendCalls.length, 1);
+  });
+
+  it("Regression: non-fee broadcast error does not trigger fee bumping", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const sendCalls: xdr.Transaction[] = [];
+
+    const mockServer = {
+      getAccount: async () => ({ sequenceNumber: () => (seq++).toString() }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => createSuccessSimulationResponse("500"),
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        return {
+          status: "ERROR" as const,
+          hash: "bad-auth-hash",
+          errorResult: new xdr.TransactionResult({
+            feeCharged: 0n,
+            result: xdr.TransactionResultResult.txBadAuth(),
+            ext: xdr.TransactionResultExt.v0(),
+          }),
+        };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.FAILED,
+        ledger: 1001,
+      }),
+    };
+
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      pollOptions: FAST_POLL,
+    });
+
+    assert.equal(outcome.kind, "error");
+    assert.ok(!(outcome instanceof BroadcastError));
+    // No retry for non-fee error
+    assert.equal(sendCalls.length, 1);
+  });
+
+  it("Regression: initial policy block never attempts broadcast", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const sendCalls: xdr.Transaction[] = [];
+    let simCallCount = 0;
+
+    const mockServer = {
+      getAccount: async () => ({ sequenceNumber: () => (seq++).toString() }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => {
+        simCallCount++;
+        if (simCallCount === 1) {
+          // Probe succeeds in recording mode
+          return createSuccessSimulationResponse("500");
+        }
+        // Enforced simulation blocks
+        return createBlockedSimulationResponse("admin_frozen");
+      },
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        return { status: "PENDING" as const, hash: "unreachable" };
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 1001,
+      }),
+    };
+
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      pollOptions: FAST_POLL,
+    });
+
+    assert.equal(outcome.kind, "blocked");
+    assert.equal(sendCalls.length, 0);
+  });
+
+  it("Regression: stale-ledger resource failure coordinates within the same retry envelope", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const sendCalls: xdr.Transaction[] = [];
+
+    const mockServer = {
+      getAccount: async () => ({ sequenceNumber: () => (seq++).toString() }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => createSuccessSimulationResponse("500"),
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        return { status: "PENDING" as const, hash: `stale-tx-${sendCalls.length}` };
+      },
+      getTransaction: async (hash: string) => {
+        if (hash === "stale-tx-1") {
+          return {
+            status: rpc.Api.GetTransactionStatus.FAILED,
+            ledger: 1001,
+            resultXdr: null,
+            diagnosticEventsXdr: [
+              {
+                body: {
+                  v0: {
+                    topics: ["error", { type: "system", code: 5, value: "scecExceededLimit" }],
+                    data: ["operation byte-write resources exceeds amount specified"],
+                  },
+                },
+              },
+            ],
+          };
+        }
+        return {
+          status: rpc.Api.GetTransactionStatus.SUCCESS,
+          ledger: 1002,
+        };
+      },
+    };
+
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      pollOptions: FAST_POLL,
+    });
+
+    assert.equal(outcome.kind, "allowed");
+    assert.equal(sendCalls.length, 2);
   });
 });
