@@ -126,11 +126,39 @@ The required keys are `PHASE2_GUARD`, `PHASE2_TOKEN`, `PHASE2_ADMIN_SECRET`,
 gitignored (as are all `.env.*` values files — only `*.example` templates are
 committable); never commit the filled-in copy.
 
+### Build SAC calls safely
+
+Hand-assembling a SAC call means remembering two different layouts: `transfer` is
+`[from, to, amount]` and `transfer_from` is `[from, spender, to, amount]`. The
+`sacTransfer` / `sacTransferFrom` builders return a typed `ContractCall` with the
+args already in the positions SPEC §6.2 defines, and encode the amount as the
+`i128` the token contract expects.
+
+```ts
+import { sacTransfer, sacTransferFrom } from "stellar-agent-guard-sdk";
+
+// transfer(from, to, amount)
+const transferCall = sacTransfer(token, from, to, 1_000n);
+
+// transfer_from(from, spender, to, amount) — the spender is the second arg,
+// not the destination.
+const transferFromCall = sacTransferFrom(token, from, spender, to, 1_000n);
+
+// Both are ordinary ContractCall values: pass one straight to the interceptor
+// (or to invoke()) instead of hand-writing `args`.
+const decision = await interceptor.check(transferCall);
+```
+
+Amounts accept `string` or `bigint` and are normalized through `BigInt`, so a
+decimal string cannot lose precision the way a `number` can. A token id that is
+not a valid `C...` StrKey fails immediately with `InvalidInputError` rather than
+being sent to the network.
+
 ### Pre-flight Policy Interception
 
 ```ts
 import { Keypair, rpc } from "@stellar/stellar-sdk";
-import { PreFlightInterceptor, isContractAddress, type ContractAddress } from "stellar-agent-guard-sdk";
+import { PreFlightInterceptor, isContractAddress, sacTransfer, type ContractAddress } from "stellar-agent-guard-sdk";
 
 // Validate contract address from environment
 const guardAddress = process.env.GUARD_ADDRESS;
@@ -149,11 +177,11 @@ const interceptor = new PreFlightInterceptor({
   source: Keypair.fromSecret(process.env.SOURCE_SECRET!),
 });
 
-const decision = await interceptor.check({
-  contract: contractAddress,
-  fn: "transfer",
-  args: [/* from, to, amount */],
-});
+const from = process.env.AGENT_ADDRESS!; // G... source account
+const to = process.env.RECIPIENT_ADDRESS!; // G... destination account
+
+// SPEC §6.2: transfer args are [from, to, amount] — sacTransfer keeps that order.
+const decision = await interceptor.check(sacTransfer(contractAddress, from, to, 1_000n));
 
 if (decision.kind === "admissible") {
   console.log("Allowed! Resource fee:", decision.estimatedResourceFee);
