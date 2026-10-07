@@ -336,6 +336,7 @@ test("cache entry expires", async () => {
   const clock = new FakeClock(0);
   const interceptor = new PreFlightInterceptor({
     server,
+    networkPassphrase,
     guard,
     agent,
     source,
@@ -406,9 +407,16 @@ identical stage names.
 The LangChain adapter exposes the same capability:
 
 ```ts
+import { createLangChainGuardMiddleware } from "stellar-agent-guard-sdk";
+
 const middleware = createLangChainGuardMiddleware({
   interceptor,
-  toContractCall: (request) => (/* ... */),
+  // Return the guarded call this tool would make, or `null` for a tool that
+  // does not move funds and should not be intercepted at all.
+  toContractCall: (request) =>
+    request.toolCall.name === "transfer"
+      ? { contract: guard, fn: "transfer", args: [] }
+      : null,
   onStep(step) {
     // enforcement-stage events (probe → sign → simulate; never broadcast)
   },
@@ -588,10 +596,17 @@ Unlike fail-fast validators, `validateGuardPolicy` returns **all** failures at o
 
 ```ts
 import {
+  isAccountAddress,
+  isContractAddress,
   validateGuardPolicy,
   type PolicyConfig,
   type PolicyFailure,
 } from "stellar-agent-guard-sdk";
+
+// Policies store branded addresses, so narrow the strkeys at the edge where
+// they enter the programme instead of casting them into the type system.
+const recipient = "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH";
+if (!isAccountAddress(recipient)) throw new Error("recipient must be a G… account address");
 
 const draftPolicy: PolicyConfig = {
   per_tx_cap: 10_000n,
@@ -599,7 +614,7 @@ const draftPolicy: PolicyConfig = {
   window_cap: 50_000n,
   assets: [],              // Empty assets vector is a no-op
   protocols: [],
-  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  recipients: [recipient],
   allow_any_recipient: false,
   active_from: 1000n,
   active_until: 500n,      // Inverted active window (active_until <= active_from)
@@ -613,7 +628,7 @@ const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
 
 if (failures.length > 0) {
   for (const failure of failures) {
-    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+    console.error(`[${failure.rule}] at ${failure.path}: ${failure.message}`);
   }
   // Safe-exit before encode or broadcast
 } else {
@@ -631,22 +646,31 @@ wrongly typed fields with a path-bearing `PolicyDecodeError`.
 ```ts
 import {
   decodePolicy,
+  isAccountAddress,
+  isContractAddress,
   policyToScVal,
   type PolicyConfig,
 } from "stellar-agent-guard-sdk";
+
+// Branded at the edge: `assets` and `protocols[].contract` are contract
+// addresses (C…), `recipients` are account addresses (G…).
+const asset = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+if (!isContractAddress(asset)) throw new Error("asset must be a C… contract address");
+const recipient = "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH";
+if (!isAccountAddress(recipient)) throw new Error("recipient must be a G… account address");
 
 const policy: PolicyConfig = {
   per_tx_cap: 1_000n,
   window_secs: 60n,
   window_cap: 150n,
-  assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
+  assets: [asset],
   protocols: [
     {
-      contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      contract: asset,
       fns: ["transfer"],
     },
   ],
-  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  recipients: [recipient],
   allow_any_recipient: false,
   active_from: 0n,
   active_until: 0n,
@@ -932,6 +956,7 @@ const events = guardEventsFromDiagnostics(diagnosticEvents, GUARD_ID, { includeR
 // Every event then carries `raw`: the `rpc.Api.EventResponse` for a committed
 // event, or the host-shaped diagnostic object for a blocked one.
 const event = (await listener.poll({ startLedger })).events[0];
+if (!event) throw new Error("no events in this page");
 console.error(JSON.stringify(event.raw, (_key, value) =>
   typeof value === "bigint" ? value.toString() : value));
 ```

@@ -143,6 +143,7 @@ npm run build && npm run test:exports   # packs the tarball and resolves every e
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
+npm run check:readme-snippets     # compiles every fenced ts block in README.md against src/ (#92)
 ```
 
 ## TypeScript strictness ratchet
@@ -343,3 +344,44 @@ test("cache entry expires after TTL", async () => {
 ```
 
 Always use `FakeClock` in unit tests and when testing cache/polling logic. Use real time only when testing live network interaction (integration tests with `.env.phase2`).
+
+## README snippet audit
+
+Every fenced ```ts code block in `README.md` is compiled against the current `src/`
+by `scripts/check-readme-snippets.ts`, and the check runs in the required `ci` job.
+A published example that no longer matches the API fails the build instead of
+becoming a silent lie in the docs.
+
+Run it locally with:
+
+```bash
+npm run check:readme-snippets
+```
+
+Two details make the check honest rather than noisy:
+
+- **Imports are hoisted.** The README shows each import once, at the point it
+  first matters, and later examples reuse those names. The script collects the
+  `import` statements from the whole document and makes them available to every
+  block, so an example is not failed for relying on an import shown earlier — and
+  a block that leans on contextual typing keeps it, because the callee is the
+  real one.
+- **Free names are `any`.** Prose introduces `server`, `call`, `listener` and so
+  on; a block is compiled once to discover the names it assumes, then again with
+  those names declared `any`. Only errors that survive the second pass fail:
+  a wrong property, a wrong argument, a missing required field, a syntax error.
+  An example cannot pass by being untyped — the calls it does make are checked
+  against the real signatures.
+
+Fenced blocks labeled `bash` are documentation for humans: they are extracted and
+reported as manual, never executed. To exclude a `ts` block from typechecking, put
+`no-check` in the info string and say why in the same line:
+
+````markdown
+```ts no-check: demonstrates the error a caller sees when the guard refuses
+const result = await interceptor.check(call);
+```
+````
+
+The script echoes every skip and its justification, so a reviewer can see exactly
+what is not covered.

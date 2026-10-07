@@ -108,6 +108,15 @@ jobs:
       - name: unit tests
         run: npm test
 
+      # Every fenced ```ts block in README.md is compiled against `src/`, so a
+      # published example that no longer matches the API fails here instead of
+      # lying in the docs. Blocks marked `no-check` are skipped by convention
+      # (see CONTRIBUTING.md); `bash` blocks are reported as manual, never run.
+      # The script prints every skip and its reason, so what is not covered is
+      # visible in this log rather than implied by a green check.
+      - name: README snippet typecheck
+        run: npm run check:readme-snippets
+
       - name: smoke test export resolution
         run: npm run test:smoke
 
