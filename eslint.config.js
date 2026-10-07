@@ -8,7 +8,11 @@
  * unused bindings, accidental `any`, shadowed names, `==` vs `===`.
  */
 import js from "@eslint/js";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import tseslint from "typescript-eslint";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 export default tseslint.config(
   { ignores: ["dist/**", "node_modules/**", "coverage/**", ".kilo/**"] },
@@ -16,6 +20,11 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   {
     files: ["**/*.ts"],
+    languageOptions: {
+      parserOptions: {
+        tsconfigRootDir: __dirname,
+      },
+    },
     rules: {
       // TypeScript resolves identifiers itself; `no-undef` has no type
       // information and reports every Node global (process, Buffer, console)

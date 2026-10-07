@@ -11,7 +11,13 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
-import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
+import {
+  Address,
+  nativeToScVal,
+  scValToNative,
+  StrKey,
+  xdr,
+} from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
 import type { CheckResult } from "../../src/policy.ts";
 import {
@@ -69,7 +75,8 @@ function samplePolicy(overrides: Partial<PolicyConfig> = {}): PolicyConfig {
  * reading them as methods throws rather than failing an assertion.
  */
 function encodedKeys(val: xdr.ScVal): string[] {
-  const entries = (val as unknown as { map?: Array<{ key: xdr.ScVal }> }).map ?? [];
+  const entries =
+    (val as unknown as { map?: Array<{ key: xdr.ScVal }> }).map ?? [];
   return entries.map((entry) => String(scValToNative(entry.key)));
 }
 
@@ -111,7 +118,10 @@ function stringEncodedNumbers(policy: PolicyConfig): xdr.ScVal {
   return replaceMapValues(
     policyToScVal(policy),
     Object.fromEntries(
-      [...numeric].map((name) => [name, xdr.ScVal.scvString(values[name]!.toString())]),
+      [...numeric].map((name) => [
+        name,
+        xdr.ScVal.scvString(values[name]!.toString()),
+      ]),
     ),
   );
 }
@@ -159,9 +169,13 @@ describe("policyToScVal", () => {
 
   it("sorts the nested protocol rule maps too", () => {
     const val = policyToScVal(
-      samplePolicy({ protocols: [{ contract: TOKEN, fns: ["transfer", "approve"] }] }),
+      samplePolicy({
+        protocols: [{ contract: TOKEN, fns: ["transfer", "approve"] }],
+      }),
     ) as unknown as { map: Array<{ key: xdr.ScVal; val: xdr.ScVal }> };
-    const protocols = val.map.find((entry) => String(scValToNative(entry.key)) === "protocols")!;
+    const protocols = val.map.find(
+      (entry) => String(scValToNative(entry.key)) === "protocols",
+    )!;
     const ruleVec = (protocols.val as unknown as { vec: xdr.ScVal[] }).vec;
     assert.deepEqual(encodedKeys(ruleVec[0]!), ["contract", "fns"]);
   });
@@ -171,26 +185,56 @@ describe("policyToScVal", () => {
       per_tx_cap: 9_007_199_254_740_993n, // beyond Number.MAX_SAFE_INTEGER
       window_cap: 12_345_678_901_234_567_890n,
     });
-    const decoded = scValToNative(policyToScVal(policy)) as Record<string, unknown>;
+    const decoded = scValToNative(policyToScVal(policy)) as Record<
+      string,
+      unknown
+    >;
     assert.equal(decoded["per_tx_cap"], 9_007_199_254_740_993n);
     assert.equal(decoded["window_cap"], 12_345_678_901_234_567_890n);
   });
 
   it("round-trips addresses as strkeys, not raw bytes", () => {
-    const decoded = scValToNative(policyToScVal(samplePolicy())) as Record<string, unknown>;
+    const decoded = scValToNative(policyToScVal(samplePolicy())) as Record<
+      string,
+      unknown
+    >;
     assert.deepEqual(decoded["assets"], [TOKEN]);
     assert.deepEqual(decoded["recipients"], [RECIPIENT]);
   });
 
+  it("preserves optional blocked recipients and per-recipient window caps", () => {
+    const policy = samplePolicy({
+      blocked_recipients: [RECIPIENT],
+      recipient_window_caps: [{ recipient: RECIPIENT, cap: 250n }],
+    });
+
+    const decoded = scValToNative(policyToScVal(policy)) as Record<
+      string,
+      unknown
+    >;
+    assert.deepEqual(decoded["blocked_recipients"], [RECIPIENT]);
+    assert.deepEqual(decoded["recipient_window_caps"], [
+      { recipient: RECIPIENT, cap: 250n },
+    ]);
+  });
+
   it("round-trips a null function list as void (any function allowed)", () => {
     const decoded = scValToNative(
-      policyToScVal(samplePolicy({ protocols: [{ contract: TOKEN, fns: null }] })),
+      policyToScVal(
+        samplePolicy({ protocols: [{ contract: TOKEN, fns: null }] }),
+      ),
     ) as { protocols: Array<{ fns: unknown }> };
     assert.equal(decoded.protocols[0]!.fns, null);
   });
 
   it("rejects a malformed address rather than emitting a broken policy", () => {
-    assert.throws(() => policyToScVal(samplePolicy({ recipients: [unsafeAccountAddress("not-an-address")] })));
+    assert.throws(() =>
+      policyToScVal(
+        samplePolicy({
+          recipients: [unsafeAccountAddress("not-an-address")],
+        }),
+      ),
+    );
   });
 });
 
@@ -228,6 +272,13 @@ describe("decodePolicy", () => {
         dms_grace_secs: 2n ** 64n - 1n,
       }),
     ],
+    [
+      "policies with blocked recipients and per-recipient caps",
+      samplePolicy({
+        blocked_recipients: [RECIPIENT],
+        recipient_window_caps: [{ recipient: RECIPIENT, cap: 250n }],
+      }),
+    ],
   ];
 
   for (const [name, policy] of roundTripFixtures) {
@@ -235,7 +286,10 @@ describe("decodePolicy", () => {
       const encoded = policyToScVal(policy);
       const decoded = decodePolicy(encoded);
       assert.deepEqual(decoded, policy);
-      assert.equal(policyToScVal(decoded).toXDR("base64"), encoded.toXDR("base64"));
+      assert.equal(
+        policyToScVal(decoded).toXDR("base64"),
+        encoded.toXDR("base64"),
+      );
       assert.deepEqual(policyFromScVal(encoded), policy);
     });
   }
@@ -266,11 +320,17 @@ describe("decodePolicy", () => {
     ) as Phase1PolicyFixture;
     const bytes = Buffer.from(fixture.scvalBase64, "base64");
     assert.equal(bytes.length, fixture.scvalByteLength);
-    assert.equal(createHash("sha256").update(bytes).digest("hex"), fixture.scvalSha256);
+    assert.equal(
+      createHash("sha256").update(bytes).digest("hex"),
+      fixture.scvalSha256,
+    );
 
     const scval = xdr.ScVal.fromXDR(fixture.scvalBase64, "base64");
     assert.equal(scval.type, fixture.scvalType);
-    assert.equal(fixture.guard, unsafeContractAddress("CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7"));
+    assert.equal(
+      fixture.guard,
+      "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+    );
     assert.match(fixture.policyInstallTransaction, /^[0-9a-f]{64}$/);
 
     const expected: PolicyConfig = {
@@ -314,13 +374,19 @@ describe("decodePolicy", () => {
 
   it("rejects duplicate, unknown, and unsorted fields", () => {
     const entries = mapEntries(policyToScVal(samplePolicy()));
-    const duplicate = new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("active_from"), val: xdr.ScVal.scvU64(1n) });
+    const duplicate = new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol("active_from"),
+      val: xdr.ScVal.scvU64(1n),
+    });
     assert.throws(
       () => decodePolicy(xdr.ScVal.scvMap([entries[0]!, duplicate])),
       /duplicate field "active_from"/,
     );
 
-    const unknown = new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("zzzz"), val: xdr.ScVal.scvBool(true) });
+    const unknown = new xdr.ScMapEntry({
+      key: xdr.ScVal.scvSymbol("zzzz"),
+      val: xdr.ScVal.scvBool(true),
+    });
     assert.throws(
       () => decodePolicy(xdr.ScVal.scvMap([...entries, unknown])),
       /unknown field "zzzz"/,
@@ -508,19 +574,34 @@ describe("dead-man switch helpers", () => {
   });
 
   it("does not count an admin freeze as the dead-man switch", () => {
-    assert.equal(isDeadManFrozen(status({ heartbeat_expired: true, admin_frozen: true })), false);
+    assert.equal(
+      isDeadManFrozen(status({ heartbeat_expired: true, admin_frozen: true })),
+      false,
+    );
   });
 
   it("reports negative remaining time once the switch has fired", () => {
-    assert.equal(deadManRemaining(status(), samplePolicy({ dms_grace_secs: 5n })), -5n);
+    assert.equal(
+      deadManRemaining(status(), samplePolicy({ dms_grace_secs: 5n })),
+      -5n,
+    );
   });
 
   it("reports positive remaining time while still inside grace", () => {
-    assert.equal(deadManRemaining(status({ now: 1002n }), samplePolicy({ dms_grace_secs: 5n })), 3n);
+    assert.equal(
+      deadManRemaining(
+        status({ now: 1002n }),
+        samplePolicy({ dms_grace_secs: 5n }),
+      ),
+      3n,
+    );
   });
 
   it("reports null when the switch is disabled", () => {
-    assert.equal(deadManRemaining(status(), samplePolicy({ dms_grace_secs: 0n })), null);
+    assert.equal(
+      deadManRemaining(status(), samplePolicy({ dms_grace_secs: 0n })),
+      null,
+    );
   });
 
   it("reports null when there is no policy to read a grace window from", () => {
@@ -533,8 +614,9 @@ describe("dead-man switch helpers", () => {
   // NOT frozen by silence — it is spendable if otherwise allowed. Treating 0 as
   // epoch-0 would report a healthy fresh account as frozen since 1970.
   describe("last_heartbeat = 0 (never heartbeated)", () => {
-    const neverHeartbeated = (overrides: Partial<GuardStatus> = {}): GuardStatus =>
-      status({ last_heartbeat: 0n, ...overrides });
+    const neverHeartbeated = (
+      overrides: Partial<GuardStatus> = {},
+    ): GuardStatus => status({ last_heartbeat: 0n, ...overrides });
 
     it("reports a never-heartbeated account as not dead-man-frozen, even with grace set", () => {
       assert.equal(isDeadManFrozen(neverHeartbeated()), false);
@@ -549,19 +631,35 @@ describe("dead-man switch helpers", () => {
       // No contract obeying rule #2 can set this state; if one ever does (or a
       // hand-built status carries it), the helper reports what the contract
       // could truthfully enforce rather than a freeze it could not have applied.
-      assert.equal(isDeadManFrozen(neverHeartbeated({ heartbeat_expired: true })), false);
+      assert.equal(
+        isDeadManFrozen(neverHeartbeated({ heartbeat_expired: true })),
+        false,
+      );
     });
 
     it("still reports an admin freeze as an admin freeze", () => {
       // The dead-man derivation is out of the picture; the admin freeze is a
       // separate condition (SPEC §5, "Manual freeze") and is not masked by the
       // never-guard, which only gates the dead-man classification.
-      const adminFrozen = neverHeartbeated({ admin_frozen: true, heartbeat_expired: true });
-      assert.equal(isDeadManFrozen(adminFrozen), false, "admin_frozen is a separate condition");
+      const adminFrozen = neverHeartbeated({
+        admin_frozen: true,
+        heartbeat_expired: true,
+      });
+      assert.equal(
+        isDeadManFrozen(adminFrozen),
+        false,
+        "admin_frozen is a separate condition",
+      );
     });
 
     it("reports null remaining time — never is not expired", () => {
-      assert.equal(deadManRemaining(neverHeartbeated(), samplePolicy({ dms_grace_secs: 100n })), null);
+      assert.equal(
+        deadManRemaining(
+          neverHeartbeated(),
+          samplePolicy({ dms_grace_secs: 100n }),
+        ),
+        null,
+      );
     });
 
     it("reports null remaining time even when the switch is armed and unexpired flags disagree", () => {
@@ -586,7 +684,10 @@ describe("dead-man switch helpers", () => {
     const grace = 100n;
     const policy = samplePolicy({ dms_grace_secs: grace });
     const at = (percentElapsed: bigint): GuardStatus =>
-      status({ last_heartbeat: 1000n, now: 1000n + (grace * percentElapsed) / 100n });
+      status({
+        last_heartbeat: 1000n,
+        now: 1000n + (grace * percentElapsed) / 100n,
+      });
 
     it("reads positive remaining at 79% elapsed", () => {
       const remaining = deadManRemaining(at(79n), policy);
@@ -617,7 +718,14 @@ describe("dead-man switch helpers", () => {
       // consistent here because the same derivation produced both.
       assert.equal(
         deadManRemaining(status({ last_heartbeat: 1000n, now: 1101n }), policy),
-        deadManRemaining(status({ last_heartbeat: 1000n, now: 1101n, heartbeat_expired: true }), policy),
+        deadManRemaining(
+          status({
+            last_heartbeat: 1000n,
+            now: 1101n,
+            heartbeat_expired: true,
+          }),
+          policy,
+        ),
       );
     });
   });
@@ -660,7 +768,10 @@ describe("address decoding", () => {
 
 describe("validateGuardPolicy (SPEC §8)", () => {
   it("passes parity check against vendored policy-rule-ids.json fixture", async () => {
-    const fixturePath = new URL("../fixtures/policy-rule-ids.json", import.meta.url);
+    const fixturePath = new URL(
+      "../fixtures/policy-rule-ids.json",
+      import.meta.url,
+    );
     const content = JSON.parse(await readFile(fixturePath, "utf-8")) as {
       rules: Array<{ id: string; specSection: string; description: string }>;
     };
@@ -681,19 +792,39 @@ describe("validateGuardPolicy (SPEC §8)", () => {
   describe("type integrity & missing fields", () => {
     it("rejects non-object inputs", () => {
       assert.deepEqual(validateGuardPolicy(null), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
+        {
+          path: "policy",
+          rule: "invalid_type",
+          message: "policy must be a non-null object",
+        },
       ]);
       assert.deepEqual(validateGuardPolicy(undefined), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
+        {
+          path: "policy",
+          rule: "invalid_type",
+          message: "policy must be a non-null object",
+        },
       ]);
       assert.deepEqual(validateGuardPolicy("not-a-policy"), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
+        {
+          path: "policy",
+          rule: "invalid_type",
+          message: "policy must be a non-null object",
+        },
       ]);
       assert.deepEqual(validateGuardPolicy(12345), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
+        {
+          path: "policy",
+          rule: "invalid_type",
+          message: "policy must be a non-null object",
+        },
       ]);
       assert.deepEqual(validateGuardPolicy([]), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
+        {
+          path: "policy",
+          rule: "invalid_type",
+          message: "policy must be a non-null object",
+        },
       ]);
     });
 
@@ -701,10 +832,24 @@ describe("validateGuardPolicy (SPEC §8)", () => {
       const failures = validateGuardPolicy({});
       const rules = failures.map((f) => f.rule);
       assert.ok(rules.includes("missing_field"));
-      assert.ok(failures.some((f) => f.path === "per_tx_cap" && f.rule === "missing_field"));
-      assert.ok(failures.some((f) => f.path === "window_secs" && f.rule === "missing_field"));
-      assert.ok(failures.some((f) => f.path === "window_cap" && f.rule === "missing_field"));
-      assert.ok(failures.some((f) => f.path === "assets" && f.rule === "invalid_type"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "per_tx_cap" && f.rule === "missing_field",
+        ),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "window_secs" && f.rule === "missing_field",
+        ),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "window_cap" && f.rule === "missing_field",
+        ),
+      );
+      assert.ok(
+        failures.some((f) => f.path === "assets" && f.rule === "invalid_type"),
+      );
     });
 
     it("rejects invalid types for primitive fields", () => {
@@ -714,9 +859,19 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         paused: "yes" as unknown as boolean,
         allow_any_recipient: 1 as unknown as boolean,
       });
-      assert.ok(failures.some((f) => f.path === "per_tx_cap" && f.rule === "invalid_type"));
-      assert.ok(failures.some((f) => f.path === "paused" && f.rule === "invalid_type"));
-      assert.ok(failures.some((f) => f.path === "allow_any_recipient" && f.rule === "invalid_type"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "per_tx_cap" && f.rule === "invalid_type",
+        ),
+      );
+      assert.ok(
+        failures.some((f) => f.path === "paused" && f.rule === "invalid_type"),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "allow_any_recipient" && f.rule === "invalid_type",
+        ),
+      );
     });
 
     it("rejects invalid Stellar addresses", () => {
@@ -725,35 +880,65 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         assets: ["not-a-stellar-address"],
         recipients: ["malformed-recipient"],
       });
-      assert.ok(failures.some((f) => f.path === "assets[0]" && f.rule === "invalid_address"));
-      assert.ok(failures.some((f) => f.path === "recipients[0]" && f.rule === "invalid_address"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "assets[0]" && f.rule === "invalid_address",
+        ),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "recipients[0]" && f.rule === "invalid_address",
+        ),
+      );
     });
   });
 
   describe("SPEC §8 bullet 1: all amounts >= 0", () => {
     it("rejects negative per_tx_cap", () => {
       const failures = validateGuardPolicy(samplePolicy({ per_tx_cap: -1n }));
-      assert.ok(failures.some((f) => f.path === "per_tx_cap" && f.rule === "negative_amount"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "per_tx_cap" && f.rule === "negative_amount",
+        ),
+      );
     });
 
     it("rejects negative window_cap", () => {
       const failures = validateGuardPolicy(samplePolicy({ window_cap: -50n }));
-      assert.ok(failures.some((f) => f.path === "window_cap" && f.rule === "negative_amount"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "window_cap" && f.rule === "negative_amount",
+        ),
+      );
     });
 
     it("rejects negative window_secs", () => {
       const failures = validateGuardPolicy(samplePolicy({ window_secs: -10n }));
-      assert.ok(failures.some((f) => f.path === "window_secs" && f.rule === "negative_amount"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "window_secs" && f.rule === "negative_amount",
+        ),
+      );
     });
 
     it("rejects negative dms_grace_secs", () => {
-      const failures = validateGuardPolicy(samplePolicy({ dms_grace_secs: -60n }));
-      assert.ok(failures.some((f) => f.path === "dms_grace_secs" && f.rule === "negative_amount"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ dms_grace_secs: -60n }),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "dms_grace_secs" && f.rule === "negative_amount",
+        ),
+      );
     });
 
     it("rejects negative active_from or active_until", () => {
       const failures = validateGuardPolicy(samplePolicy({ active_from: -1n }));
-      assert.ok(failures.some((f) => f.path === "active_from" && f.rule === "negative_amount"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "active_from" && f.rule === "negative_amount",
+        ),
+      );
     });
 
     it("rejects negative recipient_window_caps", () => {
@@ -761,18 +946,32 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         ...samplePolicy(),
         recipient_window_caps: [{ recipient: RECIPIENT, cap: -100n }],
       });
-      assert.ok(failures.some((f) => f.path === "recipient_window_caps[0].cap" && f.rule === "negative_amount"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "recipient_window_caps[0].cap" &&
+            f.rule === "negative_amount",
+        ),
+      );
     });
   });
 
   describe("SPEC §8 bullet 2: window_cap != 0 requires window_secs != 0", () => {
     it("rejects non-zero window_cap when window_secs is zero", () => {
-      const failures = validateGuardPolicy(samplePolicy({ window_cap: 500n, window_secs: 0n }));
-      assert.ok(failures.some((f) => f.path === "window_cap" && f.rule === "window_requires_secs"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ window_cap: 500n, window_secs: 0n }),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "window_cap" && f.rule === "window_requires_secs",
+        ),
+      );
     });
 
     it("allows window_cap == 0 when window_secs == 0 (window disabled)", () => {
-      const failures = validateGuardPolicy(samplePolicy({ window_cap: 0n, window_secs: 0n }));
+      const failures = validateGuardPolicy(
+        samplePolicy({ window_cap: 0n, window_secs: 0n }),
+      );
       assert.deepEqual(failures, []);
     });
   });
@@ -783,45 +982,81 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         ...samplePolicy({ window_cap: 0n, window_secs: 0n }),
         recipient_window_caps: [{ recipient: RECIPIENT, cap: 200n }],
       });
-      assert.ok(failures.some((f) => f.path === "recipient_window_caps[0].cap" && f.rule === "recipient_cap_requires_window"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "recipient_window_caps[0].cap" &&
+            f.rule === "recipient_cap_requires_window",
+        ),
+      );
     });
   });
 
   describe("SPEC §8 bullet 4: active_until == 0 || active_until > active_from", () => {
     it("allows active_until == 0 (no expiration)", () => {
-      const failures = validateGuardPolicy(samplePolicy({ active_from: 100n, active_until: 0n }));
+      const failures = validateGuardPolicy(
+        samplePolicy({ active_from: 100n, active_until: 0n }),
+      );
       assert.deepEqual(failures, []);
     });
 
     it("allows active_until > active_from", () => {
-      const failures = validateGuardPolicy(samplePolicy({ active_from: 100n, active_until: 200n }));
+      const failures = validateGuardPolicy(
+        samplePolicy({ active_from: 100n, active_until: 200n }),
+      );
       assert.deepEqual(failures, []);
     });
 
     it("rejects active_until equal to active_from", () => {
-      const failures = validateGuardPolicy(samplePolicy({ active_from: 100n, active_until: 100n }));
-      assert.ok(failures.some((f) => f.path === "active_until" && f.rule === "active_window_inverted"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ active_from: 100n, active_until: 100n }),
+      );
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "active_until" && f.rule === "active_window_inverted",
+        ),
+      );
     });
 
     it("rejects active_until less than active_from", () => {
-      const failures = validateGuardPolicy(samplePolicy({ active_from: 100n, active_until: 50n }));
-      assert.ok(failures.some((f) => f.path === "active_until" && f.rule === "active_window_inverted"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ active_from: 100n, active_until: 50n }),
+      );
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "active_until" && f.rule === "active_window_inverted",
+        ),
+      );
     });
   });
 
   describe("SPEC §8 bullet 5: empty vectors", () => {
     it("flags empty assets list", () => {
       const failures = validateGuardPolicy(samplePolicy({ assets: [] }));
-      assert.ok(failures.some((f) => f.path === "assets" && f.rule === "empty_vector_noop"));
+      assert.ok(
+        failures.some(
+          (f) => f.path === "assets" && f.rule === "empty_vector_noop",
+        ),
+      );
     });
 
     it("flags empty recipients list when allow_any_recipient is false", () => {
-      const failures = validateGuardPolicy(samplePolicy({ recipients: [], allow_any_recipient: false }));
-      assert.ok(failures.some((f) => f.path === "recipients" && f.rule === "empty_vector_noop"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ recipients: [], allow_any_recipient: false }),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "recipients" && f.rule === "empty_vector_noop",
+        ),
+      );
     });
 
     it("allows empty recipients list when allow_any_recipient is true", () => {
-      const failures = validateGuardPolicy(samplePolicy({ recipients: [], allow_any_recipient: true }));
+      const failures = validateGuardPolicy(
+        samplePolicy({ recipients: [], allow_any_recipient: true }),
+      );
       assert.deepEqual(failures, []);
     });
 
@@ -831,19 +1066,37 @@ describe("validateGuardPolicy (SPEC §8)", () => {
           protocols: [{ contract: TOKEN, fns: [] }],
         }),
       );
-      assert.ok(failures.some((f) => f.path === "protocols[0].fns" && f.rule === "empty_protocol_functions"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "protocols[0].fns" &&
+            f.rule === "empty_protocol_functions",
+        ),
+      );
     });
   });
 
   describe("SPEC §8 bullet 6: duplicate addresses", () => {
     it("rejects duplicate assets", () => {
-      const failures = validateGuardPolicy(samplePolicy({ assets: [TOKEN, TOKEN] }));
-      assert.ok(failures.some((f) => f.path === "assets[1]" && f.rule === "duplicate_asset"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ assets: [TOKEN, TOKEN] }),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "assets[1]" && f.rule === "duplicate_asset",
+        ),
+      );
     });
 
     it("rejects duplicate recipients", () => {
-      const failures = validateGuardPolicy(samplePolicy({ recipients: [RECIPIENT, RECIPIENT] }));
-      assert.ok(failures.some((f) => f.path === "recipients[1]" && f.rule === "duplicate_recipient"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ recipients: [RECIPIENT, RECIPIENT] }),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "recipients[1]" && f.rule === "duplicate_recipient",
+        ),
+      );
     });
 
     it("rejects duplicate blocked_recipients", () => {
@@ -851,7 +1104,13 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         ...samplePolicy(),
         blocked_recipients: [TOKEN, TOKEN],
       });
-      assert.ok(failures.some((f) => f.path === "blocked_recipients[1]" && f.rule === "duplicate_blocked_recipient"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "blocked_recipients[1]" &&
+            f.rule === "duplicate_blocked_recipient",
+        ),
+      );
     });
 
     it("rejects duplicate protocol contracts", () => {
@@ -863,7 +1122,13 @@ describe("validateGuardPolicy (SPEC §8)", () => {
           ],
         }),
       );
-      assert.ok(failures.some((f) => f.path === "protocols[1].contract" && f.rule === "duplicate_protocol"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "protocols[1].contract" &&
+            f.rule === "duplicate_protocol",
+        ),
+      );
     });
 
     it("rejects duplicate protocol functions within a rule", () => {
@@ -872,7 +1137,13 @@ describe("validateGuardPolicy (SPEC §8)", () => {
           protocols: [{ contract: TOKEN, fns: ["transfer", "transfer"] }],
         }),
       );
-      assert.ok(failures.some((f) => f.path === "protocols[0].fns[1]" && f.rule === "duplicate_protocol_function"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "protocols[0].fns[1]" &&
+            f.rule === "duplicate_protocol_function",
+        ),
+      );
     });
   });
 
@@ -885,17 +1156,32 @@ describe("validateGuardPolicy (SPEC §8)", () => {
           { recipient: RECIPIENT, cap: 200n },
         ],
       });
-      assert.ok(failures.some((f) => f.path === "recipient_window_caps[1].recipient" && f.rule === "duplicate_recipient_window_cap"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "recipient_window_caps[1].recipient" &&
+            f.rule === "duplicate_recipient_window_cap",
+        ),
+      );
     });
   });
 
   describe("SPEC §8 bullet 8: bounded recipient entries (MAX_RECIPIENT_ENTRIES = 256)", () => {
     it("rejects recipients list exceeding maxRecipientEntries", () => {
       const oversized = [RECIPIENT, RECIPIENT, RECIPIENT];
-      const failures = validateGuardPolicy(samplePolicy({ recipients: oversized }), {
-        maxRecipientEntries: 2,
-      });
-      assert.ok(failures.some((f) => f.path === "recipients" && f.rule === "max_recipient_entries_exceeded"));
+      const failures = validateGuardPolicy(
+        samplePolicy({ recipients: oversized }),
+        {
+          maxRecipientEntries: 2,
+        },
+      );
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "recipients" &&
+            f.rule === "max_recipient_entries_exceeded",
+        ),
+      );
     });
   });
 
@@ -905,14 +1191,26 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         ...samplePolicy({ recipients: [RECIPIENT] }),
         blocked_recipients: [RECIPIENT],
       });
-      assert.ok(failures.some((f) => f.path === "blocked_recipients[0]" && f.rule === "recipient_conflict"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "blocked_recipients[0]" &&
+            f.rule === "recipient_conflict",
+        ),
+      );
     });
   });
 
   describe("SPEC §8 bullet 10: self-address rejection", () => {
     it("rejects guard contract address in assets", () => {
-      const failures = validateGuardPolicy(samplePolicy({ assets: [GUARD] }), { guardAddress: GUARD });
-      assert.ok(failures.some((f) => f.path === "assets[0]" && f.rule === "self_as_asset"));
+      const failures = validateGuardPolicy(samplePolicy({ assets: [GUARD] }), {
+        guardAddress: GUARD,
+      });
+      assert.ok(
+        failures.some(
+          (f) => f.path === "assets[0]" && f.rule === "self_as_asset",
+        ),
+      );
     });
 
     it("rejects guard contract address in protocols", () => {
@@ -920,30 +1218,60 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         samplePolicy({ protocols: [{ contract: GUARD, fns: null }] }),
         GUARD,
       );
-      assert.ok(failures.some((f) => f.path === "protocols[0].contract" && f.rule === "self_as_protocol"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "protocols[0].contract" && f.rule === "self_as_protocol",
+        ),
+      );
     });
 
     it("rejects guard contract address in recipients", () => {
-      const failures = validateGuardPolicy(samplePolicy({ recipients: [RECIPIENT] }), { guardAddress: GUARD });
-      // Note: RECIPIENT is a valid account address and should not trigger this error.
-      // This test is checking that the guard address validation works correctly.
-      assert.ok(failures.length >= 0); // Just verify it doesn't throw
+      // The guard is a contract address, so it must be force-cast to sit in
+      // the typed `recipients` list; the validator accepts any valid strkey.
+      const failures = validateGuardPolicy(
+        samplePolicy({ recipients: [unsafeAccountAddress(GUARD)] }),
+        { guardAddress: GUARD },
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.path === "recipients[0]" && f.rule === "self_as_recipient",
+        ),
+      );
     });
 
     it("rejects guard contract address in blocked_recipients", () => {
       const failures = validateGuardPolicy(
-        { ...samplePolicy({ recipients: [RECIPIENT] }), blocked_recipients: [GUARD] },
+        {
+          ...samplePolicy({ recipients: [RECIPIENT] }),
+          blocked_recipients: [GUARD],
+        },
         { guardAddress: GUARD },
       );
-      assert.ok(failures.some((f) => f.path === "blocked_recipients[0]" && f.rule === "self_as_recipient"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "blocked_recipients[0]" &&
+            f.rule === "self_as_recipient",
+        ),
+      );
     });
 
     it("rejects guard contract address in recipient_window_caps", () => {
       const failures = validateGuardPolicy(
-        { ...samplePolicy(), recipient_window_caps: [{ recipient: GUARD, cap: 100n }] },
+        {
+          ...samplePolicy(),
+          recipient_window_caps: [{ recipient: GUARD, cap: 100n }],
+        },
         { guardAddress: GUARD },
       );
-      assert.ok(failures.some((f) => f.path === "recipient_window_caps[0].recipient" && f.rule === "self_as_recipient_cap"));
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.path === "recipient_window_caps[0].recipient" &&
+            f.rule === "self_as_recipient_cap",
+        ),
+      );
     });
   });
 
@@ -965,8 +1293,13 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         dms_grace_secs: -1n, // negative
       };
 
-      const failures = validateGuardPolicy(invalidPolicy, { guardAddress: GUARD });
-      assert.ok(failures.length >= 7, `expected >= 7 failures, got ${failures.length}`);
+      const failures = validateGuardPolicy(invalidPolicy, {
+        guardAddress: GUARD,
+      });
+      assert.ok(
+        failures.length >= 7,
+        `expected >= 7 failures, got ${failures.length}`,
+      );
 
       const ruleIds = new Set(failures.map((f) => f.rule));
       assert.ok(ruleIds.has("negative_amount"));
