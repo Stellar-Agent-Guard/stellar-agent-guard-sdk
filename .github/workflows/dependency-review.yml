@@ -1,0 +1,46 @@
+name: Dependency Review
+
+# PR-time supply-chain gate.
+# This implements the gate chosen in the security-posture decision (GitHub
+# dependency-review-action at PR time, advisory-based).
+# See: docs/security-posture.md for the decision record, the bidirectional link
+# to this workflow, and the severity policy.
+#
+# Severity policy (block / warn tiers):
+#   - Block: critical and high severity vulnerabilities that are NEWLY INTRODUCED by
+#     this PR (i.e. not present on the base ref). These fail the job.
+#   - Warn: moderate and low severity newly-introduced vulnerabilities are reported
+#     but do not fail the job (dependency-review only fails on the tier set by
+#     `fail-on-severity`; anything below it is reported in the job summary).
+#   - Pre-existing vulnerabilities are out of scope for this PR-time gate and are
+#     surfaced by the scheduled `npm audit --omit=dev` job in
+#     `.github/workflows/ci.yml` (informational, never gating).
+#
+# Advisory source: GitHub Advisory Database, managed and updated by GitHub.
+# Update cadence is GitHub-managed; this workflow does not pin an advisory snapshot.
+#
+# This is deliberately NOT the required `ci` check: it is a separate status so a
+# supply-chain finding cannot be confused with the test/typecheck gate.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Review dependency changes
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Block tier: fail the job on newly-introduced critical or high advisories.
+          fail-on-severity: high
+          # Surface the summary on the PR when the gate fails, so the finding is
+          # visible where the contributor already is.
+          comment-summary-in-pr: on-failure
