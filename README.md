@@ -182,7 +182,7 @@ This version introduces **branded types** to distinguish contract addresses (C..
 **Type Guards:**
 
 ```ts
-import { 
+import {
   isContractAddress,    // Validates C... addresses
   isAccountAddress,     // Validates G... addresses
   isStrKeyAddress,      // Validates any StrKey (C... or G...)
@@ -1047,6 +1047,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **Enforcement boundary for arbitrary calls**: Full amount/recipient limits are native to SAC token transfers. Arbitrary Soroban contract calls are enforced via protocol/function allowlists, active window, pause, and dead-man switches; per-call amount limits are not available generically from host auth contexts (tracked as v2).
 - **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
+- **Supply chain is one dependency, reviewed on every PR**: The only runtime dependency is `@stellar/stellar-sdk` (currently `^17.0.1`). What is imported from it, the tree-shaking reality for CJS consumers, the `npm audit --omit=dev` result, the caret-range decision, and the advisory-based dependency gate are recorded in [`docs/security-posture.md`](docs/security-posture.md). The caret range is intentional: consumers control resolution via their lockfile, and a PR that introduces a high/critical advisory fails the `dependency-review` check.
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
 
