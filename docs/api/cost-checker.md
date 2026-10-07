@@ -10,10 +10,21 @@ constructor(options: CostPreCheckConfig)
 
 ### Options
 
-- `interceptor: Pick<PreFlightInterceptor, "check">` — Configured interceptor instance whose simulation prices execution
-- `maxFeeStroops?: bigint` — Maximum allowable total fee in stroops (omitted means price it, never object)
-- `policySource?: string | PolicyConfig | null` — Opt-in policy source (contract address or `GuardPolicy`/`PolicyConfig`) enabling additive `policyContext`
-- `policy?: string | PolicyConfig | null` — Alias for `policySource`
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `interceptor` | `Pick<PreFlightInterceptor, "check">` | required | Configured interceptor whose simulation prices execution. |
+| `maxFeeStroops` | `bigint` | `undefined` (no ceiling) | Maximum allowable total fee in stroops; omitted means "price it, never object to the price". |
+| `logger` | `GuardLoggerInput` | `undefined` (silent) | Log sink for the priced verdict and whether the ceiling was exceeded. |
+| `policySource` | `string \| PolicyConfig \| null` | `undefined` (`policyContext: null`) | Opt-in policy source (contract address or `GuardPolicy`/`PolicyConfig`) enabling additive `policyContext`. |
+| `policy` | `string \| PolicyConfig \| null` | `undefined` | Alias for `policySource`. |
+
+Per-call `check(call, options?: CostPreCheckOptions)`:
+
+| Option | Type | Default | Semantics |
+| --- | --- | --- | --- |
+| `maxFeeStroops` | `bigint` | constructor ceiling | Override the fee ceiling for this check. |
+| `policySource` | `string \| PolicyConfig \| null` | constructor source | Override the policy source for this check. |
+| `policy` | `string \| PolicyConfig \| null` | constructor source | Alias for `policySource`. |
 
 ## Methods
 
