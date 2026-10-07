@@ -566,3 +566,56 @@ export async function assertPreconditions(
     tokenBalance,
   };
 }
+
+/**
+ * The guarded account's current sequence number, as read from the network.
+ *
+ * This is the strongest available signal that a blocked attempt never broadcast:
+ * a submitted transaction bumps the source account's sequence even when the
+ * contract returns an error, so an unchanged sequence across the attempted call
+ * is direct evidence that no transaction was ever submitted.
+ */
+export async function accountSequence(
+  server: rpc.Server,
+  address: string,
+): Promise<bigint> {
+  const account = await server.getAccount(address);
+  return BigInt(account.sequenceNumber());
+}
+
+/**
+ * Snapshot of the chain state that a blocked attempt must leave untouched.
+ *
+ * Both reads are taken from the network (not from a mock), so equality of two
+ * snapshots surrounding a tool call is the "no broadcast happened" assertion.
+ */
+export interface ChainSnapshot {
+  readonly sequence: bigint;
+  readonly balance: bigint;
+}
+
+/** Capture the guarded account's sequence + SAC balance in one read pair. */
+export async function captureChainSnapshot(
+  server: rpc.Server,
+  config: Phase2Config,
+): Promise<ChainSnapshot> {
+  const [sequence, balance] = await Promise.all([
+    accountSequence(server, config.keys.agent.publicKey()),
+    guardTokenBalance(server, config),
+  ]);
+  return { sequence, balance };
+}
+
+export const FIXTURE_POLICY: PolicyConfig = {
+  per_tx_cap: 1000n,
+  window_secs: 60n,
+  window_cap: 150n,
+  assets: [],
+  protocols: [],
+  recipients: [],
+  allow_any_recipient: false,
+  active_from: 0n,
+  active_until: 0n,
+  paused: false,
+  dms_grace_secs: 0n,
+};
