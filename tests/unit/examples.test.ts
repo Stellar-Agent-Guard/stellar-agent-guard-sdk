@@ -2,6 +2,10 @@
  * Unit tests verifying runnable framework adapter examples in examples/ directory.
  *
  * Ensures no dead code in documentation/examples, matching evidence culture.
+ *
+ * Policy (examples/README.md): every example file is imported-by or compiled-in CI.
+ * This test is the import-by CI hookup for the langchain and elizaos examples:
+ * if either example fails to compile or run, this test fails and CI goes red.
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";

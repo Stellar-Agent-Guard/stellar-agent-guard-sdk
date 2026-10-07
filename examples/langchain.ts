@@ -1,4 +1,22 @@
 /**
+ * @example langchain
+ * @runnable
+ * @typechecked
+ *
+ * Expected output (transcript):
+ *   === LangChain Middleware Example Run ===
+ *   [Run 1: Allowed] Tool ran: true
+ *   [Run 1: Allowed] Result: { content: '{"success":true,"transferred":"50"}' }
+ *   [Run 2: Blocked] Tool ran: false
+ *   [Run 2: Blocked] Message content:
+ *   <LangChainToolMessage with contract reason "recipient_not_allowed" and explanation>
+ *
+ * CI coverage: compiled/typechecked via the examples tsconfig project
+ * (see examples/README.md rule 1 and .github/workflows/ci.yml snippet-check
+ * extension). This file is imported by examples/langchain.test.ts so it is
+ * exercised by `npm test` as well.
+ */
+/**
  * LangChain Middleware Example — Full runnable demonstration with a fake transfer tool.
  *
  * Demonstrates:
