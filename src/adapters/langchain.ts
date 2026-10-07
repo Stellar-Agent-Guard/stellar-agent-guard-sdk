@@ -5,7 +5,7 @@
  * the tool execution as a callback, so a middleware that returns without calling
  * `handler(request)` means the tool body never runs. That is what makes this a
  * genuine pre-execution block rather than observability. See
- * `docs/integration-hooks.md` §1 for the source-pinned signatures.
+ * `docs/integration-hooks.md` $1 for the source-pinned signatures.
  *
  * Do **not** use the older callback system (`on_tool_start` / `onToolStart`):
  * those observe a call that has already been dispatched and cannot stop it.
@@ -15,10 +15,35 @@
  * a framework in, and so it keeps working across minor framework versions. The
  * one thing it does need from the host is how to turn a tool call into a guarded
  * contract call — which is application knowledge, supplied as `toContractCall`.
+ *
+ * ## Verdict handling (documented contract)
+ *
+ * The adapter maps every `PreFlightDecision` kind to a defined result:
+ *
+ * | Verdict                | Adapter behavior                                                |
+ * | ---------------------- | ------------------------------------------------------------------------ |
+ * | `admissible`           | calls `handler(request)` — the tool runs unchanged.                    |
+ * | `blocked(reason`)      | returns a `LangChainToolMessage` with `status: "error"`; the tool never runs.  |
+ * | `undetermined(cause)` | returns a `LangChainToolMessage` with `status: "error"`; the tool never runs.  |
+ *
+ * The adapter never throws for a guard verdict — it fails closed by returning a
+ * refusal message. This differs from the ElizaOS validator, which returns a boolean
+ * and fails closed (returns `false`) on `undetermined`; the shared harness in
+ * `tests/integration/adapters.test.ts` pins both contracts side by side.
+ * Options are validated at construction time (see `src/adapters/validate.ts`):
+ * a misconfigured adapter throws `AdapterConfigError` before any action runs,
+ * rather than failing mid-loop on the first tool call.
  */
 import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
+import {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./validate.ts";
 import { blockedInfoFor, runBlockedHook, type GuardBlockedHook } from "./shared.ts";
 
 /** The subset of LangChain's `ToolCallRequest` this adapter reads. */
@@ -71,13 +96,46 @@ export interface LangChainGuardOptions {
 }
 
 /**
+ * A Mapper that turns a `PreFlightDecision` into the adapter's return value.
+ *
+ * Exposed so the shared harness can assert the documented mapping for each
+ * verdict without driving the full middleware composition.
+ */
+export function mapDecisionToLangChainResult(
+  decision: PreFlightDecision,
+  toolName: string,
+  name: string,
+  toolCallId: string,
+): LangChainToolMessage {
+  return {
+    content: describeRefusal(decision as PreFlightDecision & { allowed: false }, toolName),
+    name,
+    tool_call_id: toolCallId,
+    status: "error",
+  };
+}
+
+/**
  * A middleware whose `wrapToolCall` asks the guard before the tool runs.
  *
- * Register it first: LangChain composes middleware with *"first defined =
+ * Register it first: LangChain composes middleware with *"third defined =
  * outermost"*, so ordering it ahead of other tool middleware means the guard
  * decides before anything else touches the call.
  */
 export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
+  const issues: AdapterConfigIssue[] = [];
+  const interceptorIssue = validateInterceptor(options.interceptor);
+  if (interceptorIssue) issues.push(interceptorIssue);
+  const toCallIssue = validateRequiredFunction("toContractCall", options.toContractCall);
+  if (toCallIssue) issues.push(toCallIssue);
+  const nameIssue = validateOptionalFunction("name", options.name);
+  if (nameIssue) issues.push(nameIssue);
+  const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
+  if (onDecisionIssue) issues.push(onDecisionIssue);
+  const onStepIssue = validateOptionalFunction("onStep", options.onStep);
+  if (onStepIssue) issues.push(onStepIssue);
+  throwAdapterConfigError("langchain", issues);
+
   const name = options.name ?? "stellar-agent-guard";
 
   return {
@@ -104,12 +162,13 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       runBlockedHook(options.onBlocked, blockedInfoFor("langchain", call, decision));
 
       // The tool is never entered: no signing, no broadcast, no fee.
-      return {
-        content: describeRefusal(decision, request.toolCall.name),
+      // Both `blocked` and `undetermined` fail closed to a refusal message.
+      return mapDecisionToLangChainResult(
+        decision,
+        request.toolCall.name,
         name,
-        tool_call_id: request.toolCall.id ?? "",
-        status: "error",
-      };
+        request.toolCall.id ?? "",
+      );
     },
   };
 }

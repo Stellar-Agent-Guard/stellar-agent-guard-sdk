@@ -6,6 +6,11 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 **Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
 **Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
 **Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
+**Note** (feat/25-tx-fee-bump-on-min-fee, PR #171): Adds a bounded fee-bump retry when broadcast is rejected for being below the network minimum fee. The retry re-prepares the transaction and re-runs the enforced simulation (including the guard's `__check_auth` and policy verdict) before any re-broadcast, so a block can never be relaxed by it; it only affects the post-verdict broadcast path. The scenarios recorded below (allowed, `per_tx_cap_exceeded`, rolling-window cap) do not depend on the min-fee retry path. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
+
+**Note** (feat/issue-39-feat-policy-decodecheckresult-exhaustive-tests, PR #229): `decodeCheckResult` is now total and fail-closed — an unknown enum tag, a `Blocked` reason the contract does not define, a malformed `ScVec`, or a non-`ScVal` input resolves to the typed `undetermined` verdict instead of throwing `ContractResponseError`. The scenarios recorded below all return well-formed `Allowed`/`Blocked` payloads whose reasons are part of the contract's own vocabulary, and their verdicts are unchanged; the new fail-closed path is covered by unit tests in `tests/unit/policy.test.ts` and `tests/unit/errors.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
+
+**Note** (feat/issue-114-feat-tx-abortsignal-timeout-support-for-check, PR #235): Adds caller-owned cancellation to the enforcement pipeline: an optional `signal`/`timeoutMs` on `check()`, `invoke()` and `CostPreChecker.check()`, plus a bounded `DEFAULT_RPC_TIMEOUT_MS` (30s) default so a black-holed RPC can no longer leave a guardrail call pending forever. An already-aborted signal short-circuits before any RPC call; a mid-flight abort or a fired timeout is reported as the check's fail-closed `undetermined` verdict (`invoke()` reports the same typed `RpcTimeoutError` through its own `error` outcome). The bound is strictly fail-closed: it can only stop the SDK from waiting, never relax a verdict — how the authorization entry is built and signed, how the enforced simulation runs, and every cap/block decision are untouched, and an un-aborted call with `timeoutMs: 0` behaves exactly as before. The scenarios recorded below are un-cancelled calls whose verdicts are unchanged; the new abort/timeout paths are covered by unit tests in `tests/unit/invoke.test.ts` and `tests/unit/preflight.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
 
 ## Instance under test
 
@@ -770,4 +775,26 @@ also re-validated the enforcement path against `main`'s newer unit suites
 this branch before merge** and replace this addendum with the fresh run output.
 No credentials, deployment or policy change are needed beyond what the suite
 already does.
+
+## Addendum — 2026-10-05 (PR #172: policy context on the cost pre-check)
+
+This PR reaches the enforcement-path file list through `src/policy.ts` by exactly
+one addition: the type alias `export type GuardPolicy = PolicyConfig`, plus its
+re-export from `src/index.ts`. It introduces no value, no runtime statement and
+no new branch — the alias is erased at compile time, so policy encoding,
+validation and block classification are byte-for-byte what the run above
+exercised.
+
+Everything else in the PR is additive and sits *after* the verdict it reports
+on: `policyContext` is computed in `src/cost.ts` from the decision the
+interceptor already returned plus the caller's own opt-in policy source, and is
+attached to the returned cost decision. It is never read by, and cannot feed
+back into, the authorization path. The `logger` field on `CostPreCheckConfig`
+restored by this PR is advisory only, under the same guarantee the PR #195
+addendum above states: a logger cannot change an outcome.
+
+No fresh live run was performed for this change, and this addendum does not
+claim one. The five scenarios recorded above are produced by the guard contract
+during enforced simulation; no line this PR touches participates in that, so the
+recorded results remain valid for them.
 
