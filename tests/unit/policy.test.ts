@@ -18,6 +18,7 @@ import {
   decodeCheckResult,
   decodePolicy,
   deadManRemaining,
+  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -1158,6 +1159,68 @@ describe("validateGuardPolicy (SPEC §8)", () => {
       });
       assert.deepEqual(failures, []);
     });
+  });
+});
+
+describe("definePolicy", () => {
+  const SECOND_RECIPIENT = unsafeAccountAddress(
+    "GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM",
+  );
+
+  // The deny-by-default base allows no assets and no recipients, and SPEC §8
+  // rejects a policy that permits neither, so every override below names both.
+  const minimal = { assets: [TOKEN], recipients: [RECIPIENT] };
+
+  it("fills in defaults for a partial override", () => {
+    const policy = definePolicy({ ...minimal, per_tx_cap: 100n });
+    assert.equal(policy.per_tx_cap, 100n);
+    assert.equal(policy.window_secs, 0n);
+    assert.equal(policy.window_cap, 0n);
+    assert.deepEqual(policy.assets, [TOKEN]);
+    assert.deepEqual(policy.recipients, [RECIPIENT]);
+    assert.equal(policy.allow_any_recipient, false);
+    assert.equal(policy.paused, false);
+  });
+
+  it("deep-merges nested lists by replacing the override entirely", () => {
+    const policy = definePolicy({
+      assets: [TOKEN],
+      recipients: [RECIPIENT, SECOND_RECIPIENT],
+      protocols: [{ contract: TOKEN, fns: ["transfer"] }],
+    });
+    // Override wins entirely; no array concatenation with defaults.
+    assert.deepEqual(policy.recipients, [RECIPIENT, SECOND_RECIPIENT]);
+    assert.deepEqual(policy.protocols, [{ contract: TOKEN, fns: ["transfer"] }]);
+  });
+
+  it("freezes the returned policy and its nested collections", () => {
+    const policy = definePolicy(minimal);
+    assert.ok(Object.isFrozen(policy));
+    assert.ok(Object.isFrozen(policy.recipients));
+    assert.ok(Object.isFrozen(policy.assets));
+    assert.throws(() => {
+      (policy as { per_tx_cap: bigint }).per_tx_cap = 1n;
+    });
+  });
+
+  it("runs cross-field validation before returning", () => {
+    assert.throws(
+      () => definePolicy({ ...minimal, active_from: 10n, active_until: 5n }),
+      /active_until/,
+    );
+  });
+
+  it("rejects unknown keys at runtime", () => {
+    // @js-ignore -- deliberately passing an unknown key to exercise the runtime check.
+    const bad = { window_cap2: 1n } as unknown as Parameters<typeof definePolicy>[0];
+    assert.throws(() => definePolicy(bad), /window_cap2/);
+  });
+
+  it("rejects unknown keys at the type level", () => {
+    assert.throws(() => {
+      // @ts-expect-error -- excess-property check rejects typo'd keys.
+      definePolicy({ window_cap2: 1n });
+    }, /window_cap2/);
   });
 });
 

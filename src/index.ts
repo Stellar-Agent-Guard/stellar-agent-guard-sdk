@@ -62,10 +62,13 @@ export type {
 } from "./reasons.ts";
 
 export {
+  DEFAULT_GUARD_POLICY,
   POLICY_RULE_IDS,
+  PolicyValidationError,
   deadManRemaining,
   decodeCheckResult,
   decodePolicy,
+  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -95,10 +98,12 @@ export type {
   CheckResult,
   ContractAddress,
   DeepReadonly,
+  DefinePolicyOptions,
   GuardPolicy,
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
+  PolicyOverride,
   PolicyRuleId,
   ProtocolRule,
   PublicKeyHex,

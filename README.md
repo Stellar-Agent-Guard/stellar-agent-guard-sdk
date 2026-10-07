@@ -126,6 +126,35 @@ The required keys are `PHASE2_GUARD`, `PHASE2_TOKEN`, `PHASE2_ADMIN_SECRET`,
 gitignored (as are all `.env.*` values files — only `*.example` templates are
 committable); never commit the filled-in copy.
 
+### Policy definition with `definePolicy()`
+
+Use `definePolicy()` to build a full `GuardPolicy` from a partial override.
+The builder deep-merges your input over the defaults, validates the result, and
+returns a frozen object. Unknown keys are rejected at both the type level (TS
+excess-property check) and at runtime, so a typo like `window_cap2` fails fast
+instead of being silently ignored.
+
+```ts
+import { definePolicy } from "stellar-agent-guard-sdk";
+
+const policy = definePolicy({
+  assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
+  recipients: ["GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD"],
+  per_tx_cap: 100n,
+});
+
+console.log(policy.per_tx_cap); // 100n
+```
+
+The deny-by-default base names no assets and no recipients, and SPEC §8 rejects a
+policy that allows neither, so a usable override names the assets and recipients
+it wants to permit (or sets `allow_any_recipient: true`).
+
+**Merge semantics:** override wins entirely for each top-level field. Nested lists
+such as `recipients` are **replaced**, not concatenated. This is deliberate: an
+implicit array merge on an allowlist would silently widen the authorized set, which
+is a dangerous surprise for a security boundary. Pass the complete list you want.
+
 ### Pre-flight Policy Interception
 
 ```ts

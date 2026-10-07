@@ -183,6 +183,157 @@ export function freezePolicy(policy: PolicyConfig): ReadonlyPolicyConfig {
 }
 
 /**
+ * Default policy used as the base for `definePolicy()`.
+ *
+ * Deny-by-default: no assets, no protocols, no recipients, no caps. Every
+ * action is blocked until the integrator opts in explicitly. All numeric
+ * fields are `bigint` to preserve i128/u64 precision.
+ */
+export const DEFAULT_GUARD_POLICY: PolicyConfig = Object.freeze({
+  per_tx_cap: 0n,
+  window_secs: 0n,
+  window_cap: 0n,
+  assets: Object.freeze([]) as unknown as string[],
+  protocols: Object.freeze([]) as unknown as ProtocolRule[],
+  recipients: Object.freeze([]) as unknown as string[],
+  allow_any_recipient: false,
+  active_from: 0n,
+  active_until: 0n,
+  paused: false,
+  dms_grace_secs: 0n,
+}) as PolicyConfig;
+
+/**
+ * Known top-level keys of `PolicyConfig`. Used for runtime unknown-key
+ * rejection in `definePolicy()`. Kept in sync with the interface above.
+ */
+const POLICY_CONFIG_KEYS = [
+  "per_tx_cap",
+  "window_secs",
+  "window_cap",
+  "assets",
+  "protocols",
+  "recipients",
+  "allow_any_recipient",
+  "active_from",
+  "active_until",
+  "paused",
+  "dms_grace_secs",
+  "recipient_window_caps",
+  "blocked_recipients",
+] as const;
+
+/**
+ * Partial override accepted by `definePolicy()`. Unknown keys are rejected at
+ * the type level via excess-property checking (object literals) and at runtime
+ * via an explicit key scan (for values that bypass the type system, e.g. JSON
+ * parsed from a config file or a `as` cast).
+ */
+export type PolicyOverride = Partial<PolicyConfig>;
+
+/**
+ * Structured error thrown by `definePolicy()` when the merged policy fails
+ * SPEC §8 validation. Carries the full list of granular failures so callers
+ * can render complete form errors rather than fixing one field at a time.
+ */
+export class PolicyValidationError extends Error {
+  readonly failures: PolicyFailure[];
+  constructor(failures: PolicyFailure[]) {
+    super(
+      `invalid policy: ${failures.length} failure(s) — ` +
+        failures.map((f) => `${f.path} (${f.rule})`).join(", "),
+    );
+    this.name = "PolicyValidationError";
+    this.failures = failures;
+  }
+}
+
+export interface DefinePolicyOptions extends ValidatePolicyOptions {
+  /**
+   * Base policy to merge overrides onto. Defaults to `DEFAULT_GUARD_POLICY`.
+   * Exposed so tests and advanced callers can supply a different baseline.
+   */
+  defaults?: PolicyConfig;
+}
+
+/**
+ * Build a full `GuardPolicy` from a partial override, deep-merged over
+ * `DEFAULT_GUARD_POLICY` (or a caller-supplied base) and validated before
+ * return.
+ *
+ * Merge semantics — deliberately shallow for arrays:
+ * - Scalars (`per_tx_cap`, `window_secs`, `paused`, …) are replaced.
+ * - Arrays (`assets`, `protocols`, `recipients`, `blocked_recipients`,
+ *   `recipient_window_caps`) are **replaced entirely**, never concatenated.
+ *   Rationale: silently merging allowlists is a security footgun — an
+ *   integrator who narrows `recipients` from a base of 10 down to 1 must not
+ *   end up with 11 entries because the base was unioned in. Override wins
+ *   wholesale; if you want to extend, spread the base yourself.
+ * - `protocols` entries are replaced wholesale too (no per-rule merge), for
+ *   the same reason: a narrowed `fns` list must not be unioned with the base.
+ *
+ * Unknown keys are rejected at runtime (in addition to the TypeScript
+ * excess-property check on object literals) so a typo like `window_cap2` fails
+ * loudly instead of being silently dropped.
+ *
+ * The returned policy is frozen (shallow-frozen at the top level; nested
+ * arrays are frozen too) so accidental mutation after construction cannot
+ * desynchronise a caller from what was validated.
+ *
+ * @throws {PolicyValidationError} when the merged policy fails SPEC §8 rules.
+ * @throws {TypeError} when `override` contains an unknown key.
+ */
+export function definePolicy(
+  override: PolicyOverride = {},
+  options: DefinePolicyOptions = {},
+): PolicyConfig {
+  if (override === null || typeof override !== "object" || Array.isArray(override)) {
+    throw new TypeError("definePolicy: override must be a plain object");
+  }
+
+  const unknownKeys = Object.keys(override).filter(
+    (key) => !(POLICY_CONFIG_KEYS as readonly string[]).includes(key),
+  );
+  if (unknownKeys.length > 0) {
+    throw new TypeError(
+      `definePolicy: unknown policy key(s): ${unknownKeys.map((k) => JSON.stringify(k)).join(", ")}`,
+    );
+  }
+
+  const base = options.defaults ?? DEFAULT_GUARD_POLICY;
+  const merged: PolicyConfig = {
+    per_tx_cap: override.per_tx_cap ?? base.per_tx_cap,
+    window_secs: override.window_secs ?? base.window_secs,
+    window_cap: override.window_cap ?? base.window_cap,
+    assets: override.assets ?? base.assets,
+    protocols: override.protocols ?? base.protocols,
+    recipients: override.recipients ?? base.recipients,
+    allow_any_recipient: override.allow_any_recipient ?? base.allow_any_recipient,
+    active_from: override.active_from ?? base.active_from,
+    active_until: override.active_until ?? base.active_until,
+    paused: override.paused ?? base.paused,
+    dms_grace_secs: override.dms_grace_secs ?? base.dms_grace_secs,
+  };
+  if (override.recipient_window_caps !== undefined) {
+    merged.recipient_window_caps = override.recipient_window_caps;
+  } else if (base.recipient_window_caps !== undefined) {
+    merged.recipient_window_caps = base.recipient_window_caps;
+  }
+  if (override.blocked_recipients !== undefined) {
+    merged.blocked_recipients = override.blocked_recipients;
+  } else if (base.blocked_recipients !== undefined) {
+    merged.blocked_recipients = base.blocked_recipients;
+  }
+
+  const failures = validateGuardPolicy(merged, options);
+  if (failures.length > 0) {
+    throw new PolicyValidationError(failures);
+  }
+
+  return freezePolicy(merged) as PolicyConfig;
+}
+
+/**
  * SPEC §8 rule identifiers for granular policy validation failures.
  *
  * Hand-listed SPEC §8 rule IDs pending contract-level granular validation issue.
