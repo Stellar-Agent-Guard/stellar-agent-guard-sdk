@@ -1,6 +1,6 @@
 # Introduction
 
-**Stellar Agent Guard SDK** is the TypeScript integration library connecting AI agent frameworks (such as LangChain and ElizaOS) to Stellar Agent Guard smart accounts on Soroban.
+Stellar Agent Guard SDK is the TypeScript integration library connecting AI agent frameworks (such as LangChain and ElizaOS) to Stellar Agent Guard smart accounts on Soroban.
 
 ## Why Stellar Agent Guard?
 
@@ -14,3 +14,7 @@ Stellar Agent Guard eliminates this single point of failure by enforcing non-cus
 2. **Simulation-Based Fee Calculation**: Accurately prices transactions using Soroban simulation results without requiring external binary profiling tools.
 3. **Custom Account Signing Pipeline**: Automates discovery and signing of `SorobanAuthorizationEntry` objects required by Soroban host custom account verification.
 4. **Dual-Stream Telemetry**: Captures committed ledger events and uncommitted simulation diagnostics to provide complete observability into guard enforcement.
+
+## API Reference
+
+The complete SDK API reference lives in the [API Reference](./api-reference.md), kept in `docs/` so it can grow alongside the prose guides (introduction, troubleshooting, glossary, threat model, compatibility) without bloating the README.

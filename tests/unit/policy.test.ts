@@ -9,9 +9,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
+import type { CheckResult } from "../../src/policy.ts";
 import {
   decodeCheckResult,
   decodePolicy,
@@ -363,8 +365,125 @@ describe("decodeCheckResult", () => {
     });
   });
 
-  it("throws on an unexpected payload instead of guessing", () => {
-    assert.throws(() => decodeCheckResult({ SomethingElse: 1 }), /unexpected CheckResult/);
+  it("decodes each known Blocked reason via fixture", async () => {
+    // The golden fixture is generated from the contracts repo's `BlockReason`
+    // enum, so this stays in lockstep with the deployed contract rather than a
+    // hand-maintained list.
+    const fixture = JSON.parse(
+      await readFile(resolve(process.cwd(), "tests/fixtures/contract-fixtures.json"), "utf8"),
+    ) as { entries: Array<{ result: string; reason: string }> };
+    const knownReasons = fixture.entries
+      .filter((entry) => entry.result === "blocked")
+      .map((entry) => entry.reason);
+    assert.ok(knownReasons.length > 0, "fixture must define at least one blocked reason");
+    for (const reason of knownReasons) {
+      const expected: CheckResult = { kind: "blocked", reason };
+      assert.deepEqual(decodeCheckResult({ Blocked: reason }), expected);
+    }
+  });
+
+  it("decodes the raw ScVal the contract returns (ScVec enum encoding)", () => {
+    // `simulation.returnValue` is an xdr.ScVal, not a native value: a
+    // `#[contracttype]` enum crosses the wire as `ScVec([variant, payload…])`.
+    assert.deepEqual(
+      decodeCheckResult(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed")])),
+      { kind: "allowed" },
+    );
+    assert.deepEqual(
+      decodeCheckResult(
+        xdr.ScVal.scvVec([
+          xdr.ScVal.scvSymbol("Blocked"),
+          xdr.ScVal.scvSymbol("recipient_not_allowed"),
+        ]),
+      ),
+      { kind: "blocked", reason: "recipient_not_allowed" },
+    );
+  });
+
+  it("decodes a bare symbol ScVal verdict", () => {
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvSymbol("Allowed")), { kind: "allowed" });
+  });
+
+  it("falls back to undetermined on an unknown enum tag (documented)", () => {
+    // A future contract may add a variant. The interceptor must fail-closed
+    // to `undetermined` rather than throwing into the agent loop.
+    assert.deepEqual(decodeCheckResult({ SomethingElse: 1 }), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult({ Blocked: "future_reason" }), { kind: "undetermined" });
+  });
+
+  it("falls back to undetermined on an empty ScVec", () => {
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvVec([])), { kind: "undetermined" });
+  });
+
+  it("falls back to undetermined on a non-ScVec input", () => {
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvVoid()), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvBool(true)), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvU32(0)), { kind: "undetermined" });
+    assert.deepEqual(decodeCheckResult(xdr.ScVal.scvString("Allowed")), { kind: "undetermined" });
+  });
+
+  it("falls back to undetermined on a malformed ScVec (wrong length)", () => {
+    assert.deepEqual(
+      decodeCheckResult(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed"), xdr.ScVal.scvSymbol("extra")])),
+      { kind: "undetermined" },
+    );
+  });
+
+  it("falls back to undetermined on a non-symbol Blocked reason", () => {
+    assert.deepEqual(
+      decodeCheckResult(xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvU32(1)])),
+      { kind: "undetermined" },
+    );
+  });
+
+  // Property (fuzz-lite): no decode input can produce an uncaught throw.
+  // Table of malformed ScVals built with stellar-sdk xdr builders.
+  it("never throws on any malformed ScVal input (fuzz-lite table)", () => {
+    const hostile: xdr.ScVal[] = [
+      xdr.ScVal.scvVoid(),
+      xdr.ScVal.scvBool(true),
+      xdr.ScVal.scvBool(false),
+      xdr.ScVal.scvU32(0),
+      xdr.ScVal.scvU32(0xffffffff),
+      xdr.ScVal.scvI32(-1),
+      xdr.ScVal.scvU64(0n),
+      xdr.ScVal.scvU64(2n ** 64n - 1n),
+      xdr.ScVal.scvI64(-1n),
+      xdr.ScVal.scvU128(new xdr.Uint128Parts({ hi: 0n, lo: 0n })),
+      xdr.ScVal.scvI128(new xdr.Int128Parts({ hi: 0n, lo: 0n })),
+      xdr.ScVal.scvString(""),
+      xdr.ScVal.scvString("Allowed"),
+      xdr.ScVal.scvString("Blocked"),
+      xdr.ScVal.scvSymbol(""),
+      xdr.ScVal.scvSymbol("Allowed"),
+      xdr.ScVal.scvSymbol("Blocked"),
+      xdr.ScVal.scvSymbol("Unknown"),
+      xdr.ScVal.scvBytes(Buffer.from([])),
+      xdr.ScVal.scvBytes(Buffer.from([0x00, 0x01, 0x02])),
+      xdr.ScVal.scvVec([]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvSymbol("reason")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvU32(1)]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Blocked"), xdr.ScVal.scvString("reason")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Unknown"), xdr.ScVal.scvSymbol("reason")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Allowed"), xdr.ScVal.scvSymbol("extra")]),
+      xdr.ScVal.scvVec([xdr.ScVal.scvVec([])]),
+      xdr.ScVal.scvMap([]),
+      xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("Allowed"), val: xdr.ScVal.scvVoid() }),
+      ]),
+    ];
+    for (const val of hostile) {
+      let result: unknown;
+      assert.doesNotThrow(() => {
+        result = decodeCheckResult(val);
+      }, `decodeCheckResult threw on ${JSON.stringify(val.toXDR("base64"))}`);
+      assert.ok(
+        result !== undefined && result !== null,
+        `decodeCheckResult returned nullish on ${JSON.stringify(val.toXDR("base64"))}`,
+      );
+    }
   });
 });
 

@@ -21,6 +21,8 @@
 * [Benchmarks](benchmarks.md)
 * [Enforcement Scope](enforcement-scope.md)
 * [Security Posture](security-posture.md)
+* [Troubleshooting](troubleshooting.md)
+* [Threat Model](threat-model.md)
 * [Contributing](contributing.md)
 * [Releasing](releasing.md)
 * [API Deprecations](deprecations.md)

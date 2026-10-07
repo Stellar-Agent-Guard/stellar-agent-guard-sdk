@@ -45,7 +45,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
-- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes.
+- **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes. Opt-in sliding-window counters expose agent self-monitoring via `stats()`.
 
 > ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
 > guardrail — it reports what the simulation predicts the guard will do, and it
@@ -174,6 +174,28 @@ Both framework adapters wrap the same `PreFlightInterceptor` but expose differen
 | `undetermined(cause)` | Halts the tool call with a formatted `ToolMessage` (fails closed); the tool handler never runs. | Returns `false` (fails closed); the action is excluded from candidate execution. |
 | Mapping error (`toContractCall` returns `null`/malformed) | Halts with a formatted `ToolMessage` describing the mapping failure; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
 
+
+#### Branded Address Types (v0.2.0+)
+
+This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
+
+**Type Guards:**
+
+```ts
+import { 
+  isContractAddress,    // Validates C... addresses
+  isAccountAddress,     // Validates G... addresses
+  isStrKeyAddress,      // Validates any StrKey (C... or G...)
+  isPublicKeyHex,       // Validates 64-char hex public keys
+} from "stellar-agent-guard-sdk";
+
+// Runtime validation before use
+if (!isContractAddress(userInput)) {
+  throw new Error("Expected contract address (C...)");
+}
+```
+
+**Migration:** If upgrading from an earlier version, see [MIGRATION.md](./MIGRATION.md) for guidance on updating your code to use typed addresses.
 
 #### Branded Address Types (v0.2.0+)
 
@@ -488,6 +510,47 @@ aborted watch ends quietly in a `for await` loop instead of surfacing an
 Revisit this when the SDK adds per-request signals to `getEvents`; until then,
 read `signal` as *stop soon and stop asking*, not *cancel the socket*.
 
+### Bounding a check or an invoke (`signal` and `timeoutMs`)
+
+`check()`, `CostPreChecker.check()` and `invoke()` each accept two optional
+caller-owned bounds on the RPC calls they make:
+
+- `signal?: AbortSignal` — your runtime's cancellation (a tool-loop deadline, a
+  shutdown hook, a user's "stop"). An **already-aborted** signal returns before
+  any RPC call is issued.
+- `timeoutMs?: number` — a per-RPC-call budget in milliseconds. It defaults to
+  `DEFAULT_RPC_TIMEOUT_MS` (**30s**), because a network partition that leaves a
+  guardrail call pending forever is a hang, not a fail-closed decision. Pass
+  `timeoutMs: 0` to opt out and rely on `signal` alone.
+
+**The typed error is the same; where it surfaces is deliberately not.** A bound
+that fires raises one class, `RpcTimeoutError` (carrying `stage` and whether it
+was an `aborted` signal or a timeout), but the entry points answer different
+questions:
+
+| Call | Fired bound |
+| --- | --- |
+| `check()` / `CostPreChecker.check()` | the fail-closed `undetermined` **verdict** (`decision.error instanceof RpcTimeoutError`) — the guard reached no decision, which is what `undetermined` already means |
+| `invoke()` | `invoke`'s `error` **outcome** (`outcome.error instanceof RpcTimeoutError`) — the pipeline never reached broadcast |
+
+```ts
+const decision = await interceptor.check(call, { timeoutMs: 5_000 });
+if (decision.kind === "undetermined" && decision.error instanceof RpcTimeoutError) {
+  // Fail closed: the guard could not be reached in time.
+}
+```
+
+Branch on the class, never on `detail`.
+
+**One limitation, stated rather than papered over: the request itself is never
+cancelled.** `@stellar/stellar-sdk` ^17's `Server` methods take no
+`AbortSignal`, so the SDK races the in-flight promise against your signal and
+the timeout. The HTTP request therefore continues server-side until it completes
+or the connection drops; the bound cancels *your wait*, not the socket. What it
+changes is bounded: a fired bound can only stop the SDK from waiting — it can
+never relax a verdict, a cap or a block reason, and a call that is neither
+aborted nor timed out behaves exactly as it did before.
+
 ### Framework Middleware (LangChain & ElizaOS)
 
 Plug-and-play middleware intercepts agent actions before tools are executed:
@@ -751,14 +814,14 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
 
 - `PreFlightInterceptor`
   - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
-  - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
+  - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
   - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
   - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run: the bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
 - `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 
@@ -772,57 +835,35 @@ money-adjacent output in a security tool is not acceptable) and with no trailing
 zeros:
 
 ```ts
-import { formatFee } from "stellar-agent-guard-sdk";
+import { startHeartbeat } from "stellar-agent-guard-sdk";
 
-cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
-formatFee(cost.totalFeeStroops); // "0.0012345"      — same value in XLM
+const hb = await startHeartbeat({
+  server,
+  guard: GUARD_ID,
+  signer: agentKeypair,        // Keypair or AgentSigner
+  intervalMs: 30_000,
+  maxSkewMs: 2_000,            // tolerated drift before a beat counts as missed
+  onBeat: ({ lateMs }) => { if (lateMs > 2_000) alert("heartbeat late"); },
+  onError: (error) => logger.error("heartbeat failed", error),
+  graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
+});
 
-formatFee(1n);             // "0.0000001" — one stroop
-formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
+// on shutdown:
+await hb.stop();
 ```
 
-#### `CostPreChecker` resource breakdown
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
+- A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
 
-Priced `within_budget` and `over_budget` results may include a `breakdown` parsed from the same Soroban simulation that produced `resourceFeeStroops`:
+The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
-```ts
-if (decision.kind === "within_budget" && decision.breakdown) {
-  console.log(decision.breakdown);
-  // {
-  //   instructions,       // SorobanResources.instructions
-  //   diskReadBytes,      // SorobanResources.diskReadBytes
-  //   writeBytes,         // SorobanResources.writeBytes
-  //   readOnlyEntries,    // footprint.readOnly.length
-  //   readWriteEntries,   // footprint.readWrite.length
-  //   storageEntries      // readOnlyEntries + readWriteEntries
-  // }
-}
-```
+## API Reference
 
-`breakdown` is `undefined` when the simulation is undetermined, malformed, or missing any required resource field; the SDK never fabricates zero values. The stellar-sdk v17 Soroban resource payload has no `memBytes` field, so this API reports the actual `writeBytes`/disk resource fields rather than relabeling them as memory usage.
-
-#### One simulation per check: prefer `checkWithCost`
-
-`PreFlightInterceptor.check()` answers *may this proceed?* and
-`CostPreChecker.check()` answers *what will it cost?* — but calling both runs the
-enforced simulation **twice**, against two ledger snapshots. The extra RPC is the
-lesser problem: the fee reported for a call can then differ from the fee implied
-by the verdict that was actually enforced, so the price no longer corresponds to
-the approved decision.
-
-`CostPreChecker.checkWithCost()` returns both from a **single** simulation:
-
-```ts
-const { decision, cost } = await costChecker.checkWithCost(call);
-
-if (decision.kind === "blocked") {
-  console.log("refused:", decision.reason);        // nothing was charged
-} else if (cost.kind === "over_budget") {
-  console.log("too expensive:", formatFee(cost.totalFeeStroops), "XLM");
-} else if (decision.allowed) {
-  console.log("approved at", formatFee(cost.totalFeeStroops), "XLM");
-}
-```
+The complete SDK API reference lives in [`docs/api-reference.md`](docs/api-reference.md) — method signatures, options, return shapes and examples for `PreFlightInterceptor`, `CostPreChecker`, `GuardTelemetryListener`, `validateGuardPolicy`, the framework adapters and the `invoke()` pipeline. The README keeps this stub so the npm landing page stays readable; the reference itself grows alongside the other `docs/` guides.
 
 Prefer this over calling `interceptor.check(call)` and `costChecker.check(call)`
 in sequence. That two-call pattern still works and its types are unchanged, but
@@ -1047,6 +1088,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for details on coding standards, PR proce
 project structure — including the strict one-commit-per-logical-unit rule and the
 [TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
 (`npm run check:strict-ratchet`).
+
+Before changing the public surface, the dependency set, or the runtime the SDK runs
+in, read [`docs/design-principles.md`](docs/design-principles.md): fail-closed
+verdicts, no secret handling, one runtime dependency, additive-only 0.x surface,
+a browser-safe core, and logger-optional silence. Departures are maintainer
+decisions (`tier:maintainer-decision`), not silent exceptions.
 
 Looking for something to work on? The
 [issue backlog](https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues)
