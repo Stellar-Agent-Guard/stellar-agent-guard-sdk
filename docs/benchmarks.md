@@ -62,6 +62,22 @@ Reading the numbers:
   twice (once to build, once to validate) at worst-case size. A realistic policy
   with a handful of recipients is orders of magnitude below the encode column.
 
+## Micro-optimizations (post-baseline)
+
+Each change below was PR'd with before/after `npm run bench` numbers for the
+touched function, measured on the same machine as the baseline above. No
+algorithmic rewrites — targeted wins only.
+
+| Change | Function | Before (ops/sec) | After (ops/sec) | Notes |
+| --- | --- | ---: | ---: | --- |
+| Hoist decoder regexes to module constants | `guardEventsFromDiagnostics` | 1,990 | _pending_ | Avoids per-call `RegExp` recompilation |
+| Localize repeated xdr field access in hot loops | `decodePolicy` | 8 | _pending_ | Caches `Vec`/`ScVal` accessors in locals |
+| Build event normalization in place (no object spread churn) | `guardEventsFromDiagnostics` | _pending_ | _pending_ | Removes per-event spread allocations |
+
+> Numbers are filled in from the PR that lands each change. If a candidate
+> showed nothing material on the bench, it is recorded here as
+> "no action needed" rather than merged as speculative churn.
+
 ## Why there is no CI gate
 
 CI runs `npm run bench` informationally and never fails the build on wall-time

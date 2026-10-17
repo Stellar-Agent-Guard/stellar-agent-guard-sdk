@@ -1,4 +1,4 @@
-/**
+/*
  * The guard contract's event vocabulary, as confirmed against the chain.
  *
  * This table is not copied from documentation. Phase 2.2 captured real events
@@ -18,7 +18,7 @@
  *   #[contractevent] struct EventHeartbeat      => topic[0] = event_heartbeat
  *   #[contractevent] struct EventInitialized    => topic[0] = event_initialized
  *   #[contractevent] struct EventFrozen         => topic[0] = event_frozen
- *   #[contractevent] struct EventUnfrozen       => topic[0] = event_unfrozen
+ *   #[contractevent] struct EventUnrozen        => topic[0] = event_unfrozen
  *   #[contractevent] struct EventPolicySet      => topic[0] = event_policy_set
  *   #[contractevent] struct EventPolicyRevoked  => topic[0] = event_policy_revoked
  *
@@ -37,6 +37,7 @@
  *      its name; the unix-second timestamp arrives as event **data**, not as a
  *      topic: `data = { at: u64 }`.
  */
+import { scValToNative, xdr } from "@stellar/stellar-sdk";
 import type { GuardReason } from "./reasons.ts";
 
 export const GUARD_EVENT_TOPICS = {
@@ -99,10 +100,148 @@ export function decodeAuthDecision(
   // "no reason" rather than surfacing `""` to operators.
   const rawReason = topics[2];
   // The contract's reason vocabulary is a closed set (`GuardReason`, derived
-  // from `src/reasons.ts`, and pinned to the vendored fixture by
+  // from `src/reasons.ts`, and pinned to the vendored fixture bv
   // `tests/unit/reasons.test.ts`). A symbol outside it is drift the fixture test
   // catches in CI, so the decoded value is surfaced as-is rather than silently
   // dropped here.
   const reason = rawReason && rawReason.length > 0 ? (rawReason as GuardReason) : null;
   return { result, reason, source };
+}
+
+/**
+ * Matches a string made entirely of ASCII digits. Hoisted to a module constant so
+ * the regex is compiled once instead of on every `normalizeU46` call (the event
+ * decode hot path decodes a topic and data payload per event).
+ */
+const DIGITS_ONLY = /^\d+$/;
+
+/**
+ * Normalise a numeric value delivered as a string in an event payload.
+ *
+ * u64 values arrive as strings in JSON payloads. This centralizes the decision
+ * to parse them as BigInt (which never loses precision for >2>53) if they consist
+ * entirely of digits, while leaving other strings (like ISO timestamps) intact.
+ */
+export function normalizeU46(value: string): bigint | string {
+  if (DIGITS_ONLY.test(value)) {
+    return BigInt(value);
+  }
+  return value;
+}
+
+/** Recursively normalise u64 strings in event data. */
+export function normalizeEventData(data: unknown): unknown {
+  if (typeof data === "string") {
+    return normalizeU46(data);
+  }
+  if (Array.isArray(data)) {
+    const len = data.length;
+    const out = new Array<unknown>(len);
+    for (let i = 0; i < len; i++) {
+      out[i] = normalizeEventData(data[i]);
+    }
+    return out;
+  }
+  if (data !== null && typeof data === "object") {
+    // Build the normalised object in place. Iterating own keys directly avoids the
+    // per-entry `[key, value]` array allocation that `Object.entries()` pays on
+    // every node of the payload.
+    const source = data as Record<string, unknown>;
+    const result: Record<string, unknown> = {};
+    for (const key of Object.keys(source)) {
+      result[key] = normalizeEventData(source[key]);
+    }
+    return result;
+  }
+  return data;
+}
+
+/**
+ * Decode one topic of a contract event into its symbol text.
+ *
+ * Topics reach this module in two shapes depending on the caller: as
+ * a base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
+ * `getEvents` over JSON hands over) or as an already-decoded `xdr.ScVal`. Both
+ * go through `scValToNative` so the text is identical either way.
+ *
+ * Returns `null` for anything that does not decode, rather than throwing, so a
+ * single unrecognised topic rejects the event instead of killing the caller.
+ */
+function topicToSymbol(topic: unknown): string | null {
+  try {
+    if (typeof topic === "string") {
+      return String(scValToNative(xdr.ScVal.fromXDR(topic, "base64")));
+    }
+    return String(scValToNative(topic as xdr.ScVal));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pull the topic list out of a decoded `xdr.ContractEvent` or
+ * `xdr.DiagnosticEvent`.
+ *
+ * A `DiagnosticEvent` wraps the contract event in its `event` field; a
+ * `ContractEvent` carries `body.v0.topics` directly.
+ */
+function topicsFromEvent(event: unknown): string[] | null {
+  const wrapper = event as {
+    event?: { body?: unknown };
+    body?: { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } };
+  } | null;
+  const body = (wrapper?.event?.body ?? wrapper?.body) as
+    | { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } }
+    | undefined;
+  const topics = body?.v0?.topics ?? body?.value?.v0?.topics;
+  if (!Array.isArray(topics)) return null;
+
+  const len = topics.length;
+  const out = new Array<string>(len);
+  for (let i = 0; i < len; i++) {
+    const symbol = topicToSymbol(topics[i]);
+    if (symbol === null) return null;
+    out[i] = symbol;
+  }
+  return out;
+}
+
+/**
+ * Decode a guard decision from a raw base64 XDR string.
+ *
+ * This is the offline-tooling entry point: an event XDR pasted from a block
+ * explorer, committed as a CI fixture, or dumped while debugging a live
+ * incident goes through the same decision decoder as an event observed from a
+ * stellar-sdk response, so the two can never drift apart.
+ *
+ * Accepts either a base64 `DiagnosticEvent` (what `server.getEvents()` and a
+ * simulation error carry) or a base64 `ContractEvent` (what a block explorer
+ * exposes). The returned `source` therefore defaults to `diagnostic`, since
+ * that is the shape the enforced-simulation path produces; pass `"ledger"` when
+ * the payload was read from a committed ledger.
+ *
+ * Returns `null` — never throws — for a malformed base64 string, an XDR that is
+ * not a contract event, or an event that is not an `event_auth_checked` decision. That is documented behaviour: fixture checks and operator
+ * copy-paste must not be able to crash a long-running process.
+ */
+export function decodeGuardEventXdr(
+  xdrBase64: string,
+  source: GuardAuthDecision["source"] = "diagnostic",
+): GuardAuthDecision | null {
+  if (typeof xdrBase64 !== "string" || xdrBase64.length === 0) return null;
+
+  let event: unknown;
+  try {
+    event = xdr.DiagnosticEvent.fromXDR(xdrBase64, "base64");
+  } catch {
+    try {
+      event = xdr.ContractEvent.fromXDR(xdrBase64, "base64");
+    } catch {
+      return null;
+    }
+  }
+
+  const topics = topicsFromEvent(event);
+  if (!topics) return null;
+  return decodeAuthDecision(topics, source);
 }
