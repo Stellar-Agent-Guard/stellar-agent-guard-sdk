@@ -26,10 +26,9 @@ import {
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
+  definePolicy,
   validateGuardPolicy,
   freezePolicy,
-  definePolicy,
-  DEFAULT_GUARD_POLICY,
   unsafeContractAddress,
   unsafeAccountAddress,
   unsafePublicKeyHex,
@@ -39,8 +38,8 @@ import {
   type ContractAddress,
   type GuardStatus,
   type PolicyConfig,
-  type PolicyOverride,
   type ProtocolRule,
+  type PolicyOverride,
 } from "../../src/policy.ts";
 
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
@@ -1224,6 +1223,114 @@ describe("freezePolicy", () => {
       // @ts-expect-error — per_tx_cap must be readonly
       frozen.per_tx_cap = 1n;
     }, TypeError);
+  });
+});
+
+describe("definePolicy", () => {
+  it("fills omitted fields from the defaults", () => {
+    const policy = definePolicy({ per_tx_cap: 100n });
+    assert.equal(policy.per_tx_cap, 100n);
+    assert.equal(policy.window_secs, 0n);
+    assert.equal(policy.window_cap, 0n);
+    assert.deepEqual(policy.assets, []);
+    assert.deepEqual(policy.protocols, []);
+    assert.deepEqual(policy.recipients, []);
+    assert.equal(policy.allow_any_recipient, false);
+    assert.equal(policy.active_from, 0n);
+    assert.equal(policy.active_until, 0n);
+    assert.equal(policy.paused, false);
+    assert.equal(policy.dms_grace_secs, 0n);
+  });
+
+  it("returns a full GuardPolicy that encodes without further validation", () => {
+    const policy = definePolicy({
+      per_tx_cap: 1000n,
+      window_secs: 60n,
+      window_cap: 150n,
+      assets: [TOKEN],
+      recipients: [RECIPIENT],
+    });
+    assert.doesNotThrow(() => policyToScVal(policy));
+  });
+
+  it("replaces nested lists entirely rather than concatenating them", () => {
+    // Override-wins semantics: merging allowlists by concatenation is a
+    // footgun (a caller narrowing a list would silently widen it), so the
+    // override replaces the default array wholesale.
+    const policy = definePolicy({ recipients: [RECIPIENT] });
+    assert.deepEqual(policy.recipients, [RECIPIENT]);
+  });
+
+  it("replaces the protocols list entirely rather than concatenating it", () => {
+    const policy = definePolicy({
+      protocols: [{ contract: TOKEN, fns: ["transfer"] }],
+    });
+    assert.deepEqual(policy.protocols, [{ contract: TOKEN, fns: ["transfer"] }]);
+  });
+
+  it("freezes the returned policy and its nested arrays", () => {
+    const policy = definePolicy({ recipients: [RECIPIENT], assets: [TOKEN] });
+    assert.ok(Object.isFrozen(policy));
+    assert.ok(Object.isFrozen(policy.recipients));
+    assert.ok(Object.isFrozen(policy.assets));
+    assert.throws(() => {
+      (policy as { per_tx_cap: bigint }).per_tx_cap = 1n;
+    }, TypeError);
+    assert.throws(() => {
+      (policy.recipients as AccountAddress[]).push(RECIPIENT);
+    }, TypeError);
+  });
+
+  it("rejects unknown keys at the type level", () => {
+    // @ts-expect-error — `window_cap2` is a typo, not a PolicyConfig field
+    assert.throws(() => definePolicy({ window_cap2: 100n }), /unknown key/);
+  });
+
+  it("rejects unknown keys at runtime even when the type check is bypassed", () => {
+    const hostile = { window_cap2: 100n } as unknown as PolicyOverride;
+    assert.throws(
+      () => definePolicy(hostile),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /unknown key/);
+        assert.match(error.message, /window_cap2/);
+        return true;
+      },
+    );
+  });
+
+  it("runs cross-field validation and fails fast with structured failures", () => {
+    assert.throws(
+      () => definePolicy({ window_cap: 500n, window_secs: 0n }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /window_cap/);
+        return true;
+      },
+    );
+  });
+
+  it("rejects negative amounts via validation", () => {
+    assert.throws(() => definePolicy({ per_tx_cap: -1n }), /per_tx_cap/);
+  });
+
+  it("rejects an inverted active window via validation", () => {
+    assert.throws(
+      () => definePolicy({ active_from: 100n, active_until: 50n }),
+      /active_until/,
+    );
+  });
+
+  it("accepts a valid partial policy and passes validation", () => {
+    const policy = definePolicy({
+      per_tx_cap: 1000n,
+      window_secs: 60n,
+      window_cap: 150n,
+      assets: [TOKEN],
+      recipients: [RECIPIENT],
+      allow_any_recipient: false,
+    });
+    assert.deepEqual(validateGuardPolicy(policy), []);
   });
 });
 
