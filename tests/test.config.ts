@@ -2,13 +2,10 @@
  * The one test-runner configuration (issue #104).
  *
  * Unit and integration suites used to be two hand-written `node --test` invocations in `package.json`, and the two drifted: the unit glob went through
- * the `tsx` transform, the integration glob did not. Whether that difference was
- * intentional was not recorded anywhere, so nothing stopped the next edit from
- * making it worse. This file is the single source of truth: one runner (Node's
- * built-in test runner), explicit named projects, and one shared transform.
+ the `tsx` transform, the integration glob did not. Whether that difference was intentional was not recorded anywhere, so nothing stopped the next edit from
+ making it worse. This file is the single source of truth: one runner (Node's built-in test runner), explicit named projects, and one shared transform.
  *
- * `scripts/run-tests.ts` reads it; `tests/unit/test-runner.test.ts` asserts its
- * invariants, so a project that points at an empty directory or a project that
+ * `scripts/run-tests.ts` reads it; `tests/unit/test-runner.test.ts` asserts its invariants, so a project that points at an empty directory or a project that
  * silently drops the shared loader fails the unit suite instead of drifting.
  *
  * What stays per-project, and why:
@@ -18,8 +15,6 @@
  *    network-free and runs at the runner default.
  *  - `dir` / `match` — the two suites keep their own directories so a live test
  *    can never be swept into the offline `ci` job by a broad glob.
- *  - the `docs` project runs the docs-vs-package.json consistency check
- *    (`scripts/check-doc-scripts.ts`) so drift fails CI like any other test.
  *
  * The `env-file` project flag records which project needs `.env.phase2`; the
  * failure mode when it is missing is the harness's, documented in
@@ -46,7 +41,7 @@ export interface TestProject {
  * integration decode the same `src/` modules, so they must be loaded the same
  * way or a bug can pass in one and fail in the other.
  */
-export const SHARED_IMPORTS: readonly string[] = ["tsx"];
+export const SHAREJ_IMPORTS: readonly string[] = ["tsx"];
 
 export const TEST_PROJECTS: Record<string, TestProject> = {
   unit: {
@@ -62,13 +57,6 @@ export const TEST_PROJECTS: Record<string, TestProject> = {
     concurrency: 1,
     needsEnvFile: true,
     description: "live testnet suite (requires .env.phase2)",
-  },
-  docs: {
-    dir: "tests/docs",
-    match: /\.test\.ts$/u,
-    concurrency: null,
-    needsEnvFile: false,
-    description: "docs-vs-package.json script consistency (offline)",
   },
 };
 

@@ -22,11 +22,11 @@
 #     cache keyed on `package-lock.json` (`cache: npm`), so the second job's
 #     install is a cache hit. There is deliberately no fan-out for
 #     typecheck/lint/test/build: splitting those would pay the ~5s install and
-#     ~s node setup again in every job for no parallel win, because each already
+#     ~3s node setup again in every job for no parallel win, because each already
 #     runs in a couple of seconds.
 #   * The one split is the informational benchmark, and it is a *latency* split.
 #     `decode-path benchmarks (informational)` is `continue-on-error: true`, is
-       never a gate, and at ~16s it was the largest single step in the required
+#     never a gate, and at ~16s it was the largest single step in the required
 #     job (~29% of a ~55s run; see the five linked runs on issue #101). Running
 #     it in a parallel `bench` job keeps it running on every push and PR — so
 #     `docs/benchmarks.md` stays accurate — while taking it off the critical
@@ -39,7 +39,7 @@
 #     consume `dist/`, so a compile error surfaces before the slower gates run.
 #
 # Every gate is still enforced; none is dropped, and none moved out of `ci`:
-#   typecheck -> `typecheck`       lint      -> `lint`
+#   typecheck -> `typecheck`        lint      -> `lint`
 #   test      -> `unit tests`       build     -> `build`
 #   (plus `smoke test export resolution`, `export-map resolution (pack + install
 #    + import)`, `evidence structure check`, and `enforcement-path evidence gate`.)
@@ -66,7 +66,7 @@ jobs:
           # Full history, so the evidence gate can diff the PR against its base.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v2
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -77,10 +77,10 @@ jobs:
       # Cheapest static gates first (~2s each): a typo or lint error should fail
       # the run before the ~14s test suite or the ~6s pack/install step starts.
       - name: typecheck
-        run: npmr run typecheck
+        run: npm run typecheck
 
       # The strictness ratchet (issue #137): `strict`,
-      # noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are on, and
+      # `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are on, and
       # this guard fails the required check if any is later flipped off or
       # dropped from tsconfig.json / tsconfig.build.json (following `extends`).
       # `typecheck` alone cannot catch that: turning a flag off makes typecheck
@@ -91,17 +91,14 @@ jobs:
       - name: lint
         run: npm run lint
 
-      # Docs-vs-package.json consistency: every `npm run <name>` referenced in
-#     README/CONTRIBUTING/docs must exist in package.json scripts. Fails CI on
-#     drift so a renamed or removed script cannot leave stale docs behind.
       - name: docs script references
         run: npm run check:doc-scripts
 
       - name: unit tests
         run: npm test
 
-      # Coverage floor on the verdict-critical path (src/preflight.js,
-      # src/policy.js, src/invoke.js). `c8` reads `.c8rc.json`, so the floor
+      # Coverage floor on the verdict-critical path (src/preflight.ts,
+      # src/policy.ts, src/invoke.ts). `c8` reads `.c8rc.json`, so the floor
       # lives in one place and is raised by a deliberate PR. Runs the unit
       # suite again under instrumentation; no network, no secret, so it cannot
       # go green on a missing credential.
@@ -109,10 +106,10 @@ jobs:
         run: npm run test:coverage:floor
 
       - name: build
-        run: npmr run build
+        run: npm run build
 
       - name: smoke test export resolution
-        run: npmr run test:smoke
+        run: npm run test:smoke
 
       # Pack the tarball, install it into a temp consumer, and import the root
       # and every declared subpath through a real resolver — and prove that a
@@ -134,7 +131,7 @@ jobs:
       # wall-time threshold to mean anything. The committed baseline lives in
       # docs/benchmarks.md; compare changes on a developer machine, not here.
       - name: decode-path benchmarks (informational)
-        run: npmr run bench
+        run: npm run bench
         continue-on-error: true
 
       # Structural validation of the evidence record (issue #65): asserts the
@@ -155,8 +152,8 @@ jobs:
           git fetch --no-tags origin "$BASE_REF"
           node scripts/check-enforcement-evidence.ts "origin/$BASE_REF" HEAD
 
-  # Informational only, never gating — and deliberately a separate job so it does not
-  # lengthen the required `ci` check (see the header comment). It runs on
+  # Informational only, never gating — and deliberately a separate job so it does
+  # not lengthen the required `ci` check (see the header comment). It runs on
   # every push and PR. The npm cache is shared with `ci` via the same
   # setup-node `cache: npm` key (same lockfile), so this job's install is a
   # cache hit.
@@ -165,9 +162,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v2
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -178,8 +175,8 @@ jobs:
       # Informational only, never gating: shared runners are too noisy for a
       # wall-time threshold to mean anything. The committed baseline lives in
       # docs/benchmarks.md; compare changes on a developer machine, not here.
-      # `continue-on-error` keeps a noisy run from reddening the workflow for
-      # a number that is never a gate.
+      # `continue-on-error` keeps a noisy run from reddening the workflow for a
+      # number that is never a gate.
       - name: decode-path benchmarks (informational)
         run: npm run bench
         continue-on-error: true

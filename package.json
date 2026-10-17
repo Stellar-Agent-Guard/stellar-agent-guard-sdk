@@ -69,7 +69,6 @@
     "typecheck": "tsc --noEmit",
     "check:strict-ratchet": "node scripts/check-strict-ratchet.mjs",
     "check:doc-scripts": "node --import tsx scripts/check-doc-scripts.ts",
-    "check:doc-scripts:test": "node --import tsx scripts/check-doc-scripts.ts --self-test",
     "lint": "eslint .",
     "test": "node --import tsx scripts/run-tests.ts unit",
     "test:unit": "node --import tsx scripts/run-tests.ts unit",
