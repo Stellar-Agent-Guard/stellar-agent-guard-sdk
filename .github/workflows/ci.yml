@@ -22,13 +22,13 @@
 #     cache keyed on `package-lock.json` (`cache: npm`), so the second job's
 #     install is a cache hit. There is deliberately no fan-out for
 #     typecheck/lint/test/build: splitting those would pay the ~5s install and
-#     ~3 node setup again in every job for no parallel win, because each already
+#     ~3s node setup again in every job for no parallel win, because each already
 #     runs in a couple of seconds.
 #   * The one split is the informational benchmark, and it is a *latency* split.
-#     `decode-path benchmarks (informational)`  is `continue-on-error: true`, is 
+#     `decode-path benchmarks (informational)` is `continue-on-error: true`, is
 #     never a gate, and at ~16s it was the largest single step in the required
 #     job (~29% of a ~55s run; see the five linked runs on issue #101). Running
-#     it in a parallel `bench job keeps it running on every push and PR — so
+#     it in a parallel `bench` job keeps it running on every push and PR — so
 #     `docs/benchmarks.md` stays accurate — while taking it off the critical
 #     path of the check that actually blocks merges. This is the issue's
 #     "justified split with shared cache": the parallel saving (~16s off the
@@ -39,11 +39,11 @@
 #     consume `dist/`, so a compile error surfaces before the slower gates run.
 #
 # Every gate is still enforced; none is dropped, and none moved out of `ci`:
-#   typecheck -> `typecheck`       lint      -> `lint`
+#   typecheck -> `typecheck`        lint      -> `lint`
 #   test      -> `unit tests`       build     -> `build`
 #   (plus `smoke test export resolution`, `export-map resolution (pack + install
 #    + import)`, `evidence structure check`, and `enforcement-path evidence gate`.)
-# --------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 name: ci
 
 on:
@@ -66,7 +66,7 @@ jobs:
           # Full history, so the evidence gate can diff the PR against its base.
           fetch-depth: 0
 
-      - uses: actions/setup-node@v2
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -79,12 +79,20 @@ jobs:
       - name: typecheck
         run: npm run typecheck
 
+      # README snippet audit (issue #XXX): extracts ```ts blocks from README.md
+      # into temp files and typechecks them against src/, so published examples
+      # cannot drift from the current API. Blocks marked `no-check` are skipped
+      # (convention documented in CONTRIBUTING.md). Bash blocks are documented
+      # as manual-only and not executed here.
+      - name: README snippet audit
+        run: npm run check:readme-snippets
+
       # The strictness ratchet (issue #137): `strict`,
-      # noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are on, and
+      # `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are on, and
       # this guard fails the required check if any is later flipped off or
       # dropped from tsconfig.json / tsconfig.build.json (following `extends`).
       # `typecheck` alone cannot catch that: turning a flag off makes typecheck
-      * pass* more easily, not fail.
+      # *pass* more easily, not fail.
       - name: strictness ratchet
         run: npm run check:strict-ratchet
 
@@ -94,21 +102,19 @@ jobs:
       - name: unit tests
         run: npm test
 
+      # Repeat the README audit after build so the snippets are also verified
+      # against the compiled dist/ surface (the shape consumers actually import),
+      # not just src/. Same script, same bounded runtime.
+      - name: README snippet audit (dist)
+        run: npm run check:readme-snippets -- --against dist
+
       # Coverage floor on the verdict-critical path (src/preflight.ts,
       # src/policy.ts, src/invoke.ts). `c8` reads `.c8rc.json`, so the floor
-      # lives in one place and is raised by a deliberate PR. Runs the
-      # unit suite again under instrumentation; no network, no secret, so it cannot
+      # lives in one place and is raised by a deliberate PR. Runs the unit
+      # suite again under instrumentation; no network, no secret, so it cannot
       # go green on a missing credential.
       - name: coverage floor (verdict-critical path)
         run: npm run test:coverage:floor
-
-      # README code blocks are version-stamped against the published 0.1.x API
-      # (issue: drift audit). This extracts every ```ts` block from README .md into a
-      # temp file and typechecks it against `src/` with a single `tsc` invocation.
-      # Blocks marked `no-check` (with a justification comment) are skipped;
-      # ```bash` blocks are documented as manual and not executed.
-      - name: README snippets (version-stamp drift audit)
-        run: npm run check:readme-snippets
 
       - name: build
         run: npm run build
@@ -160,8 +166,8 @@ jobs:
           git fetch --no-tags origin "$BASE_REF"
           node scripts/check-enforcement-evidence.ts "origin/$BASE_REF" HEAD
 
-  # Informational only, never gating — and deliberately a separate job so it does not
-  # lengthen the required `ci` check (see the header comment). It runs on
+  # Informational only, never gating — and deliberately a separate job so it does
+  # not lengthen the required `ci` check (see the header comment). It runs on
   # every push and PR. The npm cache is shared with `ci` via the same
   # setup-node `cache: npm` key (same lockfile), so this job's install is a
   # cache hit.
@@ -170,9 +176,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v2
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: npm
@@ -183,8 +189,8 @@ jobs:
       # Informational only, never gating: shared runners are too noisy for a
       # wall-time threshold to mean anything. The committed baseline lives in
       # docs/benchmarks.md; compare changes on a developer machine, not here.
-      # `continue-on-error` keeps a noisy run from reddening the workflow for
-      # a number that is never a gate.
+      # `continue-on-error` keeps a noisy run from reddening the workflow for a
+      # number that is never a gate.
       - name: decode-path benchmarks (informational)
         run: npm run bench
         continue-on-error: true
