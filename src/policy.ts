@@ -227,16 +227,6 @@ export interface ValidatePolicyOptions {
   maxRecipientEntries?: number;
 }
 
-/**
- * Maximum number of entries allowed in recipient-bearing lists
- * (`recipients`, `blocked_recipients`, `recipient_window_caps`).
- *
- * Vendored from the guard contract's cardinality limit (SPEC §8). Exported so
- * property tests and the shared seeded generator module can cite the same
- * constant instead of forking it — see the cross-repo limit-sync issue.
- */
-export const MAX_RECIPIENT_ENTRIES = 256;
-
 /** Type alias for PolicyConfig matching contract documentation and external vocabulary. */
 export type GuardPolicy = PolicyConfig;
 
@@ -332,9 +322,10 @@ const POLICY_FIELDS = [
   "window_secs",
 ] as const;
 const PROTOCOL_RULE_FIELDS = ["contract", "fns"] as const;
-export const I128_MIN = -(2n ** 127n);
-export const I128_MAX = 2n ** 127n - 1n;
-export const U64_MAX = 2n ** 64n - 1n;
+const I128_MIN = -(2n ** 127n);
+const I128_MAX = 2n ** 127n - 1n;
+const U64_MAX = 2n ** 64n - 1n;
+const MAX_RECIPIENT_ENTRIES = 256;
 
 /**
  * Decode a `PolicyConfig` returned by the guard's `policy()` read, or the map
