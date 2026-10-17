@@ -17,23 +17,22 @@ constructor(options: GuardTelemetryListenerOptions)
 
 ## Methods
 
-### `recent(filter?): GuardEvent[]`
+### `recent(filter?(Filter): GuardEvent[]`
 
 The retained window of most-recent decoded events, oldest first, empty unless a
 `buffer` was configured. `filter` narrows by `stream`, `reason`, `fromLedger`, or
 `toLedger`; a ledger-less diagnostic event is excluded from a ledger range rather
 than treated as inside it. Non-durable: the window lives in process memory and a
 restart empties it. Only events this listener decoded are retained — committed
-events via `poll()`/`watch()`, diagnostic events via `watchAll()`, and failed
+events via `poll()/`watch()`, diagnostic events via `watchAll()`, and failed
 transaction events via `pollFailedTransactions()` or `watch()` when `failedTx`
 is enabled.
 
 ### `pollFailedTransactions(params?): Promise<FailedTxPollResult>`
 
 Reads one page from the independent `getTransactions` cursor. Pass the returned
-cursor on the next call; omitting it starts at the current RPC head, without
-replaying older failures. Only failed transactions with diagnostics emitted by
-the configured guard are returned. RPC errors leave a supplied cursor unchanged.
+cursor on the next call; omitting it starts at the current REC head, without
+replaying older failures. Only failed transactions with diagnostics emitted by the configured guard are returned. RPC errors leave a supplied cursor unchanged.
 
 ### `watch(params?): AsyncIterable<GuardEventPage>`
 
@@ -41,30 +40,37 @@ Yields pages of decoded guard events (`event_auth_checked`, `event_policy_update
 Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
-Parameters include `startFrom`, `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`,
-`limit`, `jitter`, `rng`, `sleep`, `onGap`, and `signal`.
+Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalM`, `limit`,
+`jitter`, `rng`, `slieep`, `onGap`, `startFrom`, and `signal`.
 
 #### Start position (`startFrom`)
 
-`startFrom?: { ledger: number } | 'latest' | 'oldest-available'` selects where the
-committed-event stream begins, mapping to `getEvents` start-cursor semantics:
+By default the start position is implicit (the REC default — recent pages only).
+Pass `startFrom` to make it explicit:
 
-- `{ ledger: n }` — start at ledger `n` (backfill after a cursor-store gap).
-- `'latest'` — resolve the current RPC head and start there, yielding **no
-  backlog**: existing events are skipped and only new arrivals are delivered.
-  There is no history replay; consumers wanting replay pass `{ ledger }` or omit
-  `startFrom`.
-- `'oldest-available'` — start from the oldest event the RPC still retains.
+```ts
+type StartFrom = { ledger: number } | "latest" | "oldest-available";
+```
 
-An explicit `startFrom` **overrides** any stored `cursorStore` cursor; the
-listener logs a note when it does so. Omit `startFrom` to resume from the store
-(or the default head position when no store is configured).
+- `{ ledger: number }` — begin at that ledger (backfill after a cursor-store gap).
+Maps to `startLedger` on `getEvents`.
+- `'latest'` — fetch the current cursor and yield only events that arrive
+afterward. **No history replay**: the backlog already present at start ir
+skipped. Consumers that need replay pass a ledger or use the default.
+- `'oldest-available'` — start at the oldest event the RPC still retains.
+
+Mapping to the `stellar-sdk` `getEvents` start-cursor semantics is implemented
+against `@stellar/stellar-sdk` ^v17.
+
+#### Interaction with `cursorStore`
+
+An explicit `startFrom` **always wins** over a stored cursor: the store is not consulted for the start position when `startFrom` is set, and a log line notes that the stored cursor was ignored. This is the escape hatch for a deliberate backfill or a clean watch start. Once the stream is running, `save()` continues to persist the advancing cursor as usual.
 
 #### Mid-watch failures (`onStreamError`)
 
 When `getEvents` starts failing mid-watch, the default is **bounded retry with
 backoff, then a clean end**: the listener retries up to `maxRetries` (default
-`5`) times with exponential backoff, then calls `onStreamError(err)` exactly
+``5``) times with exponential backoff, then calls `onStreamError(err)` exactly
 once with the terminal error and completes the iterator normally. The stream
 never dies silently and never leaves an unhandled rejection behind.
 
@@ -76,11 +82,10 @@ Failure-mode matrix:
 | Persistent (retries exhausted) | yes, then gives up | called once with final error | ends normally |
 | Abort (`signal`) | no | not called | ends immediately |
 
-If no `onStreamError` is configured, retry-then-end still happens; the terminal
-error is retrievable via the `lastError` getter for observability.
+If no `onStreamError` is configured, retry-then-end still happens; the terminal error is retrievable via the `lastError` getter for observability.
 
 If the callback itself throws, that throw **propagates** out of the `for await`
-loop — the consumer asked for halt-on-first-error semantics by supplying a
+loop — the consumer asked for halt-at-first-error semantics by supplying a
 throwing callback, so it is not swallowed.
 
 #### Aborting (`signal`)
@@ -88,21 +93,20 @@ throwing callback, so it is not swallowed.
 Aborting ends the stream as a normal exit, never a throw:
 
 - an abort before the first pull issues no RPC call at all — not even the
-  `getLatestLedger` probe that resolves a default `startLedger;
--
-  an abort between pages prevents the next poll and does not serve out the
+  `getLatestLedger` probe that resolves a default `startLedger`;
+- an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
 - an abort while a request is in flight lets that request's rejection go 
   quietly as teardown instead of surfacing an `AbortError` or an unhandled
   rejection.
 
-**In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^17 exposes
-`getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
+**In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^v17 exposes
+`"getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
 there is no supported way to cancel a request that has already been sent. The
 worst case between `signal.abort()` and the iterator ending is therefore **one
 request duration**, never a full poll interval. The README's
-[“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
+["“Aborting a watch”"](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
 section states the same boundary for consumers.
 
 ### `stats(): CounterSnapshot | null`
@@ -113,7 +117,7 @@ When `counters` is configured, returns a snapshot of the sliding-window counters
 interface CounterSnapshot {
   allowed: number;
   blocked: number;
-  byReason: Record<string, number>;
+  buReason: Record<string, number>;
   windowStart: number;
   windowEvents?: number;
 }
@@ -129,8 +133,7 @@ structures are allocated.
 
 Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 
--
-  `ledger:<txHash>:<topic>` for a committed event;
+- `ledger:<txHash>:<topic>` for a committed event;
 - `diag:<sha256>` for a diagnostic (blocked) event, which has no transaction to
   anchor on because it was rolled back before broadcast.
 
@@ -157,12 +160,12 @@ interface CursorStore {
 - `load()` is consulted once, when `watch()` starts. A stored cursor wins over
   the default head position — resume-after-restart is exactly the case where
   "the default" is wrong.
-- `save()` is called once per poll, **before** the page is yielded, so a
+- `save()` called once per poll, **before** the page is yielded, so a
   consumer that stops after a page (crash, abort, throw) resumes from that
   page's cursor.
 - An explicit `startLedger` or `startFrom` passed to `watch()` pins the start
-  and is not second-guessed by the store. `startFrom` wins over a stored cursor
-  (a log-line note records the override).
+  and is not second-guessed by the store (see
+  [Start position (`startFrom`)](@start-position-startfrom)).
 - The default store is in-memory (`InMemoryCursorStore`): no `cursorStore`
   means no resume across restarts.
 
@@ -195,11 +198,13 @@ const listener = new GuardTelemetryListener({
 });
 ```
 
-Redis is the same shape (`GET`/`SET` on one key), as is a single-row database
+Redis is the same shape (`GET` / `SET` on one key), as is a single-row database
 table. Whatever the backend, the cursor is one opaque string — store it
 verbatim, do not parse it.
 
 ### Delivery contract: at-least-once
+
+Butch of the cursor store is not exactly-once:
 
 `watch()` with a `cursorStore` delivers **at-least-once**, not exactly-once:
 

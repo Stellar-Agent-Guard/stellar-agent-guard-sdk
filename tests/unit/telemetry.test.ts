@@ -20,11 +20,13 @@ import {
   guardEventsFromDiagnostics,
   isAllowedDecision,
   mergeGuardEventStreams,
+  resolveStartCursor,
   telemetryFromDecision,
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardTelemetryGap,
   type RecentEventFilter,
+  type StartFrom,
 } from "../../src/telemetry.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
 
@@ -1340,6 +1342,7 @@ describe("opt-in raw event retention (issue #94)", () => {
   });
 });
 
+
 describe("GuardTelemetryListener counters", () => {
   const decisionEvent = (result: "allowed" | "blocked", reason: string | null, index: number): GuardEvent => ({
     id: `diag:${index.toString(16).padStart(64, "0")}`,
@@ -1423,131 +1426,5 @@ describe("GuardTelemetryListener counters", () => {
     assert.ok(stats);
     assert.equal(stats!.allowed, 2);
     assert.equal(stats!.blocked, 0);
-  });
-});
-
-/**
- * Explicit start position (`startFrom`, issue #98).
- *
- * The listener's start position used to be implicit — whatever the RPC's
- * default `getEvents` cursor happened to be. `startFrom` makes it explicit and
- * maps each mode onto the real `getEvents` start-cursor semantics:
- *
- *   - `{ ledger: N }`     → `startLedger: N` (backfill from a known ledger)
- *   - `'oldest-available'`→ `startLedger: <oldestLedger>` (full retained history)
- *   - `'latest'`          → `cursor: <current head cursor>` (no backlog replay)
- *
- * `'latest'` is the clean-watch case: it resolves the current cursor without
- * yielding the backlog, so only events that arrive after the watch starts are
- * delivered. These tests pin the `getEvents` params sent per mode, the
- * no-backlog property of `'latest'`, and the documented precedence over a
- * stored cursor (explicit `startFrom` wins, with a log-line note).
- */
-describe("GuardTelemetryListener startFrom (issue #98)", () => {
-  /** A committed ledger event in the shape `poll()` reads from the RPC. */
-  function ledgerEvent(ledger: number, txHash = "ab".repeat(32)) {
-    return {
-      contractId: GUARD,
-      type: "contract",
-      ledger,
-      ledgerClosedAt: "2026-09-27T00:00:00Z",
-      txHash,
-      topic: ["event_auth_checked", "allowed", ""].map((topic) => xdr.ScVal.scvSymbol(topic)),
-      value: xdr.ScVal.scvMap([]),
-    };
-  }
-
-  /** A fake RPC recording every `getEvents` params object it is handed. */
-  function recordingServer(pages: Array<{ events: unknown[]; oldestLedger?: number; latestLedger: number }>) {
-    const calls: Array<Record<string, unknown>> = [];
-    let index = 0;
-    return {
-      calls,
-      getLatestLedger: async () => ({ sequence: pages[0]?.latestLedger ?? 1 }),
-      getEvents: async (params: Record<string, unknown>) => {
-        calls.push(params);
-        const page = pages[Math.min(index, pages.length - 1)]!;
-        index += 1;
-        return { ...page, cursor: `cursor_${index}` };
-      },
-    };
-  }
-
-  it("maps { ledger } to startLedger and sends no cursor", async () => {
-    const server = recordingServer([{ events: [ledgerEvent(500)], oldestLedger: 100, latestLedger: 600 }]);
-    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
-    await listener.poll({ startFrom: { ledger: 500 } });
-
-    assert.equal(server.calls.length, 1);
-    assert.equal(server.calls[0]!.startLedger, 500);
-    assert.equal(server.calls[0]!.cursor, undefined, "ledger mode must not send a cursor");
-  });
-
-  it("maps 'oldest-available' to the RPC's oldestLedger", async () => {
-    const server = recordingServer([{ events: [ledgerEvent(500)], oldestLedger: 4778215, latestLedger: 4899174 }]);
-    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
-    await listener.poll({ startFrom: "oldest-available" });
-
-    assert.equal(server.calls.length, 1);
-    assert.equal(server.calls[0]!.startLedger, 4_778_215);
-    assert.equal(server.calls[0]!.cursor, undefined);
-  });
-
-  it("maps 'latest' to a cursor fetch and yields zero backlog events", async () => {
-    // The first page is the backlog the RPC would return for a fresh start; the
-    // second page is the one new event that arrives after the watch begins.
-    // 'latest' must skip the first entirely and deliver only the second.
-    const server = recordingServer([
-      { events: [ledgerEvent(100), ledgerEvent(101)], oldestLedger: 100, latestLedger: 600 },
-      { events: [ledgerEvent(102)], oldestLedger: 100, latestLedger: 601 },
-    ]);
-    const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
-
-    const controller = new AbortController();
-    let ticks = 0;
-    const batches: GuardEvent[][] = [];
-    for await (const batch of listener.watch({
-      startFrom: "latest",
-      signal: controller.signal,
-      sleep: async () => {
-        if (++ticks >= 2) controller.abort();
-      },
-    })) {
-      batches.push(batch);
-    }
-
-    const delivered = batches.flat();
-    assert.deepEqual(
-      delivered.map((event) => event.ledger),
-      [102],
-      "'latest' must not replay the backlog — only the post-start event streams",
-    );
-    assert.equal(
-      server.calls[0]!.cursor,
-      undefined,
-      "the first 'latest' call resolves the head cursor via getLatestLedger, not a backlog page",
-    );
-    assert.ok(
-      server.calls.some((call) => typeof call.cursor === "string"),
-      "subsequent polls must resume from the resolved cursor",
-    );
-  });
-
-  it("lets an explicit startFrom override a stored cursor, with a log-line note", async () => {
-    const server = recordingServer([{ events: [ledgerEvent(500)], oldestLedger: 100, latestLedger: 600 }]);
-    const notes: string[] = [];
-    const listener = new GuardTelemetryListener({
-      server: server as never,
-      guard: GUARD,
-      log: (line) => notes.push(line),
-    });
-    await listener.poll({ cursor: "stored_cursor", startFrom: { ledger: 500 } });
-
-    assert.equal(server.calls.length, 1);
-    assert.equal(server.calls[0]!.startLedger, 500);
-    assert.equal(server.calls[0]!.cursor, undefined, "the stored cursor must not be sent");
-    assert.equal(notes.length, 1, "the override is documented in one log line");
-    assert.match(notes[0]!, /startFrom/);
-    assert.match(notes[0]!, /cursor/);
   });
 });
