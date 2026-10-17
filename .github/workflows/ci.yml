@@ -91,6 +91,10 @@ jobs:
       - name: lint
         run: npm run lint
 
+      # Docs-vs-package.json consistency (issue: npm run script hygiene): every
+      # `npm run <name>` referenced in README/CONTRIBUTING/docs must exist in
+      # package.json scripts. Fails CI on drift, so a renamed or removed script
+      # cannot leave a stale command in the docs.
       - name: docs script references
         run: npm run check:doc-scripts
 
@@ -141,9 +145,6 @@ jobs:
       - name: evidence structure check
         run: node scripts/check-enforcement-evidence.ts --check-structure
 
-      - name: docs script references
-        run: npm run check:doc-scripts
-
       # A PR that changes the enforcement path must ship fresh live-testnet
       # evidence in the same PR. This checks the file list only: no network, no
       # secret, so it cannot go green on a missing credential.
@@ -174,9 +175,6 @@ jobs:
 
       - name: install
         run: npm ci
-
-      - name: docs script references
-        run: npm run check:doc-scripts
 
       # Informational only, never gating: shared runners are too noisy for a
       # wall-time threshold to mean anything. The committed baseline lives in

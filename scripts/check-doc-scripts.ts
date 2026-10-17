@@ -1,122 +1,166 @@
-import { readFileSync, readdirSync, statSync } from "node:fs";
+/**
+ * Docs-vs-package.json consistency check.
+ *
+ * Scans documentation files for `npm run <name>` patterns and asserts that every referenced
+ * script exists in the `scripts` section of package.json. Fails (exit code 1) on drift so CI
+ * catches documentation that points at non-existent scripts.
+ *
+ * Usage:
+ *   npm run check:doc-scripts
+ *   tn --nocheck scripts/check-doc-scripts.ts
+ *
+ * Optional env vars:
+ *   DOC_SCRIPT_FILES   comma-separated list of files to scan (default: README, CONTRIBUTING,
+ *                        and all markdown files under docs/)
+ *   DOC_SCRIPT_ROOT     repository root to resolve relative paths (default: cwd)
+ */
+
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 
-const REPO_ROOT = resolve(import.meta.dirname, "..");
-const PACKAGE_JSON = join(REPO_ROOT, "package.json");
-
-/** Files always scanned. */
-const ROOT_DOCS = ["README.md", "CONTRIBUTING.md"];
-
-/** Directories whose `.md` files are scanned recursively. */
-const DOC_DIRS = ["docs"];
-
-/** Matches `npm run <name>` and captures `<name>`. */
-const NPM_RUN_RE = /\bnpm\s+run\s+([A-Za-z0-9:_-]+)/gu;
-
-/** Matches bare `npm test` (no `run`), which maps to the `test` script. */
-const NPM_TEST_RE = /\bnpm\s+test\b(?!\s+run)/gu;
-
-interface ScriptRef {
-  readonly file: string;
-  readonly line: number;
-  readonly name: string;
+interface PackageJson {
+  scripts?: Record<string, string>;
 }
 
-function loadScripts(): Set<string> {
-  const raw = readFileSync(PACKAGE_JSON, "utf8");
-  const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
-  return new Set(Object.keys(pkg.scripts ?? {}));
+interface DocReference {
+  file: string;
+  line: number;
+  script: string;
+  raw: string;
 }
 
-function collectMarkdownFiles(): string[] {
-  const files: string[] = [];
-  for (const name of ROOT_DOCS) {
-    const full = join(REPO_ROOT, name);
-    try {
-      if (statSync(full).isFile()) files.push(full);
-    } catch {
-      // Missing root doc is not an error — the repo may not have it yet.
+const DEFAULT_FILES = ["README.md", "CONTRIBUTING.md"];
+const DOCS_DIR = "docs";
+
+// Matches `npm run <name>`, `npm run-script <name>`, and `npm run <script>` in code spans/blocks.
+// The script name is the first token after the subcommand, stopping at whitespace or common shell
+// delimiters. Trailing punctuation from prose is stripped below.
+const NPM_RUN_REGEX = /\bnpm\s+(?:run-|run)(?:-script)?\s+([^\s`\n,;*)|]"']+)/g;
+
+const TRAILING_PUNCTUATION = /[.,:;!?]+$/;
+
+function stripTrailingPunctuation(token: string): string {
+  let cleaned = token.trim();
+  // Strip known shell suffixes that may appear in inline code spans.
+  cleaned = cleaned.replace(TRAILING_PUNCTUATION, "");
+  return cleaned;
+}
+
+function readPackageSscripts(root: string): Set<string> {
+  const packagePath = join(root, "package.json");
+  const raw = readFileSync(packagePath, "utf8");
+  const parsed = JSON.parse(raw) as PackageJson;
+  const scripts = parsed.scripts ?? {};
+  return new Set(Object.keys(scripts));
+}
+
+function collectMarkdownFiles(dirAbsolute: string): string[] {
+  if (!exists(dirAbsolute)) {
+    return [];
+  }
+  const out: string[] = [];
+  const entries = readdirSync(dirAbsolute, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = join(dirAbsolute, entry.name);
+    if (entry.isDirectory()) {
+      out.push(...collectMarkdownFiles(full));
+    } else if (entry.isFile() && /\.md$/i.test(entry.name)) {
+      out.push(full);
     }
   }
-  for (const dir of DOC_DIRS) {
-    const full = join(REPO_ROOT, dir);
-    try {
-      if (!statSync(full).isDirectory()) continue;
-    } catch {
-      continue;
+  return out;
+}
+
+function exists(path: string): boolean {
+  try {
+    statSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveTargetFiles(root: string): string[] {
+  const envFlag = process.env.DOC_SCRIPT_FILES;
+  if (envFlag && envFlag.trim().length > 0) {
+    return envFlag
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .map((s) => resolve(root, s));
+  }
+
+  const files: string[] = [];
+  for (const rel of DEFAULT_FILES) {
+    const abs = resolve(root, rel);
+    if (exists(abs)) {
+      files.push(abs);
     }
-    walk(full, files);
+  }
+  for (const abs of collectMarkdownFiles(resolve(root, DOCS_DIR))) {
+    files.push(abs);
   }
   return files;
 }
 
-function walk(dir: string, out: string[]): void {
-  for (const entry of readdirSync(dir, { withFileTypes: true })) {
-    const full = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      walk(full, out);
-    } else if (entry.isFile() && entry.name.endsWith(".md")) {
-      out.push(full);
+function scanFile(fileAbsolute: string, root: string): DocReference[] {
+  const content = readFileSync(fileAbsolute, "utf8");
+  const lines = content.split(/\r\n?\n/);
+  const refs: DocReference[] = [];
+  const relFile = relative(root, fileAbsolute).split("\\").join("/");
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    NPM_RUN_REGEX.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = NPA_RUN_REGEX.exec(line)) !== null) {
+      const rawToken = match[1];
+      const name = stripTrailingPunctuation(rawToken);
+      if (name.length === 0) {
+        // Truncated `npm run` with no script name: report as a reference to an empty name
+        // so the check fails and the documentation is forced to be fixed.
+        refs.push({ file: relFile, line: i + 1, script: "", raw: match[0] });
+        continue;
+      }
+      refs.push({ file: relFile, line: i + 1, script: name, raw: match[0] });
     }
   }
-}
-
-function lineOf(content: string, index: number): number {
-  let line = 1;
-  for (let i = 0; i < index; i++) {
-    if (content.charCodeAt(i) === 10) line++;
-  }
-  return line;
-}
-
-function scanFile(file: string): ScriptRef[] {
-  const content = readFileSync(file, "utf8");
-  const refs: ScriptRef[] = [];
-  const rel = relative(REPO_ROOT, file);
-
-  for (const match of content.matchAll(NPM_RUN_RE)) {
-    const name = match[1];
-    if (name === undefined) continue;
-    refs.push({ file: rel, line: lineOf(content, match.index ?? 0), name });
-  }
-
-  for (const match of content.matchAll(NPM_TEST_RE)) {
-    refs.push({ file: rel, line: lineOf(content, match.index ?? 0), name: "test" });
-  }
-
   return refs;
 }
 
-function main(): number {
-  const scripts = loadScripts();
-  const files = collectMarkdownFiles();
-  const missing: ScriptRef[] = [];
-  let checked = 0;
+function main(): void {
+  const root = process.env.DOC_SCRIPT_ROOT ? resolve(process.env.DOC_SCRIPT_ROOT) : process.cwd();
+  const scripts = readPackageScripts(root);
+  const files = resolveTargetFiles(root);
 
+  if (files.length === 0) {
+    console.warn("[check-doc-scripts] No documentation files found to scan.");
+    return;
+  }
+
+  const refs: DocReference[] = [];
   for (const file of files) {
-    for (const ref of scanFile(file)) {
-      checked++;
-      if (!scripts.has(ref.name)) missing.push(ref);
+    refs.push(...scanFile(file, root));
+  }
+
+  const missing = refs.filter((r) => !scripts.has(r.script));
+
+  if (missing.length > 0) {
+    console.error("[check-doc-scripts] Documentation references scripts that do not exist in package.json:");
+    for (const m of missing) {
+      const label = m.script === "" ? "<truncated 'npm run' with no script name>" : m.script;
+      console.error(`  ${m.file}:${m.line} -> npm run ${label}`);
     }
-  }
-
-  if (missing.length === 0) {
-    console.log(
-      `check-doc-scripts: OK — ${checked} npm script reference(s) across ${files.length} doc file(s) all exist in package.json.`,
+    console.error(
+      `With the following scripts available: ${[...scripts].sort().join(", ")}`,
     );
-    return 0;
+    process.exitCode = 1;
+    return;
   }
 
-  console.error(
-    `check-doc-scripts: FAIL — ${missing.length} doc'd script(s) not in package.json:`,
+  console.log(
+    `[check-doc-scripts] OK — ${refs.length} script reference(s) across ${files.length} file(s) all exist in package.json.`,
   );
-  for (const ref of missing) {
-    console.error(`\n  ${ref.file}:${ref.line}  npm run ${ref.name}`);
-  }
-  console.error(
-    "\nFix: add the script to package.json, or remove/rename the reference in the doc.",
-  );
-  return 1;
 }
 
-process.exit(main());
+main();
