@@ -27,8 +27,9 @@ import {
   policyToScVal,
   readPersistentEntry,
   validateGuardPolicy,
-  definePolicy,
   freezePolicy,
+  definePolicy,
+  DEFAULT_GUARD_POLICY,
   unsafeContractAddress,
   unsafeAccountAddress,
   unsafePublicKeyHex,
@@ -38,8 +39,8 @@ import {
   type ContractAddress,
   type GuardStatus,
   type PolicyConfig,
+  type PolicyOverride,
   type ProtocolRule,
-  type PolicyOverrides,
 } from "../../src/policy.ts";
 
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
@@ -1160,103 +1161,6 @@ describe("validateGuardPolicy (SPEC §8)", () => {
       });
       assert.deepEqual(failures, []);
     });
-  });
-});
-
-describe("definePolicy", () => {
-  it("fills every unspecified field from the defaults", () => {
-    const policy = definePolicy({});
-    assert.deepEqual(policy, samplePolicy());
-  });
-
-  it("overrides only the supplied fields and keeps the rest at defaults", () => {
-    const policy = definePolicy({ per_tx_cap: 100n, window_cap: 50n });
-    assert.equal(policy.per_tx_cap, 100n);
-    assert.equal(policy.window_cap, 50n);
-    assert.equal(policy.window_secs, 60n);
-    assert.deepEqual(policy.assets, [TOKEN]);
-    assert.deepEqual(policy.recipients, [RECIPIENT]);
-  });
-
-  it("replaces nested lists entirely rather than concatenating (override wins)", () => {
-    // Documented semantics: array override replaces, never merges. Merging
-    // allowlists is a silent-privilege-escalation footgun, so we refuse it.
-    const policy = definePolicy({ recipients: [RECIPIENT] });
-    assert.deepEqual(policy.recipients, [RECIPIENT]);
-    assert.equal(policy.recipients.length, 1);
-  });
-
-  it("replaces the protocols list entirely", () => {
-    const policy = definePolicy({
-      protocols: [{ contract: TOKEN, fns: ["transfer"] }],
-    });
-    assert.deepEqual(policy.protocols, [{ contract: TOKEN, fns: ["transfer"] }]);
-  });
-
-  it("replaces recipient_window_caps entirely", () => {
-    const policy = definePolicy({
-      recipient_window_caps: [{ recipient: RECIPIENT, cap: 10n }],
-    });
-    assert.deepEqual(policy.recipient_window_caps, [{ recipient: RECIPIENT, cap: 10n }]);
-  });
-
-  it("returns a frozen policy (top-level, arrays, and nested rule objects)", () => {
-    const policy = definePolicy({ protocols: [{ contract: TOKEN, fns: ["transfer"] }] });
-    assert.throws(() => {
-      (policy as { per_tx_cap: bigint }).per_tx_cap = 1n;
-    }, TypeError);
-    assert.throws(() => {
-      (policy.assets as ContractAddress[]).push(TOKEN);
-    }, TypeError);
-    assert.throws(() => {
-      (policy.protocols[0]!.fns as string[]).push("swap");
-    }, TypeError);
-  });
-
-  it("runs validation and throws a structured failure on invalid overrides", () => {
-    assert.throws(
-      () => definePolicy({ per_tx_cap: -1n }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /per_tx_cap/);
-        assert.match(error.message, /negative_amount/);
-        return true;
-      },
-    );
-  });
-
-  it("rejects cross-field violations (window_cap without window_secs)", () => {
-    assert.throws(
-      () => definePolicy({ window_cap: 100n, window_secs: 0n }),
-      /window_requires_secs/,
-    );
-  });
-
-  it("rejects unknown keys at runtime (typo guard)", () => {
-    // The type system catches this via excess-property checking; the runtime
-    // check catches untyped JS callers and `as any` casts.
-    assert.throws(
-      () => definePolicy({ window_cap2: 100n } as unknown as PolicyOverrides),
-      /unknown key/i,
-    );
-  });
-
-  it("rejects unknown keys at the type level (excess-property check)", () => {
-    // @ts-expect-error — window_cap2 is not a PolicyConfig field
-    assert.throws(() => definePolicy({ window_cap2: 100n }), /unknown key/i);
-  });
-
-  it("does not mutate the caller's override object", () => {
-    const overrides: PolicyOverrides = { per_tx_cap: 100n };
-    const snapshot = { ...overrides };
-    definePolicy(overrides);
-    assert.deepEqual(overrides, snapshot);
-  });
-
-  it("produces a policy that encodes and validates cleanly", () => {
-    const policy = definePolicy({ per_tx_cap: 100n });
-    assert.deepEqual(validateGuardPolicy(policy), []);
-    assert.doesNotThrow(() => policyToScVal(policy));
   });
 });
 

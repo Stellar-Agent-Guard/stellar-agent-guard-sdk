@@ -5,7 +5,7 @@
  * smart accounts: pre-flight policy interception, agent-auth transaction
  * signing, and on-chain event telemetry.
  *
- * **Enforcement scope, stated where the capability is claimed:** full
+ * ** Enforcement scope, stated where the capability is claimed: ** full
  * recipient/amount enforcement — spend caps, allowlists, per-transaction limits
  * — is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
  * since these are the calls whose arguments the Soroban auth context exposes for
@@ -66,6 +66,7 @@ export {
   deadManRemaining,
   decodeCheckResult,
   decodePolicy,
+  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -99,6 +100,7 @@ export type {
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
+  PolicyOverride,
   PolicyRuleId,
   ProtocolRule,
   PublicKeyHex,
