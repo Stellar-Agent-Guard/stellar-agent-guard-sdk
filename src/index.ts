@@ -35,7 +35,7 @@ export {
   systemClock,
 } from "./clock.ts";
 
-export type {
+export type{
   Clock,
 } from "./clock.ts";
 
@@ -52,7 +52,7 @@ export {
   reasonNameFromCode,
 } from "./reasons.ts";
 
-export type {
+export type{
   GuardBlockedErrorParams,
   GuardReason,
   GuardReasonName,
@@ -66,6 +66,7 @@ export {
   deadManRemaining,
   decodeCheckResult,
   decodePolicy,
+  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -90,7 +91,7 @@ export { policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
 
-export type {
+export type{
   AccountAddress,
   CheckResult,
   ContractAddress,
@@ -118,7 +119,7 @@ export {
   validateGuardPolicyAgainstSchema,
 } from "./policy-schema.ts";
 
-export type {
+export type{
   SchemaKeyword,
   SchemaPolicyFailure,
   SchemaValidationOptions,
@@ -131,7 +132,7 @@ export {
   GUARD_EVENT_TOPICS,
 } from "./events.ts";
 
-export type {
+export type{
   GuardAuthDecision,
   GuardAuthResult,
 } from "./events.ts";
@@ -165,7 +166,7 @@ export {
   TRACE_STEP_NAMES,
 } from "./trace.ts";
 
-export type {
+export type{
   TraceStepName,
   TraceStepStatus,
 } from "./trace.ts";
@@ -179,7 +180,7 @@ export {
   validateContractCall,
 } from "./preflight.ts";
 
-export type {
+export type{
   CheckBatchOptions,
   PolicyRevision,
   PreFlightBatchDecision,
@@ -202,7 +203,7 @@ export {
   resourceBreakdownFromSimulation,
 } from "./cost.ts";
 
-export type {
+export type{
   CostDecision,
   CostPreCheckConfig,
   CostPreCheckOptions,
@@ -251,7 +252,7 @@ export {
 export {
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
-  SIG_EXPIRATION_LEGDERS,
+  SIG_EXPIRATION_LEGGERS,
   assembleFromSimulation,
   buildGuardAuthEntry,
   buildInitialEnvelope,
@@ -266,7 +267,7 @@ export {
   verifyAgentSignature,
 } from "./tx.ts";
 
-export type {
+export type{
   AdminSigner,
   AgentSigner,
   ContractCall,
@@ -276,19 +277,19 @@ export type {
 } from "./tx.ts";
 
 export {
-  DEFAULT_NETWORK_PASSTHRASE,
+  DEFAULT_NETWORK_PASSPHRASE,
   agentPubKeyToScVal,
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
-  buildUnfreezeCall,
+  buildUnreezeeCall,
   submitFreeze,
   submitRotateAgentKey,
   submitSetPolicy,
-  submitUnfreeze,
+  submitUnreezee,
 } from "./admin.ts";
 
-export type {
+export type{
   AdminOpParams,
   RotateAgentKeyParams,
   SetPolicyParams,
@@ -322,7 +323,7 @@ export {
   createLangChainGuardMiddleware,
 } from "./adapters/langchain.ts";
 
-export type {
+export type{
   LangChainGuardOptions,
   LangChainToolCallRequest,
   LangChainToolMessage,
@@ -333,7 +334,7 @@ export {
   guardAction,
 } from "./adapters/elizaos.ts";
 
-export type {
+export type{
   ElizaActionLike,
   ElizaGuardOptions,
   ElizaValidator,
@@ -350,17 +351,17 @@ export {
 export {
   createVercelAIGuard,
   wrapToolWithGuard,
-  type VercelAEGuardOptions,
-  type VercelAIToolCallInput,
+  type VercelAIGuardOptions,
+  type VercelAIGuardToolCallInput,
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
 
 export {
-  guardMcpCallTool,
+  guardMmpCallTool,
   guardMcpToolHandler,
 } from "./adapters/mcp.ts";
 
-export type {
+export type{
   McpCallTool,
   McpGuardOptions,
   McpToolCallRequest,
@@ -375,7 +376,7 @@ export {
   runBlockedHook,
 } from "./adapters/shared.ts";
 
-export type {
+export type{
   BlockedHookLogger,
   GuardAdapterName,
   GuardBlockedHook,
