@@ -1,4 +1,17 @@
 /**
+ * @example
+ * Expected output (run via `npx tsx examples/elizaos.ts`):
+ *
+ *   === ElizaOS Validator Example Run ===
+ *   [Run 1: Allowed] Validation verdict (true => eligible): true
+ *   [Run 2: Blocked] Validation verdict (false => dropped): false
+ *   [Run 2: Blocked] adapter=elizaos kind=policy_violation
+ *   [Run 2: Blocked] Reason: per_tx_cap_exceeded
+ *   [Run 2: Blocked] Explanation: <human-readable refusal explanation>
+ *
+ * This file is typechecked in CI via the `examples` tsconfig project
+ * (see examples/README.md §Rule 1 and .github/workflows/ci.yml).
+ *
  * ElizaOS Action Validator Example — Full runnable demonstration with action wiring.
  *
  * Demonstrates:
@@ -25,15 +38,18 @@ import {
   PreFlightInterceptor,
   createGuardValidator,
   guardAction,
+  unsafeContractAddress,
+  unsafeAccountAddress,
   type ContractCall,
   type ElizaActionLike,
-  type PreFlightDecision,
+  type GuardBlockedInfo,
 } from "../src/index.ts";
 
-export const EXAMPLE_GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-export const EXAMPLE_TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
-export const ALLOWED_RECIPIENT = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
-export const BLOCKED_RECIPIENT = "GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM";
+/** Guard contract used by this example (testnet fixture). */
+export const EXAMPLE_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+export const EXAMPLE_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+export const ALLOWED_RECIPIENT = unsafeAccountAddress("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ");
+export const BLOCKED_RECIPIENT = unsafeAccountAddress("GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM");
 
 export interface ElizaTransferState {
   token?: string;
@@ -48,7 +64,7 @@ export function toContractCall(_message: unknown, state: unknown): ContractCall 
   if (!s.to || s.amount === undefined) return null;
 
   return {
-    contract: s.token ?? EXAMPLE_TOKEN,
+    contract: unsafeContractAddress(s.token ?? EXAMPLE_TOKEN),
     fn: "transfer",
     args: [
       new Address(s.from ?? EXAMPLE_GUARD).toScVal(),
@@ -126,7 +142,7 @@ export async function runElizaOSExample(serverOverride?: rpc.Server) {
     source,
   });
 
-  const blockedDecisions: Array<PreFlightDecision & { allowed: false }> = [];
+  const blockedDecisions: GuardBlockedInfo[] = [];
 
   // Define base ElizaOS action
   let baseValidateRan = 0;
@@ -150,8 +166,8 @@ export async function runElizaOSExample(serverOverride?: rpc.Server) {
   const action = guardAction(rawTransferAction, {
     interceptor,
     toContractCall,
-    onBlocked: (decision) => {
-      blockedDecisions.push(decision);
+    onBlocked: (info) => {
+      blockedDecisions.push(info);
     },
   });
 
@@ -196,6 +212,7 @@ export async function runElizaOSExample(serverOverride?: rpc.Server) {
   };
 }
 
+/** CLI entrypoint — prints the expected-output transcript documented in the header. */
 if (import.meta.url === `file://${process.argv[1]}`) {
   runElizaOSExample().then((res) => {
     console.log("=== ElizaOS Validator Example Run ===");
@@ -203,8 +220,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log("[Run 2: Blocked] Validation verdict (false => dropped):", res.blockedVerdict);
     if (res.blockedDecisions.length > 0) {
       const b = res.blockedDecisions[0]!;
-      console.log("[Run 2: Blocked] Reason:", b.kind === "blocked" ? b.reason : b.kind);
-      console.log("[Run 2: Blocked] Explanation:", b.kind === "blocked" ? b.explanation : b.detail);
+      console.log(`[Run 2: Blocked] adapter=${b.adapter} kind=${b.kind}`);
+      console.log("[Run 2: Blocked] Reason:", b.reason ?? b.kind);
+      console.log("[Run 2: Blocked] Explanation:", b.explanation);
     }
   });
 }

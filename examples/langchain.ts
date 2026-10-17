@@ -1,4 +1,17 @@
 /**
+ * @example langchain
+ * @policy examples/README.md — every file here is typechecked in CI via the
+ *   `examples` tsconfig project (see .github/workflows/ci.yml, "Typecheck
+ *   examples" step) and must carry this expected-output header.
+ * @expected-output
+ *   === LangChain Middleware Example Run ===
+ *   [Run 1: Allowed] Tool ran: true
+ *   [Run 1: Allowed] Result: { content: '{"success":true,"transferred":"50"}' }
+ *   [Run 2: Blocked] Tool ran: false
+ *   [Run 2: Blocked] Message content:
+ *    Blocked by Stellar Agent Guard: recipient_not_allowed — recipient is not on the allowlist.
+ */
+/**
  * LangChain Middleware Example — Full runnable demonstration with a fake transfer tool.
  *
  * Demonstrates:
@@ -20,15 +33,18 @@ import {
 import {
   PreFlightInterceptor,
   createLangChainGuardMiddleware,
+  unsafeContractAddress,
+  unsafeAccountAddress,
   type ContractCall,
+  type GuardBlockedInfo,
   type LangChainToolCallRequest,
   type PreFlightDecision,
 } from "../src/index.ts";
 
-export const EXAMPLE_GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-export const EXAMPLE_TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
-export const ALLOWED_RECIPIENT = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
-export const BLOCKED_RECIPIENT = "GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM";
+export const EXAMPLE_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+export const EXAMPLE_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+export const ALLOWED_RECIPIENT = unsafeAccountAddress("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ");
+export const BLOCKED_RECIPIENT = unsafeAccountAddress("GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM");
 
 export interface FakeTransferToolArgs {
   from?: string;
@@ -124,6 +140,7 @@ export async function runLangChainExample(serverOverride?: rpc.Server) {
   });
 
   const decisionsObserved: PreFlightDecision[] = [];
+  const blockedInfos: GuardBlockedInfo[] = [];
 
   // Create LangChain middleware
   const middleware = createLangChainGuardMiddleware({
@@ -131,6 +148,11 @@ export async function runLangChainExample(serverOverride?: rpc.Server) {
     toContractCall,
     onDecision: (_req, decision) => {
       decisionsObserved.push(decision);
+    },
+    // Operator-facing half of a refusal: wire this to a webhook/log/alert
+    // channel so the human watching dashboards learns about the block too.
+    onBlocked: (info) => {
+      blockedInfos.push(info);
     },
   });
 
@@ -182,6 +204,7 @@ export async function runLangChainExample(serverOverride?: rpc.Server) {
     blockedToolRan,
     blockedResult,
     decisionsObserved,
+    blockedInfos,
   };
 }
 
