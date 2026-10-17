@@ -231,6 +231,9 @@ export interface ValidatePolicyOptions {
 /** Type alias for PolicyConfig matching contract documentation and external vocabulary. */
 export type GuardPolicy = PolicyConfig;
 
+/** Partial override accepted by `definePolicy`; unknown keys are rejected at the type level. */
+export type PolicyOverrides = Partial<PolicyConfig>;
+
 export interface GuardStatus {
   has_policy: boolean;
   admin_frozen: boolean;
@@ -1351,11 +1354,11 @@ export function validateGuardPolicy(
 }
 
 /**
- * Default guard policy used as the merge base for `definePolicy`.
+ * Default guard policy used as the base for `definePolicy`.
  *
- * Deny-by-default: no assets, no protocols, no recipients, no dead-man grace.
- * Integrators override only the fields they care about; everything else stays
- * locked down until explicitly widened.
+ * This is a conservative default-deny policy: no assets, no protocols, no
+ * recipients, and `allow_any_recipient: false`. Integrators override only the
+ * fields they care about via `definePolicy({...})`.
  */
 export const DEFAULT_GUARD_POLICY: ReadonlyPolicyConfig = freezePolicy({
   per_tx_cap: 0n,
@@ -1370,14 +1373,6 @@ export const DEFAULT_GUARD_POLICY: ReadonlyPolicyConfig = freezePolicy({
   paused: false,
   dms_grace_secs: 0n,
 });
-
-/**
- * Partial override accepted by `definePolicy`. Every field is optional; the
- * excess-property check on the generic `T` rejects unknown keys at compile
- * time (e.g. a typo like `window_cap2`), and `definePolicy` re-checks the same
- * keys at runtime for callers that bypass the type system (JSON, `as any`).
- */
-export type PolicyOverrides = Partial<PolicyConfig>;
 
 const POLICY_OVERRIDE_KEYS: ReadonlySet<string> = new Set<string>([
   "per_tx_cap",
@@ -1396,111 +1391,102 @@ const POLICY_OVERRIDE_KEYS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /**
- * Build a full `GuardPolicy` from a partial override, deep-merged over
- * `DEFAULT_GUARD_POLICY` and validated before return.
+ * Build a full, validated, frozen `GuardPolicy` from a partial override.
  *
- * Merge semantics — **override wins entirely, no array merge**:
- * - Scalar fields (`per_tx_cap`, `window_secs`, `paused`, …) are replaced when
- *   present in the override, otherwise the default is used.
- * - Array fields (`assets`, `protocols`, `recipients`, `recipient_window_caps`,
- *   `blocked_recipients`) are **replaced**, never concatenated. Rationale:
- *   silently merging allowlists is dangerous — an integrator who intends to
- *   narrow the recipient set would instead widen it by inheriting the default
- *   entries, and a typo'd field would silently retain the permissive default.
- *   Override wins entirely so the resulting policy is exactly what the caller
- *   wrote.
- * - Nested objects inside arrays (`ProtocolRule`, `RecipientWindowCap`) are
- *   taken as-is from the override; no per-element merge.
+ * Merge semantics: shallow, field-by-field. Any field present in `overrides`
+ * replaces the default entirely — arrays are **not** concatenated. This is
+ * deliberate: silently merging allowlists (recipients, assets, protocols) is a
+ * footgun, since an integrator who expects to replace a list would instead
+ * widen it. Override wins entirely; no array merge.
  *
- * Unknown keys are rejected both at compile time (TS excess-property check via
- * the generic) and at runtime (structured `PolicyValidationError`), so a typo
- * like `window_cap2` fails loudly instead of being silently ignored.
+ * Unknown keys are rejected both at the type level (excess-property check on
+ * the object literal) and at runtime (defensive check for casts / JSON input),
+ * so a typo like `window_cap2` fails fast instead of being silently ignored.
  *
- * Validation runs `validateGuardPolicy` (SPEC §8 cross-field rules) on the
- * merged result and throws a `PolicyValidationError` carrying every
- * `PolicyFailure` if any rule fails. The returned object is frozen via
- * `freezePolicy`, so later mutation throws in strict mode.
+ * Validation runs via `validateGuardPolicy` before the result is frozen and
+ * returned; failures throw a `PolicyValidationError` carrying every
+ * `PolicyFailure` so callers can surface them all at once.
  *
- * @param overrides Partial policy fields to merge over the defaults.
+ * @param overrides Partial policy fields to layer over `DEFAULT_GUARD_POLICY`.
  * @param options Optional validation options (guard address, max entries).
- * @returns A frozen, fully-populated, validated `GuardPolicy`.
- * @throws {PolicyValidationError} When unknown keys are present or validation fails.
+ * @returns A frozen, fully-populated `ReadonlyPolicyConfig`.
+ * @throws {PolicyValidationError} When the merged policy fails SPEC §8 rules.
  */
-export function definePolicy<T extends PolicyOverrides>(
-  overrides: T & Record<Exclude<keyof T, keyof PolicyConfig>, never> = {} as T &
-    Record<Exclude<keyof T, keyof PolicyConfig>, never>,
+export function definePolicy(
+  overrides: PolicyOverrides = {},
   options?: ValidatePolicyOptions,
 ): ReadonlyPolicyConfig {
-  const input = overrides as Record<string, unknown>;
+  if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) {
+    throw new PolicyValidationError("policy overrides must be a non-null object", {
+      failures: [
+        {
+          path: "policy",
+          rule: "invalid_type",
+          message: "policy overrides must be a non-null object",
+        },
+      ],
+    });
+  }
 
-  const unknownKeys = Object.keys(input).filter((key) => !POLICY_OVERRIDE_KEYS.has(key));
+  const unknownKeys: string[] = [];
+  for (const key of Object.keys(overrides)) {
+    if (!POLICY_OVERRIDE_KEYS.has(key)) unknownKeys.push(key);
+  }
   if (unknownKeys.length > 0) {
-    const failures: PolicyFailure[] = unknownKeys.map((key) => ({
-      path: key,
-      rule: "invalid_type",
-      message: `unknown policy field "${key}" (typo? definePolicy rejects unknown keys)`,
-    }));
     throw new PolicyValidationError(
-      `definePolicy: unknown field(s): ${unknownKeys.join(", ")}`,
-      failures,
+      `unknown policy field(s): ${unknownKeys.join(", ")}`,
+      {
+        failures: unknownKeys.map((key) => ({
+          path: key,
+          rule: "invalid_type" as const,
+          message: `unknown policy field "${key}"`,
+        })),
+      },
     );
   }
 
   const merged: PolicyConfig = {
-    per_tx_cap: pick(input, "per_tx_cap", DEFAULT_GUARD_POLICY.per_tx_cap),
-    window_secs: pick(input, "window_secs", DEFAULT_GUARD_POLICY.window_secs),
-    window_cap: pick(input, "window_cap", DEFAULT_GUARD_POLICY.window_cap),
-    assets: pickArray(input, "assets", DEFAULT_GUARD_POLICY.assets),
-    protocols: pickArray(input, "protocols", DEFAULT_GUARD_POLICY.protocols),
-    recipients: pickArray(input, "recipients", DEFAULT_GUARD_POLICY.recipients),
-    allow_any_recipient: pick(input, "allow_any_recipient", DEFAULT_GUARD_POLICY.allow_any_recipient),
-    active_from: pick(input, "active_from", DEFAULT_GUARD_POLICY.active_from),
-    active_until: pick(input, "active_until", DEFAULT_GUARD_POLICY.active_until),
-    paused: pick(input, "paused", DEFAULT_GUARD_POLICY.paused),
-    dms_grace_secs: pick(input, "dms_grace_secs", DEFAULT_GUARD_POLICY.dms_grace_secs),
+    per_tx_cap: overrides.per_tx_cap ?? DEFAULT_GUARD_POLICY.per_tx_cap,
+    window_secs: overrides.window_secs ?? DEFAULT_GUARD_POLICY.window_secs,
+    window_cap: overrides.window_cap ?? DEFAULT_GUARD_POLICY.window_cap,
+    assets: overrides.assets ? [...overrides.assets] : [...DEFAULT_GUARD_POLICY.assets],
+    protocols: overrides.protocols
+      ? overrides.protocols.map((rule) => ({
+          contract: rule.contract,
+          fns: rule.fns === null ? null : [...rule.fns],
+        }))
+      : DEFAULT_GUARD_POLICY.protocols.map((rule) => ({
+          contract: rule.contract,
+          fns: rule.fns === null ? null : [...rule.fns],
+        })),
+    recipients: overrides.recipients
+      ? [...overrides.recipients]
+      : [...DEFAULT_GUARD_POLICY.recipients],
+    allow_any_recipient:
+      overrides.allow_any_recipient ?? DEFAULT_GUARD_POLICY.allow_any_recipient,
+    active_from: overrides.active_from ?? DEFAULT_GUARD_POLICY.active_from,
+    active_until: overrides.active_until ?? DEFAULT_GUARD_POLICY.active_until,
+    paused: overrides.paused ?? DEFAULT_GUARD_POLICY.paused,
+    dms_grace_secs: overrides.dms_grace_secs ?? DEFAULT_GUARD_POLICY.dms_grace_secs,
   };
 
-  if (input.recipient_window_caps !== undefined) {
-    merged.recipient_window_caps = pickArray(
-      input,
-      "recipient_window_caps",
-      DEFAULT_GUARD_POLICY.recipient_window_caps ?? [],
-    );
+  if (overrides.recipient_window_caps !== undefined) {
+    merged.recipient_window_caps = overrides.recipient_window_caps.map((cap) => ({
+      recipient: cap.recipient,
+      cap: cap.cap,
+    }));
   }
-  if (input.blocked_recipients !== undefined) {
-    merged.blocked_recipients = pickArray(
-      input,
-      "blocked_recipients",
-      DEFAULT_GUARD_POLICY.blocked_recipients ?? [],
-    );
+  if (overrides.blocked_recipients !== undefined) {
+    merged.blocked_recipients = [...overrides.blocked_recipients];
   }
 
   const failures = validateGuardPolicy(merged, options);
   if (failures.length > 0) {
     throw new PolicyValidationError(
-      `definePolicy: policy failed validation (${failures.length} failure(s))`,
-      failures,
+      `invalid guard policy: ${failures.map((f) => `${f.path}: ${f.message}`).join("; ")}`,
+      { failures },
     );
   }
 
   return freezePolicy(merged);
-}
-
-function pick<K extends keyof PolicyConfig>(
-  input: Record<string, unknown>,
-  key: K,
-  fallback: PolicyConfig[K],
-): PolicyConfig[K] {
-  return input[key] === undefined ? fallback : (input[key] as PolicyConfig[K]);
-}
-
-function pickArray<K extends keyof PolicyConfig>(
-  input: Record<string, unknown>,
-  key: K,
-  fallback: NonNullable<PolicyConfig[K]>,
-): NonNullable<PolicyConfig[K]> {
-  const value = input[key];
-  if (value === undefined) return fallback;
-  // Override wins entirely — no array merge. See definePolicy doc comment.
-  return value as NonNullable<PolicyConfig[K]>;
 }

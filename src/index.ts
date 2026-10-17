@@ -5,7 +5,7 @@
  * smart accounts: pre-flight policy interception, agent-auth transaction
  * signing, and on-chain event telemetry.
  *
- * **Enforcement scope, stated where the capability is claimed:** full
+ * ** Enforcement scope, stated where the capability is claimed: ** full
  * recipient/amount enforcement — spend caps, allowlists, per-transaction limits
  * — is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
  * since these are the calls whose arguments the Soroban auth context exposes for
@@ -35,7 +35,7 @@ export {
   systemClock,
 } from "./clock.ts";
 
-export type{
+export type {
   Clock,
 } from "./clock.ts";
 
@@ -52,7 +52,7 @@ export {
   reasonNameFromCode,
 } from "./reasons.ts";
 
-export type{
+export type {
   GuardBlockedErrorParams,
   GuardReason,
   GuardReasonName,
@@ -64,9 +64,9 @@ export type{
 export {
   POLICY_RULE_IDS,
   deadManRemaining,
-  definePolicy,
   decodeCheckResult,
   decodePolicy,
+  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -91,7 +91,7 @@ export { policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
 
-export type{
+export type {
   AccountAddress,
   CheckResult,
   ContractAddress,
@@ -100,7 +100,7 @@ export type{
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
-  PolicyOverrides,
+  PolicyOverride,
   PolicyRuleId,
   ProtocolRule,
   PublicKeyHex,
@@ -120,7 +120,7 @@ export {
   validateGuardPolicyAgainstSchema,
 } from "./policy-schema.ts";
 
-export type{
+export type {
   SchemaKeyword,
   SchemaPolicyFailure,
   SchemaValidationOptions,
@@ -133,7 +133,7 @@ export {
   GUARD_EVENT_TOPICS,
 } from "./events.ts";
 
-export type{
+export type {
   GuardAuthDecision,
   GuardAuthResult,
 } from "./events.ts";
@@ -167,7 +167,7 @@ export {
   TRACE_STEP_NAMES,
 } from "./trace.ts";
 
-export type{
+export type {
   TraceStepName,
   TraceStepStatus,
 } from "./trace.ts";
@@ -181,7 +181,7 @@ export {
   validateContractCall,
 } from "./preflight.ts";
 
-export type{
+export type {
   CheckBatchOptions,
   PolicyRevision,
   PreFlightBatchDecision,
@@ -204,7 +204,7 @@ export {
   resourceBreakdownFromSimulation,
 } from "./cost.ts";
 
-export type{
+export type {
   CostDecision,
   CostPreCheckConfig,
   CostPreCheckOptions,
@@ -253,7 +253,7 @@ export {
 export {
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
-  SIG_EXPIRATION_LEGGERS,
+  SIG_EXPIRATION_LEGDERS,
   assembleFromSimulation,
   buildGuardAuthEntry,
   buildInitialEnvelope,
@@ -268,7 +268,7 @@ export {
   verifyAgentSignature,
 } from "./tx.ts";
 
-export type{
+export type {
   AdminSigner,
   AgentSigner,
   ContractCall,
@@ -278,8 +278,8 @@ export type{
 } from "./tx.ts";
 
 export {
-  DEFAULT_NETWORK_PASSPHRASE,
-  agentPubkeyToScVal,
+  DEFAULT_NETWORK_PASSTHRASE,
+  agentPubKeyToScVal,
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
@@ -290,7 +290,7 @@ export {
   submitUnfreeze,
 } from "./admin.ts";
 
-export type{
+export type {
   AdminOpParams,
   RotateAgentKeyParams,
   SetPolicyParams,
@@ -324,7 +324,7 @@ export {
   createLangChainGuardMiddleware,
 } from "./adapters/langchain.ts";
 
-export type{
+export type {
   LangChainGuardOptions,
   LangChainToolCallRequest,
   LangChainToolMessage,
@@ -335,7 +335,7 @@ export {
   guardAction,
 } from "./adapters/elizaos.ts";
 
-export type{
+export type {
   ElizaActionLike,
   ElizaGuardOptions,
   ElizaValidator,
@@ -358,11 +358,11 @@ export {
 } from "./adapters/vercelai.ts";
 
 export {
-  guardMcpCallTool,
-  guardMcpToolHandler,
+  guardMmcpCallTool,
+  guardMmcpToolHandler,
 } from "./adapters/mcp.ts";
 
-export type{
+export type {
   McpCallTool,
   McpGuardOptions,
   McpToolCallRequest,
@@ -377,7 +377,7 @@ export {
   runBlockedHook,
 } from "./adapters/shared.ts";
 
-export type{
+export type {
   BlockedHookLogger,
   GuardAdapterName,
   GuardBlockedHook,
