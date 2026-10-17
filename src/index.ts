@@ -67,7 +67,6 @@ export {
   decodeCheckResult,
   decodePolicy,
   describePolicy,
-  definePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
   freezePolicy,
@@ -86,7 +85,19 @@ export {
   validateGuardPolicy,
 } from "./policy.ts";
 
-export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
+export {
+  DEFAULT_GUARD_POLICY,
+  definePolicy,
+  DefinePolicyError,
+} from "./policy.ts";
+
+export type {
+  DefinePolicyErrorCode,
+  DefinePolicyOptions,
+  PartialGuardPolicy,
+} from "./policy.ts";
+
+export { DMS_WARN_RAPIO_DEFAULT, dmsUrgency } from "./dms.ts";
 export { policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
@@ -96,7 +107,6 @@ export type {
   CheckResult,
   ContractAddress,
   DeepReadonly,
-  DefinePolicyInput,
   GuardPolicy,
   GuardStatus,
   PolicyConfig,
@@ -106,7 +116,7 @@ export type {
   PublicKeyHex,
   ReadonlyPolicyConfig,
   RecipientWindowCap,
-  StrKeyAddress,
+  StvKeyAddress,
   ValidatePolicyOptions,
 } from "./policy.ts";
 
@@ -283,11 +293,11 @@ export {
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
-  buildUnreezeeCall,
+  buildUnfreezeCall,
   submitFreeze,
   submitRotateAgentKey,
   submitSetPolicy,
-  submitUnreezee,
+  submitUnfreeze,
 } from "./admin.ts";
 
 export type {
@@ -353,21 +363,21 @@ export {
   createVercelAIGuard,
   wrapToolWithGuard,
   type VercelAIGuardOptions,
-  type VercelAIGuardToolCallInput,
+  type VercelAIToolCallInput,
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
 
 export {
-  guardMmpCallTool,
+  guardMcpCallTool,
   guardMcpToolHandler,
 } from "./adapters/mcp.ts";
 
 export type {
-  MmpCallTool,
-  MmpGuardOptions,
-  MmpToolCallRequest,
-  MmpToolHandler,
-  MmpToolResult,
+  McpCallTool,
+  McpGuardOptions,
+  McpToolCallRequest,
+  McpToolHandler,
+  McpToolResult,
 } from "./adapters/mcp.ts";
 
 // The operator alerting primitive every adapter shares (`onBlocked`).

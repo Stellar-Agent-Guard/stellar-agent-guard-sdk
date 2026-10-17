@@ -231,28 +231,10 @@ export interface ValidatePolicyOptions {
 export type GuardPolicy = PolicyConfig;
 
 /**
- * Partial policy override accepted by `definePolicy`. Every field is optional;
- * unknown keys are rejected at the type level via the excess-property check on
- * the generic below and at runtime by `definePolicy` itself.
- */
-export type PolicyOverrides = Partial<PolicyConfig>;
-
-export interface GuardStatus {
-  has_policy: boolean;
-  admin_frozen: boolean;
-  heartbeat_expired: boolean;
-  last_heartbeat: bigint;
-  now: bigint;
-}
-
-/**
- * Default guard policy used as the base for `definePolicy`.
+ * Default guard policy used as the base for `definePolicy` overrides.
  *
- * Conservative defaults: no assets, no protocols, no recipients, and
- * `allow_any_recipient: false` — i.e. default-deny. Integrators are expected
- * to override the fields they need rather than copy a full literal.
- *
- * The returned object is frozen; do not mutate it.
+ * Deny-by-default: no assets, no protocols, no recipients, `allow_any_recipient`
+ * false, and `paused` false. Integrators override only the fields they need.
  */
 export const DEFAULT_GUARD_POLICY: ReadonlyPolicyConfig = freezePolicy({
   per_tx_cap: 0n,
@@ -268,7 +250,7 @@ export const DEFAULT_GUARD_POLICY: ReadonlyPolicyConfig = freezePolicy({
   dms_grace_secs: 0n,
 });
 
-const POLICY_KEYS: ReadonlyArray<keyof PolicyConfig> = [
+const POLICY_KEYS = new Set<string>([
   "per_tx_cap",
   "window_secs",
   "window_cap",
@@ -282,104 +264,91 @@ const POLICY_KEYS: ReadonlyArray<keyof PolicyConfig> = [
   "dms_grace_secs",
   "recipient_window_caps",
   "blocked_recipients",
-];
+]);
 
 /**
- * Structured failure thrown by `definePolicy` when the merged policy fails
- * validation. Carries the full list of `PolicyFailure` items so callers can
- * surface every problem at once.
+ * Partial override accepted by `definePolicy`. Unknown keys are rejected at
+ * compile time via the excess-property check on object literals.
  */
-export class PolicyValidationError extends Error {
-  readonly failures: ReadonlyArray<PolicyFailure>;
-  constructor(failures: ReadonlyArray<PolicyFailure>) {
-    super(
-      `invalid guard policy: ${failures.map((f) => `${f.path}: ${f.message}`).join("; ")}`,
-    );
-    this.name = "PolicyValidationError";
-    this.failures = failures;
-  }
-}
+export type PolicyOverride = Partial<PolicyConfig>;
 
 /**
  * Build a full `GuardPolicy` from a partial override, deep-merged over
- * `DEFAULT_GUARD_POLICY` and validated before being returned.
+ * `DEFAULT_GUARD_POLICY` and validated before return.
  *
- * Merge semantics:
- * - Scalar fields: the override wins when present.
- * - Array fields (`assets`, `protocols`, `recipients`, `blocked_recipients`,
- *   `recipient_window_caps`): the override **replaces** the default array
- *   entirely. Arrays are never concatenated. Rationale: silently merging
- *   allowlists is a security footgun — an integrator who supplies a fresh
- *   `recipients` list expects exactly that list to be in force, not that list
- *   plus whatever the default happened to contain.
- * - Nested objects (`protocols[i]`, `recipient_window_caps[i]`): treated as
- *   opaque values; the override's array is used as-is.
+ * Merge semantics: scalar fields override; array fields (`assets`, `protocols`,
+ * `recipients`, `recipient_window_caps`, `blocked_recipients`) are **replaced
+ * entirely** — never concatenated. Array merge on allowlists is a footgun
+ * (silently widening or narrowing the allowlist), so override wins outright.
  *
- * Unknown keys are rejected at runtime (in addition to the TypeScript
- * excess-property check on the generic parameter) so a typo like
- * `window_cap2` fails fast instead of being silently ignored.
- *
- * Validation runs `validateGuardPolicy` on the merged result; on failure a
- * `PolicyValidationError` is thrown carrying the structured `failures`.
- *
- * The returned policy is frozen (see `freezePolicy`).
- *
- * @param overrides Partial policy fields to merge over the defaults.
- * @param options Optional validation options (e.g. `guardAddress`).
- * @returns A frozen, validated `GuardPolicy`.
+ * Unknown keys are rejected at runtime (typos like `window_cap2` would
+ * otherwise be silently ignored). Validation runs via `validateGuardPolicy`;
+ * any failures throw a `PolicyValidationError` with the structured failures.
  */
-export function definePolicy<T extends PolicyOverrides>(
-  overrides?: T,
-  options?: ValidatePolicyOptions,
-): ReadonlyPolicyConfig {
-  const input = (overrides ?? {}) as Record<string, unknown>;
-
-  for (const key of Object.keys(input)) {
-    if (!(POLICY_KEYS as ReadonlyArray<string>).includes(key)) {
-      throw new PolicyValidationError([
-        {
-          path: key,
-          rule: "invalid_type",
-          message: `unknown policy field "${key}"`,
-        },
-      ]);
-    }
+export function definePolicy(override: PolicyOverride = {}): ReadonlyPolicyConfig {
+  const raw = override as Record<string, unknown>;
+  const unknownKeys = Object.keys(raw).filter((k) => !POLICY_KEYS.has(k));
+  if (unknownKeys.length > 0) {
+    throw new PolicyValidationError(
+      `unknown policy key(s): ${unknownKeys.join(", ")}`,
+      unknownKeys.map((k) => ({
+        path: k,
+        rule: "invalid_type" as const,
+        message: `unknown policy key "${k}"`,
+      })),
+    );
   }
 
   const merged: PolicyConfig = {
-    per_tx_cap: (input.per_tx_cap as bigint | undefined) ?? DEFAULT_GUARD_POLICY.per_tx_cap,
-    window_secs: (input.window_secs as bigint | undefined) ?? DEFAULT_GUARD_POLICY.window_secs,
-    window_cap: (input.window_cap as bigint | undefined) ?? DEFAULT_GUARD_POLICY.window_cap,
-    assets: ((input.assets as ContractAddress[] | undefined) ?? DEFAULT_GUARD_POLICY.assets).slice(),
-    protocols: ((input.protocols as ProtocolRule[] | undefined) ?? DEFAULT_GUARD_POLICY.protocols).map(
-      (rule) => ({
-        contract: rule.contract,
-        fns: rule.fns === null ? null : rule.fns.slice(),
-      }),
-    ),
-    recipients: ((input.recipients as AccountAddress[] | undefined) ?? DEFAULT_GUARD_POLICY.recipients).slice(),
+    per_tx_cap: (raw.per_tx_cap as bigint | undefined) ?? DEFAULT_GUARD_POLICY.per_tx_cap,
+    window_secs: (raw.window_secs as bigint | undefined) ?? DEFAULT_GUARD_POLICY.window_secs,
+    window_cap: (raw.window_cap as bigint | undefined) ?? DEFAULT_GUARD_POLICY.window_cap,
+    assets: raw.assets !== undefined ? [...(raw.assets as ContractAddress[])] : [...DEFAULT_GUARD_POLICY.assets],
+    protocols:
+      raw.protocols !== undefined
+        ? (raw.protocols as ProtocolRule[]).map((r) => ({
+            contract: r.contract,
+            fns: r.fns === null ? null : [...r.fns],
+          }))
+        : [...DEFAULT_GUARD_POLICY.protocols],
+    recipients:
+      raw.recipients !== undefined
+        ? [...(raw.recipients as AccountAddress[])]
+        : [...DEFAULT_GUARD_POLICY.recipients],
     allow_any_recipient:
-      (input.allow_any_recipient as boolean | undefined) ?? DEFAULT_GUARD_POLICY.allow_any_recipient,
-    active_from: (input.active_from as bigint | undefined) ?? DEFAULT_GUARD_POLICY.active_from,
-    active_until: (input.active_until as bigint | undefined) ?? DEFAULT_GUARD_POLICY.active_until,
-    paused: (input.paused as boolean | undefined) ?? DEFAULT_GUARD_POLICY.paused,
-    dms_grace_secs: (input.dms_grace_secs as bigint | undefined) ?? DEFAULT_GUARD_POLICY.dms_grace_secs,
+      (raw.allow_any_recipient as boolean | undefined) ?? DEFAULT_GUARD_POLICY.allow_any_recipient,
+    active_from: (raw.active_from as bigint | undefined) ?? DEFAULT_GUARD_POLICY.active_from,
+    active_until: (raw.active_until as bigint | undefined) ?? DEFAULT_GUARD_POLICY.active_until,
+    paused: (raw.paused as boolean | undefined) ?? DEFAULT_GUARD_POLICY.paused,
+    dms_grace_secs:
+      (raw.dms_grace_secs as bigint | undefined) ?? DEFAULT_GUARD_POLICY.dms_grace_secs,
   };
-
-  if (input.recipient_window_caps !== undefined) {
-    merged.recipient_window_caps = (input.recipient_window_caps as RecipientWindowCap[]).map((cap) => ({
-      recipient: cap.recipient,
-      cap: cap.cap,
+  if (raw.recipient_window_caps !== undefined) {
+    merged.recipient_window_caps = (raw.recipient_window_caps as RecipientWindowCap[]).map((c) => ({
+      recipient: c.recipient,
+      cap: c.cap,
     }));
   }
-  if (input.blocked_recipients !== undefined) {
-    merged.blocked_recipients = (input.blocked_recipients as AccountAddress[]).slice();
+  if (raw.blocked_recipients !== undefined) {
+    merged.blocked_recipients = [...(raw.blocked_recipients as AccountAddress[])];
   }
 
-  const failures = validateGuardPolicy(merged, options);
-  if (failures.length > 0) throw new PolicyValidationError(failures);
-
+  const failures = validateGuardPolicy(merged);
+  if (failures.length > 0) {
+    throw new PolicyValidationError(
+      `invalid policy: ${failures.map((f) => `${f.path}: ${f.message}`).join("; ")}`,
+      failures,
+    );
+  }
   return freezePolicy(merged);
+}
+
+export interface GuardStatus {
+  has_policy: boolean;
+  admin_frozen: boolean;
+  heartbeat_expired: boolean;
+  last_heartbeat: bigint;
+  now: bigint;
 }
 
 /**
