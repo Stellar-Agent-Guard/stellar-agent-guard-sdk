@@ -1,101 +1,122 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 
-const ROOT = process.cwd();
-const DOC_FILES = ["README.md", "CONTRIBUTING.md"];
+const REPO_ROOT = resolve(import.meta.dirname, "..");
+const PACKAGE_JSON = join(REPO_ROOT, "package.json");
+
+/** Files always scanned. */
+const ROOT_DOCS = ["README.md", "CONTRIBUTING.md"];
+
+/** Directories whose `.md` files are scanned recursively. */
 const DOC_DIRS = ["docs"];
 
-interface Finding {
+/** Matches `npm run <name>` and captures `<name>`. */
+const NPM_RUN_RE = /\bnpm\s+run\s+([A-Za-z0-9:_-]+)/gu;
+
+/** Matches bare `npm test` (no `run`), which maps to the `test` script. */
+const NPM_TEST_RE = /\bnpm\s+test\b(?!\s+run)/gu;
+
+interface ScriptRef {
   readonly file: string;
   readonly line: number;
-  readonly script: string;
+  readonly name: string;
 }
 
-function collectDocFiles(): string[] {
+function loadScripts(): Set<string> {
+  const raw = readFileSync(PACKAGE_JSON, "utf8");
+  const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
+  return new Set(Object.keys(pkg.scripts ?? {}));
+}
+
+function collectMarkdownFiles(): string[] {
   const files: string[] = [];
-  for (const f of DOC_FILES) {
+  for (const name of ROOT_DOCS) {
+    const full = join(REPO_ROOT, name);
     try {
-      if (statSync(join(ROOT, f)).isFile()) files.push(f);
+      if (statSync(full).isFile()) files.push(full);
     } catch {
-      // missing top-level doc is not an error
+      // Missing root doc is not an error — the repo may not have it yet.
     }
   }
   for (const dir of DOC_DIRS) {
-    const abs = join(ROOT, dir);
+    const full = join(REPO_ROOT, dir);
     try {
-      if (!statSync(abs).isDirectory()) continue;
+      if (!statSync(full).isDirectory()) continue;
     } catch {
       continue;
     }
-    walk(abs, files);
+    walk(full, files);
   }
   return files;
 }
 
-function walk(absDir: string, out: string[]): void {
-  for (const entry of readdirSync(absDir)) {
-    const abs = join(absDir, entry);
-    const st = statSync(abs);
-    if (st.isDirectory()) {
-      walk(abs, out);
-    } else if (st.isFile() && entry.endsWith(".md")) {
-      out.push(relative(ROOT, abs));
+function walk(dir: string, out: string[]): void {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      walk(full, out);
+    } else if (entry.isFile() && entry.name.endsWith(".md")) {
+      out.push(full);
     }
   }
 }
 
-// Matches `npm run <name>` and `npm run <name> ...` in prose or code blocks.
-// Captures the script name (letters, digits, colon, dash, underscore, dot).
-const NPM_RUN_RE = /\bnpm\r+run\s+([A-Za-z0-9:_\-.]+)/gu;
-
-function scanFile(relPath: string, knownScripts: Set<string>): Finding[] {
-  const content = readFileSync(join(ROOT, relPath), "utf8");
-  const findings: Finding[] = [];
-  const lines = content.split("\n");
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i] ?? "";
-    NPL_RUN_RE.lastIndex = 0;
-    let m: RegExpExecArray | null;
-    while ((m = NPM_RUN_RE.exec(line)) !== null) {
-      const name = m[1];
-      if (name === undefined) continue;
-      if (!knownScripts.has(name)) {
-        findings.push({ file: relPath, line: i + 1, script: name });
-      }
-    }
+function lineOf(content: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index; i++) {
+    if (content.charCodeAt(i) === 10) line++;
   }
-  return findings;
+  return line;
 }
 
-function main(): void {
-  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")) as {
-    scripts?: Record<string, string>;
-  };
-  const knownScripts = new Set(Object.keys(pkg.scripts ?? {}));
+function scanFile(file: string): ScriptRef[] {
+  const content = readFileSync(file, "utf8");
+  const refs: ScriptRef[] = [];
+  const rel = relative(REPO_ROOT, file);
 
-  const docFiles = collectDocFiles();
-  const findings: Finding[] = [];
-  for (const f of docFiles) {
-    findings.push(...scanFile(f, knownScripts));
+  for (const match of content.matchAll(NPM_RUN_RE)) {
+    const name = match[1];
+    if (name === undefined) continue;
+    refs.push({ file: rel, line: lineOf(content, match.index ?? 0), name });
   }
 
-  if (findings.length === 0) {
+  for (const match of content.matchAll(NPM_TEST_RE)) {
+    refs.push({ file: rel, line: lineOf(content, match.index ?? 0), name: "test" });
+  }
+
+  return refs;
+}
+
+function main(): number {
+  const scripts = loadScripts();
+  const files = collectMarkdownFiles();
+  const missing: ScriptRef[] = [];
+  let checked = 0;
+
+  for (const file of files) {
+    for (const ref of scanFile(file)) {
+      checked++;
+      if (!scripts.has(ref.name)) missing.push(ref);
+    }
+  }
+
+  if (missing.length === 0) {
     console.log(
-      `check-doc-scripts: OK — ${docFiles.length} doc file(s) scanned, all \`npm run\` references resolve.`,
+      `check-doc-scripts: OK — ${checked} npm script reference(s) across ${files.length} doc file(s) all exist in package.json.`,
     );
-    return;
+    return 0;
   }
 
   console.error(
-    `check-doc-scripts: ${findings.length} reference(s) to scripts not present in package.json:`,
+    `check-doc-scripts: FAIL — ${missing.length} doc'd script(s) not in package.json:`,
   );
-  for (const f of findings) {
-    console.error(`  ${f.file}:${f.line}  npm run ${f.script}`);
+  for (const ref of missing) {
+    console.error(`\n  ${ref.file}:${ref.line}  npm run ${ref.name}`);
   }
   console.error(
-    "\nFix: either add the script to package.json or correct/remove the doc reference.",
+    "\nFix: add the script to package.json, or remove/rename the reference in the doc.",
   );
-  process.exit(1);
+  return 1;
 }
 
-main();
+process.exit(main());

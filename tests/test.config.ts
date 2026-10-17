@@ -1,11 +1,15 @@
-/**
+/*
  * The one test-runner configuration (issue #104).
  *
- * Unit and integration suites used to be two hand-written `node --test` invocations in `package.json`, and the two drifted: the unit glob went through
- the `tsx` transform, the integration glob did not. Whether that difference was intentional was not recorded anywhere, so nothing stopped the next edit from
- making it worse. This file is the single source of truth: one runner (Node's built-in test runner), explicit named projects, and one shared transform.
+ * Unit and integration suites used to be two hand-written `node --test`
+ * invocations in `package.json`, and the two drifted: the unit glob went through
+ * the `tsx` transform, the integration glob did not. Whether that difference was
+ * intentional was not recorded anywhere, so nothing stopped the next edit from
+ * making it worse. This file is the single source of truth: one runner (Node's
+ * built-in test runner), explicit named projects, and one shared transform.
  *
- * `scripts/run-tests.ts` reads it; `tests/unit/test-runner.test.ts` asserts its invariants, so a project that points at an empty directory or a project that
+ * `scripts/run-tests.ts` reads it; `tests/unit/test-runner.test.ts` asserts its
+ * invariants, so a project that points at an empty directory or a project that
  * silently drops the shared loader fails the unit suite instead of drifting.
  *
  * What stays per-project, and why:
