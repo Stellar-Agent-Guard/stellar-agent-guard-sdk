@@ -1,4 +1,4 @@
-/**
+/*
  * Structured SDK failures.
  *
  * Callers should branch on an error class (or on the class attached to a result-
@@ -7,6 +7,9 @@
  * `GuardError`, so a single `instanceof GuardError` check remains sufficient for
  * integrations that do not need a finer category.
  */
+
+// Type only import to avoid a runtime cycle between errors and tx modules.
+import type { NetworkPassphrase } from "./tx.js";
 
 function causeOptions(cause: unknown): ErrorOptions | undefined {
   return cause === undefined ? undefined : { cause };
@@ -94,7 +97,7 @@ export class BroadcastError extends GuardError {
     } else {
       const detail = messageOrParams.detail ?? messageOrParams.failure.message;
       super(
-        `stellar-agent-guard broadcast failed: minimum fee not met after ${messageOrParams.attempts} attempt(s) (last fee: ${messageOrParams.lastFee} stroops)\n${detail}`,
+        `stellar-agent-guard broadcast failed: minimum fee not met after ${messageOrParams.attempts} attempt(s) (last fee: ${messageOrParams.lastFee} strops)\n${detail}`,
       );
       this.name = "BroadcastError";
       this.transactionHash = null;
@@ -161,25 +164,24 @@ export class AdapterConfigError extends GuardError {
 }
 
 /**
- * The RPC endpoint reported a network passphrase that did not match the
- * caller's `expectedNetwork` interlock.
+ * The RPC endpoint's network passphrase did not match the caller's expectation.
  *
- * This is a guardraill, not a sandbox: it catches a misconfigured RPC URL
- * (testnet key + an RPC pointing at mainnet, or the reverse) before any
- * signing or submission happens. It cannot defend against an RPC that lies
- * about its own pasphrase.
+ * This is the network interlock: a misconfigured RPC URL ("testnet key +
+ * mainnet RPC", or the reverse) is detected before any transaction is signed or
+ * submitted. It is a guardrail, not a sandbox: an RPC that lies about its
+ * passphrase is outside this check's threat model.
  */
 export class NetworkMismatchError extends GuardError {
-  /** Passphrase the caller required (e.g. `Test SDL Network ;September 2015`). */
-  readonly expected: string;
-  /** Passphrase the RPC actually reported. */
+  /** Passphrase the caller required. */
+  readonly expected: NetworkPassphrase;
+  /** Passphrase reported by the RPC endpoint. */
   readonly actual: string;
 
-  constructor(
-    message: string,
-    options: { expected: string; actual: string; cause?: unknown },
-  ) {
-    super(message, causeOptions(options.cause));
+  constructor(options: { expected: NetworkPassphrase; actual: string; cause?: unknown }) {
+    super(
+      `stellar-agent-guard network mismatch: expected network passphrase "${options.expected}" but the RPC reported "${options.actual}"`,
+      causeOptions(options.cause),
+    );
     this.expected = options.expected;
     this.actual = options.actual;
   }

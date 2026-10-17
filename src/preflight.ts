@@ -1,4 +1,3 @@
-import { NetworkMismatchError } from "./errors.ts";
 /**
  * The pre-flight interceptor: ask the guard whether an action is permitted
  * *before* anything is signed for broadcast.
@@ -27,7 +26,7 @@ import { NetworkMismatchError } from "./errors.ts";
  */
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
-import { GuardError, SimulationError } from "./errors.ts";
+import { GuardError, NetworkMismatchError, SimulationError } from "./errors.ts";
 import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
 import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
@@ -42,7 +41,6 @@ import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
 import { systemClock, type Clock } from "./clock.ts";
-import type { NetworkPassphrase } from "./tx.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -316,6 +314,18 @@ export interface PreFlightCacheOptions {
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
+  /**
+   * The network passphrase this interceptor expects the RPC server to be on.
+   *
+   * When set, the interceptor fetches the server's network passphrase on first
+   * use and throws a typed `NetworkMismatchError` if it does not match. This
+   * catches the classic footgun of a testnet key pointed at a mainnet RPC (or
+   * the reverse) before anything is signed.
+   *
+   * Default: `undefined` = unchecked. This is NOT recommended; pass the
+   * expected passphrase explicitly in production.
+   */
+  expectedNetwork?: string | undefined;
   /** The guarded smart account whose policy is being enforced. */
   guard: ContractAddress;
   /**
@@ -349,14 +359,6 @@ export interface PreFlightConfig {
    * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
    */
   clock?: Clock;
-  /**
-   * The network passphrase this interceptor expects the RPC server to be
-   * serving. When set, the interceptor fetches the server's network passphrase
-   * on first use and fails with a typed `NetworkMismatchError` unless it
-   * matches. Omit to leave the interlock unchecked — explicitly NOT
-   * recommended; a misconfigured RPC URL is the classic footgun.
-   */
-  expectedNetwork?: NetworkPassphrase | undefined;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -418,7 +420,7 @@ export class PreFlightInterceptor {
   private readonly namespace: string;
   private readonly logger: GuardLogger;
   private readonly clock: Clock;
-  private networkCheck: Promise<void> | undefined;
+  private networkCheck: Promise<void> | null = null;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
@@ -430,29 +432,23 @@ export class PreFlightInterceptor {
   }
 
   /**
-   * Verify the RPC server's network passphrase matches `expectedNetwork`, once.
-   *
-   * The check is memoized so a long-lived interceptor pays for it at most once;
-   * a rejection is not memoized, so a transient RPC failure does not
-   * permanently poison the interceptor. Unset `expectedNetwork` is a no-op,
-   * preserving legacy behavior exactly.
+   * Verify the RPC server's network passphrase matches `expectedNetwork`, if
+   * one was supplied. Runs at most once per interceptor instance; the result
+   * (success or failure) is memoised so a mismatch fails every subsequent call
+   * with the same typed error rather than silently succeeding on a retry.
    */
   private async ensureNetwork(): Promise<void> {
-    const expected = this.config.expectedNetwork;
-    if (expected === undefined) return;
+    if (this.config.expectedNetwork === undefined) return;
     if (!this.networkCheck) {
       this.networkCheck = (async () => {
         const info = await this.config.server.getNetwork();
         const actual = info.passphrase;
-        if (actual !== expected) {
-          throw new NetworkMismatchError({ expected, actual });
+        if (actual !== this.config.expectedNetwork) {
+          throw new NetworkMismatchError(this.config.expectedNetwork as string, actual);
         }
-      })().catch((error) => {
-        this.networkCheck = undefined;
-        throw error;
-      });
+      })();
     }
-    await this.networkCheck;
+    return this.networkCheck;
   }
 
   private validateCacheOptions(): void {
@@ -541,8 +537,8 @@ export class PreFlightInterceptor {
    * unaffected.
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
-    validateContractCall(call);
     await this.ensureNetwork();
+    validateContractCall(call);
 
     const context = await this.cacheContext(call);
     if (context) {
