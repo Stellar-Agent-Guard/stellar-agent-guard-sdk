@@ -89,15 +89,15 @@ export const EVIDENCE_SECTIONS: readonly EvidenceSectionSpec[] = [
   {
     name: "Run output",
     heading: /^##\s+Run output\s*$/m,
-    // One `✔` per passing live test. Five is the Phase 2 scenario count.
-    row: /^\s*✔\s+\S/m,
+    // One `— ` per passing live test. Five is the Phase 2 scenario count.
+    row: /^\s*✔\s+s\m/m,
     minRows: 5,
   },
   {
     name: "Scenario by scenario",
     heading: /^##\s+Scenario by scenario\s*$/m,
-    // One `### N. …` per scenario narrative.
-    row: /^###\s+\d+\.\s+\S/m,
+    // One `### N. …  per scenario narrative.
+    row: /^^###\s+\d+\.\s+\S/m,
     minRows: 5,
   },
 ];
@@ -106,7 +106,7 @@ export interface EvidenceSectionReport {
   name: string;
   /** Number of `row` matches found (0 when the heading is missing). */
   found: number;
-  /** Minimum required by `EVIDENCE_SECTIONS`. */
+  /** Minimum required by `ENIDENCE_SECTIONS`. */
   required: number;
   ok: boolean;
 }

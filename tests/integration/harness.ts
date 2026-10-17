@@ -29,7 +29,8 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke, type InvokeOutcome } from "../../src/invoke.ts";
-import { policyToScVal, type PolicyConfig } from "../../src/policy.ts";
+import { policyToScVal, unsafeContractAddress, unsafeAccountAddress, type PolicyConfig } from "../../src/policy.ts";
+import { createGuardInterceptor } from "../../src/interceptor.ts";
 import { readPersistentEntry } from "../../scripts/inspect-deployment.ts";
 
 export const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -203,9 +204,9 @@ export async function loadPhase2Config(): Promise<Phase2Config> {
     per_tx_cap: 1000n,
     window_secs: 60n,
     window_cap: 150n,
-    assets: [token],
+    assets: [unsafeContractAddress(token)],
     protocols: [],
-    recipients: [keys.recipient.publicKey()],
+    recipients: [unsafeAccountAddress(keys.recipient.publicKey())],
     allow_any_recipient: false,
     active_from: 0n,
     active_until: 0n,
@@ -260,7 +261,7 @@ export async function installPolicy(
     server,
     source: config.keys.admin,
     call: {
-      contract: config.guard,
+      contract: unsafeContractAddress(config.guard),
       fn: "set_policy",
       args: [policyToScVal(policy)],
     },
@@ -283,7 +284,7 @@ export async function transfer(
     server,
     source: config.keys.agent,
     call: {
-      contract: config.token,
+      contract: unsafeContractAddress(config.token),
       fn: "transfer",
       args: [
         new Address(config.guard).toScVal(),
@@ -565,4 +566,48 @@ export async function assertPreconditions(
     tokenFunded: true,
     tokenBalance,
   };
+}
+
+/**
+ * Snapshot of the two on-chain reads that prove a blocked transfer never
+ * broadcast: the guarded account's sequence number and its SAC token balance.
+ *
+ * A refused simulation never reaches the network, so the sequence number is
+ * unchanged and the balance is untouched. Comparing these before/after an
+ * attempted tool call is the strongest available evidence of "no broadcast" —
+ * there is no transaction hash to cite precisely because no transaction exists.
+ */
+export interface NoBroadcastSnapshot {
+  sequence: bigint;
+  balance: bigint;
+}
+
+/** Read the guarded account's sequence number and token balance in one shot. */
+export async function snapshotNoBroadcast(
+  server: rpc.Server,
+  config: Phase2Config,
+): Promise<NoBroadcastSnapshot> {
+  const account = await server.getAccount(config.guard);
+  const balance = await guardTokenBalance(server, config);
+  return { sequence: BigInt(account.sequenceNumber()), balance };
+}
+
+/**
+ * Build a real guard interceptor wired to the live Phase 2 instance.
+ *
+ * Unlike the mock interceptors used elsewhere in the adapter tests, this one
+ * performs the actual middleware→interceptor→RPC chain: the wrapped tool's
+ * transfer is simulated against the deployed guard contract, and the
+ * interceptor's verdict is whatever the real contract returns.
+ */
+export function createLiveInterceptor(
+  server: rpc.Server,
+  config: Phase2Config,
+): ReturnType<typeof createGuardInterceptor> {
+  return createGuardInterceptor({
+    server,
+    guard: config.guard,
+    agent: config.keys.agent,
+    networkPassphrase: TESTNET_PASSPHRASE,
+  });
 }
