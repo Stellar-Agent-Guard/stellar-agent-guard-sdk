@@ -1,12 +1,12 @@
-/*
+/**
  * Transaction construction for a guarded smart account.
  *
  * ## Why this module exists
-
+ *
  * The `stellar` CLI cannot sign a Soroban authorization entry whose address is
  * a *contract* (the guard): it only signs for the transaction source account
- * and fails with "Missing signing key for account C…". The only way to exercise a
- * custom account's `__check_auth` is to build the `SorobanAuthorizationEntry`
+ * and fails with "Missing signing key for account C…". The only way to exercise
+ * a custom account's `__check_auth` is to build the `SorobanAuthorizationEntry`
  * for the guard address yourself and sign its payload with the registered
  * agent key — which is what this module does, in TypeScript.
  *
@@ -58,101 +58,57 @@ import {
 import {
   BroadcastError,
   ContractResponseError,
+  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
-import { NetworkMismatchError } from "./preflight.ts";
 import { systemClock, type Clock } from "./clock.ts";
 import type { ContractAddress } from "./policy.ts";
 
-/**
- * A stellar network passphrase, e.g. `Networks.TESTNET` or `Networks.PUBLIC`.
- *
- * The interlock compares this against the passphrase the RPC reports for the
- * ledger it serves. It is a guardrail, not a sandbox: an RPC that lies about
- * its passphrase is not defended against.
- */
-export type NetworkPassphrase = string;
-
-/**
- * Shared network-interlock configuration for the entry surfaces
- * (`interceptor`, `invoke`, and the `tx` helpers).
- *
- * `expectedNetwork` is the passphrase the caller believes the RPC serves. When
- * set, the SD fetches the server's passphrase (at construction or first use)
- * and throws `NetworkMismatchError` unless it matches. When unset, behaviour is
- * exactly the legacy unchecked path — explicitly NOT recommended.
- */
-export interface NetworkInterlockOptions {
-  expectedNetwork?: NetworkPassphrase | undefined;
-}
-
 /** Extra ledger validity granted to a guard auth entry when it is signed. */
-const SIG_EXPIRATION_LEGGERS = 10_000;
+const SIG_EXPIRATION_LEDGERS = 10_000;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
-const MAX_RESOURCE_FEE = 2n ** 64n - 1n ;
+const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
 
 /**
- * Fetch the network passphrase the RPC serves and assert it matches
- * `expectedNetwork`.
+ * Expected network passphrase for the interlock.
  *
- * Returns the actual passphrase so callers can reuse it (e.g. to build
- * transactions) without a second round-trip. When `expectedNetwork` is
- * `undefined` the fetch is skipped entirely and `undefined` is returned, which
- * preserves the legacy unchecked behaviour byte-for-byte.
+ * When supplied to `invoke`/`interceptor`/`tx` options, the SDK fetches the
+ * RPC server's reported network passphrase and fails with a typed
+ * `NetworkMismatchError` unless it matches. Unset means unchecked — legacy
+ * behaviour, explicitly NOT recommended for real use.
+ */
+export type ExpectedNetwork = string;
+
+/**
+ * Fetch the server's network passphrase and assert it matches `expected`.
+ *
+ * This is a guardrail, not a sandbox: an RPC that lies about its passphrase is
+ * not defended against. The interlock catches the common misconfiguration
+ * (testnet key + mainnet RPC, or the reverse) before any signing happens.
  */
 export async function assertExpectedNetwork(
   server: rpc.Server,
-  expectedNetwork: NetworkPassphrase | undefined,
-): Promise<NetworkPassphrase | undefined> {
-  if (expectedNetwork === undefined) return undefined;
-  let actual: NetworkPassphrase;
+  expected: ExpectedNetwork | undefined,
+): Promise<void> {
+  if (expected === undefined) return;
+  let actual: string;
   try {
     const info = await server.getNetwork();
     actual = info.passphrase;
   } catch (error) {
     throw new NetworkMismatchError(
-      `could not fetch the server network passphrase to verify it matches the expected network`,
-      { expected: expectedNetwork, actual: null, cause: error },
+      `could not fetch server network passphrase to verify against expected "${expected}"`,
+      { expected, actual: null, cause: error },
     );
   }
-  if (actual !== expectedNetwork) {
+  if (actual !== expected) {
     throw new NetworkMismatchError(
-      `server network passphrase does not match the expected network: expected ${JSON.stringify(
-        expectedNetwork,
-      )}, got ${JSON.stringify(actual)}`,
-      { expected: expectedNetwork, actual },
+      `network mismatch: expected "${expected}" but server reports "${actual}"`,
+      { expected, actual },
     );
   }
-  return actual;
-}
-
-/**
- * Resolve the passphrase to use for signing/building, enforcing the interlock
- * when `expectedNetwork` is set.
- *
- * Callers that already know the passphrase (e.g. `networkPassphrase` on a
- * build helper) still get the interlock check when `expectedNetwork` is
- * supplied: the two must agree, and the server's reported passphrase must
- * agree with both.
- */
-export async function resolveNetworkPassphrase(params: {
-  server: rpc.Server;
-  networkPassphrase: NetworkPassphrase;
-  expectedNetwork?: NetworkPassphrase | undefined;
-}): Promise<NetworkPassphrase> {
-  const { server, networkPassphrase, expectedNetwork } = params;
-  if (expectedNetwork !== undefined && expectedNetwork !== networkPassphrase) {
-    throw new NetworkMismatchError(
-      `configured networkPassphrase does not match the expected network: expected ${JSON.stringify(
-        expectedNetwork,
-      )}, got ${JSON.stringify(networkPassphrase)}`,
-      { expected: expectedNetwork, actual: networkPassphrase },
-    );
-  }
-  await assertExpectedNetwork(server, expectedNetwork);
-  return networkPassphrase;
 }
 
 export interface ContractCall {
@@ -217,7 +173,7 @@ export function addressToScVal(strkey: string): xdr.ScVal {
  * Verify an Ed25519 agent-auth signature without accepting or deriving a
  * private key.
  *
- * `publicKey` accepts the registered account strkey (`G… ) or the raw 32-byte
+ * `publicKey` accepts the registered account strkey (`G…`) or the raw 32-byte
  * public key stored by the contract. The Stellar SDK's low-level Ed25519
  * verifier is the same primitive used by `Keypair.verify` and the Stellar auth
  * path, so callers do not need a second cryptographic implementation.
@@ -300,7 +256,7 @@ export interface AdminSigner {
 
 /**
  * The signing capability the guard's authorization needs — the seam that lets
- * N-key (or otherwise non-`Kheypair`) agent signing land without a second
+ * N-key (or otherwise non-`Keypair`) agent signing land without a second
  * breaking change (see the module header and
  * `docs/concepts/multi-key-agent-signing.md`).
  *
@@ -313,129 +269,678 @@ export interface AdminSigner {
 export interface AgentSigner {
   /** The signer's public identity, for diagnostics and key matching. */
   readonly publicKey: string;
-  /** Sign the 32-byte authorization digest. */
+  /** Sign the 32-byte SHA-256 digest `__check_auth` will verify. */
   signDigest(digest: Uint8Array): Uint8Array | Promise<Uint8Array>;
 }
 
-/** Wrap a single `Keypair` as an `AgentSigner`. */
-export function keypairAgentSigner(keypair: Keypair): AgentSigner {
+/**
+ * The current single-key signer: a local Ed25519 `Keypair`, exposed through
+ * the `AgentSigner` interface. One key, one raw 64-byte signature — exactly the
+ * behaviour the SDK has always had.
+ */
+export function keypairAgentSigner(agent: Keypair): AgentSigner {
   return {
-    publicKey: keypair.publicKey(),
-    signDigest: (digest) => keypair.sign(Buffer.from(digest)),
+    publicKey: agent.publicKey(),
+    signDigest: (digest) => agent.sign(Buffer.from(digest)),
   };
 }
 
-/** Normalize a `Keypair` or `AgentSigner` into an `AgentSigner`. */
-export function toAgentSigner(signer: Keypair | AgentSigner): AgentSigner {
-  if (signer instanceof Keypair) return keypairAgentSigner(signer);
-  return signer;
+/**
+ * Accept either a ready-made `AgentSigner` or a plain `Keypair`.
+ *
+ * The `Keypair` branch is what keeps this refactor non-breaking: every existing
+ * caller passing a keypair still works, and only a caller with a genuinely
+ * different signing setup has to supply the interface itself.
+ */
+export function toAgentSigner(signer: AgentSigner | Keypair): AgentSigner {
+  if (typeof (signer as AgentSigner).signDigest === "function") {
+    return signer as AgentSigner;
+  }
+  return keypairAgentSigner(signer as Keypair);
 }
 
-export interface BuildGuardAuthEntryParams {
-  /** The guard contract address (C…). */
+/**
+ * Build and sign the guard's authorization entry for one call.
+ *
+ * `nonce` and `signatureExpirationLedger` are written into the signed payload,
+ * so the returned entry is only valid for that nonce — build a fresh entry per
+ * submission rather than reusing one.
+ *
+ * Async because an `AgentSigner` may be: a remote or threshold signer resolves
+ * its signatures as a promise. The single-`Keypair` path still resolves
+ * immediately, so this is a source-compatible widening for `await`ing callers
+ * and a signature change for callers that used the return value synchronously.
+ */
+/**
+ * Credential kinds the host may demand for this account.
+ *
+ * Which one arrives is not the caller's choice — the RPC reports what the call
+ * requires, and it differs by call shape: an SAC `transfer` authorized by the
+ * account comes back as legacy `sorobanCredentialsAddress`, while a self-call
+ * such as `heartbeat` comes back as `sorobanCredentialsAddressV2` (CAP-71),
+ * whose signed payload additionally binds the account address.
+ *
+ * The contract itself is indifferent: `__check_auth` verifies the Ed25519
+ * signature against whatever digest the host presents, so the SDK's job is to
+ * build the preimage that matches the credential type it is answering.
+ */
+export type GuardCredentialType =
+  | "sorobanCredentialsAddress"
+  | "sorobanCredentialsAddressV2";
+
+export async function buildGuardAuthEntry(params: {
   guard: string;
-  /** The invocation the authorization applies to. */
   call: ContractCall;
-  /** The signer for the guard's agent key. */
-  signer: Keypair | AgentSigner;
-  /** Network passphrase the auth digest is bound to. */
-  networkPassphrase: NetworkPassphrase;
-  /** Nonce for the auth entry (typically the tx sequence). */
-  nonce: bigint | string;
-  /** Ledger at which the signature expires. */
+  /**
+   * The account's agent signer. A `Keypair` is accepted for the single-key case
+   * and wrapped via `toAgentSigner`; supply an `AgentSigner` directly for any
+   * other signing setup.
+   */
+  signer: AgentSigner | Keypair;
+  nonce: bigint;
   signatureExpirationLedger: number;
-}
-
-/**
- * Build and sign a `SorobanAuthorizationEntry` for the guard contract
- * address, using the agent signer's raw Ed25519 signature over the auth
- * digest.
- */
-export async function buildGuardAuthEntry(
-  params: BuildGuardAuthEntryParams,
-): Promise<xdr.SorobanAuthorizationEntry> {
-  const { guard, call, signer, networkPassphrase, nonce, signatureExpirationLedger } = params;
-  const agent = toAgentSigner(signer);
-  const invocation = xdr.SorobanAuthorizationInvocation.invokeContract(invocationArgs(call));
-  const nonceBigInt = typeof nonce === "bigint" ? nonce : BigInt(nonce);
-  const networkId = createHash("sha256").update(networkPassphrase).update(Buffer.from([0])).digest();
-  const preimage = xdr.HashIdPreimage.sorobanAuthorization(
-    new xdr.HashIdPreimageSorobanAuthorization({
-      networkId,
-      nonce: xdr.Uint64.fromString(nonceBigInt.toString()),
-      signatureExpirationLedger: xdr.Uint32.fromString(String(signatureExpirationLedger)),
-      invocation,
-    }),
-  );
-  const digest = createHash("sha256").update(preimage.toXDR()).digest();
-  const signature = new Uint8Array(await agent.signDigest(new Uint8Array(digest)));
-  const credentials = new xdr.SorobanAddressCredentials({
-    address: new Address(guard).toScAddress(),
-    signatureExpirationLedger: xdr.Uint32.fromString(String(signatureExpirationLedger)),
-    signature: xdr.ScVal.scvBytes(Buffer.from(signature)),
-  });
-  return new xdr.SorobanAuthorizationEntry({
-    credentials: xdr.SorobanAuthorizationCredentials.sorobanAddressCredentials(credentials),
-    rootInvocation: invocation,
-  });
-}
-
-export interface BuildInvokeTxParams {
-  /** RPC server to simulate and submit against. */
-  server: rpc.Server;
-  /** Source account for the transaction (G…). */
-  source: string;
-  /** The guard contract address (C… . */
-  guard: string;
-  /** The contract call to invoke. */
-  call: ContractCall;
-  /** Signer for the guard's agent key. */
-  signer: Keypair | AgentSigner;
-  /** Network passphrase to build and sign for. */
-  networkPassphrase: NetworkPassphrase;
-  /** Optional expected-network interlock. */
-  expectedNetwork?: NetworkPassphrase | undefined;
-  /** Clock for deterministic testing. */
-  clock?: Clock;
-}
-
-/**
- * Build a guarded invoke transaction, attaching the guard's signed auth
- * entry. The network interlock is enforced when `expectedNetwork` is set.
- */
-export async function buildInvokeTx(params: BuildInvokeTxParams): Promise<Transaction> {
-  const { server, source, guard, call, signer, networkPassphrase, expectedNetwork } = params;
-  await resolveNetworkPassphrase({ server, networkPassphrase, expectedNetwork });
-
-  const account = await server.getAccount(source);
-  const sequence = BigInt(account.sequenceNumber());
-  const tx = new TransactionBuilder(new Account(source, account.sequenceNumber()), {
-    fee: INCLUSION_FEE,
-    networkPassphrase,
-  })
-    .addOperation(
-      new Address(call.contract).toScAddress() && buildInvokeOp(call),
-    )
-    .setTimeout(TransactionBuilder.TimeoutInfinite);
-
-  const authEntry = await buildGuardAuthEntry({
+  networkPassphrase: string;
+  credentialType?: GuardCredentialType;
+}): Promise<xdr.SorobanAuthorizationEntry> {
+  const {
     guard,
     call,
-    signer,
+    signer: rawSigner,
+    nonce,
+    signatureExpirationLedger,
     networkPassphrase,
-    nonce: sequence,
-    signatureExpirationLedger: 0,
+    credentialType = "sorobanCredentialsAddress",
+  } = params;
+  const signer = toAgentSigner(rawSigner);
+  const rootInvocation = new xdr.SorobanAuthorizedInvocation({
+    function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+      invocationArgs(call),
+    ),
+    subInvocations: [],
   });
-  tx.addSorobanAuth(authEntry);
-  return tx.build();
+  const networkId = createHash("sha256").update(networkPassphrase).digest();
+  const guardAddress = new Address(guard).toScAddress();
+
+  const preimage =
+    credentialType === "sorobanCredentialsAddressV2"
+      ? xdr.HashIdPreimage.envelopeTypeSorobanAuthorizationWithAddress(
+          new xdr.HashIdPreimageSorobanAuthorizationWithAddress({
+            networkId,
+            nonce,
+            invocation: rootInvocation,
+            address: guardAddress,
+            signatureExpirationLedger,
+          }),
+        )
+      : xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+          new xdr.HashIdPreimageSorobanAuthorization({
+            networkId,
+            nonce,
+            invocation: rootInvocation,
+            signatureExpirationLedger,
+          }),
+        );
+
+  const digest = createHash("sha256").update(preimage.toXDR()).digest();
+  let signature: Uint8Array;
+  try {
+    signature = await signer.signDigest(digest);
+  } catch (error) {
+    // A signer that cannot produce a signature is a `SigningError` at the layer
+    // that owns the failure, so a direct caller of this helper gets the same
+    // typed category an `invoke()` caller would have gotten.
+    throw new SigningError("could not sign the guard authorization entry", {
+      address: guard,
+      cause: error,
+    });
+  }
+
+  const addressCredentials = new xdr.SorobanAddressCredentials({
+    address: guardAddress,
+    nonce,
+    signatureExpirationLedger,
+    signature: xdr.ScVal.scvBytes(signature),
+  });
+
+  return new xdr.SorobanAuthorizationEntry({
+    credentials:
+      credentialType === "sorobanCredentialsAddressV2"
+        ? xdr.SorobanCredentials.sorobanCredentialsAddressV2(addressCredentials)
+        : xdr.SorobanCredentials.sorobanCredentialsAddress(addressCredentials),
+    rootInvocation,
+  });
 }
 
-function buildInvokeOp(call: ContractCall): xdr.Operation {
-  return xdr.Operation.invokeContract(
-    new xdr.InvokeContractOp({
-      contractAddress: new Address(call.contract).toScAddress(),
-      functionName: call.fn,
-      args: call.args,
-    }),
+/**
+ * Sign a classic-account authorization entry (used for admin calls such as
+ * `initialize` / `set_policy`, where the authorizer is a normal keypair or
+ * an AdminSigner rather than the smart account).
+ */
+export async function signAccountAuthEntry(params: {
+  entry: xdr.SorobanAuthorizationEntry;
+  signer: Keypair | AdminSigner;
+  signatureExpirationLedger: number;
+  networkPassphrase: string;
+}): Promise<xdr.SorobanAuthorizationEntry> {
+  const { entry, signer, signatureExpirationLedger, networkPassphrase } = params;
+  try {
+    if ("signAuthEntry" in signer && typeof signer.signAuthEntry === "function") {
+      return await signer.signAuthEntry(entry, { signatureExpirationLedger, networkPassphrase });
+    }
+    if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+      const { authorizeEntry } = await import("@stellar/stellar-sdk");
+      return await authorizeEntry(
+        entry,
+        signer as Keypair,
+        signatureExpirationLedger,
+        networkPassphrase,
+      );
+    }
+  } catch (error) {
+    throw new SigningError("could not sign the required account authorization entry", {
+      address: await signer.publicKey(),
+      cause: error,
+    });
+  }
+  // For classic transaction signers (e.g. Freighter) without a separate auth-entry signer,
+  // return entry to be authorized via the envelope signature.
+  return entry;
+}
+
+export interface SimulationOutcome {
+  /** Raw simulation response, for callers that need events or cost data. */
+  raw: rpc.Api.SimulateTransactionResponse;
+  blocked: { code?: string; message: string } | null;
+}
+
+/**
+ * Simulate a call whose authorization has already been signed.
+ *
+ * When the auth entry carries a valid agent signature, the RPC runs the *real*
+ * `__check_auth` during simulation. A policy violation therefore surfaces here,
+ * before broadcast, as a simulation error naming the reason symbol — this is
+ * the interception point the SDK's pre-flight gate is built on.
+ */
+export async function simulateSigned(
+  server: rpc.Server,
+  transaction: Transaction,
+): Promise<SimulationOutcome> {
+  let raw: rpc.Api.SimulateTransactionResponse;
+  try {
+    raw = await server.simulateTransaction(transaction);
+  } catch (error) {
+    throw new SimulationError("signed transaction simulation request failed", {
+      stage: "simulate",
+      cause: error,
+    });
+  }
+  if (rpc.Api.isSimulationError(raw)) {
+    const error = raw as rpc.Api.SimulateTransactionErrorResponse;
+    return {
+      raw,
+      blocked: {
+        ...(typeof error.error === "string" ? { code: error.error } : {}),
+        message: error.error ?? "simulation failed",
+      },
+    };
+  }
+  return { raw, blocked: null };
+}
+
+export interface AssembleResult {
+  transaction: Transaction;
+  /** Resource fee actually charged for the assembled transaction. */
+  resourceFee: bigint;
+  footprintKeys: number;
+  /** Inclusion fee declared for the assembled transaction. */
+  inclusionFee?: bigint | undefined;
+}
+
+/**
+ * Assemble a submittable transaction from a successful simulation, merging the
+ * guard's own storage keys into the footprint.
+ *
+ * RPC preflight prices what the *called* contract touches. A custom account's
+ * `__check_auth` additionally reads and writes the account's own policy, window
+ * and freeze state, so those keys must be present in the declared footprint and
+ * the declared resource fee must cover them — otherwise core rejects the
+ * transaction with `insufficient_refundable_fee`. Keys are merged, never
+ * dropped, so a simulation that already priced them is unaffected.
+ */
+export function assembleFromSimulation(params: {
+  simulation: rpc.Api.SimulateTransactionSuccessResponse;
+  source: Account;
+  operation: xdr.Operation;
+  networkPassphrase: string;
+  guard: string | null;
+  extraResourceFee?: bigint | undefined;
+  inclusionFee?: bigint | string | undefined;
+}): AssembleResult {
+  const { simulation, source, operation, networkPassphrase, guard } = params;
+  // v17 hands back a builder already; older shapes hand back the data itself.
+  const data =
+    simulation.transactionData instanceof SorobanDataBuilder
+      ? simulation.transactionData
+      : new SorobanDataBuilder(simulation.transactionData);
+  let footprintKeys = 0;
+
+  if (guard) {
+    const merged = [...data.getReadWrite()];
+    // De-duplicate against BOTH footprint lists. A key appearing in read_only and
+    // read_write at once is an invalid footprint and the network rejects the
+    // transaction with `tx_soroban_invalid` — and RPC preflight commonly places
+    // the guard's own storage keys in read_only, so merging blindly into
+    // read_write would duplicate every one of them.
+    const seen = new Set([
+      ...data.getReadOnly().map((key) => ledgerKeyId(key)),
+      ...merged.map((key) => ledgerKeyId(key)),
+    ]);
+    for (const key of guardStorageLedgerKeys(guard)) {
+      const id = ledgerKeyId(key);
+      if (!seen.has(id)) {
+        seen.add(id);
+        merged.push(key);
+      }
+    }
+    data.setReadWrite(merged);
+    footprintKeys = merged.length;
+  }
+
+  const minResourceFee = BigInt(simulation.minResourceFee);
+  const extra = params.extraResourceFee ?? 0n;
+  data.setResourceFee(minResourceFee + extra);
+
+  const inclusionFee = (params.inclusionFee ?? INCLUSION_FEE).toString();
+
+  // `TransactionBuilder` folds the resource fee declared in `sorobanData` into
+  // the transaction fee on build(), so `fee` here is the inclusion fee only.
+  const transaction = new TransactionBuilder(source, {
+    fee: inclusionFee,
+    networkPassphrase,
+    sorobanData: data.build(),
+  })
+    .addOperation(operation)
+    .setTimeout(0)
+    .build();
+
+  return { transaction, resourceFee: minResourceFee + extra, footprintKeys, inclusionFee: BigInt(inclusionFee) };
+}
+
+/**
+ * Human-readable dump of a simulation's declared resources and footprint.
+ *
+ * A `scecExceededLimit` rejection *after* inclusion means the ledger charged
+ * more of a resource than the transaction declared — a mismatch that only shows
+ * up as two bare numbers in an error payload. This makes the declaration
+ * legible next to the charge, which is the only way to tell an under-declaration
+ * from a genuine limit.
+ */
+export function describeSimulationResources(
+  simulation: unknown,
+  guard: string | null,
+): string {
+  const candidate = simulation as {
+    transactionData?: unknown;
+    minResourceFee?: string | number;
+    error?: unknown;
+  };
+  if (candidate.transactionData === undefined) {
+    return `  (simulation error, no resources declared)\n  error: ${JSON.stringify(candidate.error)}`;
+  }
+  const data =
+    candidate.transactionData instanceof SorobanDataBuilder
+      ? candidate.transactionData
+      : new SorobanDataBuilder(candidate.transactionData as never);
+  const built = data.build();
+  // The SDK's XDR classes expose camelCase properties (`writeBytes`,
+  // `footprint.readWrite`); only their serialised JSON form uses the wire's
+  // snake_case names. Reading the JSON shape here would silently yield
+  // `undefined` for every field.
+  const resources = (built as unknown as {
+    resources: {
+      instructions: number;
+      diskReadBytes: number;
+      writeBytes: number;
+      footprint: { readOnly: unknown[]; readWrite: unknown[] };
+    };
+  }).resources;
+  const declared = new Set(resources.footprint.readWrite.map((key) => ledgerKeyId(key as xdr.LedgerKey)));
+  const own = guard
+    ? guardStorageLedgerKeys(guard).map((key, index) => {
+        const name = GUARD_STORAGE_KEYS[index] ?? `#${index}`;
+        return declared.has(ledgerKeyId(key))
+          ? `${name}: declared read_write`
+          : `${name}: NOT in the footprint`;
+      })
+    : [];
+  return [
+    `  instructions: ${resources.instructions}`,
+    `  disk_read_bytes: ${resources.diskReadBytes}`,
+    `  write_bytes: ${resources.writeBytes}`,
+    `  footprint: ${resources.footprint.readOnly.length} read-only, ${resources.footprint.readWrite.length} read-write`,
+    `  minResourceFee: ${candidate.minResourceFee}`,
+    ...own.map((line) => `  guard key ${line}`),
+  ].join("\n");
+}
+
+/**
+ * `resultXdr` arrives either as a base64 string or as a decoded value that
+ * knows how to serialise itself, depending on SDK internals — normalise to a
+ * string so failure reports are always copy-pasteable evidence.
+ */
+function resultXdrToString(result: unknown): string | null {
+  const value = (result as { resultXdr?: unknown }).resultXdr;
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return value;
+  const serialisable = value as { toXDR?: (format: string) => string };
+  if (typeof serialisable.toXDR === "function") return serialisable.toXDR("base64");
+  return String(value);
+}
+
+export interface SubmissionResult {
+  hash: string;
+  status: string;
+  ledger: number | null;
+  /** Present when the network rejected the transaction after broadcast. */
+  failure: {
+    resultXdr: string | null;
+    /** Contract-level arm derived from the result, e.g. `invokeHostFunctionResult=trap`. */
+    resultCode: string | null;
+    message: string;
+    diagnosticEvents: unknown[];
+  } | null;
+  events: unknown[];
+}
+
+/** Recursively convert SDK XDR values into plain, inspectable objects. */
+function toPlain(value: unknown, depth = 0): unknown {
+  if (value === null || value === undefined || depth > 8) return value ?? null;
+  if (typeof value === "bigint") return value.toString();
+  if (value instanceof Uint8Array) return `0x${Buffer.from(value).toString("hex")}`;
+  if (typeof value !== "object") return value;
+  const withXdr = value as { toXdrObject?: () => unknown };
+  if (typeof withXdr.toXdrObject === "function") {
+    return toPlain(withXdr.toXdrObject(), depth + 1);
+  }
+  if (Array.isArray(value)) return value.map((item) => toPlain(item, depth + 1));
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = toPlain(item, depth + 1);
+  }
+  return out;
+}
+
+/**
+ * Name the arm that caused a rejected transaction. A trap (`trap`) means the
+ * contract itself panicked — the most useful thing to surface, since the guard
+ * panics with a typed `Error` rather than a bare failure.
+ */
+export function describeTransactionResult(result: unknown): string | null {
+  const plain = toPlain(result) as
+    | { result?: { type?: string; results?: Array<{ tr?: Record<string, unknown> }> } }
+    | null;
+  const arm = plain?.result?.results?.[0]?.tr?.["invokeHostFunctionResult"] as
+    | { type?: string }
+    | undefined;
+  if (arm?.type) return `invokeHostFunctionResult=${arm.type}`;
+  if (plain?.result?.type) return `result=${plain.result.type}`;
+  const directType = (result as { result?: { type?: string } })?.result?.type;
+  if (typeof directType === "string") return `result=${directType}`;
+  return null;
+}
+
+/** Render a diagnostic event's topics and data in the contract's vocabulary. */
+function describeEvent(raw: unknown): string {
+  const event = raw as {
+    event?: { body?: { v0?: { topics?: xdr.ScVal[]; data?: xdr.ScVal } } };
+  };
+  const v0 = event?.event?.body?.v0;
+  if (!v0) return "(unrecognised diagnostic event shape)";
+  const render = (value: unknown): string => {
+    if (value === undefined) return "()";
+    try {
+      return JSON.stringify(scValToNative(value as xdr.ScVal), (_k, v: unknown) =>
+        typeof v === "bigint" ? v.toString() : v,
+      );
+    } catch {
+      return "(undecodable)";
+    }
+  };
+  const topics = (v0.topics ?? []).map(render).join(", ");
+  return `topics=[${topics}] data=${render(v0.data)}`;
+}
+
+/**
+ * Human-readable summary of the diagnostic events attached to a failure.
+ * These are the host's and the contract's own words (`fn_call`, `error`, `log`),
+ * which is what makes a trap diagnosable rather than opaque.
+ */
+export function summarizeDiagnosticEvents(events: unknown[]): string[] {
+  return events.map(describeEvent);
+}
+
+/**
+ * Was this post-inclusion failure a *stale-ledger resource declaration*?
+ *
+ * Diagnosed the hard way: the enforced simulation reports the write size for the
+ * window state it observed, and when the RPC serves a ledger snapshot that
+ * predates the write this SDK just made, the declared `writeBytes` is short by
+ * exactly one rolling-window entry (72 bytes on this contract). The transaction
+ * is then included and rejected by core with `scecExceededLimit` — a failure
+ * that is not the caller's fault and not a policy decision.
+ *
+ * It is safe to re-simulate and retry: a transaction rejected for exceeding a
+ * resource limit applies **nothing** (state is rolled back), and the very fact
+ * of inclusion proves the ledger has since advanced past the stale snapshot.
+ * Contract-level `Auth` failures are deliberately *not* matched here — those are
+ * the guard doing its job and must surface as a block, not be retried.
+ */
+export function isStaleLedgerResourceFailure(
+  failure: NonNullable<SubmissionResult["failure"]>,
+): boolean {
+  const haystack = [
+    failure.message,
+    failure.resultCode ?? "",
+    ...failure.diagnosticEvents.map((event) => JSON.stringify(event)),
+  ].join("\n");
+  // The host names this `insufficient_refundable_fee` as an error code and
+  // "insufficient refundable fee" in prose; match either spelling.
+  return /scecExceededLimit|exceeds amount specified|insufficient[_ ]refundable[_ ]fee/i.test(
+    haystack,
   );
 }
+
+/**
+ * Was this post-broadcast rejection caused by a transaction fee below the network minimum?
+ *
+ * Simulation prices fees at prepare-time, but a fee-market change (e.g. surge
+ * pricing or minimum inclusion fee floor increase) between transaction preparation
+ * and broadcast causes core to reject the transaction with `tx_insufficient_fee` /
+ * "tx too cheap" / min-fee errors.
+ */
+export function isMinimumFeeBroadcastFailure(
+  failure: NonNullable<SubmissionResult["failure"]>,
+): boolean {
+  if (
+    failure.resultCode === "result=txInsufficientFee" ||
+    failure.resultCode === "txInsufficientFee" ||
+    failure.resultCode === "tx_insufficient_fee"
+  ) {
+    return true;
+  }
+  const haystack = [failure.resultCode ?? "", failure.message].join("\n");
+  return /tx_?insufficient_?fee|tx too cheap|tx_too_cheap|min(?:imum)?[ _-]fee/i.test(
+    haystack,
+  );
+}
+
+/**
+ * Was a submission rejected because the source account sequence was stale?
+ *
+ * `tx_bad_seq` is the canonical code, but RPC error payloads are not perfectly
+ * consistent across SDK and server versions. Keep the matching deliberately
+ * narrow so ordinary transaction failures are never retried with a new sequence.
+ */
+export function isSequenceNumberFailure(
+  failure: NonNullable<SubmissionResult["failure"]>,
+): boolean {
+  const haystack = [
+    failure.message,
+    failure.resultCode ?? "",
+    ...failure.diagnosticEvents.map((event) => JSON.stringify(event)),
+  ].join("\n");
+  return /tx_bad_seq|bad[_ ]seq|sequence (?:number )?(?:is )?(?:too (?:low|high|small|large)|mismatch|does not match|already (?:been )?(?:used|spent))/i.test(
+    haystack,
+  );
+}
+
+export { BroadcastError } from "./errors.ts";
+
+/** Full, copy-pasteable rendering of a failed submission, for evidence. */
+export function describeSubmissionFailure(failure: NonNullable<SubmissionResult["failure"]>): string {
+  const lines = [`resultCode: ${failure.resultCode ?? "unknown"}`, `message: ${failure.message}`];
+  if (failure.resultXdr) lines.push(`resultXdr: ${failure.resultXdr}`);
+  for (const summary of summarizeDiagnosticEvents(failure.diagnosticEvents)) {
+    lines.push(`diagnostic: ${summary}`);
+  }
+  return lines.join("\n");
+}
+
+/** Submit a signed transaction and poll until it is included in a ledger. */
+export async function submitAndPoll(
+  server: rpc.Server,
+  transaction: Transaction,
+  signers: Array<Keypair | AdminSigner>,
+  options: {
+    pollAttempts?: number | undefined;
+    pollIntervalMs?: number | undefined;
+    clock?: Clock | undefined;
+    /**
+     * Expected network passphrase. When set, the server's reported passphrase
+     * is verified before submission; a mismatch throws `NetworkMismatchError`.
+     * Unset preserves legacy behaviour (unchecked — NOT recommended).
+     */
+    expectedNetwork?: ExpectedNetwork | undefined;
+  } = {},
+): Promise<SubmissionResult> {
+  const clock = options.clock ?? systemClock;
+
+  await assertExpectedNetwork(server, options.expectedNetwork);
+
+  for (const signer of signers) {
+    if ("signTransaction" in signer && typeof signer.signTransaction === "function") {
+      const signed = await signer.signTransaction(transaction, {
+        networkPassphrase: transaction.networkPassphrase,
+      });
+      if (typeof signed === "string") {
+        transaction = new Transaction(signed, transaction.networkPassphrase);
+      } else {
+        transaction = signed;
+      }
+    } else if ("sign" in signer && typeof (signer as Keypair).sign === "function") {
+      transaction.sign(signer as Keypair);
+    }
+  }
+
+  let sent: Awaited<ReturnType<rpc.Server["sendTransaction"]>>;
+  try {
+    sent = await server.sendTransaction(transaction);
+  } catch (error) {
+    throw new BroadcastError("transaction submission request failed", { cause: error });
+  }
+  if (sent.status === "ERROR") {
+    return {
+      hash: sent.hash,
+      status: sent.status,
+      ledger: null,
+      failure: {
+        resultXdr: null,
+        resultCode: describeTransactionResult(sent.errorResult),
+        message: JSON.stringify(sent.errorResult ?? sent),
+        diagnosticEvents: [],
+      },
+      events: [],
+    };
+  }
+
+  const attempts = options.pollAttempts ?? 20;
+  const interval = options.pollIntervalMs ?? 3_000;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    await clock.sleep(interval);
+    let result: Awaited<ReturnType<rpc.Server["getTransaction"]>>;
+    try {
+      result = await server.getTransaction(sent.hash);
+    } catch (error) {
+      throw new BroadcastError(`could not poll transaction ${sent.hash}`, {
+        transactionHash: sent.hash,
+        cause: error,
+      });
+    }
+    if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return {
+        hash: sent.hash,
+        status: result.status,
+        ledger: result.ledger ?? null,
+        failure: null,
+        events: (result as { events?: { contractEventsXdr?: unknown[] } }).events
+          ?.contractEventsXdr ?? [],
+      };
+    }
+    if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
+      const failed = result as unknown as {
+        resultXdr?: unknown;
+        diagnosticEventsXdr?: unknown[];
+      };
+      return {
+        hash: sent.hash,
+        status: result.status,
+        ledger: result.ledger ?? null,
+        failure: {
+          resultXdr: resultXdrToString(result),
+          resultCode: describeTransactionResult(failed.resultXdr),
+          message: "transaction failed after inclusion",
+          diagnosticEvents: failed.diagnosticEventsXdr ?? [],
+        },
+        events: [],
+      };
+    }
+  }
+  return {
+    hash: sent.hash,
+    status: "TIMEOUT",
+    ledger: null,
+    failure: {
+      resultXdr: null,
+      resultCode: null,
+      message: "timed out waiting for ledger inclusion",
+      diagnosticEvents: [],
+    },
+    events: [],
+  };
+}
+
+/** Convenience wrapper: build the initial (footprint-declaring) envelope. */
+export function buildInitialEnvelope(params: {
+  source: Account;
+  operation: xdr.Operation;
+  networkPassphrase: string;
+  guard: string | null;
+  fee?: bigint | string | undefined;
+}): Transaction {
+  const builder = new TransactionBuilder(params.source, {
+    fee: (params.fee ?? INCLUSION_FEE).toString(),
+    networkPassphrase: params.networkPassphrase,
+    ...(params.guard
+      ? {
+          sorobanData: new SorobanDataBuilder()
+            .setReadWrite(guardStorageLedgerKeys(params.guard))
+            .build(),
+        }
+      : {}),
+  })
+    .addOperation(params.operation)
+    .setTimeout(0);
+  return builder.build();
+}
+
+export { SIG_EXPIRATION_LEDGERS, INCLUSION_FEE };

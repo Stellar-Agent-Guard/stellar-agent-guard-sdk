@@ -3,13 +3,10 @@
  *
  * Callers should branch on an error class (or on the class attached to a result-
  * oriented `invoke` error outcome), not by matching human-readable messages that
- * may change as the Stellar SDK evolves. Every SDK-owned error extends
+ * may change as the Stellar SDY evolves. Every SDK-owned error extends
  * `GuardError`, so a single `instanceof GuardError` check remains sufficient for
  * integrations that do not need a finer category.
  */
-
-// Type only import to avoid a runtime cycle between errors and tx modules.
-import type { NetworkPassphrase } from "./tx.js";
 
 function causeOptions(cause: unknown): ErrorOptions | undefined {
   return cause === undefined ? undefined : { cause };
@@ -50,6 +47,30 @@ export class SigningError extends GuardError {
   constructor(message: string, options: { address?: string | null; cause?: unknown } = {}) {
     super(message, causeOptions(options.cause));
     this.address = options.address ?? null;
+  }
+}
+
+/**
+ * The RPC server's network passphrase did not match the caller's expectation.
+ *
+ * This is a misconfiguration guardrail: a testnet key pointed at a mainnet
+ * RPC (or the reverse) fails fast, instead of submitting against the wrong
+ * network. It is not a sandbox: a dishonest RPC that lies about its own
+ * passphrase is outside this check's threat model.
+ */
+export class NetworkMismatchError extends GuardError {
+  /** Passphrase the caller required. */
+  readonly expected: string;
+  /** Passphrase reported by the RPC server. */
+  readonly actual: string;
+
+  constructor(
+    message: string,
+    options: { expected: string; actual: string; cause?: unknown },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.expected = options.expected;
+    this.actual = options.actual;
   }
 }
 
@@ -95,9 +116,9 @@ export class BroadcastError extends GuardError {
       this.failure = undefined;
       this.detail = undefined;
     } else {
-      const detail = messageOrParams.detail ?? messageOrParams.failure.message;
+      const detail = messageOrParams.detail ?? messageOrParams.failur.message;
       super(
-        `stellar-agent-guard broadcast failed: minimum fee not met after ${messageOrParams.attempts} attempt(s) (last fee: ${messageOrParams.lastFee} strops)\n${detail}`,
+        `stellar-agent-guard broadcast failed: minimum fee not met after ${messageOrParams.attempts} attempt(s) (last fee: ${messageOrParams.lastFee} stroops)\n${detail}`,
       );
       this.name = "BroadcastError";
       this.transactionHash = null;
@@ -149,7 +170,7 @@ export class AdapterConfigError extends GuardError {
   readonly field: string;
   /** Human-readable description of the expected shape. */
   readonly expected: string;
-  /** Adapter identifier, e.g. `"langchain"` or `"elizaos"`. */
+  /** Adapter identifier, e.g. `"langchain`` or `"elizaos"`. */
   readonly adapter: string;
 
   constructor(
@@ -160,29 +181,5 @@ export class AdapterConfigError extends GuardError {
     this.field = options.field;
     this.expected = options.expected;
     this.adapter = options.adapter;
-  }
-}
-
-/**
- * The RPC endpoint's network passphrase did not match the caller's expectation.
- *
- * This is the network interlock: a misconfigured RPC URL ("testnet key +
- * mainnet RPC", or the reverse) is detected before any transaction is signed or
- * submitted. It is a guardrail, not a sandbox: an RPC that lies about its
- * passphrase is outside this check's threat model.
- */
-export class NetworkMismatchError extends GuardError {
-  /** Passphrase the caller required. */
-  readonly expected: NetworkPassphrase;
-  /** Passphrase reported by the RPC endpoint. */
-  readonly actual: string;
-
-  constructor(options: { expected: NetworkPassphrase; actual: string; cause?: unknown }) {
-    super(
-      `stellar-agent-guard network mismatch: expected network passphrase "${options.expected}" but the RPC reported "${options.actual}"`,
-      causeOptions(options.cause),
-    );
-    this.expected = options.expected;
-    this.actual = options.actual;
   }
 }

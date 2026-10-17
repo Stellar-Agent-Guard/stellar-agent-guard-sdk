@@ -2,13 +2,13 @@
  * Unit tests for PreFlightInterceptor:
  *  - Input validation and the throw-vs-verdict contract
  *  - Opt-in pre-flight simulation cache
+ *  - Network interlock (expectedNetwork) binding
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Account, Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
   InvalidInputError,
-  NetworkMismatchError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
   validateContractCall,
@@ -20,11 +20,14 @@ import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
-import type { NetworkPassphrase } from "../../src/preflight.ts";
+import { NetworkMismatchError } from "../../src/index.ts";
 
 const VALID_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 const VALID_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
 const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
+
+const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
+const MAINNET_PASSPHRASE = "Public Global Stellar Network ; September 2015";
 
 function validTransferCall(amount: bigint = 100n): ContractCall {
   return {
@@ -52,16 +55,16 @@ function createMockServer(options?: {
     get requestCount() {
       return requestCount;
     },
-    async getNetwork() {
-      requestCount++;
-      return {
-        passphrase: options?.networkPassphrase ?? "Test SDF Network ; September 2015",
-      };
-    },
     async getAccount() {
       requestCount++;
       return {
         sequenceNumber: () => "100",
+      };
+    },
+    async getNetwork() {
+      requestCount++;
+      return {
+        passphrase: options?.networkPassphrase ?? TESTNET_PASSPHRASE,
       };
     },
     async getLatestLedger() {
@@ -112,16 +115,88 @@ function createMockServer(options?: {
   return mock;
 }
 
-function createTestInterceptor(server: rpc.Server, expectedNetwork?: NetworkPassphrase) {
+function createTestInterceptor(server: rpc.Server) {
   return new PreFlightInterceptor({
     server,
     networkPassphrase: "Test SDF Network ; September 2015",
     guard: VALID_GUARD,
     agent: Keypair.random(),
     source: Keypair.random(),
-    ...(expectedNetwork !== undefined ? { expectedNetwork } : {}),
   });
 }
+
+function createInterlockedInterceptor(
+  server: rpc.Server,
+  expectedNetwork: string,
+) {
+  return new PreFlightInterceptor({
+    server,
+    networkPassphrase: TESTNET_PASSPHRASE,
+    expectedNetwork,
+    guard: VALID_GUARD,
+    agent: Keypair.random(),
+    source: Keypair.random(),
+  });
+}
+
+describe("network interlock (expectedNetwork)", () => {
+  it("passes when the server's network matches the expected passphrase", async () => {
+    const mockServer = createMockServer({ networkPassphrase: TESTNET_PASSPHRASE });
+    const interceptor = createInterlockedInterceptor(mockServer, TESTNET_PASSPHRASE);
+
+    const decision = await interceptor.check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+  });
+
+  it("throws NetworkMismatchError when expected testnet but server is mainnet", async () => {
+    const mockServer = createMockServer({ networkPassphrase: MAINNET_PASSPHRASE });
+    const interceptor = createInterlockedInterceptor(mockServer, TESTNET_PASSPHRASE);
+
+    await assert.rejects(
+      async () => interceptor.check(validTransferCall()),
+      (err: unknown) => {
+        assert(err instanceof NetworkMismatchError);
+        assert.equal(err.expected, TESTNET_PASSPHRASE);
+        assert.equal(err.actual, MAINNET_PASSPHRASE);
+        assert.match(err.message, /network/i);
+        return true;
+      },
+    );
+  });
+
+  it("throws NetworkMismatchError when expected mainnet but server is testnet", async () => {
+    const mockServer = createMockServer({ networkPassphrase: TESTNET_PASSPHRASE });
+    const interceptor = createInterlockedInterceptor(mockServer, MAINNET_PASSPHRASE);
+
+    await assert.rejects(
+      async () => interceptor.check(validTransferCall()),
+      (err: unknown) => {
+        assert(err instanceof NetworkMismatchError);
+        assert.equal(err.expected, MAINNET_PASSPHRASE);
+        assert.equal(err.actual, TESTNET_PASSPHRASE);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed also surfaces NetworkMismatchError on mismatch", async () => {
+    const mockServer = createMockServer({ networkPassphrase: MAINNET_PASSPHRASE });
+    const interceptor = createInterlockedInterceptor(mockServer, TESTNET_PASSPHRASE);
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(validTransferCall()),
+      NetworkMismatchError,
+    );
+  });
+
+  it("unset expectedNetwork preserves legacy behavior (no getNetwork call, no mismatch)", async () => {
+    const mockServer = createMockServer({ networkPassphrase: MAINNET_PASSPHRASE });
+    const interceptor = createTestInterceptor(mockServer);
+
+    const decision = await interceptor.check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+  });
+});
 
 describe("validateContractCall validator unit tests", () => {
   describe("contract format validation", () => {
@@ -374,54 +449,6 @@ describe("interceptor.check() input validation and zero RPC round-trips", () => 
     );
 
     assert.equal(mockServer.requestCount, 0, "No RPC calls should be attempted on invalid amount");
-  });
-});
-
-describe("network interlock", () => {
-  it("throws NetworkMismatchError when server passphrase differs from expectedNetwork", async () => {
-    const mockServer = createMockServer({ networkPassphrase: "Public Global Stellar Network ; September 2015" });
-    const interceptor = createTestInterceptor(mockServer, "Test SDF Network ; September 2015" as NetworkPassphrase);
-
-    await assert.rejects(
-      async () => interceptor.check(validTransferCall()),
-      (err: unknown) => {
-        assert(err instanceof NetworkMismatchError);
-        assert.equal(err.expected, "Test SDF Network ; September 2015");
-        assert.equal(err.actual, "Public Global Stellar Network ; September 2015");
-        return true;
-      },
-    );
-  });
-
-  it("throws NetworkMismatchError in the reverse direction (mainnet expected, testnet server)", async () => {
-    const mockServer = createMockServer({ networkPassphrase: "Test SDF Network ; September 2015" });
-    const interceptor = createTestInterceptor(mockServer, "Public Global Stellar Network ; September 2015" as NetworkPassphrase);
-
-    await assert.rejects(
-      async () => interceptor.check(validTransferCall()),
-      (err: unknown) => {
-        assert(err instanceof NetworkMismatchError);
-        assert.equal(err.expected, "Public Global Stellar Network ; September 2015");
-        assert.equal(err.actual, "Test SDF Network ; September 2015");
-        return true;
-      },
-    );
-  });
-
-  it("passes when server passphrase matches expectedNetwork", async () => {
-    const mockServer = createMockServer({ networkPassphrase: "Test SDF Network ; September 2015" });
-    const interceptor = createTestInterceptor(mockServer, "Test SDF Network ; September 2015" as NetworkPassphrase);
-
-    const decision = await interceptor.check(validTransferCall());
-    assert.equal(decision.kind, "allow");
-  });
-
-  it("legacy behavior: unset expectedNetwork skips the interlock entirely", async () => {
-    const mockServer = createMockServer({ networkPassphrase: "Public Global Stellar Network ; September 2015" });
-    const interceptor = createTestInterceptor(mockServer);
-
-    const decision = await interceptor.check(validTransferCall());
-    assert.equal(decision.kind, "allow");
   });
 });
 

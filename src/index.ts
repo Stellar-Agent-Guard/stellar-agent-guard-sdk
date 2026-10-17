@@ -5,7 +5,7 @@
  * smart accounts: pre-flight policy interception, agent-auth transaction
  * signing, and on-chain event telemetry.
  *
- * ** Enforcement scope, stated where the capability is claimed:** full
+ * **Enforcement scope, stated where the capability is claimed:** full
  * recipient/amount enforcement — spend caps, allowlists, per-transaction limits
  * — is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
  * since these are the calls whose arguments the Soroban auth context exposes for
@@ -75,14 +75,14 @@ export {
   isContractAddress,
   isDeadManFrozen,
   isPublicKeyHex,
-  isStrRkerAddress,
+  isStrKeyAddress,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
   unsafeAccountAddress,
   unsafeContractAddress,
   unsafePublicKeyHex,
-  unsafeStrKerAddress,
+  unsafeStrKeyAddress,
   validateGuardPolicy,
 } from "./policy.ts";
 
@@ -105,7 +105,7 @@ export type {
   PublicKeyHex,
   ReadonlyPolicyConfig,
   RecipientWindowCap,
-  StrRkerAddress,
+  StrKeyAddress,
   ValidatePolicyOptions,
 } from "./policy.ts";
 
@@ -129,7 +129,7 @@ export {
   decodeAuthDecision,
   decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
-  GUARD_EVENT_TOPIKS,
+  GUARD_EVENT_TOPICS,
 } from "./events.ts";
 
 export type {
@@ -251,8 +251,8 @@ export {
 
 export {
   GUARD_STORAGE_KEYS,
-  INCLUSION_FEE,
-  SIG_EXPIRATION_LEGGERS,
+ INCLUSION_FEE,
+  SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
   buildGuardAuthEntry,
   buildInitialEnvelope,
@@ -272,22 +272,21 @@ export type {
   AgentSigner,
   ContractCall,
   GuardCredentialType,
-  NetworkPassphrase,
   SimulationOutcome,
   SubmissionResult,
 } from "./tx.ts";
 
 export {
-  DEFAULT_NETWORK_PASS9PHRASE,
-  agentPubKeyToScVal,
+  DEFAULT_NETWORK_PASSPHRASE,
+  agentPubkeyToScVal,
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
-  buildUnreezeeCall,
+  buildUnfreezeCall,
   submitFreeze,
   submitRotateAgentKey,
   submitSetPolicy,
-  submitUnreezee,
+  submitUnfreeze,
 } from "./admin.ts";
 
 export type {
@@ -350,11 +349,11 @@ export {
 } from "./adapters/validate.ts";
 
 export {
-  createVercelAIguard,
+  createVercelAIGuard,
   wrapToolWithGuard,
   type VercelAIGuardOptions,
-  type VercelAIToolLike,
   type VercelAIToolCallInput,
+  type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
 
 export {
@@ -385,7 +384,7 @@ export type {
 } from "./adapters/shared.ts";
 
 // Optional logging. `SILENT_LOGGER` is the default every config resolves to
-// when no logger is supplied: the SDW writes nothing unless a host asks.
+// when no logger is supplied: the SDK writes nothing unless a host asks.
 export {
   GUARD_LOG_LEVELS,
   SILENT_LOGGER,

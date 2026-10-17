@@ -56,6 +56,11 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 > [`docs/threat-model.md`](docs/threat-model.md) for the full threat model
 > (verdict-inversion, stale-cache verdicts, compromised runtime, fake-RPC
 > simulation, single-dependency supply chain).
+>
+> **Network interlock:** pass `expectedNetwork` to `PreFlightInterceptor`,
+> `invoke()`, or the tx options to fail with a typed `NetworkMismatchError` when
+> the RPC's reported passphrase differs from the expected one. It is a guardrail,
+> not a sandbox — an RPC that lies about its passphrase is not defended against.
 
 ## Quick Start
 
@@ -144,8 +149,8 @@ const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6M
 const interceptor = new PreFlightInterceptor({
   server: new rpc.Server("https://soroban-testnet.stellar.org"),
   networkPassphrase: "Test SDF Network ; September 2015",
-  // Recommended: fail closed if the RPC's network passphrase doesn't match.
-  // Unset = unchecked (legacy behavior; NOT recommended).
+  // Bind to the expected network: fails with NetworkMismatchError if the RPC
+  // reports a different passphrase. Strongly recommended; unset = unchecked.
   expectedNetwork: "Test SDF Network ; September 2015",
   guard: guardAddress, // Type-safe: validated as ContractAddress
   agent: Keypair.fromSecret(process.env.AGENT_SECRET!),
