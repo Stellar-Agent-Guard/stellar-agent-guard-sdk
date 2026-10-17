@@ -64,9 +64,9 @@ export type{
 export {
   POLICY_RULE_IDS,
   deadManRemaining,
+  definePolicy,
   decodeCheckResult,
   decodePolicy,
-  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -100,6 +100,7 @@ export type{
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
+  PolicyOverrides,
   PolicyRuleId,
   ProtocolRule,
   PublicKeyHex,
@@ -278,15 +279,15 @@ export type{
 
 export {
   DEFAULT_NETWORK_PASSPHRASE,
-  agentPubKeyToScVal,
+  agentPubkeyToScVal,
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
-  buildUnreezeeCall,
+  buildUnfreezeCall,
   submitFreeze,
   submitRotateAgentKey,
   submitSetPolicy,
-  submitUnreezee,
+  submitUnfreeze,
 } from "./admin.ts";
 
 export type{
@@ -352,12 +353,12 @@ export {
   createVercelAIGuard,
   wrapToolWithGuard,
   type VercelAIGuardOptions,
-  type VercelAIGuardToolCallInput,
+  type VercelAIToolCallInput,
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
 
 export {
-  guardMmpCallTool,
+  guardMcpCallTool,
   guardMcpToolHandler,
 } from "./adapters/mcp.ts";
 
