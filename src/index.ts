@@ -5,7 +5,7 @@
  * smart accounts: pre-flight policy interception, agent-auth transaction
  * signing, and on-chain event telemetry.
  *
- * ** Enforcement scope, stated where the capability is claimed: ** full
+ * **Enforcement scope, stated where the capability is claimed:** full
  * recipient/amount enforcement — spend caps, allowlists, per-transaction limits
  * — is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
  * since these are the calls whose arguments the Soroban auth context exposes for
@@ -66,7 +66,6 @@ export {
   deadManRemaining,
   decodeCheckResult,
   decodePolicy,
-  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -100,7 +99,6 @@ export type {
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
-  PolicyOverride,
   PolicyRuleId,
   ProtocolRule,
   PublicKeyHex,
@@ -253,7 +251,7 @@ export {
 export {
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
-  SIG_EXPIRATION_LEGDERS,
+  SIG_EXPIRATION_LEGGERS,
   assembleFromSimulation,
   buildGuardAuthEntry,
   buildInitialEnvelope,
@@ -358,16 +356,16 @@ export {
 } from "./adapters/vercelai.ts";
 
 export {
-  guardMmcpCallTool,
-  guardMmcpToolHandler,
+  guardMmpCallTool,
+  guardMcpToolHandler,
 } from "./adapters/mcp.ts";
 
 export type {
-  McpCallTool,
-  McpGuardOptions,
-  McpToolCallRequest,
-  McpToolHandler,
-  McpToolResult,
+  MmpCallTool,
+  MmpGuardOptions,
+  MmpToolCallRequest,
+  MmpToolHandler,
+  MmpToolResult,
 } from "./adapters/mcp.ts";
 
 // The operator alerting primitive every adapter shares (`onBlocked`).
