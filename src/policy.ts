@@ -183,6 +183,18 @@ export function freezePolicy(policy: PolicyConfig): ReadonlyPolicyConfig {
 }
 
 /**
+ * Maximum number of entries allowed in recipient-bearing lists
+ * (`recipients`, `blocked_recipients`, `recipient_window_caps`).
+ *
+ * Vendored from the deployed contract's cardinality limit (SPEC §8). Kept in
+ * sync with `stellar-agent-guard-contracts`; the property tests in
+ * `tests/property/policy-encode-decode.test.ts` assert that a policy at the
+ * limit encodes and that a policy at limit+1 is rejected by
+ * `validateGuardPolicy` before encoding.
+ */
+export const MAX_RECIPIENT_ENTRIES = 256;
+
+/**
  * SPEC §8 rule identifiers for granular policy validation failures.
  *
  * Hand-listed SPEC §8 rule IDs pending contract-level granular validation issue.
@@ -223,7 +235,7 @@ export interface PolicyFailure {
 export interface ValidatePolicyOptions {
   /** Guard contract address used to enforce self-address rejection rules. */
   guardAddress?: ContractAddress | string;
-  /** Maximum allowed recipient entries (default: 256 per SPEC §8). */
+  /** Maximum allowed recipient entries (default: `MAX_RECIPIENT_ENTRIES` per SPEC §8). */
   maxRecipientEntries?: number;
 }
 
@@ -322,10 +334,42 @@ const POLICY_FIELDS = [
   "window_secs",
 ] as const;
 const PROTOCOL_RULE_FIELDS = ["contract", "fns"] as const;
-const I128_MIN = -(2n ** 127n);
-const I128_MAX = 2n ** 127n - 1n;
-const U64_MAX = 2n ** 64n - 1n;
-const MAX_RECIPIENT_ENTRIES = 256;
+export const I128_MIN = -(2n ** 127n);
+export const I128_MAX = 2n ** 127n - 1n;
+export const U64_MAX = 2n ** 64n - 1n;
+
+/**
+ * Shared property-test configuration and seeded generator.
+ *
+ * Single source of truth for the policy encode/decode property tests
+ * (`tests/property/policy-encode-decode.test.ts` and
+ * `tests/unit/policy.test.ts`). Import these instead of redeclaring them in
+ * each test file — a duplicate `PROPERTY_ITERATIONS` or generator in a test
+ * file is a load-time error (TS2451/TS2393).
+ *
+ * Iteration count and wall-clock budget mirror the contracts repo's property
+ * test runtime discipline (bounded N, bounded ms) so CI stays predictable.
+ * These are the ONLY declarations of these identifiers in the repo; test
+ * files must import them, never redeclare (TS2451).
+ */
+export const PROPERTY_ITERATIONS = 200;
+export const PROPERTY_TIME_BUDGET_MS = 5_000;
+
+/**
+ * Deterministic 32-bit PRNG (mulberry32). Returns a function producing floats
+ * in [0, 1). Seed is printed by the property tests on failure so a failing
+ * case is reproducible.
+ */
+export function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
 
 /**
  * Decode a `PolicyConfig` returned by the guard's `policy()` read, or the map

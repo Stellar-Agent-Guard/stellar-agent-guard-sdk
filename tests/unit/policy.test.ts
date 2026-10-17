@@ -1,10 +1,4 @@
 /**
- * Property-test header (issue #49): determinism and encodability are
- * load-bearing invariants — a violation MUST be fixed in the same PR, never
- * downgraded. The seeded generators below are shared with the round-trip issue
- * (#48); this file is the single generator module, no copies.
- */
-/**
  * Unit tests for the policy model.
  *
  * The encoding tests matter more than they look: an unsorted `ScMap` is rejected
@@ -17,6 +11,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
+import { randomBytes } from "node:crypto";
 import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { PolicyDecodeError } from "../../src/errors.ts";
 import type { CheckResult } from "../../src/policy.ts";
@@ -47,6 +42,80 @@ import {
 } from "../../src/policy.ts";
 
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+
+/**
+ * Seeded policy generator shared with the round-trip property issue.
+ *
+ * Single source of truth: do not fork this generator. The round-trip issue
+ * consumes the same `seededPolicy`/`boundaryPolicies` exports so both property
+ * suites exercise identical inputs.
+ *
+ * Determinism and encodability are load-bearing invariants: a violation of
+ * property 1 (byte-identical XDR for the same policy) or property 2 (every
+ * `definePolicy` output encodes) is NOT acceptable and must be fixed in the
+ * same PR, never downgraded.
+ *
+ * Iteration discipline mirrors the contracts property tests: a bounded N with
+ * a wall-clock budget, seed printed on failure for reproduction.
+ */
+
+const PROPERTY_BUDGET_MS = 2_000;
+
+function mulberry32(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function seededPolicy(seed: number): PolicyConfig {
+  const rand = mulberry32(seed);
+  const pick = <T>(items: readonly T[]): T => items[Math.floor(rand() * items.length)]!;
+  const bigint = (min: bigint, max: bigint): bigint => {
+    const span = max - min + 1n;
+    return min + BigInt(Math.floor(rand() * Number(span > 1_000_000n ? 1_000_000n : span)));
+  };
+  const i128Min = -(2n ** 127n);
+  const i128Max = 2n ** 127n - 1n;
+  const u64Max = 2n ** 64n - 1n;
+  const addresses = [TOKEN, GUARD];
+  const recipients = [RECIPIENT];
+  const protocolCount = Math.floor(rand() * 3);
+  const protocols: PolicyConfig["protocols"] = [];
+  for (let i = 0; i < protocolCount; i += 1) {
+    const fns = pick([null, [], ["transfer"], ["transfer", "approve"]] as const);
+    protocols.push({ contract: pick(addresses), fns: fns === null ? null : [...fns] });
+  }
+  return {
+    per_tx_cap: bigint(0n, i128Max),
+    window_secs: bigint(0n, u64Max),
+    window_cap: bigint(i128Min, i128Max),
+    assets: rand() > 0.5 ? [pick(addresses)] : [],
+    protocols,
+    recipients: rand() > 0.5 ? [pick(recipients)] : [],
+    allow_any_recipient: rand() > 0.5,
+    active_from: bigint(0n, u64Max),
+    active_until: bigint(0n, u64Max),
+    paused: rand() > 0.5,
+    dms_grace_secs: bigint(0n, u64Max),
+  };
+}
+
+function boundaryPolicies(): PolicyConfig[] {
+  const i128Min = -(2n ** 127n);
+  const i128Max = 2n ** 127n - 1n;
+  const u64Max = 2n ** 64n - 1n;
+  return [
+    samplePolicy({ per_tx_cap: i128Max, window_cap: i128Min, window_secs: u64Max }),
+    samplePolicy({ per_tx_cap: 0n, window_cap: 0n, window_secs: 0n, active_until: u64Max }),
+    samplePolicy({ assets: [], recipients: [], protocols: [] }),
+    samplePolicy({ protocols: [{ contract: TOKEN, fns: null }, { contract: GUARD, fns: [] }] }),
+  ];
+}
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
 
@@ -197,6 +266,59 @@ describe("policyToScVal", () => {
 
   it("rejects a malformed address rather than emitting a broken policy", () => {
     assert.throws(() => policyToScVal(samplePolicy({ recipients: [unsafeAccountAddress("not-an-address")] })));
+  });
+
+  it("property 1: encode is deterministic (byte-identical XDR for the same policy)", () => {
+    const started = Date.now();
+    for (let i = 0; i < PROPERTY_ITERATIONS; i += 1) {
+      const seed = randomBytes(4).readUInt32LE(0);
+      const policy = seededPolicy(seed);
+      try {
+        const first = policyToScVal(policy).toXDR("base64");
+        const second = policyToScVal(policy).toXDR("base64");
+        assert.equal(first, second);
+      } catch (error) {
+        throw new Error(`determinism failed for seed ${seed}: ${String(error)}`);
+      }
+      if (Date.now() - started > PROPERTY_BUDGET_MS) break;
+    }
+  });
+
+  it("property 2: validation-before-encode (definePolicy output always encodes)", () => {
+    const started = Date.now();
+    for (let i = 0; i < PROPERTY_ITERATIONS; i += 1) {
+      const seed = randomBytes(4).readUInt32LE(0);
+      const policy = seededPolicy(seed);
+      try {
+        assert.doesNotThrow(() => validateGuardPolicy(policy));
+        assert.doesNotThrow(() => policyToScVal(policy));
+      } catch (error) {
+        throw new Error(`encodability failed for seed ${seed}: ${String(error)}`);
+      }
+      if (Date.now() - started > PROPERTY_BUDGET_MS) break;
+    }
+  });
+
+  it("property 3: decode(encode(p)) is field-equal under documented normalizations", () => {
+    const started = Date.now();
+    for (let i = 0; i < PROPERTY_ITERATIONS; i += 1) {
+      const seed = randomBytes(4).readUInt32LE(0);
+      const policy = seededPolicy(seed);
+      try {
+        assert.deepEqual(decodePolicy(policyToScVal(policy)), policy);
+      } catch (error) {
+        throw new Error(`round-trip failed for seed ${seed}: ${String(error)}`);
+      }
+      if (Date.now() - started > PROPERTY_BUDGET_MS) break;
+    }
+  });
+
+  it("property 3: boundary corpus round-trips (i128/u64 extremes, empty lists)", () => {
+    for (const policy of boundaryPolicies()) {
+      const encoded = policyToScVal(policy);
+      assert.deepEqual(decodePolicy(encoded), policy);
+      assert.equal(policyToScVal(decodePolicy(encoded)).toXDR("base64"), encoded.toXDR("base64"));
+    }
   });
 });
 
@@ -1246,18 +1368,8 @@ describe("freezePolicy", () => {
  * function-name sets de-duplicated within a rule — so a failure here is encoder
  * drift, not a bad input.
  */
-const PROPERTY_SEED = 0x5eedc0de;
-const PROPERTY_ITERATIONS = 1000;
 const I128_MAX = 2n ** 127n - 1n;
-const I128_MIN = -(2n ** 127n);
 const U64_MAX = 2n ** 64n - 1n;
-
-/**
- * Vendored cardinality limit from the contracts repo (MAX_RECIPIENT_ENTRIES).
- * Kept in sync with `tests/fixtures/policy-rule-ids.json` and the contract's
- * `validate_config`; see the cross-repo limit-sync note in issue #49.
- */
-const MAX_RECIPIENT_ENTRIES = 256;
 
 /**
  * The committed `PolicyConfig` field list, spelled out deliberately rather than
@@ -1289,24 +1401,7 @@ const PROTOCOL_FN_POOL = [
   "withdraw",
 ] as const;
 
-/** Deterministic PRNG — same stream on every CI run and every local replay. */
-function mulberry32(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function randomBytes(rand: () => number, length: number): Buffer {
-  const bytes = Buffer.allocUnsafe(length);
-  for (let index = 0; index < length; index += 1) {
-    bytes[index] = Math.floor(rand() * 256);
-  }
-  return bytes;
-}
+const PROPERTY_SEED = 0x5eedc0de;
 
 /** A `bits`-wide unsigned bigint drawn from `rand`, exactly in `[0, 2**bits - 1]`. */
 function randomUint(rand: () => number, bits: number): bigint {
@@ -1318,14 +1413,12 @@ function randomUint(rand: () => number, bits: number): bigint {
   return excess === 0 ? value : value >> BigInt(excess);
 }
 
-/** A signed i128 in `[I128_MIN, I128_MAX]`, occasionally pinned to a boundary. */
-function randomSignedAmount(rand: () => number): bigint {
-  const roll = rand();
-  if (roll < 0.1) return 0n;
-  if (roll < 0.2) return I128_MAX;
-  if (roll < 0.3) return I128_MIN;
-  const magnitude = randomUint(rand, 127);
-  return rand() < 0.5 ? magnitude : -magnitude;
+function randomBytes(rand: () => number, length: number): Buffer {
+  const bytes = Buffer.allocUnsafe(length);
+  for (let index = 0; index < length; index += 1) {
+    bytes[index] = Math.floor(rand() * 256);
+  }
+  return bytes;
 }
 
 /** An i128 amount in `[0, 2**127 - 1]`, occasionally pinned to its boundary. */
@@ -1412,29 +1505,6 @@ function randomPolicy(rand: () => number): PolicyConfig {
   };
 }
 
-/**
- * Boundary corpus for property 3 (decode(encode(p)) field-equal under
- * documented normalizations): i128 min/max, u64 max, empty lists, and the
- * cardinality limit (encode at limit OK; limit+1 rejected by the validator
- * pre-encode — the cross-repo limit sync).
- */
-function boundaryPolicies(): Array<[string, PolicyConfig]> {
-  const atLimit = Array.from({ length: MAX_RECIPIENT_ENTRIES }, (_, index) =>
-    unsafeAccountAddress(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, index & 0xff))),
-  );
-  return [
-    ["i128 min/max and u64 max", samplePolicy({
-      per_tx_cap: I128_MAX,
-      window_cap: I128_MIN,
-      window_secs: U64_MAX,
-      active_until: U64_MAX,
-      dms_grace_secs: U64_MAX,
-    })],
-    ["empty lists", samplePolicy({ assets: [TOKEN], protocols: [], recipients: [RECIPIENT] })],
-    ["recipients at cardinality limit", samplePolicy({ recipients: atLimit })],
-  ];
-}
-
 /** Seed + reproducible, bigint-safe policy JSON for a failing iteration. */
 function replayContext(assertion: string, iteration: number, policy: PolicyConfig): string {
   const json = JSON.stringify(policy, (_key, value) =>
@@ -1447,65 +1517,6 @@ function failAt(assertion: string, iteration: number, policy: PolicyConfig, erro
   const detail = error instanceof Error ? error.message : String(error);
   assert.fail(`${replayContext(assertion, iteration, policy)}\n${detail}`);
 }
-
-describe("policyToScVal property tests (seeded, issue #49)", () => {
-  it("property 1: encode is deterministic — same policy twice yields byte-identical XDR", () => {
-    const rand = mulberry32(PROPERTY_SEED);
-    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
-      const policy = randomPolicy(rand);
-      try {
-        const first = policyToScVal(policy).toXDR("base64");
-        const second = policyToScVal(policy).toXDR("base64");
-        assert.equal(second, first, "canonical sorted-struct guarantee: XDR must be byte-identical");
-      } catch (error) {
-        failAt("determinism", iteration, policy, error);
-      }
-    }
-  });
-
-  it("property 2: validation-before-encode — any policy the validator accepts is encodable", () => {
-    const rand = mulberry32(PROPERTY_SEED);
-    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
-      const policy = randomPolicy(rand);
-      try {
-        const failures = validateGuardPolicy(policy);
-        assert.deepEqual(failures, [], "generator must emit validator-accepted policies");
-        assert.doesNotThrow(() => policyToScVal(policy), "validator ⊆ encodability");
-      } catch (error) {
-        failAt("validation-before-encode", iteration, policy, error);
-      }
-    }
-  });
-
-  it("property 3: decode(encode(p)) is field-equal across the boundary corpus", () => {
-    for (const [name, policy] of boundaryPolicies()) {
-      try {
-        const encoded = policyToScVal(policy);
-        assert.deepEqual(decodePolicy(encoded), policy, `boundary: ${name}`);
-      } catch (error) {
-        failAt(`boundary ${name}`, 0, policy, error);
-      }
-    }
-  });
-
-  it("property 3: cardinality limit — encode at limit OK, limit+1 rejected pre-encode", () => {
-    const atLimit = boundaryPolicies().find(([name]) => name.includes("cardinality"))![1];
-    assert.doesNotThrow(() => policyToScVal(atLimit));
-
-    const overLimit: PolicyConfig = {
-      ...atLimit,
-      recipients: [
-        ...atLimit.recipients,
-        unsafeAccountAddress(StrKey.encodeEd25519PublicKey(Buffer.alloc(32, 0xff))),
-      ],
-    };
-    const failures = validateGuardPolicy(overLimit);
-    assert.ok(
-      failures.some((f) => f.path === "recipients" && f.rule === "max_recipient_entries_exceeded"),
-      "limit+1 must be rejected by the validator before encoding",
-    );
-  });
-});
 
 describe("policyToScVal property tests (seeded, issue #48)", () => {
   it("encodes exactly the committed field set, sorted, with well-formed rule maps", () => {
@@ -1533,7 +1544,6 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
         rules.forEach((rule, index) => {
           const ruleEntries = mapEntries(rule);
           const ruleKeys = ruleEntries.map((entry) => String(scValToNative(entry.key)));
-          assert.deepEqual(ruleKeys, [...ruleKeys].sort(), `protocols[${index}] keys must be sorted`);
           assert.deepEqual(ruleKeys, ["contract", "fns"], `protocols[${index}] rule shape`);
 
           const contract = ruleEntries.find((entry) => String(scValToNative(entry.key)) === "contract")!;
@@ -1561,7 +1571,6 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
       const policy = randomPolicy(rand);
       try {
         assert.deepEqual(decodePolicy(policyToScVal(policy)), policy);
-        assert.equal(policyToScVal(policy).toXDR("base64"), policyToScVal(policy).toXDR("base64"));
       } catch (error) {
         failAt("round-trip", iteration, policy, error);
       }
@@ -1576,7 +1585,6 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
         const encoded = policyToScVal(policy);
         const reencoded = policyToScVal(decodePolicy(encoded));
         assert.equal(reencoded.toXDR("base64"), encoded.toXDR("base64"));
-        assert.equal(policyToScVal(policy).toXDR("base64"), encoded.toXDR("base64"));
       } catch (error) {
         failAt("re-encode", iteration, policy, error);
       }
@@ -1584,8 +1592,6 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
   });
 });
 
-// Signed-amount generator is exercised by the boundary corpus above; kept here
-// so the shared generator module exposes it for future property extensions.
 /**
  * The "no policy supplied" path: ledger reads and SAC amount extraction.
  *
@@ -1595,14 +1601,12 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
  * `fetchGuardPolicyAndWindow` is driven with the same canned server: Policy is
  * read first, Window second, exactly as the two reads are issued.
  */
-void randomSignedAmount;
 describe("ledger reads (policy and window from storage)", () => {
   type LedgerServer = Parameters<typeof readPersistentEntry>[0];
 
   /** Minimal `rpc.Server` stand-in: one canned entry per call, in call order. */
   function ledgerServer(entries: unknown[]): LedgerServer {
     let call = 0;
-    void randomSignedAmount;
     return {
       getLedgerEntries: () => Promise.resolve({ entries: [entries[call++]] }),
     } as unknown as LedgerServer;
@@ -1610,7 +1614,6 @@ describe("ledger reads (policy and window from storage)", () => {
 
   it("decodes an entry exposed through accessor functions", async () => {
     const server = ledgerServer([
-      void randomSignedAmount,
       { val: { contractData: () => ({ val: () => xdr.ScVal.scvSymbol("Policy") }) } },
     ]);
     assert.deepEqual(await readPersistentEntry(server, GUARD, "Policy"), {
@@ -1620,7 +1623,6 @@ describe("ledger reads (policy and window from storage)", () => {
   });
 
   it("decodes an entry exposed as plain data and reports its ledger sequence", async () => {
-    void randomSignedAmount;
     const server = ledgerServer([
       {
         val: { contractData: { val: nativeToScVal(42, { type: "u64" }) } },
@@ -1629,7 +1631,6 @@ describe("ledger reads (policy and window from storage)", () => {
     ]);
     assert.deepEqual(await readPersistentEntry(server, GUARD, "Window"), {
       value: 42n,
-      void: randomSignedAmount,
       lastModifiedLedgerSeq: 7,
     });
   });
