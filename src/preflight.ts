@@ -1,3 +1,4 @@
+import { NetworkMismatchError } from "./errors.ts";
 /**
  * The pre-flight interceptor: ask the guard whether an action is permitted
  * *before* anything is signed for broadcast.
@@ -27,17 +28,21 @@
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { GuardError, SimulationError } from "./errors.ts";
-import { enforceCall } from "./invoke.ts";
+import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
 import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
-  type PolicyConfig,
+  type ContractAddress,
+  type ReadonlyPolicyConfig,
 } from "./policy.ts";
 import { GuardBlockedError, explainReason } from "./reasons.ts";
-import type { InvokeStepEvent } from "./invoke.ts";
+import type { EnforcementOutcome, InvokeStepEvent } from "./invoke.ts";
+import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
+import { systemClock, type Clock } from "./clock.ts";
+import type { NetworkPassphrase } from "./tx.ts";
 
 /**
  * Thrown synchronously when a ContractCall has invalid shape or types
@@ -220,7 +225,7 @@ export interface CheckBatchOptions {
    * Policy configuration to enforce against during batch staging.
    * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
    */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
 
   /**
    * Initial committed amount already spent in the current rolling window.
@@ -268,9 +273,28 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  * simulate; `check()` never broadcasts), using the same `InvokeStepEvent`
  * shape and shared trace vocabulary as `invoke()`'s `onStep`. Entirely
  * optional — omitting it changes nothing about the check.
+ *
+ * `signal` and `timeoutMs` bound the RPC calls the check makes (the ledger
+ * lookup and the probe/enforced simulations). An already-aborted signal
+ * returns before any RPC call is made; a mid-flight abort or a fired timeout
+ * returns the check's fail-closed `undetermined` verdict carrying a typed
+ * `RpcTimeoutError` — the guard reached no decision, which is exactly what
+ * `undetermined` means, so a bound can never produce an `admissible` verdict.
+ * Both default to the pipeline's shared behaviour: no signal, and
+ * `DEFAULT_RPC_TIMEOUT_MS` for the timeout.
  */
 export interface PreFlightCheckOptions {
   onStep?: (step: InvokeStepEvent) => void;
+  /**
+   * Caller-owned cancellation; aborts the RPC calls the check makes. A fired
+   * signal yields an `undetermined` verdict, never a throw.
+   */
+  signal?: AbortSignal | undefined;
+  /**
+   * Bound on each RPC call, in milliseconds; `0` disables the timeout. A fired
+   * timeout yields the same `undetermined` verdict as an abort.
+   */
+  timeoutMs?: number | undefined;
 }
 
 export interface PreFlightCacheOptions {
@@ -293,7 +317,7 @@ export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
   /** The guarded smart account whose policy is being enforced. */
-  guard: string;
+  guard: ContractAddress;
   /**
    * The key registered as the account's agent, used to sign the auth entry: an
    * `AgentSigner` for any signing setup, or a plain Ed25519 `Keypair` for the
@@ -305,12 +329,34 @@ export interface PreFlightConfig {
   /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
   accountSigners?: Keypair[];
   /** Optional policy to use for batch staging (otherwise fetched from ledger). */
-  policy?: PolicyConfig | null;
+  policy?: ReadonlyPolicyConfig | null;
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
    */
   cache?: PreFlightCacheOptions;
+  /**
+   * Optional log sink for this interceptor's decision points: each verdict, and
+   * every cache hit, store and invalidation.
+   *
+   * Omitted — the default — the interceptor says nothing at all. A verdict is
+   * still returned exactly as before; the logger changes only whether anyone is
+   * told about it.
+   */
+  logger?: GuardLoggerInput | undefined;
+  /**
+   * Inject a custom clock for time-dependent operations (cache TTL, etc.).
+   * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
+   */
+  clock?: Clock;
+  /**
+   * The network passphrase this interceptor expects the RPC server to be
+   * serving. When set, the interceptor fetches the server's network passphrase
+   * on first use and fails with a typed `NetworkMismatchError` unless it
+   * matches. Omit to leave the interlock unchecked — explicitly NOT
+   * recommended; a misconfigured RPC URL is the classic footgun.
+   */
+  expectedNetwork?: NetworkPassphrase | undefined;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -370,12 +416,43 @@ export class PreFlightInterceptor {
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
   private readonly namespace: string;
+  private readonly logger: GuardLogger;
+  private readonly clock: Clock;
+  private networkCheck: Promise<void> | undefined;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
+    this.clock = config.clock ?? systemClock;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
+    this.logger = resolveLogger(config.logger);
+  }
+
+  /**
+   * Verify the RPC server's network passphrase matches `expectedNetwork`, once.
+   *
+   * The check is memoized so a long-lived interceptor pays for it at most once;
+   * a rejection is not memoized, so a transient RPC failure does not
+   * permanently poison the interceptor. Unset `expectedNetwork` is a no-op,
+   * preserving legacy behavior exactly.
+   */
+  private async ensureNetwork(): Promise<void> {
+    const expected = this.config.expectedNetwork;
+    if (expected === undefined) return;
+    if (!this.networkCheck) {
+      this.networkCheck = (async () => {
+        const info = await this.config.server.getNetwork();
+        const actual = info.passphrase;
+        if (actual !== expected) {
+          throw new NetworkMismatchError({ expected, actual });
+        }
+      })().catch((error) => {
+        this.networkCheck = undefined;
+        throw error;
+      });
+    }
+    await this.networkCheck;
   }
 
   private validateCacheOptions(): void {
@@ -424,7 +501,7 @@ export class PreFlightInterceptor {
       return null;
     }
 
-    const now = Date.now();
+    const now = this.clock.now();
     for (const [key, entry] of this.cache) {
       if (entry.ledger !== ledger || entry.expiresAt <= now) this.cache.delete(key);
     }
@@ -439,13 +516,20 @@ export class PreFlightInterceptor {
   /** Clear all cached verdicts, or only entries for `call` when provided. */
   invalidate(call?: ContractCall): void {
     if (!call) {
+      const cleared = this.cache.size;
       this.cache.clear();
+      this.logger.debug("pre-flight cache invalidated", { scope: "all", cleared });
       return;
     }
     const prefix = `${this.namespace}:${callFingerprint(call)}:`;
+    let cleared = 0;
     for (const key of this.cache.keys()) {
-      if (key.startsWith(prefix)) this.cache.delete(key);
+      if (key.startsWith(prefix)) {
+        this.cache.delete(key);
+        cleared += 1;
+      }
     }
+    this.logger.debug("pre-flight cache invalidated", { scope: "call", cleared });
   }
 
   /**
@@ -458,27 +542,58 @@ export class PreFlightInterceptor {
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
+    await this.ensureNetwork();
 
     const context = await this.cacheContext(call);
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {
-        const now = Date.now();
+        const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
+          // A hit is worth a line of its own: it is the one verdict the caller
+          // gets without a simulation, so a host reading logs needs to be able
+          // to tell a reused verdict from a fresh one.
+          this.logger.debug("pre-flight verdict served from cache", {
+            guard: this.config.guard,
+            contract: call.contract,
+            fn: call.fn,
+            kind: cached.decision.kind,
+            ledger: context.ledger,
+          });
           return cached.decision;
         }
         this.cache.delete(context.key);
       }
     }
-    const outcome = await enforceCall({
-      server: this.config.server,
-      source: this.config.source,
-      call,
-      networkPassphrase: this.config.networkPassphrase,
-      guardAuth: { guard: this.config.guard, agent: this.config.agent },
-      ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-      ...(options?.onStep ? { onStep: options.onStep } : {}),
-    });
+    // A bound that fired is a verdict, not a crash: the guard never reached a
+    // decision, so the check returns its fail-closed `undetermined` arm (the
+    // same arm any other unrunnable simulation takes) carrying the typed
+    // `RpcTimeoutError`. `invoke()` reports the same error through its own
+    // `error` outcome instead — a verdict question versus a pipeline question.
+    let outcome: EnforcementOutcome;
+    try {
+      outcome = await withRpcAbort(
+        {
+          stage: "pre-flight",
+          signal: options?.signal,
+          timeoutMs: options?.timeoutMs,
+        },
+        () =>
+          enforceCall({
+            server: this.config.server,
+            source: this.config.source,
+            call,
+            networkPassphrase: this.config.networkPassphrase,
+            guardAuth: { guard: this.config.guard, agent: this.config.agent },
+            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+            ...(options?.onStep ? { onStep: options.onStep } : {}),
+            ...(this.config.logger ? { logger: this.config.logger } : {}),
+          }),
+      );
+    } catch (error) {
+      if (!(error instanceof RpcTimeoutError)) throw error;
+      outcome = timeoutOutcome(error);
+    }
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
@@ -544,6 +659,37 @@ export class PreFlightInterceptor {
         ledger: context.ledger,
         expiresAt: context.expiresAt,
       });
+      this.logger.debug("pre-flight verdict cached", {
+        kind: decision.kind,
+        ledger: context.ledger,
+      });
+    }
+
+    // The verdict itself, at the level its severity deserves: a refusal is the
+    // guardrail working and is reported as information, a decision that could
+    // not be reached is a degraded state and is reported as a warning.
+    if (decision.kind === "blocked") {
+      this.logger.info(`guard refused the call (${decision.reason})`, {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+        reason: decision.reason,
+      });
+    } else if (decision.kind === "undetermined") {
+      this.logger.warn(`pre-flight could not determine enforcement: ${decision.detail}`, {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+      });
+    } else {
+      this.logger.debug("call admitted by the guard", {
+        guard: this.config.guard,
+        contract: call.contract,
+        fn: call.fn,
+        // A string, not the raw bigint: a JSON logger cannot serialise one.
+        estimatedResourceFee: decision.estimatedResourceFee.toString(),
+        footprintKeys: decision.footprintKeys,
+      });
     }
     return decision;
   }
@@ -578,6 +724,7 @@ export class PreFlightInterceptor {
     calls: ContractCall[],
     options?: CheckBatchOptions,
   ): Promise<PreFlightBatchDecision> {
+    await this.ensureNetwork();
     if (calls.length === 0) {
       return {
         admissible: true,
@@ -589,7 +736,7 @@ export class PreFlightInterceptor {
     }
 
     // Resolve policy and initial window spend for staging
-    let policy: PolicyConfig | null = options?.policy ?? this.config.policy ?? null;
+    let policy: ReadonlyPolicyConfig | null = options?.policy ?? this.config.policy ?? null;
     let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
 
     if (policy === null || options?.initialWindowSpent === undefined) {

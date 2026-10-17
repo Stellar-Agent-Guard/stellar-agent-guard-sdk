@@ -1,6 +1,6 @@
 # Invoke Pipeline API
 
-## `invoke(params: InvokeParams): Promise<InvokeOutcome>`
+## ``invoke(params: InvokeParams): Promise<InvokeOutcome>``
 
 Executes an end-to-end transaction through the guard:
 1. Runs probe simulation to collect required authorization entries.
@@ -8,20 +8,61 @@ Executes an end-to-end transaction through the guard:
    an `AgentSigner`, or a plain Ed25519 `Keypair` for the single-key default).
 3. Runs enforced simulation through `__check_auth`.
 4. Assembles transaction envelope and submits to Soroban RPC.
-5. Retries a post-broadcast stale-ledger resource rejection with bounded full-jitter exponential backoff.
+5. Handles transient `scecExceededLimit` ledger resource errors with bounded retry.
+6. Handles minimum-fee broadcast rejections (`tx_insufficient_fee` / "tx too cheap") with bounded fee-bump retry.
 
-Every retry calls the entire pipeline again, so the account sequence, required authorizations, resource declaration, and guard policy decision are refreshed from current ledger state. Non-retryable errors, including invalid input and guard blocks, return immediately without sleeping.
+Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
 
-### Retry options
+### Network Interlock (`expectedNetwork`)
 
-Pass `retry` on `InvokeParams`:
+Bind the pipeline to an expected network passphrase so a misconfigured RPC URL
+(testnet key + amainnet RPC, or the reverse) fails fast instead of silently signing
+for the wrong network:
 
-| Option | Default | Meaning |
-| --- | ---: | --- |
-| `maxAttempts` | `3` | Total attempts, including the first. |
-| `baseDelayMs` | `100` | First full-jitter window. |
-| `maxDelayMs` | `2_000` | Cap for later full-jitter windows. |
-| `random` | `Math.random` | RNG injection point. |
-| `sleep` | `setTimeout` | Async sleep injection point. |
+```typescript
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  expectedNetwork: Networks.TESTNET, // fails typed NetworkMismatchError on mismatch
+  feeBump: {
+    maxAttempts: 3,
+    feeMultiplier: 2,
+    initialInclusionFee: 100n,
+  },
+});
+```
 
-The delay for retry `n` is `random() × min(maxDelayMs, baseDelayMs × 2^(n-1))`, which is full jitter rather than a fixed sleep. When the retry budget is exhausted, the result is an `InvokeRetryError` with `attempts`, `lastCause`, `cause`, and `lastOutcome`. `InvokeOptions` is an alias for `InvokeParams` for compatibility with the README.
+* **Semantics**: the server's network passphrase is fetched at construction (or first use) and compared against `expectedNetwork.`
+On mismatch the call fails with a typed `NetworkMismatchError` naming both the expected and
+actual passphrases.
+* **Unset behavior**: `expectedNetwork === undefined` is unchecked and preserves legacy
+behavior exactly. This is **not recommended** for production use.
+* **Limitation**: the interlock is a guardrail, not a sandbox — an RPC lying about its
+  passphrase is not defended against.
+
+### Fee-Bump Configuration (`feeBump`)
+
+When network fee conditions change between prepare-time and broadcast, core may reject a transaction with a minimum-fee failure. The pipeline can automatically retry with an increased fee:
+
+```typescript
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  expectedNetwork: Networks.TESTNET,
+  feeBump: {
+    maxAttempts: 3,        // Maximum attempts before returning BroadcastError (default: 3)
+    feeMultiplier: 2,      // Multiplier applied to inclusion fee per retry (default: 2)
+    initialInclusionFee: 100n, // Base inclusion fee in stroops (default: 100 stroops)
+  },
+});
+```
+
+* **What it controls**: Controls bounded fee-increase retries when broadcast fails due to minimum-fee / "tx too cheap" rejections (`tx_insufficient_fee`).
+* **Default behavior**: Enabled by default with up to 3 attempts, a 2x fee multiplier, and base inclusion fee of 100 stroops.
+* **How attempts are bounded**: Configured via `maxAttempts` (default: 3) or overall `maxRetries`. When exhausted, returns a typed `BroadcastError` containing attempt count and the last attempted fee.
+* **How the fee multiplier works**: On each retry, the inclusion fee is scaled by `feeMultiplier` (e.g. 100 stroops → 200 stroops → 400 stroops) and re-added to the simulated resource fee.
+* **Guard and Simulation Invariant**: **Every fee-bump attempt is re-prepared, re-simulated, and re-evaluated by the guard policy.** A fee bump NEVER bypasses simulation or guard enforcement. If re-simulation causes a policy block, the policy block is immediately surfaced and the transaction is never broadcast.
