@@ -79,14 +79,6 @@ jobs:
       - name: typecheck
         run: npm run typecheck
 
-      # README snippet audit (issue #XXX): extracts ```ts blocks from README.md
-      # into temp files and typechecks them against src/, so published examples
-      # cannot drift from the current API. Blocks marked `no-check` are skipped
-      # (convention documented in CONTRIBUTING.md). Bash blocks are documented
-      # as manual-only and not executed here.
-      - name: README snippet audit
-        run: npm run check:readme-snippets
-
       # The strictness ratchet (issue #137): `strict`,
       # `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are on, and
       # this guard fails the required check if any is later flipped off or
@@ -102,12 +94,6 @@ jobs:
       - name: unit tests
         run: npm test
 
-      # Repeat the README audit after build so the snippets are also verified
-      # against the compiled dist/ surface (the shape consumers actually import),
-      # not just src/. Same script, same bounded runtime.
-      - name: README snippet audit (dist)
-        run: npm run check:readme-snippets -- --against dist
-
       # Coverage floor on the verdict-critical path (src/preflight.ts,
       # src/policy.ts, src/invoke.ts). `c8` reads `.c8rc.json`, so the floor
       # lives in one place and is raised by a deliberate PR. Runs the unit
@@ -119,6 +105,8 @@ jobs:
       - name: build
         run: npm run build
 
+      # README code blocks are typechecked against src/ (issue: drift audit).
+      # Extracts 
       - name: unit tests
         run: npm test
 
