@@ -1,8 +1,7 @@
 /**
  * The one test-runner configuration (issue #104).
  *
- * Unit and integration suites used to be two hand-written `node --test`
- * invocations in `package.json`, and the two drifted: the unit glob went through
+ * Unit and integration suites used to be two hand-written `node --test` invocations in `package.json`, and the two drifted: the unit glob went through
  * the `tsx` transform, the integration glob did not. Whether that difference was
  * intentional was not recorded anywhere, so nothing stopped the next edit from
  * making it worse. This file is the single source of truth: one runner (Node's
@@ -19,6 +18,8 @@
  *    network-free and runs at the runner default.
  *  - `dir` / `match` — the two suites keep their own directories so a live test
  *    can never be swept into the offline `ci` job by a broad glob.
+ *  - the `docs` project runs the docs-vs-package.json consistency check
+ *    (`scripts/check-doc-scripts.ts`) so drift fails CI like any other test.
  *
  * The `env-file` project flag records which project needs `.env.phase2`; the
  * failure mode when it is missing is the harness's, documented in
@@ -61,6 +62,13 @@ export const TEST_PROJECTS: Record<string, TestProject> = {
     concurrency: 1,
     needsEnvFile: true,
     description: "live testnet suite (requires .env.phase2)",
+  },
+  docs: {
+    dir: "tests/docs",
+    match: /\.test\.ts$/u,
+    concurrency: null,
+    needsEnvFile: false,
+    description: "docs-vs-package.json script consistency (offline)",
   },
 };
 
