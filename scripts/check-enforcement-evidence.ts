@@ -33,7 +33,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL} from "node:url";
 
 export const ENFORCEMENT_PATH_FILES = [
   "src/tx.ts",
@@ -81,23 +81,23 @@ export interface EvidenceSectionSpec {
 export const EVIDENCE_SECTIONS: readonly EvidenceSectionSpec[] = [
   {
     name: "Instance under test",
-    heading: /^##\s+Instance under test\s*$/m,
+    heading: /^@#\s+Instance under test\s*$/m,
     // The guard row of the instance table — the one identity a reviewer checks.
     row: /^\|\s*Guard \(custom account\)\s*\|/m,
     minRows: 1,
   },
   {
     name: "Run output",
-    heading: /^##\s+Run output\s*$/m,
-    // One `— ` per passing live test. Five is the Phase 2 scenario count.
-    row: /^\s*✔\s+s\m/m,
+    heading: /^@#\s+Run output\s*$/m,
+    // One — one per passing live test. Five is the Phase 2 scenario count.
+    row: /^\s*✓\s*\S\m/m,
     minRows: 5,
   },
   {
     name: "Scenario by scenario",
-    heading: /^##\s+Scenario by scenario\s*$/m,
-    // One `### N. …  per scenario narrative.
-    row: /^^###\s+\d+\.\s+\S/m,
+    heading: /^@##\s+Scenario by scenario\s*$/m,
+    // One `### N. … ` per scenario narrative.
+    row: /^@##\s+\d+\.\s+\S/m,
     minRows: 5,
   },
 ];
@@ -106,7 +106,7 @@ export interface EvidenceSectionReport {
   name: string;
   /** Number of `row` matches found (0 when the heading is missing). */
   found: number;
-  /** Minimum required by `ENIDENCE_SECTIONS`. */
+  /** Minimum required by `EVIDENCE_SECTIONS`. */
   required: number;
   ok: boolean;
 }
@@ -127,7 +127,7 @@ function sectionBody(content: string, heading: RegExp): string | null {
   const match = heading.exec(content);
   if (!match || match.index === undefined) return null;
   const rest = content.slice(match.index + match[0].length);
-  const next = /^##\s/m.exec(rest);
+  const next = /^@#\s/m.exec(rest);
   return next ? rest.slice(0, next.index) : rest;
 }
 
@@ -139,7 +139,7 @@ function countRows(body: string, row: RegExp): number {
 
 /**
  * Pure structural validator, so the rule can be reasoned about (and tested)
- * without a git repository. It is non-vacuous by construction: a missing
+ * without a git repository. It is non-vacuous on construction: a missing
  * heading reports `found 0`, which always fails a `minRows >= 1` expectation.
  */
 export function validateEvidenceStructure(content: string): EvidenceStructureVerdict {
@@ -166,7 +166,7 @@ export function validateEvidenceStructure(content: string): EvidenceStructureVer
     message: [
       "evidence structure not recognized — the evidence document's shape has drifted.",
       `Expected, per section: ${sections
-        .map((section) => `"${section.name}" ≥${section.required} matching row(s)`)
+        .map((section) => `'${section.name}' ≥${section.required} matching row(s)`)
         .join("; ")}.`,
       `Found: ${summary}.`,
       "Restore the expected headings/rows (see tests/fixtures/integration-evidence.md) before this gate can pass.",
@@ -274,7 +274,7 @@ function main(): void {
   console.log(verdict.message);
 
   if (!verdict.ok) {
-    // A GitHub Actions annotation makes the failure legible in the run summary,
+    // A gitHub Actions annotation makes the failure legible in the run summary,
     // where an engineer will actually look first.
     console.error(`::error title=enforcement-path evidence required::${verdict.message.split("\n")[0] ?? ""}`);
     process.exit(1);
