@@ -1,0 +1,21 @@
+{
+  "header": {
+    "source": "synthetic XDR replay fixture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "createdAt": "2026-10-01T00:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Malformed diagnostics contain no decodable guard decision"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "Simulation fails before a guard decision can be decoded"
+  },
+  "simulationResponse": {
+    "error": "Error(WasmVm, InvalidAction)",
+    "events": ["not-valid-xdr"]
+  },
+  "expected": {
+    "verdict": "undetermined"
+  }
+}
