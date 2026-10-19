@@ -18,6 +18,8 @@ import {
   GuardBlockedError,
   explainReason,
   isGuardReason,
+  reasonMessages,
+  reasonMessagesEn,
   reasonName,
   reasonNameFromCode,
   type GuardReason,
@@ -128,6 +130,132 @@ describe("explainReason", () => {
 
   it("falls back for an unrecognised reason rather than throwing", () => {
     assert.match(explainReason(777), /Unrecognised/);
+  });
+});
+
+/**
+ * Golden snapshot for issue #96.
+ *
+ * These strings were captured from `explainReason` *before* the message-key
+ * refactor, by iterating `GUARD_REASON_CODES` against the then-current module.
+ * They are committed here as the refactor's safety net: a default call must
+ * still return exactly this text, character for character, or the refactor has
+ * changed behavior a consumer depends on.
+ */
+const GOLDEN_EXPLANATIONS: Record<GuardReason, string> = {
+  unauthorized: "The presented signature did not verify against the account's registered agent key.",
+  already_initialized: "The guard account has already been initialized.",
+  not_initialized: "The guard account has no registered agent key yet.",
+  invalid_config: "The policy configuration was rejected by validation and was not applied.",
+  invalid_amount: "The transfer amount was zero or negative.",
+  admin_frozen: "An admin froze the account (freeze), or the dead-man switch grace window lapsed.",
+  heartbeat_expired: "The dead-man switch fired: no heartbeat within the policy's grace window, so the account is frozen until an admin unfreezes it.",
+  no_policy: "No policy is installed (never set, or revoked) — the account is default-deny.",
+  paused: "The policy's admin kill switch is engaged.",
+  outside_active_window: "The current ledger time is outside the policy's active_from/active_until window.",
+  asset_not_allowed: "The SAC token being called is not in the policy's assets list.",
+  recipient_not_allowed: "The transfer recipient is not in the policy's recipients allowlist.",
+  per_tx_cap_exceeded: "The transfer amount exceeds the policy's per-transaction cap.",
+  window_cap_exceeded: "The transfer would push cumulative spend over the rolling-window cap.",
+  protocol_not_allowed: "The contract being called is not in the policy's protocols allowlist.",
+  function_not_allowed: "The function being called on an allowlisted contract is not in its function allowlist.",
+  unknown_contract: "The contract being called is neither the account itself, an allowlisted asset, nor an allowlisted protocol (default deny).",
+  self_function_not_allowed: "The call targets a guard function that the agent key may not invoke.",
+  create_contract_not_allowed: "The account may not authorize contract creation.",
+};
+
+describe("explainReason golden snapshot (issue #96)", () => {
+  it("returns the pre-refactor English output byte-identically for every reason", () => {
+    for (const reason of Object.keys(GUARD_REASON_CODES) as GuardReason[]) {
+      assert.equal(explainReason(reason), GOLDEN_EXPLANATIONS[reason], `${reason} drifted`);
+    }
+  });
+
+  it("serves that output from the English message map, not a stray literal", () => {
+    for (const reason of Object.keys(GUARD_REASON_CODES) as GuardReason[]) {
+      assert.equal(explainReason(reason), reasonMessagesEn[reason].body);
+      assert.equal(reasonMessagesEn[reason].body, GOLDEN_EXPLANATIONS[reason]);
+    }
+  });
+
+  it("commits an unconditional snapshot, so the fixture cannot silently pass empty", () => {
+    assert.equal(Object.keys(GOLDEN_EXPLANATIONS).length, Object.keys(GUARD_REASON_CODES).length);
+  });
+
+  it("keeps the unknown-reason fallback unchanged", () => {
+    assert.equal(explainReason(777), "Unrecognised guard reason: 777");
+    assert.equal(explainReason("not_a_reason"), "Unrecognised guard reason: not_a_reason");
+  });
+});
+
+describe("reasonMessages structure (issue #96)", () => {
+  it("lists every reason exactly once, derived from the single code source", () => {
+    assert.deepEqual(
+      Object.keys(reasonMessages).sort(),
+      Object.keys(GUARD_REASON_CODES).sort(),
+    );
+    assert.deepEqual(
+      Object.keys(reasonMessagesEn).sort(),
+      Object.keys(GUARD_REASON_CODES).sort(),
+    );
+  });
+
+  it("namespaces distinct title/body/remediation keys per reason and carries the code", () => {
+    const keys = new Set<string>();
+    for (const [reason, message] of Object.entries(reasonMessages)) {
+      assert.equal(message.code, GUARD_REASON_CODES[reason as GuardReason]);
+      assert.equal(message.titleKey, `guard.reason.${reason}.title`);
+      assert.equal(message.bodyKey, `guard.reason.${reason}.body`);
+      assert.equal(message.remediationKey, `guard.reason.${reason}.remediation`);
+      for (const key of [message.titleKey, message.bodyKey, message.remediationKey]) {
+        assert.ok(!keys.has(key), `duplicate message key ${key}`);
+        keys.add(key);
+      }
+    }
+  });
+
+  it("provides English text for every title/body/remediation key", () => {
+    for (const [reason, message] of Object.entries(reasonMessages)) {
+      assert.ok(reasonMessagesEn[reason as GuardReason].title.length > 0);
+      assert.ok(reasonMessagesEn[reason as GuardReason].body.length > 0);
+      assert.ok(reasonMessagesEn[reason as GuardReason].remediation.length > 0);
+      assert.ok(message.bodyKey.endsWith(".body"));
+    }
+  });
+
+  it("ships no i18n framework: the maps are plain frozen objects", () => {
+    assert.ok(Object.isFrozen(reasonMessages));
+    assert.ok(Object.isFrozen(reasonMessagesEn));
+  });
+});
+
+describe("explainReason localisation (issue #96)", () => {
+  it("returns a per-reason override without touching the default", () => {
+    const text = explainReason("paused", undefined, { paused: "Kill switch is on." });
+    assert.equal(text, "Kill switch is on.");
+    assert.equal(explainReason("paused"), GOLDEN_EXPLANATIONS.paused);
+  });
+
+  it("resolves a locale catalog through bodyKey", () => {
+    const fr: Record<string, string> = {
+      [reasonMessages.paused.bodyKey]: "Le coupe-circuit administrateur est actif.",
+    };
+    assert.equal(explainReason("paused", fr), "Le coupe-circuit administrateur est actif.");
+    assert.equal(explainReason(13, fr), "Le coupe-circuit administrateur est actif.");
+  });
+
+  it("falls back to English for a key the locale omits", () => {
+    assert.equal(explainReason("paused", {}), GOLDEN_EXPLANATIONS.paused);
+  });
+
+  it("applies the override ahead of the locale", () => {
+    const fr: Record<string, string> = {
+      [reasonMessages.paused.bodyKey]: "Le coupe-circuit administrateur est actif.",
+    };
+    assert.equal(
+      explainReason("paused", fr, { paused: "overridden" }),
+      "overridden",
+    );
   });
 });
 

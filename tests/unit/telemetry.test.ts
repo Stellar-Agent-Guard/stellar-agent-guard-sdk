@@ -1244,3 +1244,184 @@ describe("GuardTelemetryListener opt-in buffer (issue #68)", () => {
   });
 });
 
+/**
+ * Opt-in raw event retention (issue #94).
+ *
+ * When a decoded verdict looks wrong, the raw payload is the evidence an SDK
+ * bug report needs. It is off by default because the payload (XDR `ScVal`s,
+ * host-shaped objects) is large enough that retaining it for every event is a
+ * memory decision, not a convenience. These tests pin both halves: the source
+ * object is attached when asked for, and *absent* — not merely empty —
+ * otherwise, so the default path keeps discarding it.
+ */
+describe("opt-in raw event retention (issue #94)", () => {
+  const blockedEvent = () =>
+    diagnosticEvent(["event_auth_checked", "blocked", "per_tx_cap_exceeded"]);
+
+  it("omits the raw field entirely by default, including on guardEventsFromDiagnostics", () => {
+    const events = guardEventsFromDiagnostics([blockedEvent()], GUARD);
+    assert.equal(events.length, 1);
+    assert.equal(events[0]!.raw, undefined);
+    assert.ok(
+      !("raw" in events[0]!),
+      "the default decode must not retain the source payload at all",
+    );
+  });
+
+  it("attaches the exact source event object when includeRaw is enabled", () => {
+    const source = blockedEvent();
+    const events = guardEventsFromDiagnostics([source], GUARD, { includeRaw: true });
+    assert.equal(events.length, 1);
+    assert.deepEqual(events[0]!.raw, source);
+    // Same reference, not a copy: a bug report should carry what the SDK saw.
+    assert.equal(events[0]!.raw, source);
+  });
+
+  it("keeps includeRaw off when the option object is present but false", () => {
+    const events = diagnosticsToEvents([blockedEvent()], GUARD, { includeRaw: false });
+    assert.ok(!("raw" in events[0]!));
+  });
+
+  it("forwards includeRaw through telemetryFromDecision", () => {
+    const source = blockedEvent();
+    const events = telemetryFromDecision(
+      { kind: "blocked", reason: "per_tx_cap_exceeded", diagnosticEvents: [source] },
+      GUARD,
+      { includeRaw: true },
+    );
+    assert.deepEqual(events[0]!.raw, source);
+  });
+
+  it("retains the ledger RPC event only when the listener opts in", async () => {
+    function rawLedgerEvent() {
+      return {
+        contractId: GUARD,
+        type: "contract",
+        ledger: 500,
+        ledgerClosedAt: "2026-09-27T00:00:00Z",
+        txHash: "ab".repeat(32),
+        topic: ["event_auth_checked", "allowed", ""].map((topic) => xdr.ScVal.scvSymbol(topic)),
+        value: xdr.ScVal.scvMap([]),
+      };
+    }
+    function server() {
+      return {
+        getLatestLedger: async () => ({ sequence: 1 }),
+        getEvents: async () => ({ events: [rawLedgerEvent()], cursor: "c", latestLedger: 600 }),
+      };
+    }
+
+    const off = new GuardTelemetryListener({ server: server() as never, guard: GUARD });
+    const offPage = await off.poll({ startLedger: 500 });
+    assert.equal(offPage.events[0]!.raw, undefined);
+    assert.ok(!("raw" in offPage.events[0]!));
+
+    const on = new GuardTelemetryListener({
+      server: server() as never,
+      guard: GUARD,
+      includeRaw: true,
+    });
+    const onPage = await on.poll({ startLedger: 500 });
+    assert.deepEqual(onPage.events[0]!.raw, rawLedgerEvent());
+  });
+
+  it("preserves raw across the unified stream's diagnostic tagging", async () => {
+    const source = blockedEvent();
+    const batch: GuardDiagnosticBatch = {
+      events: guardEventsFromDiagnostics([source], GUARD, { includeRaw: true }),
+      observedAt: "2026-09-27T00:00:00Z",
+    };
+    const seen: GuardEvent[] = [];
+    for await (const event of mergeGuardEventStreams([], [batch])) {
+      seen.push(event);
+    }
+    assert.equal(seen.length, 1);
+    assert.deepEqual(seen[0]!.raw, source);
+  });
+});
+
+describe("GuardTelemetryListener counters", () => {
+  const decisionEvent = (result: "allowed" | "blocked", reason: string | null, index: number): GuardEvent => ({
+    id: `diag:${index.toString(16).padStart(64, "0")}`,
+    kind: "auth_checked",
+    topic: "event_auth_checked",
+    source: "diagnostic",
+    stream: "diagnostic",
+    contractId: GUARD,
+    ledger: null,
+    ledgerClosedAt: null,
+    observedAt: new Date(index).toISOString(),
+    transactionHash: null,
+    decision: { result, reason, source: "diagnostic" } as GuardEvent["decision"],
+    data: {},
+  });
+
+  it("does not allocate counters by default and returns null from stats()", () => {
+    const listener = new GuardTelemetryListener();
+    assert.equal(listener.stats(), null);
+  });
+
+  it("counts allowed and blocked decisions by reason over a count-window", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 20 } });
+    const reasons = ["per_tx_cap_exceeded", "window_cap_exceeded", "recipient_not_allowed"];
+    for (let i = 0; i < 20; i++) {
+      const blocked = i % 2 === 0;
+      listener.observe(
+        decisionEvent(blocked ? "blocked" : "allowed", blocked ? reasons[(i / 2) % 3]! : null, i),
+      );
+    }
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.allowed, 10);
+    assert.equal(stats!.blocked, 10);
+    assert.deepEqual(stats!.byReason, {
+      per_tx_cap_exceeded: 4,
+      window_cap_exceeded: 3,
+      recipient_not_allowed: 3,
+    });
+  });
+
+  it("evicts old events once the count window is exceeded", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 5 } });
+    for (let i = 0; i < 5; i++) {
+      listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", i));
+    }
+    for (let i = 5; i < 10; i++) {
+      listener.observe(decisionEvent("allowed", null, i));
+    }
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.allowed, 5);
+    assert.equal(stats!.blocked, 0);
+    assert.deepEqual(stats!.byReason, {});
+  });
+
+  it("returns a deep-copied snapshot that callers cannot mutate", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 0));
+    const first = listener.stats();
+    assert.ok(first);
+    first!.allowed = 999;
+    first!.byReason.per_tx_cap_exceeded = 999;
+    const second = listener.stats();
+    assert.equal(second!.allowed, 0);
+    assert.equal(second!.byReason.per_tx_cap_exceeded, 1);
+  });
+
+  it("supports a time-window with an injected clock", () => {
+    let now = 0;
+    const listener = new GuardTelemetryListener( {
+      counters: { windowMs: 1000 },
+      clock: () => now,
+    });
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 0));
+    now = 500;
+    listener.observe(decisionEvent("allowed", null, 1));
+    now = 1500;
+    listener.observe(decisionEvent("allowed", null, 2));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.allowed, 2);
+    assert.equal(stats!.blocked, 0);
+  });
+});

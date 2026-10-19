@@ -91,6 +91,17 @@ jobs:
       - name: lint
         run: npm run lint
 
+      - name: unit tests
+        run: npm test
+
+      # Coverage floor on the verdict-critical path (src/preflight.ts,
+      # src/policy.ts, src/invoke.ts). `c8` reads `.c8rc.json`, so the floor
+      # lives in one place and is raised by a deliberate PR. Runs the unit
+      # suite again under instrumentation; no network, no secret, so it cannot
+      # go green on a missing credential.
+      - name: coverage floor (verdict-critical path)
+        run: npm run test:coverage:floor
+
       - name: build
         run: npm run build
 

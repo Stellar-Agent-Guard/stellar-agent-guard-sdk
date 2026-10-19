@@ -615,6 +615,9 @@ async function main(): Promise<void> {
       networkPassphrase: TESTNET_PASSPHRASE,
       accountSigners: [keys.admin],
     });
+    if (outcome instanceof Error) {
+      throw new Error(`initialize failed: ${outcome.message}`);
+    }
     if (outcome.kind !== "allowed") {
       // Belt and braces: if the instance turns out to be initialized already,
       // that is a no-op for bring-up, not a failure.
@@ -677,7 +680,9 @@ async function main(): Promise<void> {
       networkPassphrase: TESTNET_PASSPHRASE,
       accountSigners: [keys.issuer],
     });
-    if (outcome.kind !== "allowed") throw new Error(`mint failed: ${json(outcome)}`);
+    if (outcome instanceof Error || outcome.kind !== "allowed") {
+      throw new Error(`mint failed: ${outcome instanceof Error ? outcome.message : json(outcome)}`);
+    }
     // Appended, never assigned to a fixed slot: this is a distinct transaction
     // from any earlier top-up and needs its own permanent record.
     createdMints.push({
@@ -710,7 +715,9 @@ async function main(): Promise<void> {
       networkPassphrase: TESTNET_PASSPHRASE,
       accountSigners: [keys.admin],
     });
-    if (outcome.kind !== "allowed") throw new Error(`set_policy failed: ${json(outcome)}`);
+    if (outcome instanceof Error || outcome.kind !== "allowed") {
+      throw new Error(`set_policy failed: ${outcome instanceof Error ? outcome.message : json(outcome)}`);
+    }
     record("setPolicy", outcome.submission);
     step(`    tx ${outcome.submission.hash} (ledger ${outcome.submission.ledger})`);
   } else {
