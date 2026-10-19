@@ -8,7 +8,35 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeU64 } from "../../src/events.ts";
+import { xdr } from "@stellar/stellar-sdk";
+import {
+  GUARD_AUTH_RESULTS,
+  GUARD_EVENT_TOPICS,
+  decodeAuthDecision,
+  decodeGuardEventXdr,
+  normalizeU64,
+} from "../../src/events.ts";
+
+/** Build the base64 `ContractEvent` XDR a block explorer hands over. */
+function contractEventXdr(topics: string[]): string {
+  return new xdr.ContractEvent({
+    ext: xdr.ExtensionPoint.v0(),
+    contractId: null,
+    type: xdr.ContractEventType.contract,
+    body: xdr.ContractEventBody.v0(
+      new xdr.ContractEventV0({
+        topics: topics.map((topic) => xdr.ScVal.scvSymbol(topic)),
+        data: xdr.ScVal.scvVoid(),
+      }),
+    ),
+  }).toXDR("base64");
+}
+
+/** The same event in the `DiagnosticEvent` wrapper a simulation error carries. */
+function diagnosticEventXdr(topics: string[]): string {
+  const event = xdr.ContractEvent.fromXDR(contractEventXdr(topics), "base64");
+  return new xdr.DiagnosticEvent({ inSuccessfulContractCall: true, event }).toXDR("base64");
+}
 
 describe("guard event topics", () => {
   it("carries the event_ prefix the #[contractevent] macro adds", () => {
@@ -75,7 +103,7 @@ describe("decodeAuthDecision", () => {
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { scValToNative, xdr } from "@stellar/stellar-sdk";
+import { scValToNative } from "@stellar/stellar-sdk";
 import { topicSymbols } from "../../src/invoke.ts";
 import { GUARD_REASON_CODES, explainReason } from "../../src/reasons.ts";
 import { diagnosticsToEvents } from "../../src/telemetry.ts";
@@ -240,5 +268,64 @@ describe("normalizeU64", () => {
 
   it("preserves non-digit strings", () => {
     assert.equal(normalizeU64("2023-11-20T12:00:00Z"), "2023-11-20T12:00:00Z");
+  });
+});
+
+describe("decodeGuardEventXdr", () => {
+  it("returns null for empty string input", () => {
+    assert.equal(decodeGuardEventXdr(""), null);
+  });
+
+  it("returns null for invalid base64 without throwing", () => {
+    assert.equal(decodeGuardEventXdr("!!!not-base64!!!"), null);
+  });
+
+  it("returns null for an XDR payload that is not a contract event", () => {
+    const notAnEvent = xdr.ScVal.scvU32(1234).toXDR("base64");
+    assert.equal(decodeGuardEventXdr(notAnEvent), null);
+  });
+
+  it("decodes the allowed event and normalises the empty reason symbol", () => {
+    const decision = decodeGuardEventXdr(
+      contractEventXdr([GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.allowed, ""]),
+    );
+    assert.deepEqual(decision, { result: "allowed", reason: null, source: "diagnostic" });
+  });
+
+  it("decodes a blocked event and keeps its reason", () => {
+    const decision = decodeGuardEventXdr(
+      contractEventXdr([GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "per_tx_cap_exceeded"]),
+    );
+    assert.deepEqual(decision, {
+      result: "blocked",
+      reason: "per_tx_cap_exceeded",
+      source: "diagnostic",
+    });
+  });
+
+  it("accepts the DiagnosticEvent wrapper a simulation error carries", () => {
+    const topics = [GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "paused"];
+    assert.deepEqual(decodeGuardEventXdr(diagnosticEventXdr(topics)), decodeGuardEventXdr(contractEventXdr(topics)));
+  });
+
+  it("honours an explicit source for a ledger-read payload", () => {
+    const decision = decodeGuardEventXdr(
+      contractEventXdr([GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.allowed, ""]),
+      "ledger",
+    );
+    assert.equal(decision?.source, "ledger");
+  });
+
+  it("rejects a non-decision event such as a heartbeat", () => {
+    assert.equal(decodeGuardEventXdr(contractEventXdr([GUARD_EVENT_TOPICS.heartbeat])), null);
+  });
+
+  it("rejects the un-prefixed topic the docs use, so docs drift cannot pass", () => {
+    assert.equal(decodeGuardEventXdr(contractEventXdr(["auth_checked", "blocked", "paused"])), null);
+  });
+
+  it("agrees with the object-path decode for the same event", () => {
+    const topics = [GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "window_cap_exceeded"];
+    assert.deepEqual(decodeGuardEventXdr(contractEventXdr(topics)), decodeAuthDecision(topics, "diagnostic"));
   });
 });

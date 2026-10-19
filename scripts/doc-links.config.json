@@ -1,0 +1,17 @@
+{
+  "_comment": "Excludes for scripts/check-doc-links.ts (issue #140). Each entry is a regular expression matched against the raw link target, with the reason it is excluded. Keep this list short: an exclude is a known-broken or unverifiable link, not a way to silence a typo. Remove an entry as soon as its reason no longer holds.",
+  "ignore": [
+    {
+      "pattern": "^design-principles\\.md(#.*)?$",
+      "reason": "docs/deprecations.md links ahead to docs/design-principles.md, which is tracked as pending in #162 (the link is annotated as such in place). Remove this entry when #162 lands."
+    },
+    {
+      "pattern": "^https?://(localhost|127\\.0\\.0\\.1)(:\\d+)?(/|$)",
+      "reason": "Local development URLs (e.g. a local RPC or dashboard) are examples, not resources the docs depend on; they are unreachable from CI by design."
+    },
+    {
+      "pattern": "^https://www\\.npmjs\\.com/package/",
+      "reason": "npmjs.com answers automated HEAD/GET requests with HTTP 403 (bot protection), so these links can never pass from CI. The package itself is verified by docs/releasing.md's post-publish checks against the registry API instead."
+    }
+  ]
+}
