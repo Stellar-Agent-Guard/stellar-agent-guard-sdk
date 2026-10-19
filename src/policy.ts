@@ -42,12 +42,6 @@ export type PublicKeyHex = string & { readonly __brand: "PublicKeyHex" };
  * These perform prefix and length validation according to Stellar StrKey format.
  */
 
-// Hoisted to module scope so hot validation paths don't recompile them per call.
-const STRKEY_ADDRESS_RE = /^[GC][A-Z2-7]{55}$/;
-const CONTRACT_ADDRESS_RE = /^C[A-Z2-7]{55}$/;
-const ACCOUNT_ADDRESS_RE = /^G[A-Z2-7]{55}$/;
-const PUBLIC_KEY_HEX_RE = /^[0-9a-fA-F]{64}$/;
-
 /**
  * Check if a value is a valid Stellar StrKey address (either G... or C...).
  * @param value - The value to validate
@@ -56,7 +50,7 @@ const PUBLIC_KEY_HEX_RE = /^[0-9a-fA-F]{64}$/;
 export function isStrKeyAddress(value: unknown): value is StrKeyAddress {
   if (typeof value !== "string") return false;
   if (value.length !== 56) return false;
-  if (!STRKEY_ADDRESS_RE.test(value)) return false;
+  if (!value.match(/^[GC][A-Z2-7]{55}$/)) return false;
   // Use SDK's StrKey validation for both account (G) and contract (C) addresses
   return (
     (value.startsWith("G") && StrKey.isValidEd25519PublicKey(value)) ||
@@ -74,7 +68,7 @@ export function isContractAddress(value: unknown): value is ContractAddress {
   if (typeof value !== "string") return false;
   if (!value.startsWith("C")) return false;
   if (value.length !== 56) return false;
-  if (!CONTRACT_ADDRESS_RE.test(value)) return false;
+  if (!value.match(/^C[A-Z2-7]{55}$/)) return false;
   return StrKey.isValidContract(value);
 }
 
@@ -88,7 +82,7 @@ export function isAccountAddress(value: unknown): value is AccountAddress {
   if (typeof value !== "string") return false;
   if (!value.startsWith("G")) return false;
   if (value.length !== 56) return false;
-  if (!ACCOUNT_ADDRESS_RE.test(value)) return false;
+  if (!value.match(/^G[A-Z2-7]{55}$/)) return false;
   return StrKey.isValidEd25519PublicKey(value);
 }
 
@@ -100,7 +94,7 @@ export function isAccountAddress(value: unknown): value is AccountAddress {
 export function isPublicKeyHex(value: unknown): value is PublicKeyHex {
   if (typeof value !== "string") return false;
   if (value.length !== 64) return false;
-  return PUBLIC_KEY_HEX_RE.test(value);
+  return /^[0-9a-fA-F]{64}$/.test(value);
 }
 
 /**
@@ -331,6 +325,9 @@ const PROTOCOL_RULE_FIELDS = ["contract", "fns"] as const;
 const I128_MIN = -(2n ** 127n);
 const I128_MAX = 2n ** 127n - 1n;
 const U64_MAX = 2n ** 64n - 1n;
+const POLICY_FIELD_SET: ReadonlySet<string> = new Set(POLICY_FIELDS);
+const PROTOCOL_RULE_FIELD_SET: ReadonlySet<string> = new Set(PROTOCOL_RULE_FIELDS);
+const DECIMAL_INTEGER_RE = /^[+-]?\d+$/;
 
 /**
  * Decode a `PolicyConfig` returned by the guard's `policy()` read, or the map
@@ -362,7 +359,7 @@ const U64_MAX = 2n ** 64n - 1n;
  */
 export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
   try {
-    const fields = symbolMap(policyMap(scVal), "policy", POLICY_FIELDS);
+    const fields = symbolMap(policyMap(scVal), "policy", POLICY_FIELDS, POLICY_FIELD_SET);
     return {
       per_tx_cap: policyInteger(
         fields.get("per_tx_cap")!,
@@ -428,6 +425,7 @@ function symbolMap(
   scVal: xdr.ScVal,
   path: string,
   expectedFields: readonly string[],
+  expectedFieldSet: ReadonlySet<string>,
 ): Map<string, xdr.ScVal> {
   if (scVal.type !== "scvMap") throw policyDecodeFailure(path, `expected a map, got ${scVal.type}`);
 
@@ -444,7 +442,7 @@ function symbolMap(
     if (previous !== null && name <= previous) {
       throw policyDecodeFailure(path, `symbol keys are not sorted (${previous} precedes ${name})`);
     }
-    if (!expectedFields.includes(name)) {
+    if (!expectedFieldSet.has(name)) {
       throw policyDecodeFailure(path, `unknown field ${JSON.stringify(name)}`);
     }
     fields.set(name, entry.val);
@@ -480,7 +478,7 @@ function policyInteger(
       throw policyDecodeFailure(path, `number ${native} cannot be represented safely`);
     }
     value = BigInt(native);
-  } else if (typeof native === "string" && /^[+-]?\d+$/.test(native)) {
+  } else if (typeof native === "string" && DECIMAL_INTEGER_RE.test(native)) {
     value = BigInt(native);
   } else {
     throw policyDecodeFailure(path, "value is not a base-10 integer");
@@ -531,7 +529,7 @@ function addressVector(scVal: xdr.ScVal, path: string): string[] {
 function protocolRules(scVal: xdr.ScVal): ProtocolRule[] {
   return policyVec(scVal, "protocols").map((rule, index) => {
     const path = `protocols[${index}]`;
-    const fields = symbolMap(rule, path, PROTOCOL_RULE_FIELDS);
+    const fields = symbolMap(rule, path, PROTOCOL_RULE_FIELDS, PROTOCOL_RULE_FIELD_SET);
     const contractAddr = policyAddress(fields.get("contract")!, `${path}.contract`);
     return {
       contract: contractAddr as ContractAddress,
@@ -807,7 +805,7 @@ function normalizeStellarAddress(addr: string): string | null {
 function isIntegerLike(val: unknown): boolean {
   if (typeof val === "bigint") return true;
   if (typeof val === "number") return Number.isSafeInteger(val);
-  if (typeof val === "string" && /^[+-]?\d+$/.test(val.trim())) return true;
+  if (typeof val === "string" && DECIMAL_INTEGER_RE.test(val.trim())) return true;
   return false;
 }
 

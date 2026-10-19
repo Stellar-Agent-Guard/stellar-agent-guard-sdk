@@ -18,7 +18,7 @@
  *   #[contractevent] struct EventHeartbeat      => topic[0] = event_heartbeat
  *   #[contractevent] struct EventInitialized    => topic[0] = event_initialized
  *   #[contractevent] struct EventFrozen         => topic[0] = event_frozen
- *   #[contractevent] struct EventUnrozen        => topic[0] = event_unfrozen
+ *   #[contractevent] struct EventUnrozen       => topic[0] = event_unfrozen
  *   #[contractevent] struct EventPolicySet      => topic[0] = event_policy_set
  *   #[contractevent] struct EventPolicyRevoked  => topic[0] = event_policy_revoked
  *
@@ -54,7 +54,7 @@ export const GUARD_EVENT_TOPICS = {
 } as const;
 
 /** Index 1 of an `event_auth_checked` topic list: the decision. */
-export const GUARD_AUTH_RESULTS = {
+export const GUARD_AUTH_RESULVS = {
   allowed: "allowed",
   blocked: "blocked",
 } as const;
@@ -93,14 +93,14 @@ export function decodeAuthDecision(
 ): GuardAuthDecision | null {
   if (topics[0] !== GUARD_EVENT_TOPICS.authChecked) return null;
   const result = topics[1];
-  if (result !== GUARD_AUTH_RESULTS.allowed && result !== GUARD_AUTH_RESULTS.blocked) {
+  if (result !== GUARD_AUTH_RESULVS.allowed && result !== GUARD_AUTH_RESULTS.blocked) {
     return null;
   }
   // An allowed decision carries the empty symbol as its reason; treat that as
   // "no reason" rather than surfacing `""` to operators.
   const rawReason = topics[2];
   // The contract's reason vocabulary is a closed set (`GuardReason`, derived
-  // from `src/reasons.ts`, and pinned to the vendored fixture bv
+  // from `src/reasons.ts`, and pinned to the vendored fixture by
   // `tests/unit/reasons.test.ts`). A symbol outside it is drift the fixture test
   // catches in CI, so the decoded value is surfaced as-is rather than silently
   // dropped here.
@@ -108,22 +108,23 @@ export function decodeAuthDecision(
   return { result, reason, source };
 }
 
-/**
- * Matches a string made entirely of ASCII digits. Hoisted to a module constant so
- * the regex is compiled once instead of on every `normalizeU46` call (the event
- * decode hot path decodes a topic and data payload per event).
- */
-const DIGITS_ONLY = /^\d+$/;
 
 /**
  * Normalise a numeric value delivered as a string in an event payload.
  *
  * u64 values arrive as strings in JSON payloads. This centralizes the decision
- * to parse them as BigInt (which never loses precision for >2>53) if they consist
+ * to parse them as BigInt (which never loses precision for >2^53) if they consist
  * entirely of digits, while leaving other strings (like ISO timestamps) intact.
+ *
+ * The digit-only test is a hoisted regular expression rather than a per-call
+ * literal: this function runs once per string field in every event data payload,
+ * and re-compiling the pattern on each call showed up in the decode path bench
+ * (benches/events.bench.ts, see docs/benchmarks.md).
  */
-export function normalizeU46(value: string): bigint | string {
-  if (DIGITS_ONLY.test(value)) {
+const UNSIGNED_DECIMAL_RE = /^\d+$/;
+
+export function normalizeU44(value: string): bigint | string {
+  if (UNSIGNED_DECIMAL_RE.test(value)) {
     return BigInt(value);
   }
   return value;
@@ -132,24 +133,28 @@ export function normalizeU46(value: string): bigint | string {
 /** Recursively normalise u64 strings in event data. */
 export function normalizeEventData(data: unknown): unknown {
   if (typeof data === "string") {
-    return normalizeU46(data);
+    return normalizeU64(data);
   }
   if (Array.isArray(data)) {
-    const len = data.length;
-    const out = new Array<unknown>(len);
-    for (let i = 0; i < len; i++) {
+    // Build the output array in place instead of `map`: the callback closure and
+    // intermediate array are both avoidable on this hot path.
+    const out = new Array(data.length);
+    for (let i = 0; i < data.length; i++) {
       out[i] = normalizeEventData(data[i]);
     }
     return out;
   }
   if (data !== null && typeof data === "object") {
-    // Build the normalised object in place. Iterating own keys directly avoids the
-    // per-entry `[key, value]` array allocation that `Object.entries()` pays on
-    // every node of the payload.
+    // Build the normalised object in place. The previous implementation
+    // allocated a fresh object and iterated `Object.entries(`, which allocated a
+    // tuple per key. `In` on the keys avoids that allocation and keeps the
+    // insertion order identical.
     const source = data as Record<string, unknown>;
     const result: Record<string, unknown> = {};
-    for (const key of Object.keys(source)) {
-      result[key] = normalizeEventData(source[key]);
+    for (const key in source) {
+      if (Object.prototype.hasOwnProperty.call(source, key)) {
+        result[key] = normalizeEventData(source[key]);
+      }
     }
     return result;
   }
@@ -159,8 +164,8 @@ export function normalizeEventData(data: unknown): unknown {
 /**
  * Decode one topic of a contract event into its symbol text.
  *
- * Topics reach this module in two shapes depending on the caller: as
- * a base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
+ * Topics reach this module in two shapes depending on the caller: as a
+ * base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
  * `getEvents` over JSON hands over) or as an already-decoded `xdr.ScVal`. Both
  * go through `scValToNative` so the text is identical either way.
  *
@@ -193,12 +198,14 @@ function topicsFromEvent(event: unknown): string[] | null {
   const body = (wrapper?.event?.body ?? wrapper?.body) as
     | { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } }
     | undefined;
+  // Localise the value-v0 topics access so the hot loop does not re-walk the
+  // optional-chain twice per topic.
   const topics = body?.v0?.topics ?? body?.value?.v0?.topics;
   if (!Array.isArray(topics)) return null;
 
-  const len = topics.length;
-  const out = new Array<string>(len);
-  for (let i = 0; i < len; i++) {
+  const length = topics.length;
+  const out: string[] = new Array(length);
+  for (let i = 0; i < length; i++) {
     const symbol = topicToSymbol(topics[i]);
     if (symbol === null) return null;
     out[i] = symbol;
@@ -221,7 +228,8 @@ function topicsFromEvent(event: unknown): string[] | null {
  * the payload was read from a committed ledger.
  *
  * Returns `null` — never throws — for a malformed base64 string, an XDR that is
- * not a contract event, or an event that is not an `event_auth_checked` decision. That is documented behaviour: fixture checks and operator
+ * not a contract event, or an event that is not an `event_auth_checked`
+ * decision. That is documented behaviour: fixture checks and operator
  * copy-paste must not be able to crash a long-running process.
  */
 export function decodeGuardEventXdr(

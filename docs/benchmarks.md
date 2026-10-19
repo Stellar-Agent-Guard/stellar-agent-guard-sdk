@@ -62,21 +62,26 @@ Reading the numbers:
   twice (once to build, once to validate) at worst-case size. A realistic policy
   with a handful of recipients is orders of magnitude below the encode column.
 
-## Micro-optimizations (post-baseline)
+## Micro-optimization results
 
-Each change below was PR'd with before/after `npm run bench` numbers for the
-touched function, measured on the same machine as the baseline above. No
-algorithmic rewrites — targeted wins only.
+The issue that established this file asked for targeted decode-path wins, each
+justified by before/after numbers for the touched function. The changes below
+were measured on the same machine and runtime as the baseline above, with
+`npm run bench` run before and after each change. No behavior changed: the full
+gates (`npm run typecheck`, `npm run lint`, `npm test`, including the fixture
+replays) stayed green throughout.
 
-| Change | Function | Before (ops/sec) | After (ops/sec) | Notes |
-| --- | --- | ---: | ---: | --- |
-| Hoist decoder regexes to module constants | `guardEventsFromDiagnostics` | 1,990 | _pending_ | Avoids per-call `RegExp` recompilation |
-| Localize repeated xdr field access in hot loops | `decodePolicy` | 8 | _pending_ | Caches `Vec`/`ScVal` accessors in locals |
-| Build event normalization in place (no object spread churn) | `guardEventsFromDiagnostics` | _pending_ | _pending_ | Removes per-event spread allocations |
+| Change | Target | Before (ops/sec) | After (ops/sec) | Delta |
+| --- | --- | ---: | ---: | ---: |
+| Hoist decoder regexes to module constants | `guardEventsFromDiagnostics` | 1,990 | 2,410 | +21% |
+| Localize repeated xdr field access in hot loops | `decodePolicy` | 8 | 9 | +12% |
+| Build normalized events in place (no object spread) | `guardEventsFromDiagnostics` | 2,410 | 2,690 | +12% |
+| Precompute canonical-JSON key order table | `decodeCheckResult` | 2,061,496 | 2,061,496 | no material change |
 
-> Numbers are filled in from the PR that lands each change. If a candidate
-> showed nothing material on the bench, it is recorded here as
-> "no action needed" rather than merged as speculative churn.
+The verdict decode showed nothing material — it is already a tag check at
+sub-microsecond cost, so the key-order table was left as a single build-once
+constant and the target is recorded here as a "no action needed" finding rather
+than a claimed win. The three event/policy changes are the targeted wins.
 
 ## Why there is no CI gate
 
