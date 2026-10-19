@@ -1,3 +1,4 @@
+import { NetworkMismatchError } from "./errors.ts";
 /**
  * The full invocation pipeline for a guarded account, in the order the Stellar
  * host actually requires:
@@ -410,6 +411,16 @@ export interface InvokeParams {
   source: Keypair | AdminSigner;
   call: ContractCall;
   networkPassphrase: string;
+  /**
+   * The network this invocation is expected to run against. When set, the
+   * server's own network passphrase is fetched and compared before any
+   * transaction is built; a mismatch fails with `NetworkMismatchError`.
+   *
+   * Default: `undefined` — unchecked, which is NOT recommended. A misconfigured
+   * RPC URL (testnet key against a mainnet RPC, or the reverse) is the classic
+   * footgun; always pass the expected passphrase in production.
+   */
+  expectedNetwork?: string | undefined;
   /** Present when the call requires the smart account's own authorization. */
   guardAuth?: GuardAuthorization | null | undefined;
   /** Extra classic-account authorizers available to sign (e.g. an admin). */
@@ -1306,6 +1317,45 @@ export async function enforceCall(
   const { server, source, call, networkPassphrase } = params;
   const logger = resolveLogger(params.logger);
   const onStep = stepHook(params.onStep, logger);
+
+  // ── Network interlock ─────────────────────────────────────────────────
+  // A guardrail, not a sandbox: a lying RPC is not defended against. But a
+  // plain misconfigured URL — the common footgun — is caught here, before any
+  // transaction is built or signed, and reported as a typed failure naming
+  // both passphrases. Unset means unchecked (legacy behavior).
+  if (params.expectedNetwork !== undefined) {
+    let actual: string;
+    try {
+      actual = await withStepTiming(
+        onStep,
+        { name: "probe", attempt },
+        () => server.getNetwork(),
+      );
+    } catch (cause) {
+      return {
+        kind: "error",
+        detail: `could not fetch server network passphrase: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+        error: new SimulationError("could not fetch server network passphrase", {
+          stage: "probe",
+          cause,
+        }),
+        diagnosticEvents: [],
+      };
+    }
+    if (actual !== params.expectedNetwork) {
+      return {
+        kind: "error",
+        detail: `network mismatch: expected ${params.expectedNetwork}, server reports ${actual}`,
+        error: new NetworkMismatchError({
+          expected: params.expectedNetwork,
+          actual,
+        }),
+        diagnosticEvents: [],
+      };
+    }
+  }
 
   let operation: xdr.Operation;
   let expiration: number;

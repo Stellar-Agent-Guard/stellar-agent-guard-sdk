@@ -58,6 +58,7 @@ import {
 import {
   BroadcastError,
   ContractResponseError,
+  NetworkMismatchError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -69,6 +70,46 @@ const SIG_EXPIRATION_LEDGERS = 10_000;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
 const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
+
+/**
+ * Expected network passphrase for the interlock.
+ *
+ * When supplied to `invoke`/`interceptor`/`tx` options, the SDK fetches the
+ * RPC server's reported network passphrase and fails with a typed
+ * `NetworkMismatchError` unless it matches. Unset means unchecked — legacy
+ * behaviour, explicitly NOT recommended for real use.
+ */
+export type ExpectedNetwork = string;
+
+/**
+ * Fetch the server's network passphrase and assert it matches `expected`.
+ *
+ * This is a guardrail, not a sandbox: an RPC that lies about its passphrase is
+ * not defended against. The interlock catches the common misconfiguration
+ * (testnet key + mainnet RPC, or the reverse) before any signing happens.
+ */
+export async function assertExpectedNetwork(
+  server: rpc.Server,
+  expected: ExpectedNetwork | undefined,
+): Promise<void> {
+  if (expected === undefined) return;
+  let actual: string;
+  try {
+    const info = await server.getNetwork();
+    actual = info.passphrase;
+  } catch (error) {
+    throw new NetworkMismatchError(
+      `could not fetch server network passphrase to verify against expected "${expected}"`,
+      { expected, actual: null, cause: error },
+    );
+  }
+  if (actual !== expected) {
+    throw new NetworkMismatchError(
+      `network mismatch: expected "${expected}" but server reports "${actual}"`,
+      { expected, actual },
+    );
+  }
+}
 
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
@@ -774,9 +815,17 @@ export async function submitAndPoll(
     pollAttempts?: number | undefined;
     pollIntervalMs?: number | undefined;
     clock?: Clock | undefined;
+    /**
+     * Expected network passphrase. When set, the server's reported passphrase
+     * is verified before submission; a mismatch throws `NetworkMismatchError`.
+     * Unset preserves legacy behaviour (unchecked — NOT recommended).
+     */
+    expectedNetwork?: ExpectedNetwork | undefined;
   } = {},
 ): Promise<SubmissionResult> {
   const clock = options.clock ?? systemClock;
+
+  await assertExpectedNetwork(server, options.expectedNetwork);
 
   for (const signer of signers) {
     if ("signTransaction" in signer && typeof signer.signTransaction === "function") {

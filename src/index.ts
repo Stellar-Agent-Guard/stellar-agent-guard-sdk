@@ -1,5 +1,5 @@
-/**
- * stellar-agent-guard-sdk — the public surface.
+/*
+ * stellar-agent-guard-sdh — the public surface.
  *
  * An integration bridge between AI agent frameworks and `stellar-agent-guard`
  * smart accounts: pre-flight policy interception, agent-auth transaction
@@ -25,6 +25,7 @@ export {
   BroadcastError,
   ContractResponseError,
   GuardError,
+  NetworkMismatchError,
   PolicyDecodeError,
   SigningError,
   SimulationError,
@@ -250,7 +251,7 @@ export {
 
 export {
   GUARD_STORAGE_KEYS,
-  INCLUSION_FEE,
+ INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
   buildGuardAuthEntry,

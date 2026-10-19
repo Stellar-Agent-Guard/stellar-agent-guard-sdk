@@ -1,6 +1,6 @@
 # PreFlightInterceptor API
 
-`PreFlightInterceptor` evaluates whether a planned contract call will be accepted by the guard contract.
+PreFlightInterceptor evaluates whether a planned contract call will be accepted by the guard contract.
 
 ## Constructor
 
@@ -10,12 +10,14 @@ constructor(options: PreFlightInterceptorOptions)
 
 ### Options
 
-- `server: rpc.Server` — Soroban RPC server instance
-- `networkPassphrase: string` — Stellar network passphrase
-- `guard: string` — Custom account contract address (`C...`)
-- `agent: Keypair` — Keypair registered as the agent in the guard
-- `source: Keypair` — Keypair paying for transaction fees
-- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default
+- `server: rpc.Server` -- Soroban RPC server instance
+- `networkPassphrase: string` -- Stellar network passphrase
+- `expectedNetwork?: NetworkPassphrase` -- Optional network interlock. When set, the interceptor fetches the server's network passphrase at construction (or first use) and throws a typed `NetworkMismatchError` naming the expected vs actual passphrase unless they match. Default: `undefined` = unchecked (legacy behavior; explicitly **not** recommended). Note: this is a guardrail, not a sandbox -- an RPC that lies about its passphrase is not defended against.
+- `network?: 'testnet' | 'mainnet' | 'futurenet'` -- Optional shorthand for `expectedNetwork`. Resolves to the corresponding `NetworkPassphrase`; mutually exclusive with `expectedNetwork` (setting both to conflicting values throws).
+- `guard: string` -- Custom account contract address (`C...`)
+- `agent: Keypair` -- Keypair registered as the agent in the guard
+- `source: Keypair` -- Keypair paying for transaction fees
+- `cache?: PreFlightCacheOptions` -- Optional short-lived verdict cache; disabled by default
 
 ### Optional cache
 
@@ -46,19 +48,18 @@ Evaluates a call and throws `GuardBlockedError` if blocked or undetermined.
 The interceptor reads the guard contract's `CheckResult` value from the
 simulation response. The contract returns an enum with the following shapes:
 
-- `Allowed` — a unit variant with no payload.
-- `Blocked(reason)` — a variant carrying a symbol reason (e.g. `recipient_not_allowed`,
+- `Allowed` -- a unit variant with no payload.
+- `Blocked(reason)` -- a variant carrying a symbol reason (e.g. `recipient_not_allowed`,
   `per_tx_cap_exceeded`, `paused`).
 
-`decodeCheckResult` accepts either the raw `xdr.ScVal` the contract returns
-(for example `simulation.returnValue`) or the native value `scValToNative`
+`decodeCheckResult` accepts either the raw `xdr.ScVal` the contract returns (for example `simulation.returnValue`) or the native value `scValToNative`
 produces from it, and validates a `Blocked` reason against the contract's own
 reason vocabulary.
 
 Decoding is fail-closed. If the returned ScVal is not a recognized
-`CheckResult` shape — an unknown enum tag, a `Blocked` reason the contract does
+`CheckResult` shape -- an unknown enum tag, a `Blocked` reason the contract does
 not define, an empty or over-long `ScVec`, a blocked variant whose reason is not
-a symbol, or a non-`ScVec` input — the decoder does not throw. Instead it
+a symbol, or a non-`ScVec` input -- the decoder does not throw. Instead it
 returns the typed fallback for the call-site contract:
 
 | Call site | Fallback verdict | Notes |

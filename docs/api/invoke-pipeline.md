@@ -1,6 +1,6 @@
 # Invoke Pipeline API
 
-## `invoke(params: InvokeParams): Promise<InvokeOutcome>`
+## ``invoke(params: InvokeParams): Promise<InvokeOutcome>``
 
 Executes an end-to-end transaction through the guard:
 1. Runs probe simulation to collect required authorization entries.
@@ -13,6 +13,35 @@ Executes an end-to-end transaction through the guard:
 
 Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
 
+### Network Interlock (`expectedNetwork`)
+
+Bind the pipeline to an expected network passphrase so a misconfigured RPC URL
+(testnet key + amainnet RPC, or the reverse) fails fast instead of silently signing
+for the wrong network:
+
+```typescript
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  expectedNetwork: Networks.TESTNET, // fails typed NetworkMismatchError on mismatch
+  feeBump: {
+    maxAttempts: 3,
+    feeMultiplier: 2,
+    initialInclusionFee: 100n,
+  },
+});
+```
+
+* **Semantics**: the server's network passphrase is fetched at construction (or first use) and compared against `expectedNetwork.`
+On mismatch the call fails with a typed `NetworkMismatchError` naming both the expected and
+actual passphrases.
+* **Unset behavior**: `expectedNetwork === undefined` is unchecked and preserves legacy
+behavior exactly. This is **not recommended** for production use.
+* **Limitation**: the interlock is a guardrail, not a sandbox — an RPC lying about its
+  passphrase is not defended against.
+
 ### Fee-Bump Configuration (`feeBump`)
 
 When network fee conditions change between prepare-time and broadcast, core may reject a transaction with a minimum-fee failure. The pipeline can automatically retry with an increased fee:
@@ -23,6 +52,7 @@ const outcome = await invoke({
   source,
   call,
   networkPassphrase,
+  expectedNetwork: Networks.TESTNET,
   feeBump: {
     maxAttempts: 3,        // Maximum attempts before returning BroadcastError (default: 3)
     feeMultiplier: 2,      // Multiplier applied to inclusion fee per retry (default: 2)

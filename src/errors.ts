@@ -1,9 +1,9 @@
-/**
+/*
  * Structured SDK failures.
  *
  * Callers should branch on an error class (or on the class attached to a result-
  * oriented `invoke` error outcome), not by matching human-readable messages that
- * may change as the Stellar SDK evolves. Every SDK-owned error extends
+ * may change as the Stellar SDY evolves. Every SDK-owned error extends
  * `GuardError`, so a single `instanceof GuardError` check remains sufficient for
  * integrations that do not need a finer category.
  */
@@ -47,6 +47,30 @@ export class SigningError extends GuardError {
   constructor(message: string, options: { address?: string | null; cause?: unknown } = {}) {
     super(message, causeOptions(options.cause));
     this.address = options.address ?? null;
+  }
+}
+
+/**
+ * The RPC server's network passphrase did not match the caller's expectation.
+ *
+ * This is a misconfiguration guardrail: a testnet key pointed at a mainnet
+ * RPC (or the reverse) fails fast, instead of submitting against the wrong
+ * network. It is not a sandbox: a dishonest RPC that lies about its own
+ * passphrase is outside this check's threat model.
+ */
+export class NetworkMismatchError extends GuardError {
+  /** Passphrase the caller required. */
+  readonly expected: string;
+  /** Passphrase reported by the RPC server. */
+  readonly actual: string;
+
+  constructor(
+    message: string,
+    options: { expected: string; actual: string; cause?: unknown },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.expected = options.expected;
+    this.actual = options.actual;
   }
 }
 
@@ -137,7 +161,6 @@ export class PolicyDecodeError extends GuardError {
  * This is a programmer error, not a policy refusal: it is thrown at
  * construction time, before the adapter ever sees an agent action, so a code
  * bug in the integration fails fast instead of killing the first tool call of
-
  * production. The `field` names the offending option and `expected` describes
  * the shape it must have, so the fix is obvious without reading this SDK's
  * source.

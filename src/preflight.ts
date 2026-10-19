@@ -1,3 +1,4 @@
+import { NetworkMismatchError } from "./errors.ts";
 /**
  * The pre-flight interceptor: ask the guard whether an action is permitted
  * *before* anything is signed for broadcast.
@@ -27,6 +28,7 @@
 import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { GuardError, SimulationError } from "./errors.ts";
+import { assertExpectedNetwork } from "./network.ts";
 import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
 import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
@@ -314,6 +316,19 @@ export interface PreFlightCacheOptions {
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
+  /**
+   * The network passphrase this interceptor is expected to be bound to.
+   *
+   * When set, the interceptor fetches the server's network passphrase on first
+   * use and throws a typed `NetworkMismatchError` if it does not match. This
+   * guards against the classic footgun of pairing a testnet key with a mainnet
+   * RPC URL (or the reverse).
+   *
+   * Default: `undefined` — unchecked. This is NOT recommended; always pass
+   * `expectedNetwork` in production. The interlock is a guardrail, not a
+   * sandbox: an RPC that lies about its passphrase is not defended against.
+   */
+  expectedNetwork?: string | undefined;
   /** The guarded smart account whose policy is being enforced. */
   guard: ContractAddress;
   /**
@@ -408,6 +423,7 @@ export class PreFlightInterceptor {
   private readonly namespace: string;
   private readonly logger: GuardLogger;
   private readonly clock: Clock;
+  private networkVerified: Promise<void> | null = null;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
@@ -416,6 +432,30 @@ export class PreFlightInterceptor {
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
     this.logger = resolveLogger(config.logger);
+  }
+
+  /**
+   * Verify the server's network passphrase matches `expectedNetwork`, once.
+   *
+   * The check is memoized: the first caller triggers the RPC round-trip and
+   * every subsequent caller awaits the same promise. A mismatch throws a
+   * typed `NetworkMismatchError` naming expected vs actual. When
+   * `expectedNetwork` is unset, this is a no-op (legacy behaviour).
+   */
+  private async verifyNetwork(): Promise<void> {
+    if (this.config.expectedNetwork === undefined) return;
+    if (!this.networkVerified) {
+      this.networkVerified = assertExpectedNetwork(
+        this.config.server,
+        this.config.expectedNetwork,
+      ).catch((error: unknown) => {
+        // Do not memoize a failure: a transient RPC error should be retryable,
+        // and a genuine mismatch will simply throw again on the next call.
+        this.networkVerified = null;
+        throw error;
+      });
+    }
+    await this.networkVerified;
   }
 
   private validateCacheOptions(): void {
@@ -505,6 +545,7 @@ export class PreFlightInterceptor {
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
+    await this.verifyNetwork();
 
     const context = await this.cacheContext(call);
     if (context) {
@@ -686,6 +727,7 @@ export class PreFlightInterceptor {
     calls: ContractCall[],
     options?: CheckBatchOptions,
   ): Promise<PreFlightBatchDecision> {
+    await this.verifyNetwork();
     if (calls.length === 0) {
       return {
         admissible: true,
