@@ -23,12 +23,12 @@ import {
   submitSetPolicy,
   submitUnfreeze,
 } from "../../src/admin.ts";
-import { policyToScVal, type PolicyConfig } from "../../src/policy.ts";
+import { policyToScVal, type PolicyConfig, unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
 import type { AdminSigner } from "../../src/tx.ts";
 
-const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-const TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
-const RECIPIENT = "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ";
+const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+const RECIPIENT = unsafeAccountAddress("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ");
 
 const TEST_POLICY: PolicyConfig = {
   per_tx_cap: 1000n,
