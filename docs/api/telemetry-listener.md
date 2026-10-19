@@ -51,7 +51,18 @@ Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`jitter`, `rng`, `sleep`, `onGap`, and `signal`.
+`jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, and `signal`.
+
+#### Unknown topics
+
+Unknown name topics are dropped from `GuardEvent` delivery, but they are no longer
+silent. `poll()` returns `unknownTopics: GuardUnknownTopic[]` on each page, and
+`watch()`/`watchAll()` accept `onUnknownTopics(unknownTopics)`, called once per
+page that contains at least one unrecognised event. Each entry is
+`{ topic: string; count: number }`, sorted by topic; only decoded names and counts
+are exposed — never raw XDR or the source payload. The callback is isolated like
+`onGap`, so a throwing sink cannot stop the stream. See
+[`docs/event-schema.md`](../event-schema.md#unknown-event-topics--observability-without-payloads).
 
 #### One active stream per listener
 
