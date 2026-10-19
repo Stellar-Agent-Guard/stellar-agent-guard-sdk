@@ -28,6 +28,7 @@ import {
   InMemoryCursorStore,
   type CursorStore,
   type GuardEvent,
+  type GuardUnknownTopic,
 } from "../../src/telemetry.ts";
 
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
@@ -318,6 +319,98 @@ describe("committed-page ordering (issue #289)", () => {
     assert.deepEqual(
       seen.map((event) => [event.ledger, event.transactionHash]),
       expected,
+    );
+  });
+});
+
+describe("unknown event topics (issue #287)", () => {
+  it("poll() reports unknown names and counts without exposing payloads", async () => {
+    const rawEvents = [
+      rawLedgerEvent(503, "tx-future-1", "event_future"),
+      rawLedgerEvent(501, "tx-known"),
+      rawLedgerEvent(502, "tx-future-2", "event_future"),
+      rawLedgerEvent(504, "tx-other", "event_other"),
+    ];
+    const { server } = scriptedServer([{ events: rawEvents, cursor: "cursor-1" }]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const page = await listener.poll({ startLedger: 500 });
+
+    assert.deepEqual(
+      page.unknownTopics,
+      [
+        { topic: "event_future", count: 2 },
+        { topic: "event_other", count: 1 },
+      ],
+      "names are sorted and counted per page",
+    );
+    assert.deepEqual(
+      page.events.map((event) => event.id),
+      ["ledger:tx-known:event_heartbeat"],
+      "unknown topics stay out of GuardEvent",
+    );
+    assert.equal("raw" in page.events[0]!, false, "the default path retains no raw event");
+    assert.deepEqual(
+      page.unknownTopics.map((entry) => Object.keys(entry).sort()),
+      [
+        ["count", "topic"],
+        ["count", "topic"],
+      ],
+      "the summary carries only decoded names and counts",
+    );
+    assert.equal(
+      JSON.stringify(page.unknownTopics).includes("tx-future"),
+      false,
+      "no transaction hash or source payload leaks through the summary",
+    );
+  });
+
+  it("keeps an unknown event out of the buffer even when raw retention is on", async () => {
+    const unknown = rawLedgerEvent(501, "tx-future", "event_future");
+    const { server } = scriptedServer([{ events: [unknown], cursor: "cursor-1" }]);
+    const listener = new GuardTelemetryListener({
+      server,
+      guard: GUARD,
+      buffer: { max: 10 },
+      includeRaw: true,
+    });
+
+    const page = await listener.poll({ startLedger: 500 });
+
+    assert.deepEqual(page.events, []);
+    assert.deepEqual(listener.recent(), []);
+    assert.deepEqual(page.unknownTopics, [{ topic: "event_future", count: 1 }]);
+  });
+
+  it("watch() surfaces a new topic through the callback and keeps polling", async () => {
+    const pages: ScriptedPage[] = [
+      {
+        events: [
+          rawLedgerEvent(501, "tx-future", "event_future"),
+          rawLedgerEvent(502, "tx-known"),
+        ],
+        cursor: "cursor-1",
+      },
+      { events: [rawLedgerEvent(503, "tx-known-2")], cursor: "cursor-2" },
+    ];
+    const { server } = scriptedServer(pages);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const reports: GuardUnknownTopic[][] = [];
+    const delivered: GuardEvent[][] = [];
+
+    for await (const page of listener.watch({
+      pollIntervalMs: 1,
+      onUnknownTopics: (unknownTopics) => reports.push([...unknownTopics]),
+    })) {
+      delivered.push(page);
+      if (delivered.length === 2) break;
+    }
+
+    assert.deepEqual(reports, [[{ topic: "event_future", count: 1 }]]);
+    assert.deepEqual(
+      delivered.map((page) => page.map((event) => event.ledger)),
+      [[502], [503]],
+      "the unknown topic neither crashes the stream nor stops the next page",
     );
   });
 });
