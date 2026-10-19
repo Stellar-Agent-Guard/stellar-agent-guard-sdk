@@ -33,6 +33,7 @@
  */
 import { createHash } from "node:crypto";
 import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
+import { GuardError } from "./errors.ts";
 import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
 import { topicSymbols } from "./invoke.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
@@ -1090,9 +1091,45 @@ export interface GuardTelemetryUnifiedParams extends GuardTelemetryWatchParams {
   diagnostics?: AsyncIterable<GuardDiagnosticBatch> | Iterable<GuardDiagnosticBatch>;
 }
 
-/** Committed events sort by ledger ascending; a missing ledger sorts last. */
-function compareEventsByLedger(a: GuardEvent, b: GuardEvent): number {
-  return (a.ledger ?? Number.MAX_SAFE_INTEGER) - (b.ledger ?? Number.MAX_SAFE_INTEGER);
+/** Plain code-unit string comparison, independent of the host locale. */
+function compareStrings(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/** Ascending string order, with a missing value sorting last. */
+function compareNullableStrings(a: string | null, b: string | null): number {
+  if (a === b) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return compareStrings(a, b);
+}
+
+/**
+ * The committed-page ordering rule: ledger ascending, then a stable
+ * tie-breaker for events that share a ledger.
+ *
+ * A missing ledger sorts last. Within one ledger the tie-breaker is the
+ * transaction hash, then the event topic, then the stable event id, each
+ * ascending and each placing a missing value last. The final id component
+ * makes the comparison total for every event this SDK produces; when two
+ * entries are indistinguishable the caller's input order is preserved by the
+ * stable `Array#sort`. `poll()`, `watch()` and `watchAll()` all apply this same
+ * rule, so switching APIs cannot change committed-event order.
+ */
+export function compareCommittedEvents(a: GuardEvent, b: GuardEvent): number {
+  const ledgerA = a.ledger ?? Number.MAX_SAFE_INTEGER;
+  const ledgerB = b.ledger ?? Number.MAX_SAFE_INTEGER;
+  if (ledgerA !== ledgerB) return ledgerA - ledgerB;
+  const byHash = compareNullableStrings(a.transactionHash, b.transactionHash);
+  if (byHash !== 0) return byHash;
+  const byTopic = compareStrings(a.topic, b.topic);
+  if (byTopic !== 0) return byTopic;
+  return compareStrings(a.id, b.id);
+}
+
+/** Sort one committed page in place, leaving every other stream untouched. */
+function sortCommittedPage(events: GuardEvent[]): GuardEvent[] {
+  return events.sort(compareCommittedEvents);
 }
 
 /** Adapt a sync or async iterable to an async iterator, so both arms can be armed. */
@@ -1123,9 +1160,11 @@ type MergePull =
  *
  * ## Ordering rule
  *
- * - **Committed events are emitted in ledger order.** Each page is sorted by
- *   `ledger` ascending before it is yielded, and pages arrive in cursor order,
- *   so no committed event overtakes an earlier-ledger one.
+ * - **Committed events are emitted in ledger order.** Each page is sorted with
+ *   `compareCommittedEvents()` before it is yielded: `ledger` ascending (missing
+ *   last), then transaction hash, topic and stable id as tie-breakers for events
+ *   that share a ledger. Pages arrive in cursor order, so no committed event
+ *   overtakes an earlier-ledger one.
  * - **Diagnostic events are emitted when the batch carrying them is observed**,
  *   tagged with `observedAt`. A refusal was rolled back before broadcast, so it
  *   has no ledger to sort on; its position is the point of observation relative
@@ -1181,10 +1220,17 @@ export async function* mergeGuardEventStreams(
       if (settled.source === "committed") {
         committedPull = null;
         if (settled.result.done) continue;
-        for (const event of [...settled.result.value].sort(compareEventsByLedger)) {
-          if (emitted.has(event.id)) continue;
-          emitted.add(event.id);
-          yield event;
+        const page = settled.result.value;
+        const orderedCommitted = sortCommittedPage(
+          page.filter((event) => event.stream === "committed"),
+        );
+        let nextCommitted = 0;
+        for (const event of page) {
+          const ordered =
+            event.stream === "committed" ? orderedCommitted[nextCommitted++]! : event;
+          if (emitted.has(ordered.id)) continue;
+          emitted.add(ordered.id);
+          yield ordered;
         }
         committedPull = committed
           .next()
@@ -1240,9 +1286,36 @@ export interface GuardTelemetryLocalConfig {
   logger?: GuardLoggerInput | undefined;
 }
 
+/**
+ * Thrown when a second `watch()`/`watchAll()` stream is started on a listener
+ * that already has one active.
+ *
+ * A listener owns shared cursor, failed-transaction de-duplication, counter,
+ * and buffer state. Rather than let two iterators race those structures, the
+ * listener supports **one active stream at a time**: a second stream is
+ * rejected before it issues an RPC request or advances any cursor. Start a
+ * second listener (with its own options) when you need independent streams.
+ */
+export class ConcurrentTelemetryStreamError extends GuardError {
+  /** Stable code for consumers that branch on the failure. */
+  readonly code = "telemetry.concurrent_stream";
+  /** The stream kind that was rejected. */
+  readonly requested: "watch" | "watchAll";
+
+  constructor(requested: "watch" | "watchAll") {
+    super(
+      `GuardTelemetryListener already has an active watch()/watchAll() stream; ${requested}() cannot start concurrently. Use one listener per stream.`,
+    );
+    this.requested = requested;
+  }
+}
+
 export class GuardTelemetryListener {
   private readonly config: GuardTelemetryConfig;
   private readonly logger: GuardLogger;
+
+  /** Lease for the one stream currently allowed to mutate listener state. */
+  private activeStreamLease: symbol | null = null;
 
   /** The persistence adapter this listener is using (defaults to in-memory). */
   readonly activeCursorStore: CursorStore;
@@ -1487,6 +1560,7 @@ export class GuardTelemetryListener {
       if (decoded) events.push(decoded);
       else dropped += 1;
     }
+    sortCommittedPage(events);
     const oldestLedger = typeof response.oldestLedger === "number" ? response.oldestLedger : null;
     this.logger.debug("telemetry page received", {
       guard: this.config.guard,
@@ -1504,6 +1578,21 @@ export class GuardTelemetryListener {
       // detection, rather than a boundary invented from `latestLedger`.
       oldestLedger,
     };
+  }
+
+  /** Claim the single active-stream lease, or reject concurrent use. */
+  private acquireStreamLease(kind: "watch" | "watchAll"): symbol {
+    if (this.activeStreamLease !== null) {
+      throw new ConcurrentTelemetryStreamError(kind);
+    }
+    const lease = Symbol(kind);
+    this.activeStreamLease = lease;
+    return lease;
+  }
+
+  /** Release the lease only if it is still the one this stream holds. */
+  private releaseStreamLease(lease: symbol): void {
+    if (this.activeStreamLease === lease) this.activeStreamLease = null;
   }
 
   /**
@@ -1526,8 +1615,28 @@ export class GuardTelemetryListener {
    * one bound on promptness is the request already in flight: `getEvents` takes
    * no `AbortSignal` (see the README's cancellation note), so the listener can
    * stop *issuing* requests immediately but cannot cancel one already sent.
+   *
+   * ## Concurrency
+   *
+   * One listener supports one active stream. Starting a second `watch()` or
+   * `watchAll()` while the first is still being pulled throws
+   * `ConcurrentTelemetryStreamError`; it never issues an RPC request, saves a
+   * cursor, or records an event. Use a separate listener for an independent
+   * stream.
    */
   async *watch(
+    params: GuardTelemetryWatchParams = {},
+  ): AsyncGenerator<GuardEvent[], void, undefined> {
+    const lease = this.acquireStreamLease("watch");
+    try {
+      yield* this.watchStream(params);
+    } finally {
+      this.releaseStreamLease(lease);
+    }
+  }
+
+  /** The implementation behind `watch()`, also used by `watchAll()`. */
+  private async *watchStream(
     params: GuardTelemetryWatchParams = {},
   ): AsyncGenerator<GuardEvent[], void, undefined> {
     const interval = params.pollIntervalMs ?? 5_000;
@@ -1723,18 +1832,23 @@ export class GuardTelemetryListener {
   async *watchAll(
     params: GuardTelemetryUnifiedParams = {},
   ): AsyncGenerator<GuardEvent, void, undefined> {
-    if (params.signal?.aborted) return;
-    for await (const event of mergeGuardEventStreams(
-      this.watch(params),
-      params.diagnostics,
-      params.signal,
-    )) {
-      this.counters?.record(event);
-      // Committed events were already recorded when their page was decoded in
-      // `poll()`, so only the diagnostic half is recorded here — recording the
-      // merged stream wholesale would double every committed event.
-      if (event.stream === "diagnostic") this.record([event]);
-      yield event;
+    const lease = this.acquireStreamLease("watchAll");
+    try {
+      if (params.signal?.aborted) return;
+      for await (const event of mergeGuardEventStreams(
+        this.watchStream(params),
+        params.diagnostics,
+        params.signal,
+      )) {
+        this.counters?.record(event);
+        // Committed events were already recorded when their page was decoded in
+        // `poll()`, so only the diagnostic half is recorded here — recording the
+        // merged stream wholesale would double every committed event.
+        if (event.stream === "diagnostic") this.record([event]);
+        yield event;
+      }
+    } finally {
+      this.releaseStreamLease(lease);
     }
   }
 }
