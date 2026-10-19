@@ -354,6 +354,8 @@ test("cache entry expires", async () => {
 
 **For production**, no action is needed: modules default to the system clock. The `Clock` interface is purely optional and for testing.
 
+> **Where does a change land?** Before editing, read the [architecture on-ramp](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands) in CONTRIBUTING — a five-layer map of `src/` files and a change-routing table (including which fixes belong in a sibling repo, not here).
+
 Key methods on `FakeClock`:
 
 - `now()` — returns current time in milliseconds
@@ -974,8 +976,6 @@ Key order, the drop-`undefined`/keep-`null` policy, and the `bigint`-to-decimal-
 
 ## Architecture
 
-New to the codebase? [`CONTRIBUTING.md`](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands) maps the five SDK layers to the `src/` files that implement them, with a change-routing table (including honest "wrong repo → sibling" redirects) so you can find where a change lands before you start.
-
 Stellar Agent Guard operates across three dedicated repositories:
 
 ```
@@ -1010,7 +1010,7 @@ Stellar Agent Guard operates across three dedicated repositories:
 | [**stellar-agent-guard-sdk**](https://github.com/aigbagbobila/stellar-agent-guard-sdk) (this repo) | TypeScript SDK for pre-flight interception, simulation pricing, and AI agent framework integration | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-sdk) |
 | [**stellar-agent-guard-dashboard**](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) | Client-side operator dashboard for policy deployment, inspection, and emergency panic-button freeze | [GitHub](https://github.com/aigbagbobila/stellar-agent-guard-dashboard) |
 
-The diagram above shows the **repositories**; for the **files inside this SDK** — verdict layer (`src/preflight.ts`, `src/cost.ts`), execution layer (`src/invoke.ts`, `src/tx.ts`), observation layer (`src/telemetry.ts`, `src/events.ts`), integration layer (`src/adapters/`), and authority layer (`src/policy.ts`) — see the [architecture on-ramp in CONTRIBUTING.md](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands).
+> The diagram above shows the **three repositories**. For a map of the **files inside this SDK** — which layer a change belongs to and where to start — see the [architecture on-ramp](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands) in CONTRIBUTING.
 
 ## ✅ Verified against live testnet
 
@@ -1093,7 +1093,8 @@ project structure — including the strict one-commit-per-logical-unit rule and 
 [TypeScript strictness ratchet](CONTRIBUTING.md#typescript-strictness-ratchet)
 (`npm run check:strict-ratchet`).
 
-Start with the [architecture on-ramp](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands) — a five-layer map of the SDK (verdict, execution, observation, integration, authority) with a change-routing table that tells you which `src/` file a bug lands in, and which sibling repo owns the fixes this SDK cannot make (verdict logic lives on-chain in `stellar-agent-guard-contracts`; policy semantics likewise).
+New here? Start with the [architecture on-ramp](CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands):
+five layers mapped to `src/` files, plus a change-routing table that says which repo a fix belongs in.
 
 Before changing the public surface, the dependency set, or the runtime the SDK runs
 in, read [`docs/design-principles.md`](docs/design-principles.md): fail-closed
@@ -1107,3 +1108,4 @@ holds scoped issues with Summary / Acceptance Criteria / Tech Stack — good fir
 the Drips Stellar Wave contributor sprints.
 
 ![Contributors](https://contrib.rocks/image?repo=aigbagbobila/stellar-agent-guard-sdk)
+
