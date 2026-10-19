@@ -22,6 +22,7 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - `describePolicy(policy, options?)` now reports the advanced constraints — the blocked recipients, the per-recipient window caps, and the active window with its state — with a `DescribePolicyOptions` type (`detail`, `nowSecs`) and an `ActiveWindowState` type. Recipient lists are reported as counts unless `detail: true` asks for the addresses, and the output is stable across policies that store the same lists in a different order (#343).
 - `onBeat` receives the number of attempts a beat took in its new `attempt` field (#340).
 - `validateGuardEventXdr()`: strict offline validation for captured event XDR, reporting every failure with its input index, stable path, pipeline stage, and code, while leaving the resilient live decoders unchanged (#290).
+- Unknown committed-event topics are now observable without a logger: `poll()` returns `unknownTopics` (`{ topic, count }[]`) and `watch()`/`watchAll()` accept `onUnknownTopics`, exposing decoded names and per-page counts only — never raw XDR or source payloads. Unknown topics still stay out of `GuardEvent` and the listener buffer (#287).
 
 ### Changed
 
