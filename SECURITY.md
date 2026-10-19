@@ -1,8 +1,8 @@
 # Security Policy
 
 The `@stellar-agent-guard/sdk` package is maintained by the same team as the
-[stellar-agent-guard-contracts](https://github.com/stellar-agent-guard/stellar-agent-guard-contracts)
-repository. This document describes where to report security issues and what is in scope for this SDP.
+[`stellar-agent-guard-contracts`](https://github.com/stellar-agent-guard/stellar-agent-guard-contracts)
+repository. This document describes where to report security issues and what is in scope for this SDK.
 
 ## Scope
 
