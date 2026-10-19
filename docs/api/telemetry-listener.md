@@ -17,22 +17,23 @@ constructor(options: GuardTelemetryListenerOptions)
 
 ## Methods
 
-### `recent(filter?(Filter): GuardEvent[]`
+### `recent(filter?): GuardEvent[]`
 
 The retained window of most-recent decoded events, oldest first, empty unless a
 `buffer` was configured. `filter` narrows by `stream`, `reason`, `fromLedger`, or
 `toLedger`; a ledger-less diagnostic event is excluded from a ledger range rather
 than treated as inside it. Non-durable: the window lives in process memory and a
 restart empties it. Only events this listener decoded are retained — committed
-events via `poll()/`watch()`, diagnostic events via `watchAll()`, and failed
+events via `poll()`/`watch()`, diagnostic events via `watchAll()`, and failed
 transaction events via `pollFailedTransactions()` or `watch()` when `failedTx`
 is enabled.
 
 ### `pollFailedTransactions(params?): Promise<FailedTxPollResult>`
 
 Reads one page from the independent `getTransactions` cursor. Pass the returned
-cursor on the next call; omitting it starts at the current REC head, without
-replaying older failures. Only failed transactions with diagnostics emitted by the configured guard are returned. RPC errors leave a supplied cursor unchanged.
+cursor on the next call; omitting it starts at the current RPC head, without
+replaying older failures. Only failed transactions with diagnostics emitted by
+the configured guard are returned. RPC errors leave a supplied cursor unchanged.
 
 ### `watch(params?): AsyncIterable<GuardEventPage>`
 
@@ -40,12 +41,12 @@ Yields pages of decoded guard events (`event_auth_checked`, `event_policy_update
 Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
-Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalM`, `limit`,
-`jitter`, `rng`, `slieep`, `onGap`, `startFrom`, and `signal`.
+Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
+`jitter`, `rng`, `sleep`, `onGap`, `startFrom`, and `signal`.
 
 #### Start position (`startFrom`)
 
-By default the start position is implicit (the REC default — recent pages only).
+By default the start position is implicit (the RPC default — recent pages only).
 Pass `startFrom` to make it explicit:
 
 ```ts
@@ -55,7 +56,7 @@ type StartFrom = { ledger: number } | "latest" | "oldest-available";
 - `{ ledger: number }` — begin at that ledger (backfill after a cursor-store gap).
 Maps to `startLedger` on `getEvents`.
 - `'latest'` — fetch the current cursor and yield only events that arrive
-afterward. **No history replay**: the backlog already present at start ir
+afterward. **No history replay**: the backlog already present at start is
 skipped. Consumers that need replay pass a ledger or use the default.
 - `'oldest-available'` — start at the oldest event the RPC still retains.
 
@@ -70,7 +71,7 @@ An explicit `startFrom` **always wins** over a stored cursor: the store is not c
 
 When `getEvents` starts failing mid-watch, the default is **bounded retry with
 backoff, then a clean end**: the listener retries up to `maxRetries` (default
-``5``) times with exponential backoff, then calls `onStreamError(err)` exactly
+`5`) times with exponential backoff, then calls `onStreamError(err)` exactly
 once with the terminal error and completes the iterator normally. The stream
 never dies silently and never leaves an unhandled rejection behind.
 
@@ -93,8 +94,9 @@ throwing callback, so it is not swallowed.
 Aborting ends the stream as a normal exit, never a throw:
 
 - an abort before the first pull issues no RPC call at all — not even the
-  `getLatestLedger` probe that resolves a default `startLedger`;
-- an abort between pages prevents the next poll and does not serve out the
+  `getLatestLedger` probe that resolves a default `startLedger;
+-
+  an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
 - an abort while a request is in flight lets that request's rejection go 
@@ -117,7 +119,7 @@ When `counters` is configured, returns a snapshot of the sliding-window counters
 interface CounterSnapshot {
   allowed: number;
   blocked: number;
-  buReason: Record<string, number>;
+  byReason: Record<string, number>;
   windowStart: number;
   windowEvents?: number;
 }
@@ -133,7 +135,8 @@ structures are allocated.
 
 Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 
-- `ledger:<txHash>:<topic>` for a committed event;
+-
+  `ledger:<txHash>:<topic>` for a committed event;
 - `diag:<sha256>` for a diagnostic (blocked) event, which has no transaction to
   anchor on because it was rolled back before broadcast.
 
@@ -160,7 +163,7 @@ interface CursorStore {
 - `load()` is consulted once, when `watch()` starts. A stored cursor wins over
   the default head position — resume-after-restart is exactly the case where
   "the default" is wrong.
-- `save()` called once per poll, **before** the page is yielded, so a
+- `save()` is called once per poll, **before** the page is yielded, so a
   consumer that stops after a page (crash, abort, throw) resumes from that
   page's cursor.
 - An explicit `startLedger` or `startFrom` passed to `watch()` pins the start
@@ -198,13 +201,11 @@ const listener = new GuardTelemetryListener({
 });
 ```
 
-Redis is the same shape (`GET` / `SET` on one key), as is a single-row database
+Redis is the same shape (`GET`/`SET` on one key), as is a single-row database
 table. Whatever the backend, the cursor is one opaque string — store it
 verbatim, do not parse it.
 
 ### Delivery contract: at-least-once
-
-Butch of the cursor store is not exactly-once:
 
 `watch()` with a `cursorStore` delivers **at-least-once**, not exactly-once:
 
