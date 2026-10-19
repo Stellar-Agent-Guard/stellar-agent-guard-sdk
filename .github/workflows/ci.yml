@@ -105,6 +105,8 @@ jobs:
       - name: build
         run: npm run build
 
+      # README code blocks are typechecked against src/ (issue: drift audit).
+      # Extracts 
       - name: unit tests
         run: npm test
 
