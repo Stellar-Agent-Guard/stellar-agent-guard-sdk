@@ -28,6 +28,15 @@ events via `poll()`/`watch()`, diagnostic events via `watchAll()`, and failed
 transaction events via `pollFailedTransactions()` or `watch()` when `failedTx`
 is enabled.
 
+**Detached snapshots (issue #344).** What this returns is a snapshot, not a view
+into the buffer: the array, the events in it, their decoded `decision` and
+`data`, and the opt-in `raw` payload are all copies. Editing a returned event
+cannot change what the listener still retains, and the next `recent()` reports
+the retained event rather than the edit. The copy keeps the prototype of a
+class instance, so an XDR value inside a `raw` payload still behaves like the
+XDR value it was. With no `buffer` configured there is nothing to copy: the
+call returns `[]` and allocates nothing.
+
 ### `pollFailedTransactions(params?): Promise<FailedTxPollResult>`
 
 Reads one page from the independent `getTransactions` cursor. Pass the returned

@@ -129,6 +129,11 @@ export interface GuardEvent {
    * ring buffer is enabled, for as long as that buffer retains the event. That is
    * why it is opt-in and off by default; turn it on for the debugging session or
    * the bug-report window, not for a long-running fleet.
+   *
+   * A snapshot handed out by `recent()` carries a **copy** of this payload
+   * (issue #344), so editing the copy cannot corrupt the retained record. The
+   * copy keeps the XDR values' prototypes, so `raw` still behaves like the
+   * object the SDK actually saw.
    */
   raw?: unknown;
 }
@@ -493,6 +498,99 @@ function matchesRecentFilter(event: GuardEvent, filter: RecentEventFilter): bool
 }
 
 /**
+ * Deep-copy one value so a snapshot cannot be mutated through the copy
+ * (issue #344).
+ *
+ * The copy is *structural*, not a re-serialisation:
+ *
+ * - objects and arrays are rebuilt, so a nested field cannot be reached
+ *   through the copy and written back into the retained event;
+ * - byte arrays are copied, so a byte written into the copy does not land in
+ *   the source buffer;
+ * - a class instance keeps its prototype, so an XDR value inside an opt-in
+ *   `raw` payload still answers `value`/`toXdr()` like the value it was;
+ * - cycles are handled through `seen`, because a `raw` payload is
+ *   host-supplied and this function must not hang on a self-referential one.
+ *
+ * Primitives (including `bigint`) are returned as they are: there is nothing
+ * to detach, and the decoded data of most events is exactly that.
+ */
+function detachValue<T>(value: T, seen: WeakMap<object, unknown>): T {
+  if (value === null || typeof value !== "object") return value;
+  const source = value as unknown as object;
+  const existing = seen.get(source);
+  if (existing !== undefined) return existing as T;
+
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(source, copy);
+    for (const item of value) copy.push(detachValue(item, seen));
+    return copy as unknown as T;
+  }
+  if (value instanceof Date) {
+    const copy = new Date(value.getTime());
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  if (value instanceof Uint8Array) {
+    // `new Uint8Array(view)` copies the bytes; it does not alias the source.
+    const copy = new Uint8Array(value);
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  if (value instanceof ArrayBuffer) {
+    const copy = value.slice(0);
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  if (value instanceof Map) {
+    const copy = new Map<unknown, unknown>();
+    seen.set(source, copy);
+    for (const [key, item] of value) {
+      copy.set(detachValue(key, seen), detachValue(item, seen));
+    }
+    return copy as unknown as T;
+  }
+  if (value instanceof Set) {
+    const copy = new Set<unknown>();
+    seen.set(source, copy);
+    for (const item of value) copy.add(detachValue(item, seen));
+    return copy as unknown as T;
+  }
+  // A plain object or a class instance: rebuild it with the same prototype, so
+  // an XDR value keeps its methods instead of degrading into a bare object.
+  const copy = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
+  seen.set(source, copy);
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    copy[key] = detachValue(item, seen);
+  }
+  return copy as unknown as T;
+}
+
+/**
+ * A detached snapshot of one event (issue #344).
+ *
+ * The event object, its decoded `decision`, its decoded `data` and the opt-in
+ * `raw` payload are all copied, so a consumer that mutates what `recent()`
+ * handed it cannot reach the event the buffer still retains.
+ *
+ * `seen` is shared by every event of one snapshot, so a value two events point
+ * at stays one value in the snapshot too — the copy mirrors the retained
+ * structure instead of quietly splitting it.
+ */
+function detachEvent(event: GuardEvent, seen: WeakMap<object, unknown>): GuardEvent {
+  const copy: GuardEvent = {
+    ...event,
+    decision: event.decision === null ? null : detachValue(event.decision, seen),
+    data: detachValue(event.data, seen),
+  };
+  // `raw` is absent — not `null` — unless the decode asked for it, and that
+  // distinction is part of the documented contract.
+  if (event.raw !== undefined) copy.raw = detachValue(event.raw, seen);
+  return copy;
+}
+
+/**
  * A fixed-capacity FIFO ring of the most recent `GuardEvent`s (issue #68).
  *
  * O(1) push with no allocation after construction: the backing array is
@@ -537,13 +635,23 @@ export class GuardEventRingBuffer {
   /**
    * The retained events in observation order, optionally narrowed by `filter`.
    *
-   * Returns a copy, so a caller cannot mutate the ring by holding the result.
+   * Returns **detached snapshots** (issue #344): a fresh array, and a fresh
+   * copy of every event in it — including the nested decoded `data`, the
+   * decoded `decision`, and the opt-in `raw` payload. Mutating what this
+   * returns can therefore never change what the ring still retains, and a
+   * later `recent()` reports the retained event, not the consumer's edit.
+   *
+   * The copy is per call, not per event: the ring itself keeps the original
+   * event objects, so the cost is paid only by a caller that actually reads a
+   * snapshot — and a listener with no buffer configured never allocates one at
+   * all.
    */
   recent(filter?: RecentEventFilter): GuardEvent[] {
     const out: GuardEvent[] = [];
+    const seen = new WeakMap<object, unknown>();
     for (let i = 0; i < this.count; i += 1) {
       const event = this.slots[(this.start + i) % this.max]!;
-      if (!filter || matchesRecentFilter(event, filter)) out.push(event);
+      if (!filter || matchesRecentFilter(event, filter)) out.push(detachEvent(event, seen));
     }
     return out;
   }
@@ -1219,6 +1327,13 @@ export class GuardTelemetryListener {
    * two-stream distinction the rest of the telemetry API makes.
    *
    * The buffer is in-process and non-durable; a restart empties it.
+   *
+   * **Snapshot semantics (issue #344):** what this returns is a *detached
+   * snapshot*. The array, the events in it, their decoded `data`/`decision` and
+   * the opt-in `raw` payload are all copies, so mutating them cannot change
+   * what the listener still retains, and the next `recent()` reports the
+   * retained event rather than the consumer's edit. With no buffer configured
+   * there is nothing to copy: the call returns `[]` and allocates nothing.
    */
   recent(filter?: RecentEventFilter): GuardEvent[] {
     return this.buffer ? this.buffer.recent(filter) : [];

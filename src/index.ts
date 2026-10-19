@@ -85,6 +85,11 @@ export {
   validateGuardPolicy,
 } from "./policy.ts";
 
+export type {
+  ActiveWindowState,
+  DescribePolicyOptions,
+} from "./policy.ts";
+
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
 export { policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
@@ -303,12 +308,16 @@ export {
 } from "./wasm.ts";
 
 export {
+  DEFAULT_HEARTBEAT_RETRY_OPTIONS,
+  HeartbeatBlockedError,
   HeartbeatIntervalError,
+  isRetryableHeartbeatFailure,
   startHeartbeat,
   submitHeartbeat,
   type HeartbeatBeat,
   type HeartbeatHandle,
   type HeartbeatOptions,
+  type HeartbeatRetryOptions,
   type HeartbeatSubmission,
   type SubmitHeartbeatParams,
 } from "./heartbeat.ts";
