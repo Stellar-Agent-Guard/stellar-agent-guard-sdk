@@ -111,6 +111,9 @@ jobs:
       - name: build
         run: npm run build
 
+      - name: unit tests
+        run: npm test
+
       - name: smoke test export resolution
         run: npm run test:smoke
 
