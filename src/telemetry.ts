@@ -710,6 +710,19 @@ export interface GuardTelemetryConfig {
   cursorStore?: CursorStore;
 }
 
+/**
+ * One name topic on a committed page that this SDK version does not recognise.
+ *
+ * Only the decoded topic text and its count are exposed. The source event, its
+ * raw XDR, and its payload are deliberately not retained or reported.
+ */
+export interface GuardUnknownTopic {
+  /** The event's name topic as decoded text; empty when the event carried none. */
+  topic: string;
+  /** How many events on this page carried that name topic. */
+  count: number;
+}
+
 export interface PollResult {
   events: GuardEvent[];
   /** Cursor to resume from, as returned by the RPC. */
@@ -723,6 +736,14 @@ export interface PollResult {
    * case rather than guessed at: a proof needs the boundary.
    */
   oldestLedger: number | null;
+  /**
+   * Unknown name topics on this page, sorted by topic, with per-page counts.
+   *
+   * Empty when every event decoded. These events stay out of `events` and are
+   * never added to the listener's buffer; this summary contains no raw XDR or
+   * event payload. Additive (issue #287).
+   */
+  unknownTopics: GuardUnknownTopic[];
 }
 
 /**
@@ -916,6 +937,16 @@ export interface GuardTelemetryWatchParams {
    */
   onGap?: (gap: GuardTelemetryGap) => void;
   /**
+   * Called once for each successful page that contains at least one event whose
+   * name topic this SDK version does not recognise.
+   *
+   * The callback receives decoded topic names and per-page counts only — never
+   * raw XDR or the source event payload. A throwing callback is isolated so an
+   * observability sink cannot stop the stream. `poll()` exposes the same
+   * summary as `PollResult.unknownTopics`. Additive (issue #287).
+   */
+  onUnknownTopics?: (unknownTopics: readonly GuardUnknownTopic[]) => void;
+  /**
    * Called once when the committed stream ends because of a terminal RPC
    * failure — after the bounded retry envelope is exhausted. Fail-visible
    * telemetry: a silent stream death is an incident blind spot.
@@ -1102,6 +1133,13 @@ function compareNullableStrings(a: string | null, b: string | null): number {
   if (a === null) return 1;
   if (b === null) return -1;
   return compareStrings(a, b);
+}
+
+/** Render one page's unknown-topic counts in a stable, payload-free shape. */
+function unknownTopicSummary(counts: ReadonlyMap<string, number>): GuardUnknownTopic[] {
+  return [...counts.entries()]
+    .map(([topic, count]) => ({ topic, count }))
+    .sort((a, b) => compareStrings(a.topic, b.topic));
 }
 
 /**
@@ -1533,14 +1571,15 @@ export class GuardTelemetryListener {
     const response = await this.config.server.getEvents(request);
     const events: GuardEvent[] = [];
     // Kept rather than merely skipped: an event this listener cannot interpret
-    // is a coverage fact a host may need to see, and counting it is the only
-    // way to tell "the guard was quiet" from "the guard spoke in a vocabulary
-    // this SDK version does not know".
-    let dropped = 0;
+    // is a coverage fact a host may need to see. Counts were only visible in a
+    // debug log, which a logger-less host cannot read, so the same fact is now
+    // returned as page metadata without retaining the source payload (issue #287).
+    const unknownTopicCounts = new Map<string, number>();
     for (const event of response.events) {
       const contractId = event.contractId ? String(event.contractId) : null;
+      const topics = event.topic.map((topic) => String(scValToNative(topic)));
       const decoded = interpret(
-        event.topic.map((topic) => String(scValToNative(topic))),
+        topics,
         decodeData(event.value),
         {
           source: "ledger",
@@ -1557,15 +1596,21 @@ export class GuardTelemetryListener {
           ...(this.config.includeRaw ? { raw: event } : {}),
         },
       );
-      if (decoded) events.push(decoded);
-      else dropped += 1;
+      if (decoded) {
+        events.push(decoded);
+      } else {
+        const topic = topics[0] ?? "";
+        unknownTopicCounts.set(topic, (unknownTopicCounts.get(topic) ?? 0) + 1);
+      }
     }
     sortCommittedPage(events);
+    const unknownTopics = unknownTopicSummary(unknownTopicCounts);
     const oldestLedger = typeof response.oldestLedger === "number" ? response.oldestLedger : null;
     this.logger.debug("telemetry page received", {
       guard: this.config.guard,
       events: events.length,
-      dropped,
+      dropped: unknownTopics.reduce((total, entry) => total + entry.count, 0),
+      unknownTopics,
       latestLedger: response.latestLedger,
       oldestLedger,
     });
@@ -1577,6 +1622,7 @@ export class GuardTelemetryListener {
       // Best-effort: a host that omits the retention boundary gets no gap
       // detection, rather than a boundary invented from `latestLedger`.
       oldestLedger,
+      unknownTopics,
     };
   }
 
@@ -1604,6 +1650,8 @@ export class GuardTelemetryListener {
    * When `onGap` is supplied, the listener also checks each response's retention
    * window and reports a provable hole (see `GuardTelemetryGap`) instead of
    * silently skipping it. Omitting `onGap` changes nothing about the stream.
+   * `onUnknownTopics` reports unrecognised name topics by count without retaining
+   * their payloads; omitting it leaves delivery unchanged.
    *
    * ## Aborting
    *
@@ -1782,6 +1830,15 @@ export class GuardTelemetryListener {
         } catch {
           // A consumer's alerting failure must not stop the stream: the notice
           // is advisory, and swallowing it mirrors `onStep`'s isolation.
+        }
+      }
+
+      if (params.onUnknownTopics && page.unknownTopics.length > 0) {
+        try {
+          params.onUnknownTopics(page.unknownTopics);
+        } catch {
+          // Observability must not be able to stop telemetry: the same isolation
+          // contract as `onGap`.
         }
       }
 
