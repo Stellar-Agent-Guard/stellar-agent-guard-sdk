@@ -17,7 +17,7 @@ User-facing changes need an **Unreleased** row in [`CHANGELOG.md`](CHANGELOG.md)
 added in the same PR as the change; changes no user can observe (CI, tests, internal
 docs) need none.
 
-## One commit per logical unit, ****per file**** — the hard rule
+## One commit per logical unit, **per file** — the hard rule
 
 Every commit **and every push** must touch **exactly one file**. Not "on average" —
 exactly one, every time.
@@ -28,7 +28,7 @@ exactly one, every time.
   sequential commits — **one file each** — pushed in order. Do not squash them
   together afterwards.
 - This is stricter than the earlier "one commit per logical unit" rule. It is now
-  one commit per logical unit ****per file****.
+  one commit per logical unit **per file**.
 - It applies to every repository in this org: `stellar-agent-guard-sdk`,
   `stellar-agent-guard-contracts`, and `stellar-agent-guard-dashboard`.
 
@@ -47,7 +47,7 @@ git show --stat HEAD
 `main` is protected by the `main-protection` ruleset:
 
 - the required status check is named exactly **`ci`**;
-- one approving review is required, stale reviews are dismissed on push, and
+- **one approving review** is required, stale reviews are dismissed on push, and
   GitHub does not permit self-approval;
 - allowed merge methods are `merge`, `squash` and `rebase`.
 
@@ -60,13 +60,13 @@ Do not modify the ruleset to work around a required check that is legitimately b
 CI reports **one required check**, plus a scheduled workflow that is deliberately not
 part of it:
 
-- `ci` — required, and the only check that gates a merge. Runs typecheck, lint, the
+- **`ci`** — required, and the only check that gates a merge. Runs typecheck, lint, the
   unit tests, and the **enforcement-path evidence gate**. It touches no secret, so
   nothing in it can silently mask a skip: every step either really runs or the job
   fails.
-- `live-suite` (`.github/workflows/live-suite.yml`) — **never run on a pull
+- **`live-suite`** (`.github/workflows/live-suite.yml`) — **never run on a pull
   request**. Runs the live testnet suite weekly (`schedule`) and on demand
-  (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` referenced
+  (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` is referenced
   only in that workflow, and it has no `pull_request` / `pull_request_target` trigger,
   so a pull request — including a forked one — can never reach the secret.
 
@@ -97,7 +97,7 @@ change". The committed evidence file is the record for the change itself.
      button GitHub shows on a merged PR);
   3. delete the local branch with `-d`, **not** `-D`. If `-d` refuses, that is a signal the
      merge did not land the way you think — stop and check rather than forcing it.
-- Sweep for stray branches (`git branch -a,` `gh api repos/{owner}/{repo}/branches`) and
+- Sweep for stray branches (`git branch -a`, `gh api repos/{owner}/{repo}/branches`) and
   delete the ones already merged into `main`. **Never delete an unmerged branch** to hit a
   `main`-only target — that silently discards unmerged work.
 - Verify with `git branch -a`: it should show `main` and nothing else.
@@ -124,8 +124,8 @@ Wave docs assign it when an issue is added to a Wave Program in the dashboard, a
 bot applies its own program label. Keeping the tier taxonomy orthogonal to it means neither
 scheme has to be renamed later.
 
-Anything still open when a phase closes gets an issue, not just a note in a pull request or
-a chat log.
+Anything still open when a phase closes gets an issue, not just a note in a pull request or a
+chat log.
 
 ## Releasing
 
@@ -136,7 +136,8 @@ maintainer-only (npm 2FA/automation token, outside this repo).
 ## Local gates before pushing
 
 ```bash
-npm run typecheck.npm run lint
+npm run typecheck
+npm run lint
 npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
@@ -147,7 +148,8 @@ node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `lin
 ## TypeScript strictness ratchet
 
 `tsconfig.json` enables `strict`, `noUncheckedIndexedAccess` and
-`exactOptionalPropertyTypes`, and they stay on. `noUncheckedIndexedAccess` makes an indexed read yield `T | undefined` — the TypeScript-side mirror of the
+`exactOptionalPropertyTypes`, and they stay on. `noUncheckedIndexedAccess` makes
+an indexed read yield `T | undefined` — the TypeScript-side mirror of the
 contract's `parse_call` bounds checks — and `exactOptionalPropertyTypes` stops an
 omitted optional property and an explicitly-`undefined` one from being
 interchangeable, which is where options-object footguns hide.
@@ -167,49 +169,10 @@ Contributors use diverse operating systems and editors. To prevent cross-platfor
 - `.editorconfig` establishes baseline editor formatting: 2-space indentation, UTF-8 character encoding, LF line endings, and trimmed trailing whitespace. Note the hierarchy: the project formatter/linter is authoritative; `.editorconfig` assists editors only.
 - `.gitattributes` normalizes text line endings to LF on checkout and commit (`* text=auto eol=lf`), preventing Windows CRLF churn.
 
-## Architecture on-ramp: where a change lands
-
-This repo is the **SDK** — the client side of the guard. The cross-repo diagram in
-[`README.md`](README.md) shows the three reposities; this section shows where inside
-`src/` a given change belongs. Read it before opening a PR — it is the difference
-between a five-minute change and a week of pushing against the wrong layer.
-
-### The five layers
-
-| Layer | Files in `src/` | One-line responsibility |
-| --- | --- | --- |
-| **Verdict** |
-`src/preflight.ts`, `src/policy.ts`, `src/cost-checker.ts` | Decide *before* submission whether a call would pass and what it would cost — the client-side mirror of the on-chain verdict. |
-| **Execution** |
-`src/tx.ts`, `src/invoke.ts` | Build, sign and submit the transaction / invoke once the verdict is clean. |
-| **Observation** |
-`src/telemetry.ts`, `src/events.ts` | Stream dual-stream telemetry and normalise guard events for consumers. |
-| **Integration** |
-`src/adapters/` | Adapters that bind the core to a framework's transport/signing model. |
-| **Authority** |
-`src/policy-encoding.ts` | Encode a policy into the on-chain representation the contracts read — the SDK encodes, it does not decide. |
-
-### Change routing: "bug does X → start in file Y"
-
-| Symptom | Start in | Notes |
-| --- | --- | --- |
-| Preflight says blocked but the chain would accept it (or vice versa) | `src/preflight.ts` | If the verdict logic itself is wrong, see the verdict-logic row below. |
-| Cost estimate is off from the simulation result | `src/cost-checker.ts` | Check the simulation parsing before touching the threshold logic. |
-| Transaction fails to build/sign/submit | `src/tx.ds` | Execution only; a verdict problem is not fixed there. |
-| Invoke pipeline misses a step or orders them wrongly | `src/invoke.ts` | The pipeline is the orchestration layer, not the verdict layer. |
-| Telemetry event is missing or malformed | `src/telemetry.ts`, `src/events.ts` | Schema changes are additive; see [`docs/event-schema.md`](docs/event-schema.md). |
-| A framework adapter breaks after a framework upgrade | `src/adapters/` | The adapter binds transport/signing; it must not reimplement verdict logic. |
-| **Verdict logic is wrong — a call that should pass is rejected on-chain** | ❌ Wrong repo — [`stellar-agent-guard-contracts`](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | The verdict lives on-chain. The SDK cannot fix it, and a PR here attempting to is out of scope. |
-| **Policy semantics are wrong — what a policy *means* is misinterpreted** | ❍ Wrong repo — [`stellar-agent-guard-contracts`](https://github.com/aigbagbobila/stellar-agent-guard-contracts) | The SDK encodes policies; the contracts define their meaning. Encoding bugs are fixed in `src/policy-encoding.ts`, semantics bugs are not. |
-
-When a row says "wrong repo", the honest answer is to open the issue in the sibling
-repo and link it from here. An SDK PR that tries to change verdict logic or policy
-semantics is wasted effort — the contracts repo owns that code.
-
 ## Test tiers and fixtures
 
 - **Unit** (`npm test`) — no network, no secrets, deterministic.
-- `**Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
+- **Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
   (template: `.env.phase2.example`). Not run on pull requests; see
   "The live testnet suite is not run on every PR" above.
 
@@ -230,9 +193,10 @@ identically in either tier. A project's invariants — its directory has matchin
 files, the live project stays serialised — are asserted by
 `tests/unit/test-runner.test.ts` rather than left to convention.
 
-When `.env.phase2` absent or incomplete, the test runner fails immediately at entry with a single actionable message pointing to `.env.phase2.example` and the provision command (`npm run deploy:phase2`) without cascading test cancellations:
+When `.env.phase2` is absent or incomplete, the test runner fails immediately at entry with a single actionable message pointing to `.env.phase2.example` and the provision command (`npm run deploy:phase2`) without cascading test cancellations:
 
-```.env.phase2 was not found in the working directory.
+```
+.env.phase2 was not found in the working directory.
 
 Copy the documented template and fill it in:  cp .env.phase2.example .env.phase2
 Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  npm run deploy:phase2
@@ -253,4 +217,129 @@ Copy the documented template and fill it in:  cp .env.phase2.example .env.phase2
 Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  npm run deploy:phase2
 ```
 
-Fixtures that encode real netw
+Fixtures that encode real network shapes are committed and refreshed when the
+code or the SDK beneath them changes:
+
+- `tests/fixtures/contract-fixtures.json` — the guard's event vocabulary. Refresh
+  with `npm run sync:fixtures` when the contracts repo's schema moves.
+- `tests/fixtures/rpc/*.json` — real RPC payloads decoded by
+  `tests/unit/rpc-fixtures.test.ts`. Refresh with `npm run capture:rpc-fixtures`
+  after touching `src/telemetry.ts` or `src/invoke.ts`, or after upgrading
+  `@stellar/stellar-sdk`. Provenance and capture details:
+  `tests/fixtures/rpc/README.md`.
+
+## Coverage
+
+Two coverage commands, two tools, and the difference matters:
+
+- `npm run test:coverage` — the whole-project report from the test-tier table
+  above: Node's built-in `--experimental-test-coverage` over every project in one
+  run. Needs `.env.phase2`, because the live project is included.
+- `npm run test:coverage:floor` — `c8` over the unit suite only: offline, no
+  secret, no network. `c8` understands the `tsx` loader and maps its numbers
+  back to the TypeScript source, and it reads [`.c8rc.json`](.c8rc.json), so the
+  floor lives in one place rather than in the workflow. This is the coverage
+  gate `ci` runs.
+
+The floor applies **per file** to the three verdict-critical modules —
+`src/preflight.ts`, `src/policy.ts`, `src/invoke.ts` — and starts at the
+measured baseline for those files (line 90 / branch 71 / function 92, measured
+2026-09-29), so it is honest rather than aspirational: it fails only on a real
+regression.
+
+**Ratchet rule:** raise the floor only in a deliberate PR that raises the tests
+first — measure the new number (`npm run test:coverage:floor`), then bump the
+matching key in `.c8rc.json` and state the old and new numbers in the PR. Never
+lower a threshold to make a red build green; that is the one change the floor
+exists to prevent.
+
+Sequencing: the test-tier docs issue had already landed when the floor was
+added, so the floor command is documented in the test-tier table above. This
+subsection stays, because it carries the floor mechanics and the ratchet rule
+that the table cannot hold.
+
+## Secrets
+
+`PHASE2_ENV_FILE` (live testnet signing keys) and `NPM_TOKEN` (publish) are
+maintainer-managed repository secrets. `.env.phase2` is gitignored — never commit it,
+and never embed keys in a workflow or work around a missing secret with an alternate
+name.
+
+`PHASE2_ENV_FILE` must stay referenced in **exactly one workflow** —
+`.github/workflows/live-suite.yml` — which is triggered only by `schedule` and
+`workflow_dispatch`. Never add it to a workflow with a `pull_request` or
+`pull_request_target` trigger: that would expose it to a forked pull request.
+## Deterministic time control in tests
+
+Time-dependent modules in the SDK (cache TTLs, transaction polling) support dependency injection of a `Clock` abstraction to make tests deterministic and fast.
+
+**For production code**, no action is needed: modules default to the system clock and behave normally.
+
+**For tests that need to control time**, inject a `FakeClock`:
+
+```ts
+import { FakeClock } from "stellar-agent-guard-sdk";
+
+const clock = new FakeClock(0); // Start at t=0ms
+const interceptor = new PreFlightInterceptor({
+  // ... other config ...
+  clock, // Pass the fake clock
+});
+
+// Time does not advance automatically; you control it
+await someAsyncWork();
+
+// Advance the clock deterministically, without real delays
+clock.advance(5000); // Skip to t=5000ms
+
+// Pending sleeps/delays complete instantly
+// No setTimeout waits; tests run fast and are reproducible
+```
+
+**Why it matters**: Multiple modules (cache expiration, transaction polling, telemetry intervals) each used to invent their own time sources (`Date.now()`, `setTimeout`). Without Clock injection, unit tests either:
+
+1. Used real sleeps (slow, flaky, wall-time dependent)
+2. Ad-hoc mocked each module separately (non-composable, tests fragile to module changes)
+
+The `Clock` interface allows tests to:
+- Simulate time passage synchronously
+- Eliminate real `setTimeout` waits
+- Test time-dependent boundary conditions deterministically
+- Verify cache expiration, retry backoff, and polling behavior without network latency
+
+**Key methods:**
+
+- `clock.now()` — returns current time (in milliseconds, like `Date.now()`)
+- `clock.sleep(ms)` — returns a promise that resolves after ms milliseconds
+- `clock.advance(ms)` — move the clock forward deterministically; resolves all pending sleeps
+- `clock.setTime(ms)` — set clock to an absolute time
+
+**Example: Cache TTL test**
+
+```ts
+import { FakeClock } from "stellar-agent-guard-sdk";
+
+test("cache entry expires after TTL", async () => {
+  const clock = new FakeClock(1000);
+  const interceptor = new PreFlightInterceptor({
+    server: mockServer,
+    cache: { ttlMs: 5000 },
+    clock,
+  });
+
+  // First check caches the result
+  const decision1 = await interceptor.check(call);
+
+  // Advance to just before expiry (t=5999ms)
+  clock.advance(4999);
+  const decision2 = await interceptor.check(call);
+  // Cache hit — same decision, no RPC call
+
+  // Advance past expiry (t=6000ms)
+  clock.advance(1);
+  const decision3 = await interceptor.check(call);
+  // Cache miss — fresh RPC call needed
+});
+```
+
+Always use `FakeClock` in unit tests and when testing cache/polling logic. Use real time only when testing live network interaction (integration tests with `.env.phase2`).
