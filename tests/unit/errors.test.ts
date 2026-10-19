@@ -78,15 +78,10 @@ describe("typed guard errors", () => {
     assert.equal(broadcast.cause, cause);
   });
 
-  it("throws ContractResponseError for an unexpected CheckResult", () => {
-    assert.throws(
-      () => decodeCheckResult({ SomethingElse: true }),
-      (error: unknown) => {
-        assert.ok(error instanceof ContractResponseError);
-        assert.equal(error.field, "CheckResult");
-        return true;
-      },
-    );
+  it("fails closed instead of throwing for an unexpected CheckResult", () => {
+    // The decoder is total by design: a hostile or future payload must resolve
+    // to the typed `undetermined` fallback, never an exception in the verdict path.
+    assert.deepEqual(decodeCheckResult({ SomethingElse: true }), { kind: "undetermined" });
   });
 
   it("throws PolicyDecodeError with the failing field path", () => {

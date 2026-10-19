@@ -25,6 +25,7 @@ import {
   guardEventsFromDiagnostics,
   type GuardTelemetryGap,
 } from "../../src/telemetry.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
 const FIXTURE_DIR = resolve(process.cwd(), "tests/fixtures/rpc");
 
@@ -54,7 +55,7 @@ const FIXTURE_NAMES = [
 /** The guard the fixtures were recorded against, read from a fixture itself. */
 const GUARD =
   loadFixture<unknown>("get-events-guard-page.json").contractId ??
-  "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+  unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 
 /** A fake `rpc.Server` returning a fixture's already-parsed response unchanged. */
 function fixtureServer(response: unknown) {

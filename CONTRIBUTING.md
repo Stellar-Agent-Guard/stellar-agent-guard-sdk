@@ -143,7 +143,6 @@ npm run build && npm run test:exports   # packs the tarball and resolves every e
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
-npm run check:doc-scripts   # docs PRs: every `npm run <name>` in docs exists in package.json
 ```
 
 ## TypeScript strictness ratchet
@@ -193,7 +192,6 @@ Both projects share the `tsx` transform, so the same `src/` modules load
 identically in either tier. A project's invariants — its directory has matching
 files, the live project stays serialised — are asserted by
 `tests/unit/test-runner.test.ts` rather than left to convention.
-Script names referenced in this file and in `README.md` are checked against `package.json` by `npm run check:doc-scripts` (part of `ci`); a doc'd script that does not exist fails the build.
 
 When `.env.phase2` is absent or incomplete, the test runner fails immediately at entry with a single actionable message pointing to `.env.phase2.example` and the provision command (`npm run deploy:phase2`) without cascading test cancellations:
 
@@ -242,7 +240,6 @@ Two coverage commands, two tools, and the difference matters:
   back to the TypeScript source, and it reads [`.c8rc.json`](.c8rc.json), so the
   floor lives in one place rather than in the workflow. This is the coverage
   gate `ci` runs.
-- `npm run check:doc-scripts` — scans `README.md`, `CONTRIBUTING.md` and `docs/` for `npm run <name>` references and asserts each name exists in `package.json` `scripts`. Offline, no secret; runs as a step of the required `ci` check.
 
 The floor applies **per file** to the three verdict-critical modules —
 `src/preflight.ts`, `src/policy.ts`, `src/invoke.ts` — and starts at the

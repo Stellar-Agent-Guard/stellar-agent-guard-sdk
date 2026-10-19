@@ -14,6 +14,7 @@ import { after, before, describe, it } from "node:test";
 import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { invoke } from "../../src/invoke.ts";
 import { PreFlightInterceptor } from "../../src/preflight.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 import {
   GuardTelemetryListener,
   describeGuardEvent,
@@ -46,7 +47,7 @@ describe("GuardTelemetryListener against the live guard", () => {
     const outcome = await invoke({
       server,
       source: config.keys.agent,
-      call: { contract: config.guard, fn: "heartbeat", args: [] },
+      call: { contract: unsafeContractAddress(config.guard), fn: "heartbeat", args: [] },
       networkPassphrase: TESTNET_PASSPHRASE,
       guardAuth: { guard: config.guard, agent: config.keys.agent },
     });
@@ -85,13 +86,13 @@ describe("GuardTelemetryListener against the live guard", () => {
     const interceptor = new PreFlightInterceptor({
       server,
       networkPassphrase: TESTNET_PASSPHRASE,
-      guard: config.guard,
+      guard: unsafeContractAddress(config.guard),
       agent: config.keys.agent,
       source: config.keys.agent,
     });
 
     const decision = await interceptor.check({
-      contract: config.token,
+      contract: unsafeContractAddress(config.token),
       fn: "transfer",
       args: [
         new Address(config.guard).toScVal(),
