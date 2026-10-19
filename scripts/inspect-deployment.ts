@@ -22,11 +22,12 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
+import { unsafeContractAddress, unsafeAccountAddress } from "../src/policy.ts";
 
 /** Phase 1 guard instance — historical dead-man-switch evidence, untouched. */
-const PHASE1_GUARD = "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7";
-const PHASE1_TOKEN = "CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7";
-const PHASE1_ADMIN = "GD5S5O2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS";
+const PHASE1_GUARD = unsafeContractAddress("CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7");
+const PHASE1_TOKEN = unsafeContractAddress("CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7");
+const PHASE1_ADMIN = unsafeAccountAddress("GD5S5O2MZ6FSMFH6QILG37KSQNRVR3RPSWBTTV4JOUJ7J6TWLLL5LAVS");
 const TESTNET_RPC = "https://soroban-testnet.stellar.org";
 
 /**
