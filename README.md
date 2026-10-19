@@ -6,6 +6,9 @@
 <a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml">
 <img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"/>
 </a>
+<a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/live-suite.yml">
+<img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/live-suite.yml/badge.svg" alt="Live suite"/>
+</a>
 <a href="LICENSE">
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"/>
 </a>
@@ -14,6 +17,12 @@
 </a>
 <!-- docs: <a href="#"><img src="https://img.shields.io/badge/docs-GitBook-blue" alt="Documentation"/></a> (added in P2 once GitBook URL is confirmed live) -->
 </p>
+
+**Badge legend**
+
+- **CI** — unit, lint, and type-check jobs on every push/PR ([`ci.yml`](.github/workflows/ci.yml)). Green CI means the required checks ran, **not** that the live suite ran against this change (see [Honest limitations](#honest-limitations)).
+- **Live suite** — weekly scheduled run of `npm run test:integration` against the deployed testnet instance ([`live-suite.yml`](.github/workflows/live-suite.yml)); this is the project's honest signal for live-suite health.
+- **License** — MIT ([`LICENSE`](LICENSE)). **Node** — minimum supported runtime (`engines` in `package.json`).
 
 # Stellar Agent Guard — SDK
 
@@ -24,6 +33,8 @@
 An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
 
 **Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
+
+> **Coverage badge: skipped.** No coverage reporting exists yet in this repo (no `vitest --coverage`/`c8` config, no coverage artifact uploaded by CI), so a coverage badge would be decoration rather than a signal. Adding one is gated on the coverage-reporting prerequisite issue; once that lands, add a coverage badge here that links its workflow run.
 
 ## 🎯 What makes this different
 

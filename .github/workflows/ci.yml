@@ -91,8 +91,13 @@ jobs:
       - name: lint
         run: npm run lint
 
-      - name: unit tests
-        run: npm test
+      # Coverage floor on the verdict-critical path (src/preflight.ts,
+      # src/policy.ts, src/invoke.ts). `c8` reads `.c8rc.json`, so the floor
+      # lives in one place and is raised by a deliberate PR. Runs the unit
+      # suite again under instrumentation; no network, no secret, so it cannot
+      # go green on a missing credential.
+      - name: coverage floor (verdict-critical path)
+        run: npm run test:coverage:floor
 
       # Coverage floor on the verdict-critical path (src/preflight.ts,
       # src/policy.ts, src/invoke.ts). `c8` reads `.c8rc.json`, so the floor
@@ -101,6 +106,9 @@ jobs:
       # go green on a missing credential.
       - name: coverage floor (verdict-critical path)
         run: npm run test:coverage:floor
+
+      - name: build
+        run: npm run build
 
       - name: build
         run: npm run build
@@ -117,6 +125,9 @@ jobs:
       # dist/ in-place; this one exercises the published artifact.
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
+
+      - name: smoke test export resolution
+        run: npm run test:smoke
 
       # Browser-consumer bundle-size canary (issue #145): the dashboard imports
       # the SDK client-side, so this number ships to every operator's browser.
@@ -151,6 +162,9 @@ jobs:
         run: |
           git fetch --no-tags origin "$BASE_REF"
           node scripts/check-enforcement-evidence.ts "origin/$BASE_REF" HEAD
+
+      - name: coverage report (upload)
+        run: npm run test:coverage:report
 
   # Informational only, never gating — and deliberately a separate job so it does
   # not lengthen the required `ci` check (see the header comment). It runs on

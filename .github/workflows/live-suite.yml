@@ -16,6 +16,11 @@
 # record the run's output in the evidence file instead.
 name: live-suite
 
+# NOTE: The README badge row links to this workflow's Actions page as the
+# project's honest-signal for live-suite health. If you rename this workflow
+# or move it, update the badge URL in README.md (`actions/workflows/live-suite.yml/badge.svg`
+# and the `.../workflows/live-suite.yml` link target) in the same PR.
+
 on:
   schedule:
     # Weekly, Monday 06:17 UTC. Off the hour so it does not stack with the
