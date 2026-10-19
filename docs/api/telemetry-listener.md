@@ -53,6 +53,20 @@ committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `jitter`, `rng`, `sleep`, `onGap`, and `signal`.
 
+#### One active stream per listener
+
+A listener owns shared cursor, failed-transaction de-duplication, counter, and
+buffer state, so it supports **one active `watch()`/`watchAll()` stream at a
+time**. Starting a second stream while the first is still being pulled throws
+`ConcurrentTelemetryStreamError` (`code: "telemetry.concurrent_stream"`) before
+it issues an RPC request, saves a cursor, or records an event. The active stream
+keeps its own progress; after it ends, a new stream can start from the saved
+cursor. Use a separate listener when you need two independent streams.
+
+This is a deliberate fail-fast model, not isolation: rejecting the second stream
+is what makes cursor persistence and counters impossible to overwrite or
+double-count from two iterators on one listener.
+
 #### Mid-watch failures (`onStreamError`)
 
 When `getEvents` starts failing mid-watch, the default is **bounded retry with
@@ -130,6 +144,40 @@ Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 The same event re-parsed yields the same id; two different blocks within one
 simulation yield different ids. Format and collision notes:
 [`docs/event-schema.md`](../event-schema.md#event-identity--guardeventid).
+
+## Strict offline fixture validation
+
+`decodeGuardEventXdr()` is intentionally resilient: it returns `null` for a
+malformed or unrecognised payload so live monitoring never crashes on one bad
+event. Fixture maintainers and incident tooling need the opposite — every input
+accounted for. `validateGuardEventXdr()` is the separate strict entry point:
+
+```ts
+import { validateGuardEventXdr } from "stellar-agent-guard-sdk";
+
+const report = validateGuardEventXdr(fixtureXdr, { source: "ledger" });
+if (!report.ok) {
+  for (const failure of report.failures) {
+    console.error(failure.path, failure.stage, failure.code, failure.message);
+  }
+}
+```
+
+The report preserves input order: `events` contains the decoded decisions,
+`results` contains one entry per input, and `failures` contains only rejections.
+Each failure carries the input `index`, a stable `path` such as
+`events[2].topics[0]`, a pipeline `stage`, and a stable `code`:
+
+| Stage | Codes | Meaning |
+| --- | --- | --- |
+| `input` | `input.not_string`, `input.empty` | The entry is not a non-empty base64 string. |
+| `xdr` | `xdr.unparseable` | The value is neither a `DiagnosticEvent` nor a `ContractEvent` XDR. |
+| `topics` | `topics.missing` | The event carries no contract-event topic list. |
+| `topic` | `topic.undecodable` | One topic is not a decodable `ScVal`; the path names its index. |
+| `decision` | `decision.unknown_topic`, `decision.invalid_result` | The topics decoded, but are not an `event_auth_checked` decision with an `allowed`/`blocked` result. |
+
+Resilient live polling and the existing decoder return values are unchanged;
+this is an additive offline API.
 
 ## Cursor persistence (`cursorStore`)
 
