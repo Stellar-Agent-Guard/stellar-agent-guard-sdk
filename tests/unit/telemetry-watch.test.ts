@@ -23,6 +23,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { rpc, xdr } from "@stellar/stellar-sdk";
 import {
+  ConcurrentTelemetryStreamError,
   GuardTelemetryListener,
   InMemoryCursorStore,
   type CursorStore,
@@ -35,35 +36,43 @@ const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
  * A raw ledger event in the shape `getEvents` returns — `ScVal` topics and
  * value — because `poll()` decodes the RPC's shape, not `GuardEvent`s.
  */
-function rawLedgerEvent(ledger: number) {
+function rawLedgerEvent(
+  ledger: number,
+  txHash: string = `tx-${ledger}`,
+  topic = "event_heartbeat",
+) {
   return {
     contractId: GUARD,
     type: "contract" as const,
-    topic: [xdr.ScVal.scvSymbol("event_heartbeat")],
+    topic: [xdr.ScVal.scvSymbol(topic)],
     value: xdr.ScVal.scvMap([
       new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(BigInt(ledger)) }),
     ]),
     ledger,
     ledgerClosedAt: null,
-    txHash: `tx-${ledger}`,
+    txHash,
   };
 }
 
 /** What `poll()` should decode that raw event into, stable id included. */
-function decodedEvent(ledger: number): GuardEvent {
+function decodedEvent(
+  ledger: number,
+  txHash: string = `tx-${ledger}`,
+  topic = "event_heartbeat",
+): GuardEvent {
   return {
     // Format from `guardEventId`: `ledger:<txHash>:<topic>` — the raw event
     // below carries txHash `tx-<ledger>`, so the decoded id is derivable here.
-    id: `ledger:tx-${ledger}:event_heartbeat`,
+    id: `ledger:${txHash}:${topic}`,
     kind: "heartbeat",
-    topic: "event_heartbeat",
+    topic,
     source: "ledger",
     stream: "committed",
     contractId: GUARD,
     ledger,
     ledgerClosedAt: null,
     observedAt: null,
-    transactionHash: `tx-${ledger}`,
+    transactionHash: txHash,
     decision: null,
     data: { at: BigInt(ledger) },
   };
@@ -249,6 +258,138 @@ describe("watch(signal) cursor persistence", () => {
     assert.equal(rec.loadCount(), 0, "a caller-pinned position is not second-guessed by the store");
     assert.equal(requests[0]?.startLedger, 100);
     assert.equal(requests[0]?.cursor, undefined);
+  });
+});
+
+describe("committed-page ordering (issue #289)", () => {
+  /** A deliberately shuffled page: ledgers out of order, and two per ledger. */
+  const shuffled = [
+    rawLedgerEvent(502, "tx-z"),
+    rawLedgerEvent(500, "tx-b"),
+    rawLedgerEvent(502, "tx-c"),
+    rawLedgerEvent(500, "tx-a"),
+  ];
+  const expected = [
+    [500, "tx-a"],
+    [500, "tx-b"],
+    [502, "tx-c"],
+    [502, "tx-z"],
+  ];
+
+  it("poll() orders by ledger, then by a stable same-ledger tie-breaker", async () => {
+    const { server } = scriptedServer([{ events: shuffled, cursor: "cursor-1" }]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const page = await listener.poll({ startLedger: 500 });
+
+    assert.deepEqual(
+      page.events.map((event) => [event.ledger, event.transactionHash]),
+      expected,
+    );
+  });
+
+  it("watch() exposes the same committed order as poll()", async () => {
+    const { server } = scriptedServer([{ events: shuffled, cursor: "cursor-1" }]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const [page] = await take(listener, 1, { startLedger: 500 });
+
+    assert.deepEqual(
+      page?.map((event) => [event.ledger, event.transactionHash]),
+      expected,
+    );
+  });
+
+  it("watchAll() exposes the same committed order as poll()", async () => {
+    const { server } = scriptedServer([{ events: shuffled, cursor: "cursor-1" }]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const controller = new AbortController();
+    const seen: GuardEvent[] = [];
+
+    for await (const event of listener.watchAll({
+      startLedger: 500,
+      pollIntervalMs: 1,
+      signal: controller.signal,
+      sleep: async () => controller.abort(),
+    })) {
+      seen.push(event);
+    }
+
+    assert.deepEqual(
+      seen.map((event) => [event.ledger, event.transactionHash]),
+      expected,
+    );
+  });
+});
+
+describe("single active stream (issue #291)", () => {
+  it("rejects a concurrent watch() before it issues an RPC request", async () => {
+    const pages: ScriptedPage[] = [
+      { events: [rawLedgerEvent(501)], cursor: "cursor-1" },
+      { events: [rawLedgerEvent(502)], cursor: "cursor-2" },
+      { events: [rawLedgerEvent(503)], cursor: "cursor-3" },
+    ];
+    const { server, requests } = scriptedServer(pages);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const first = listener.watch({ pollIntervalMs: 1 });
+    const firstPage = await first.next();
+    assert.deepEqual(firstPage.value?.map((event) => event.ledger), [501]);
+
+    const second = listener.watch({ pollIntervalMs: 1 });
+    await assert.rejects(
+      second.next(),
+      (error: unknown) => error instanceof ConcurrentTelemetryStreamError,
+      "the second stream is rejected deterministically",
+    );
+    assert.equal(requests.length, 1, "the rejected stream must not touch the RPC");
+
+    const secondPage = await first.next();
+    assert.deepEqual(
+      secondPage.value?.map((event) => event.ledger),
+      [502],
+      "the active stream keeps its own progress",
+    );
+    await first.return?.();
+
+    const third = listener.watch({ pollIntervalMs: 1 });
+    const thirdPage = await third.next();
+    assert.deepEqual(
+      thirdPage.value?.map((event) => event.ledger),
+      [503],
+      "after the first stream ends, a new stream starts from the saved cursor",
+    );
+    await third.return?.();
+  });
+
+  it("rejects a concurrent watchAll() and does not double-count counters", async () => {
+    const allowed = {
+      ...rawLedgerEvent(501),
+      topic: ["event_auth_checked", "allowed", ""].map((topic) => xdr.ScVal.scvSymbol(topic)),
+    };
+    const { server } = scriptedServer([
+      { events: [allowed], cursor: "cursor-1" },
+      { events: [allowed], cursor: "cursor-2" },
+    ]);
+    const listener = new GuardTelemetryListener({
+      server,
+      guard: GUARD,
+      counters: { windowEvents: 10 },
+    });
+
+    const first = listener.watchAll({ pollIntervalMs: 1 });
+    const firstEvent = await first.next();
+    assert.equal(firstEvent.value?.decision?.result, "allowed");
+
+    const second = listener.watchAll({ pollIntervalMs: 1 });
+    await assert.rejects(
+      second.next(),
+      (error: unknown) => error instanceof ConcurrentTelemetryStreamError,
+    );
+
+    assert.equal(listener.stats()?.allowed, 1, "only the active stream records a decision");
+    assert.equal(listener.stats()?.blocked, 0);
+    await first.return?.();
   });
 });
 
