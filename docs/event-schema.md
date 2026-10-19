@@ -65,6 +65,7 @@ behaves:
 | `GUARD_REASON_CODES` numbers | contract | **Append-only** | Numeric codes are never renumbered and never reused; removed variants keep their number. |
 | `describeGuardEvent()` text | SDK | **Internal** | A log line, not a format. Parse `GuardEvent`, not this string. |
 | `poll()` `cursor` / `latestLedger` | RPC | **Best-effort** | Pagination is host-defined; treat as opaque. |
+| `poll().unknownTopics` | SDK summary of contract topics | **Best-effort** | `{ topic: string; count: number }[]`, sorted by topic, for events the SDK did not recognise. No raw XDR or source payload. Additive (issue #287). |
 | `serializeEvent()` output | SDK | **Stable** | Canonical JSON line. Fixed key order and normalization policy — see below. |
 
 ### Canonical JSON serialization — `serializeEvent()`
@@ -426,6 +427,37 @@ enforced-simulation diagnostic events for blocked ones — because a refusal is
 never committed, and a listener that only tails the ledger would see a guard that
 appears to never block anything. `watchAll()` (see "Merged stream" below)
 delivers exactly that union as one ordered iterator.
+
+## Unknown event topics — observability without payloads
+
+Unknown name topics are still **dropped, not guessed**: they never become a
+`GuardEvent`, never enter the listener's buffer, and do not change delivery. But
+silence should not be indistinguishable from a contract vocabulary change, and a
+host may not have configured a logger to read the debug count. The listener
+therefore exposes the decoded names and per-page counts as optional observability:
+
+```ts
+const page = await listener.poll({ startLedger });
+for (const { topic, count } of page.unknownTopics) {
+  alerting.unknownTopic(topic, count);
+}
+
+for await (const events of listener.watch({
+  onUnknownTopics(unknownTopics) {
+    // Called once per page that contains at least one unknown topic.
+    for (const { topic, count } of unknownTopics) alerting.unknownTopic(topic, count);
+  },
+})) {
+  // Known events only, exactly as before.
+}
+```
+
+`unknownTopics` is sorted by topic and is empty when every event decoded. The
+callback receives the same shape and is isolated: a throwing observability sink
+cannot stop the stream, matching `onGap`. The summary contains only the decoded
+name topic and its count — never the source event, its XDR, transaction hash, or
+payload. This is additive; the default polling path and `GuardEvent` shape are
+unchanged.
 
 ## Event identity — `GuardEvent.id`
 
