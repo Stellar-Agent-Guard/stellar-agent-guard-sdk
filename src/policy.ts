@@ -214,29 +214,27 @@ export const POLICY_RULE_IDS = [
 
 export type PolicyRuleId = (typeof POLICY_RULE_IDS)[number];
 
-/**
- * Maximum number of entries allowed in recipient-bearing policy lists
- * (`recipients`, `blocked_recipients`, `recipient_window_caps`).
- *
- * Vendored from the guard contract's cardinality limit (see
- * `stellar-agent-guard-contracts` SPEC §8). Kept here as the single source of
- * truth for SDK-side validation and property tests so the cross-repo limit
- * cannot drift silently: `validateGuardPolicy` rejects `limit + 1` entries
- * pre-encode, and property tests encode exactly `limit` entries to prove the
- * boundary is encodable.
- */
-export const MAX_RECIPIENT_ENTRIES = 256;
-
 export interface PolicyFailure {
   path: string;
   rule: PolicyRuleId;
   message: string;
 }
 
+/**
+ * Maximum number of entries allowed in recipient-shaped policy lists
+ * (`recipients`, `blocked_recipients`, `recipient_window_caps`).
+ *
+ * Vendored from the guard contract's cardinality limit (SPEC §8) so the SDK
+ * rejects over-limit policies *before* encoding — the cross-repo limit sync.
+ * The validator default and the property-test boundary corpus both read this
+ * constant, so a contract-side change only needs to update this one value.
+ */
+export const MAX_RECIPIENT_ENTRIES = 256;
+
 export interface ValidatePolicyOptions {
   /** Guard contract address used to enforce self-address rejection rules. */
   guardAddress?: ContractAddress | string;
-  /** Maximum allowed recipient entries (default: MAX_RECIPIENT_ENTRIES per SPEC §8). */
+  /** Maximum allowed recipient entries (default: 256 per SPEC §8). */
   maxRecipientEntries?: number;
 }
 
@@ -318,6 +316,30 @@ export function policyToScVal(policy: ReadonlyPolicyConfig): xdr.ScVal {
     { key: "paused", val: xdr.ScVal.scvBool(policy.paused) },
     { key: "dms_grace_secs", val: nativeToScVal(policy.dms_grace_secs, { type: "u64" }) },
   ];
+  // Optional fields are only emitted when present so the wire shape matches
+  // the contract's `Option<...>` fields (absent key == None). Emitting them
+  // unconditionally would change the canonical map and break on-chain decode.
+  if (policy.recipient_window_caps !== undefined) {
+    entries.push({
+      key: "recipient_window_caps",
+      val: xdr.ScVal.scvVec(
+        policy.recipient_window_caps.map((cap) =>
+          sortedScMap([
+            { key: "cap", val: nativeToScVal(cap.cap, { type: "i128" }) },
+            { key: "recipient", val: new Address(cap.recipient).toScVal() },
+          ]),
+        ),
+      ),
+    });
+  }
+  if (policy.blocked_recipients !== undefined) {
+    entries.push({
+      key: "blocked_recipients",
+      val: xdr.ScVal.scvVec(
+        policy.blocked_recipients.map((address) => new Address(address).toScVal()),
+      ),
+    });
+  }
   return sortedScMap(entries);
 }
 
@@ -333,6 +355,8 @@ const POLICY_FIELDS = [
   "recipients",
   "window_cap",
   "window_secs",
+  "recipient_window_caps",
+  "blocked_recipients",
 ] as const;
 const PROTOCOL_RULE_FIELDS = ["contract", "fns"] as const;
 const I128_MIN = -(2n ** 127n);
@@ -357,6 +381,8 @@ const U64_MAX = 2n ** 64n - 1n;
  *   range-checked against u64/i128 bounds;
  * - address values must be `ScVal::Address` and are normalised to canonical
  *   Stellar strkeys; function names must be `ScVal::Symbol`.
+ * - optional fields (`recipient_window_caps`, `blocked_recipients`) are absent
+ *   on the wire when `None` and decode to `undefined`; present when `Some`.
  *
  * Maps must contain every expected field exactly once, no unknown fields, and
  * symbol keys in canonical ascending order. The decoder checks representation
@@ -403,6 +429,8 @@ export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
         0n,
         U64_MAX,
       ),
+      ...optionalRecipientWindowCaps(fields.get("recipient_window_caps")),
+      ...optionalBlockedRecipients(fields.get("blocked_recipients")),
     };
   } catch (error) {
     if (error instanceof PolicyDecodeError) throw error;
@@ -555,6 +583,41 @@ function functionSymbols(scVal: xdr.ScVal, path: string): string[] | null {
     }
     return String(scValToNative(item));
   });
+}
+
+/**
+ * Decode the optional `recipient_window_caps` field. Absent on the wire means
+ * `None` and decodes to `undefined`; present means `Some(Vec<RecipientWindowCap>)`.
+ * Each entry is a sorted struct map with `cap` (i128) and `recipient` (Address).
+ */
+function optionalRecipientWindowCaps(
+  scVal: xdr.ScVal | undefined,
+): Pick<PolicyConfig, "recipient_window_caps"> {
+  if (scVal === undefined) return {};
+  const caps = policyVec(scVal, "recipient_window_caps").map((entry, index) => {
+    const path = `recipient_window_caps[${index}]`;
+    const fields = symbolMap(entry, path, RECIPIENT_WINDOW_CAP_FIELDS);
+    return {
+      recipient: policyAddress(fields.get("recipient")!, `${path}.recipient`) as AccountAddress,
+      cap: policyInteger(fields.get("cap")!, `${path}.cap`, "i128", I128_MIN, I128_MAX),
+    };
+  });
+  return { recipient_window_caps: caps };
+}
+
+/**
+ * Decode the optional `blocked_recipients` field. Absent on the wire means
+ * `None` and decodes to `undefined`; present means `Some(Vec<Address>)`.
+ */
+function optionalBlockedRecipients(
+  scVal: xdr.ScVal | undefined,
+): Pick<PolicyConfig, "blocked_recipients"> {
+  if (scVal === undefined) return {};
+  return {
+    blocked_recipients: addressVector(scVal, "blocked_recipients").map(
+      (a) => a as AccountAddress,
+    ),
+  };
 }
 
 function policyDecodeFailure(path: string, detail: string, cause?: unknown): PolicyDecodeError {
