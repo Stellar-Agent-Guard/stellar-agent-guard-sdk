@@ -21,6 +21,7 @@
  * is what keeps the two repos from drifting apart on it.
  */
 export {
+  AdapterConfigError,
   BroadcastError,
   ContractResponseError,
   GuardError,
@@ -30,58 +31,122 @@ export {
 } from "./errors.ts";
 
 export {
+  FakeClock,
+  systemClock,
+} from "./clock.ts";
+
+export type {
+  Clock,
+} from "./clock.ts";
+
+export {
   GuardBlockedError,
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
   GUARD_REASONS,
   explainReason,
   isGuardReason,
+  reasonMessages,
+  reasonMessagesEn,
   reasonName,
   reasonNameFromCode,
-  type GuardBlockedErrorParams,
-  type GuardReason,
-  type GuardReasonName,
+} from "./reasons.ts";
+
+export type {
+  GuardBlockedErrorParams,
+  GuardReason,
+  GuardReasonName,
+  ReasonMessage,
+  ReasonMessageCatalog,
+  ReasonMessageText,
 } from "./reasons.ts";
 
 export {
+  POLICY_RULE_IDS,
+  deadManRemaining,
   decodeCheckResult,
   decodePolicy,
-  deadManRemaining,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
+  freezePolicy,
+  isAccountAddress,
+  isContractAddress,
   isDeadManFrozen,
-  POLICY_RULE_IDS,
+  isPublicKeyHex,
+  isStrKeyAddress,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
+  unsafeAccountAddress,
+  unsafeContractAddress,
+  unsafePublicKeyHex,
+  unsafeStrKeyAddress,
   validateGuardPolicy,
-  type CheckResult,
-  type GuardStatus,
-  type PolicyConfig,
-  type PolicyFailure,
-  type PolicyRuleId,
-  type ProtocolRule,
-  type RecipientWindowCap,
-  type ValidatePolicyOptions,
+} from "./policy.ts";
+
+export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
+export { policyDiff } from "./policy-diff.ts";
+export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
+export type { DmsUrgency } from "./dms.ts";
+
+export type {
+  AccountAddress,
+  CheckResult,
+  ContractAddress,
+  DeepReadonly,
+  GuardPolicy,
+  GuardStatus,
+  PolicyConfig,
+  PolicyFailure,
+  PolicyRuleId,
+  ProtocolRule,
+  PublicKeyHex,
+  ReadonlyPolicyConfig,
+  RecipientWindowCap,
+  StrKeyAddress,
+  ValidatePolicyOptions,
 } from "./policy.ts";
 
 export {
+  POLICY_SCHEMA_PATH,
+  SCHEMA_DIALECT,
+  SCHEMA_RULE_ID_ANNOTATION,
+  SCHEMA_VS_CODE_RULES,
+  ruleFromAnnotation,
+  ruleForKeyword,
+  validateGuardPolicyAgainstSchema,
+} from "./policy-schema.ts";
+
+export type {
+  SchemaKeyword,
+  SchemaPolicyFailure,
+  SchemaValidationOptions,
+} from "./policy-schema.ts";
+
+export {
   decodeAuthDecision,
+  decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
-  type GuardAuthDecision,
-  type GuardAuthResult,
+} from "./events.ts";
+
+export type {
+  GuardAuthDecision,
+  GuardAuthResult,
 } from "./events.ts";
 
 export {
   DEFAULT_INVOKE_RETRY_OPTIONS,
+  DEFAULT_RPC_TIMEOUT_MS,
   enforceCall,
   INVOKE_ERROR_CAUSES,
   InvokeRetryError,
   invoke,
+  RpcTimeoutError,
   topicSymbols,
   type EnforcementOutcome,
+  type FeeBumpConfig,
   type GuardAuthorization,
   type InvokeDryRunResult,
   type InvokeDryRunStepName,
@@ -98,8 +163,11 @@ export {
 
 export {
   TRACE_STEP_NAMES,
-  type TraceStepName,
-  type TraceStepStatus,
+} from "./trace.ts";
+
+export type {
+  TraceStepName,
+  TraceStepStatus,
 } from "./trace.ts";
 
 export {
@@ -109,14 +177,17 @@ export {
   preflight,
   preflightBatch,
   validateContractCall,
-  type CheckBatchOptions,
-  type PolicyRevision,
-  type PreFlightBatchDecision,
-  type PreFlightCacheOptions,
-  type PreFlightCheckOptions,
-  type PreFlightConfig,
-  type PreFlightDecision,
-  type PreFlightInterceptorOptions,
+} from "./preflight.ts";
+
+export type {
+  CheckBatchOptions,
+  PolicyRevision,
+  PreFlightBatchDecision,
+  PreFlightCacheOptions,
+  PreFlightCheckOptions,
+  PreFlightConfig,
+  PreFlightDecision,
+  PreFlightInterceptorOptions,
 } from "./preflight.ts";
 
 export {
@@ -129,27 +200,40 @@ export {
   precheckCost,
   precheckCostWithDecision,
   resourceBreakdownFromSimulation,
-  type CostDecision,
-  type CostPreCheckConfig,
-  type CostWithDecision,
-  type FeeBreakdown,
-  type ResourceBreakdown,
+} from "./cost.ts";
+
+export type {
+  CostDecision,
+  CostPreCheckConfig,
+  CostPreCheckOptions,
+  CostPreCheckResult,
+  CostWithDecision,
+  FeeBreakdown,
+  PolicyContext,
+  ResourceBreakdown,
 } from "./cost.ts";
 
 export {
   DEFAULT_JITTER_FRACTION,
+  GuardEventRingBuffer,
   GuardTelemetryListener,
+  InMemoryCursorStore,
   computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
   guardEventsFromDiagnostics,
+  guardEventsFromFailedTransaction,
   isAllowedDecision,
   mergeGuardEventStreams,
+  serializeEvent,
   telemetryFromDecision,
+  type CursorStore,
   type GuardDiagnosticBatch,
   type GuardEvent,
+  type GuardEventBufferOptions,
   type GuardEventContext,
+  type GuardEventDecodeOptions,
   type GuardEventIdentityInput,
   type GuardEventKind,
   type GuardEventStream,
@@ -160,6 +244,7 @@ export {
   type GuardTelemetryWatchParams,
   type PollResult,
   type PollSleep,
+  type RecentEventFilter,
   type TelemetryJitter,
 } from "./telemetry.ts";
 
@@ -173,17 +258,21 @@ export {
   describeSimulationResources,
   describeSubmissionFailure,
   describeTransactionResult,
+  isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   toAgentSigner,
   verifyAgentSignature,
-  type AdminSigner,
-  type AgentSigner,
-  type ContractCall,
-  type GuardCredentialType,
-  type SimulationOutcome,
-  type SubmissionResult,
+} from "./tx.ts";
+
+export type {
+  AdminSigner,
+  AgentSigner,
+  ContractCall,
+  GuardCredentialType,
+  SimulationOutcome,
+  SubmissionResult,
 } from "./tx.ts";
 
 export {
@@ -197,24 +286,110 @@ export {
   submitRotateAgentKey,
   submitSetPolicy,
   submitUnfreeze,
-  type AdminOpParams,
-  type RotateAgentKeyParams,
-  type SetPolicyParams,
 } from "./admin.ts";
 
+export type {
+  AdminOpParams,
+  RotateAgentKeyParams,
+  SetPolicyParams,
+} from "./admin.ts";
+
+export {
+  GUARD_WASM_HASH,
+  sha256Hex,
+  toHex,
+  verifyGuardWasm,
+  type GuardWasmVerification,
+} from "./wasm.ts";
+
+export {
+  HeartbeatIntervalError,
+  startHeartbeat,
+  submitHeartbeat,
+  type HeartbeatBeat,
+  type HeartbeatHandle,
+  type HeartbeatOptions,
+  type HeartbeatSubmission,
+  type SubmitHeartbeatParams,
+} from "./heartbeat.ts";
+
 // Framework adapters. Both are written structurally against their host's hook,
-// so neither framework is a dependency of this package.
+// so neither framework is a dependency of this package. Options are validated
+// at construction time (see `src/adapters/validate.ts`), so a misconfigured
+// adapter throws `AdapterConfigError` before the first action rather than
+// failing mid-loop.
 export {
   createLangChainGuardMiddleware,
-  type LangChainGuardOptions,
-  type LangChainToolCallRequest,
-  type LangChainToolMessage,
+} from "./adapters/langchain.ts";
+
+export type {
+  LangChainGuardOptions,
+  LangChainToolCallRequest,
+  LangChainToolMessage,
 } from "./adapters/langchain.ts";
 
 export {
   createGuardValidator,
   guardAction,
-  type ElizaActionLike,
-  type ElizaGuardOptions,
-  type ElizaValidator,
 } from "./adapters/elizaos.ts";
+
+export type {
+  ElizaActionLike,
+  ElizaGuardOptions,
+  ElizaValidator,
+} from "./adapters/elizaos.ts";
+
+export {
+  throwAdapterConfigError,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateRequiredFunction,
+  type AdapterConfigIssue,
+} from "./adapters/validate.ts";
+
+export {
+  createVercelAIGuard,
+  wrapToolWithGuard,
+  type VercelAIGuardOptions,
+  type VercelAIToolCallInput,
+  type VercelAIToolLike,
+} from "./adapters/vercelai.ts";
+
+export {
+  guardMcpCallTool,
+  guardMcpToolHandler,
+} from "./adapters/mcp.ts";
+
+export type {
+  McpCallTool,
+  McpGuardOptions,
+  McpToolCallRequest,
+  McpToolHandler,
+  McpToolResult,
+} from "./adapters/mcp.ts";
+
+// The operator alerting primitive every adapter shares (`onBlocked`).
+// Exported so a consumer can type its sink and build the payload itself.
+export {
+  blockedInfoFor,
+  runBlockedHook,
+} from "./adapters/shared.ts";
+
+export type {
+  BlockedHookLogger,
+  GuardAdapterName,
+  GuardBlockedHook,
+  GuardBlockedInfo,
+} from "./adapters/shared.ts";
+
+// Optional logging. `SILENT_LOGGER` is the default every config resolves to
+// when no logger is supplied: the SDK writes nothing unless a host asks.
+export {
+  GUARD_LOG_LEVELS,
+  SILENT_LOGGER,
+  resolveLogger,
+  type GuardLogger,
+  type GuardLoggerInput,
+  type GuardLogLevel,
+  type GuardLogMeta,
+} from "./logger.ts";
