@@ -46,6 +46,12 @@ golden vocabulary in [`../contract-fixtures.json`](../contract-fixtures.json)
 (real base64 `ScVal` XDR for every reason symbol) plus the live capture recorded
 in [`../../docs/event-schema.md`](../../../docs/event-schema.md).
 
+### Semantic replay fixtures
+
+Files named `replay-*.json` are synthetic, schema-valid XDR fixtures used by
+`tests/unit/replay.test.ts` to verify offline verdict and reason decoding. They
+are not live RPC captures; their headers identify them as synthetic.
+
 ## Capturing / refreshing
 
 ```bash

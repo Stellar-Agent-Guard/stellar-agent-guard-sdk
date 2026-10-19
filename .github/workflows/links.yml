@@ -1,0 +1,68 @@
+# Docs link checker (issue #140). Runs scripts/check-doc-links.ts — Node
+# built-ins only, so no new runtime or dev dependency and no third-party
+# action to pin (only the same first-party checkout/setup-node the `ci`
+# workflow already uses; Dependabot keeps those current, see #124).
+#
+# Failure policy:
+#
+#   | trigger              | relative links + anchors | external URLs          |
+#   |----------------------|--------------------------|------------------------|
+#   | pull_request (docs)  | hard fail                | not checked            |
+#   | schedule / dispatch  | hard fail                | reported, never red    |
+#
+# Why external URLs never turn the scheduled run red: they rot on other
+# people's schedules (a vendor moves a page, a host rate-limits CI). A
+# permanently red scheduled run teaches everyone to ignore it, and an
+# auto-opened issue is bot noise this repo avoids. The sweep instead lists
+# every unreachable URL in the job summary and as `::warning` annotations on
+# the run page, so a maintainer can triage it in one view. Relative links are
+# ours to keep correct, so a broken one is red on both triggers.
+#
+# This workflow is deliberately not the required `ci` check: it only runs when
+# docs change (or weekly), and the `ci` job stays the single merge gate.
+name: links
+
+on:
+  pull_request:
+    # Only PRs that can change what the checker sees. A PR touching only
+    # source files skips this workflow entirely; the weekly sweep catches a
+    # doc link broken by a moved/deleted non-Markdown file.
+    paths:
+      - "**/*.md"
+      - "scripts/check-doc-links.ts"
+      - "scripts/doc-links.config.json"
+      - ".github/workflows/links.yml"
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC, alongside Dependabot
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  relative:
+    name: relative links
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: check relative links and anchors
+        run: node scripts/check-doc-links.ts
+
+  external:
+    name: external links (report only)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: sweep external URLs
+        # Exit status still reflects relative links; external failures are
+        # summary + warnings only (see the policy table above).
+        run: node scripts/check-doc-links.ts --external

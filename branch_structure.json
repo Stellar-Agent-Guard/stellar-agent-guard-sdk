@@ -1,0 +1,21 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-113-feat-tx-network-interlock-bind-interceptor",
+    "feat/issue-82-feat-docs-npm-run-script-hygiene-audit-package",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-113-feat-tx-network-interlock-bind-interceptor": "main",
+    "feat/issue-82-feat-docs-npm-run-script-hygiene-audit-package": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-113-feat-tx-network-interlock-bind-interceptor",
+    "feat/issue-82-feat-docs-npm-run-script-hygiene-audit-package",
+    "origin"
+  ]
+}

@@ -116,7 +116,7 @@ export class BroadcastError extends GuardError {
       this.failure = undefined;
       this.detail = undefined;
     } else {
-      const detail = messageOrParams.detail ?? messageOrParams.failur.message;
+      const detail = messageOrParams.detail ?? messageOrParams.failure.message;
       super(
         `stellar-agent-guard broadcast failed: minimum fee not met after ${messageOrParams.attempts} attempt(s) (last fee: ${messageOrParams.lastFee} stroops)\n${detail}`,
       );
@@ -170,7 +170,7 @@ export class AdapterConfigError extends GuardError {
   readonly field: string;
   /** Human-readable description of the expected shape. */
   readonly expected: string;
-  /** Adapter identifier, e.g. `"langchain`` or `"elizaos"`. */
+  /** Adapter identifier, e.g. `"langchain"` or `"elizaos"`. */
   readonly adapter: string;
 
   constructor(

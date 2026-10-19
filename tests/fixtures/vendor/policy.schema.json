@@ -1,0 +1,206 @@
+{
+  "_provenance": {
+    "sourceRepo": "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+    "sourceCommit": "18a6ba64d797e2f99a3726913213f9e6372724f0",
+    "sourcePath": "policy.schema.json",
+    "digest": "sha256:0d581bd9ad4069aeae7e830f801763cd88a808ca66d916d17f9b028ad59c13d8",
+    "digestAlgorithm": "sha256 over the vendored schema bytes (the `schema` value re-serialized)",
+    "refreshCommand": "npm run vendor:refresh",
+    "refreshProtocol": "bump scripts/vendor-fixtures.ts POLICY_SCHEMA.repoCommit to the pinned upstream SHA, then rerun; commit artifact + digest together",
+    "upstreamLanded": false,
+    "upstreamIssue": "Stellar-Agent-Guard/stellar-agent-guard-contracts#61",
+    "note": "vendored ahead of upstream: written from contracts SPEC §8 pending issue #61; refresh protocol re-fetches the landed file once it exists",
+    "updatedAt": "2026-09-30T00:00:00.000Z"
+  },
+  "schema": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "title": "PolicyConfig",
+    "description": "Machine-readable shape of the stellar-agent-guard contract's PolicyConfig (SPEC §3 fields, §8 validation). Vendored by stellar-agent-guard-sdk ahead of contracts #61; the _provenance header in the vendored wrapper carries source, commit, digest, and the refresh protocol.",
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "per_tx_cap",
+      "window_secs",
+      "window_cap",
+      "assets",
+      "protocols",
+      "recipients",
+      "allow_any_recipient",
+      "active_from",
+      "active_until",
+      "paused",
+      "dms_grace_secs"
+    ],
+    "properties": {
+      "per_tx_cap": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Maximum spend per single authorization, in stroops (§8 bullet 1: >= 0)."
+      },
+      "window_secs": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Rolling-window length in seconds (§8 bullet 1: >= 0)."
+      },
+      "window_cap": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Rolling-window spend ceiling, in stroops (§8 bullet 1: >= 0; bullet 2: nonzero requires window_secs nonzero)."
+      },
+      "dms_grace_secs": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Dead-man-switch grace in seconds; 0 disables the switch (§8 bullet 1: >= 0)."
+      },
+      "active_from": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Policy activation time, unix seconds (§8 bullet 1: >= 0)."
+      },
+      "active_until": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Policy expiry, unix seconds; 0 = never expires (§8 bullet 1: >= 0). The bullet 4 cross-field comparison (0, or strictly greater than active_from) is code-enforced: active_window_inverted."
+      },
+      "paused": {
+        "type": "boolean",
+        "description": "When true, every authorization is blocked (§4 gate order)."
+      },
+      "allow_any_recipient": {
+        "type": "boolean",
+        "description": "When false, only `recipients` may receive transfers (§8 bullet 5: empty recipients with this false is a shape-valid no-op)."
+      },
+      "assets": {
+        "type": "array",
+        "description": "SAC contract addresses spendable by the agent. Items are strings; full StrKey validity is code-enforced (invalid_address), duplicates too (duplicate_asset).",
+        "items": {
+          "type": "string"
+        }
+      },
+      "recipients": {
+        "type": "array",
+        "description": "Allowlisted account addresses (G...). Full StrKey validity is code-enforced (invalid_address), duplicates (duplicate_recipient), entry cap (max_recipient_entries_exceeded, bullet 8), and intersection with blocked_recipients (recipient_conflict, bullet 9).",
+        "items": {
+          "type": "string"
+        }
+      },
+      "blocked_recipients": {
+        "type": "array",
+        "description": "Denylisted account addresses; same code-enforced checks as recipients (duplicate_blocked_recipient, recipient_conflict).",
+        "items": {
+          "type": "string"
+        }
+      },
+      "protocols": {
+        "type": "array",
+        "description": "Allowlisted non-SAC protocol calls. Per-rule address checks are code-enforced (duplicate_protocol, self_as_protocol).",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contract"
+          ],
+          "properties": {
+            "contract": {
+              "type": "string",
+              "description": "Protocol contract address (C...); validity code-enforced (invalid_address)."
+            },
+            "fns": {
+              "type": [
+                "array",
+                "null"
+              ],
+              "description": "Function allowlist; null allows any function. An empty array is schema-valid but contract-rejected (empty_protocol_functions, code-enforced); entries must be non-empty strings (minLength) and unique (duplicate_protocol_function, code-enforced).",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        }
+      },
+      "recipient_window_caps": {
+        "type": "array",
+        "description": "Optional per-recipient window caps. Entry cap and duplicate/self checks are code-enforced (max_recipient_entries_exceeded, duplicate_recipient_window_cap, self_as_recipient_cap).",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "recipient",
+            "cap"
+          ],
+          "properties": {
+            "recipient": {
+              "type": "string",
+              "description": "Capped account address (G...); validity code-enforced (invalid_address)."
+            },
+            "cap": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Per-recipient rolling-window ceiling (§8 bullet 1: >= 0; bullet 3: nonzero requires window_secs nonzero via the allOf branch below)."
+            }
+          }
+        }
+      }
+    },
+    "allOf": [
+      {
+        "description": "§8 bullet 2: window_cap > 0 requires window_secs > 0.",
+        "if": {
+          "properties": {
+            "window_cap": {
+              "minimum": 1
+            }
+          },
+          "required": [
+            "window_cap"
+          ]
+        },
+        "then": {
+          "properties": {
+            "window_secs": {
+              "minimum": 1,
+              "x-policy-rule-id": "window_requires_secs"
+            }
+          },
+          "required": [
+            "window_secs"
+          ]
+        }
+      },
+      {
+        "description": "§8 bullet 3: any per-recipient cap > 0 requires window_secs > 0.",
+        "if": {
+          "properties": {
+            "recipient_window_caps": {
+              "contains": {
+                "properties": {
+                  "cap": {
+                    "minimum": 1
+                  }
+                },
+                "required": [
+                  "cap"
+                ]
+              }
+            }
+          },
+          "required": [
+            "recipient_window_caps"
+          ]
+        },
+        "then": {
+          "properties": {
+            "window_secs": {
+              "minimum": 1,
+              "x-policy-rule-id": "recipient_cap_requires_window"
+            }
+          },
+          "required": [
+            "window_secs"
+          ]
+        }
+      }
+    ]
+  }
+}
