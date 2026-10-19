@@ -2,8 +2,8 @@
 
 ## Requirements
 
-- **Node.js**: `v24.0.0` or higher
-- **Runtime Dependencies**: `@stellar/stellar-sdk` (`^17.0.1`)
+- `Node.js`: `v24.0.0` or higher
+- `@stellar/stellar-sdk`: `^17.0.1` (runtime dependency)
 
 ## Installing from NPM
 
@@ -22,3 +22,9 @@ npm test
 ```
 
 The SDK uses Node 24 native TypeScript test execution (`node --test`) and compiles to modern ESM (`dist/index.js`).
+
+## Next Steps
+
+- See the [API reference](./api-reference.md) for the full surface area.
+- See the [quickstart](../README.md#quick-start) for a minimal end-to-end example.
+- See [troubleshooting](./troubleshooting.md) if installation fails.
