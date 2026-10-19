@@ -1,5 +1,5 @@
-/*
- * stellar-agent-guard-sdh — the public surface.
+/**
+ * stellar-agent-guard-sdk — the public surface.
  *
  * An integration bridge between AI agent frameworks and `stellar-agent-guard`
  * smart accounts: pre-flight policy interception, agent-auth transaction
@@ -63,10 +63,11 @@ export type {
 
 export {
   POLICY_RULE_IDS,
+  DEFAULT_GUARD_POLICY,
   deadManRemaining,
+  definePolicy,
   decodeCheckResult,
   decodePolicy,
-  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -86,10 +87,6 @@ export {
   validateGuardPolicy,
 } from "./policy.ts";
 
-export type {
-  PolicyOverride,
-} from "./policy.ts";
-
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
 export { policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
@@ -104,6 +101,8 @@ export type {
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
+  PolicyOverride,
+  DefinePolicyOptions,
   PolicyRuleId,
   ProtocolRule,
   PublicKeyHex,
@@ -388,7 +387,7 @@ export type {
 } from "./adapters/shared.ts";
 
 // Optional logging. `SILENT_LOGGER` is the default every config resolves to
-// when no logger is supplied: the SDW writes nothing unless a host asks.
+// when no logger is supplied: the SDK writes nothing unless a host asks.
 export {
   GUARD_LOG_LEVELS,
   SILENT_LOGGER,
