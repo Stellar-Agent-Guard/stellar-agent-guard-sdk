@@ -134,11 +134,19 @@ export {
   decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
+  validateGuardEventXdr,
 } from "./events.ts";
 
 export type {
   GuardAuthDecision,
   GuardAuthResult,
+  GuardEventValidationCode,
+  GuardEventValidationEntry,
+  GuardEventValidationFailure,
+  GuardEventValidationOptions,
+  GuardEventValidationReport,
+  GuardEventValidationStage,
+  GuardEventValidationSuccess,
 } from "./events.ts";
 
 export {
@@ -219,10 +227,12 @@ export type {
 } from "./cost.ts";
 
 export {
+  ConcurrentTelemetryStreamError,
   DEFAULT_JITTER_FRACTION,
   GuardEventRingBuffer,
   GuardTelemetryListener,
   InMemoryCursorStore,
+  compareCommittedEvents,
   computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
