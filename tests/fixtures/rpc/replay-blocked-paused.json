@@ -1,0 +1,24 @@
+{
+  "header": {
+    "source": "synthetic XDR replay fixture",
+    "method": "simulateTransaction (enforced)",
+    "network": "testnet",
+    "createdAt": "2026-10-01T00:00:00.000Z",
+    "stellarSdkVersion": "17.0.1",
+    "note": "Blocked guard decision while policy is paused"
+  },
+  "guardContractId": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+  "simulationRequest": {
+    "note": "Transfer attempted while policy is paused"
+  },
+  "simulationResponse": {
+    "error": "HostError: ContractError",
+    "events": [
+      "AAAAAAAAAAAAAAABHgGYiud/E6m8jitGDTMpxyN+PTxJBzVLwr7CqF2xSNcAAAACAAAAAAAAAAMAAAAPAAAAEmV2ZW50X2F1dGhfY2hlY2tlZAAAAAAADwAAAAdibG9ja2VkAAAAAA8AAAAGcGF1c2VkAAAAAAAB"
+    ]
+  },
+  "expected": {
+    "verdict": "blocked",
+    "reason": "paused"
+  }
+}

@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { Keypair } from "@stellar/stellar-sdk";
 import type { PolicyConfig } from "../src/policy.ts";
+import { unsafeAccountAddress, unsafeContractAddress } from "../src/policy.ts";
 
 /** The 8192-entry allowlist the issue names as the contract-side worst case. */
 export const LARGE_POLICY_ENTRIES = 8192;
@@ -52,9 +53,9 @@ export function largePolicy(entryCount: number = LARGE_POLICY_ENTRIES): PolicyCo
     per_tx_cap: 1_000_000n,
     window_secs: 60n,
     window_cap: 10_000_000n,
-    assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
+    assets: [unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB")],
     protocols: [],
-    recipients,
+    recipients: recipients.map(unsafeAccountAddress),
     allow_any_recipient: false,
     active_from: 0n,
     active_until: 0n,

@@ -18,6 +18,7 @@ file.
 |---|---|---|
 | LangChain | `AgentMiddleware.wrap_tool_call` | **Confirmed** |
 | ElizaOS | `Action.validate` | **Confirmed** |
+| MCP | registered tool handler / client `callTool` | **Confirmed** — see §4 |
 | AutoGPT | none exposed to third parties | **Confirmed absent** — see §3 |
 
 The rule this document enforces: a framework gets an adapter only if a genuine
@@ -396,6 +397,72 @@ moderation path. The negative finding stands.
 
 ---
 
+## 4. MCP (Model Context Protocol) — registered tool handler / client `callTool`
+
+**Last verified: 2026-09-30.**
+
+MCP is mid-migration between two published generations of the TypeScript SDK, so
+both were reviewed before writing the adapter:
+
+| Generation | Package | Pin |
+| --- | --- | --- |
+| v2 (current line, spec `2026-07-28`) | `@modelcontextprotocol/server`, `@modelcontextprotocol/client` | `modelcontextprotocol/typescript-sdk` `main`, `README.md` blob `6d5e2328efd2fc4493731b4e4cfd2e117ad1e28d` |
+| v1 (legacy; bug/security fixes) | `@modelcontextprotocol/sdk` (latest 1.30.1) | `modelcontextprotocol/typescript-sdk` `v1.x`, `README.md` blob `2d2f19ae376bee6081437c4d6f8e251bf3fd3ce5` |
+
+### The hook
+
+An MCP server exposes a tool by registering a handler. v2:
+
+```ts
+server.registerTool(
+  "transfer_tokens",
+  { description, inputSchema },
+  async (args, extra) => ({ content: [{ type: "text", text: "sent" }] }),
+);
+```
+
+v1 exposes the same handler shape through `server.tool(name, schema, handler)`, and
+the low-level form, `server.setRequestHandler(CallToolRequestSchema, handler)`,
+receives `request.params = { name, arguments }`. The handler is invoked only after
+a client sends `tools/call`, and the server's response *is* the tool result.
+
+On the client side, the high-level `Client` exposes
+`callTool({ name, arguments })` — the last point before the request leaves the
+process.
+
+### Why this is genuinely blockable, not observability-only
+
+A handler that is never called means the tool body — the code that signs and
+broadcasts the guarded transaction — never runs. That is the same continuation
+property the LangChain adapter depends on: the guard's verdict decides whether the
+registered handler is entered, and a refusal is returned to the client as an
+`isError: true` result instead of a transaction. Wrapping `callTool` on the client
+is the same boundary read from the egress side.
+
+There is no post-hoc-only problem to document here; unlike AutoGPT (§3), MCP
+exposes a real pre-execution point to third-party code in both generations.
+
+### What the adapter does
+
+1. `guardMcpToolHandler(toolName, handler, options)` wraps a registered handler
+   and asks the guard before invoking it.
+2. `guardMcpCallTool(callTool, options)` wraps a client's `callTool` and refuses
+   before the request is sent.
+3. On block, both return `{ content: [{ type: "text", text: refusal }], isError:
+   true }` without invoking the wrapped handler/call, and fire the shared
+   `onBlocked` operator hook (`src/adapters/shared.ts`).
+
+### Dependency stance
+
+Both generations require Zod (v1) or a Standard Schema library (v2) at the host,
+and the packages are large. The adapter is therefore written **structurally**
+against the handler / `callTool` shape, so neither package becomes a dependency of
+this SDK and no lazy peer dep is required — the same zero-dependency stance the
+LangChain and ElizaOS adapters take. No speculative code: both wrappers are
+covered by `tests/unit/adapters.test.ts`.
+
+---
+
 ## Revision log
 
 Append-only record of every superseded pin, newest last. A pin is never replaced
@@ -419,3 +486,14 @@ Superseded file-content pins are kept above rather than deleted, so the previous
 revision remains addressable. No framework gained a genuine third-party
 pre-execution blocking hook in this sweep, so no new adapter is unblocked and no
 follow-up adapter issue is filed.
+
+### 2026-09-30 — MCP spike (issue #45)
+
+| File | Pin | What was checked |
+| --- | --- | --- |
+| `modelcontextprotocol/typescript-sdk` `main` `README.md` | blob `6d5e2328efd2fc4493731b4e4cfd2e117ad1e28d` | v2 (`@modelcontextprotocol/server`) tool registration and the `Client.callTool` egress |
+| `modelcontextprotocol/typescript-sdk` `v1.x` `README.md` | blob `2d2f19ae376bee6081437c4d6f8e251bf3fd3ce5` | v1 (`@modelcontextprotocol/sdk` 1.30.1) handler registration and `Client.callTool` |
+
+Outcome: MCP has a genuine pre-execution blocking point in both generations, so
+the adapter was built rather than deferred — see §4. No superseded pin: this is
+the first MCP entry.
