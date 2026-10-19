@@ -1,0 +1,21 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-99-feat-tx-readme-badges-add-live-suite-status",
+    "main",
+    "origin",
+    "security/issue-139-feat-ci-ci-npm-audit-dependency-review-action"
+  ],
+  "parent": {
+    "feat/issue-99-feat-tx-readme-badges-add-live-suite-status": "main",
+    "main": null,
+    "origin": "main",
+    "security/issue-139-feat-ci-ci-npm-audit-dependency-review-action": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-99-feat-tx-readme-badges-add-live-suite-status",
+    "origin",
+    "security/issue-139-feat-ci-ci-npm-audit-dependency-review-action"
+  ]
+}
