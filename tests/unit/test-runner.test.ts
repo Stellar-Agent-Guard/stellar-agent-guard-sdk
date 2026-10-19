@@ -27,6 +27,7 @@ import {
   parseEnvContent,
   validatePhase2Env,
 } from "../integration/harness.ts";
+import { unsafeContractAddress } from "../../src/policy.ts";
 
 describe("unified test-runner configuration", () => {
   it("routes every project through the same TypeScript transform", () => {
@@ -100,8 +101,8 @@ describe("integration harness env-missing entry check parity", () => {
 
   it("lists only the specific missing keys when env is partially populated", () => {
     const partial = {
-      PHASE2_GUARD: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
-      PHASE2_TOKEN: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      PHASE2_GUARD: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
+      PHASE2_TOKEN: unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"),
     };
     const result = validatePhase2Env(partial);
     assert.equal(result.ok, false);
