@@ -79,22 +79,19 @@ const BY_CODE = new Map<number, GuardReason>(
 );
 
 /**
- * Precomputed `guard.reason.<reason>.<part>` message keys, built once at module
- * load so the hot decode path never re-concatenates strings per event.
+ * Precomputed `guard.reason.<reason>.<part>` keys, built once at module load.
+ *
+ * `explainReason` is on the decode path for every blocked event, so the key
+ * strings are hoisted out of the per-call path instead of being re-derived
+ * (or re-templated) on each invocation.
  */
-const REASON_MESSAGE_KEYS: Readonly<
-  Record<GuardReason, { titleKey: string; bodyKey: string; remediationKey: string }>
-> = Object.freeze(
+const BODY_KEYS: Readonly<Record<GuardReason, string>> = Object.freeze(
   (Object.keys(GUARD_REASON_CODES) as GuardReason[]).reduce(
     (keys, reason) => {
-      keys[reason] = {
-        titleKey: `guard.reason.${reason}.title`,
-        bodyKey: `guard.reason.${reason}.body`,
-        remediationKey: `guard.reason.${reason}.remediation`,
-      };
+      keys[reason] = `guard.reason.${reason}.body`;
       return keys;
     },
-    {} as Record<GuardReason, { titleKey: string; bodyKey: string; remediationKey: string }>,
+    {} as Record<GuardReason, string>,
   ),
 );
 
@@ -127,12 +124,11 @@ export interface ReasonMessage {
 export const reasonMessages: Readonly<Record<GuardReason, ReasonMessage>> = Object.freeze(
   (Object.keys(GUARD_REASON_CODES) as GuardReason[]).reduce(
     (messages, reason) => {
-      const keys = REASON_MESSAGE_KEYS[reason];
       messages[reason] = {
         code: GUARD_REASON_CODES[reason],
-        titleKey: keys.titleKey,
-        bodyKey: keys.bodyKey,
-        remediationKey: keys.remediationKey,
+        titleKey: `guard.reason.${reason}.title`,
+        bodyKey: `guard.reason.${reason}.body`,
+        remediationKey: `guard.reason.${reason}.remediation`,
       };
       return messages;
     },
@@ -302,7 +298,7 @@ export function explainReason(
   if (override !== undefined) return override;
   const english = reasonMessagesEn[name].body;
   if (locale === undefined) return english;
-  return locale[reasonMessages[name].bodyKey] ?? english;
+  return locale[BODY_KEYS[name]] ?? english;
 }
 
 import type { ContractCall } from "./tx.ts";

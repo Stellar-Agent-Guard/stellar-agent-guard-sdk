@@ -115,16 +115,20 @@ export function decodeAuthDecision(
  * u64 values arrive as strings in JSON payloads. This centralizes the decision
  * to parse them as BigInt (which never loses precision for >2^53) if they consist
  * entirely of digits, while leaving other strings (like ISO timestamps) intact.
- *
- * The digit-only test is a hoisted regular expression rather than a per-call
- * literal: this function runs once per string field in every event data payload,
- * and re-compiling the pattern on each call showed up in the decode path bench
- * (benches/events.bench.ts, see docs/benchmarks.md).
  */
-const UNSIGNED_DECIMAL_RE = /^\d+$/;
 
-export function normalizeU44(value: string): bigint | string {
-  if (UNSIGNED_DECIMAL_RE.test(value)) {
+/**
+ * Matches a string of one or more ASCII digits and nothing else.
+ *
+ * Hoisted to a module constant so the pattern is compiled once at module
+ * load rather than re-resolved on every `normalizeU`64` call. This is the
+ * hottest path in event normalisation (one call per string leaf in a payload),
+ * so it is worth the explicit constant even though V8 caches literal regexes.
+ */
+const UNSIGNED_INTEGER_RE = /^\d+$/;
+
+export function normalizeU64(value: string): bigint | string {
+  if (UNSIGNED_INTEGER_RE.test(value)) {
     return BigInt(value);
   }
   return value;
@@ -136,19 +140,18 @@ export function normalizeEventData(data: unknown): unknown {
     return normalizeU64(data);
   }
   if (Array.isArray(data)) {
-    // Build the output array in place instead of `map`: the callback closure and
-    // intermediate array are both avoidable on this hot path.
-    const out = new Array(data.length);
-    for (let i = 0; i < data.length; i++) {
+    const length = data.length;
+    const out = new Array(length);
+    for (let i = 0; i < length; i++) {
       out[i] = normalizeEventData(data[i]);
     }
     return out;
   }
   if (data !== null && typeof data === "object") {
-    // Build the normalised object in place. The previous implementation
-    // allocated a fresh object and iterated `Object.entries(`, which allocated a
-    // tuple per key. `In` on the keys avoids that allocation and keeps the
-    // insertion order identical.
+    // Build the normalised object in place. `Object.entries` allocates an
+    // intermediate key/value array for every node in the payload; `if ... in`
+    // iterates the own keys without that allocation and keeps the same
+    // own-keys-only semantics `normalizeEventData` has always had.
     const source = data as Record<string, unknown>;
     const result: Record<string, unknown> = {};
     for (const key in source) {
@@ -164,8 +167,8 @@ export function normalizeEventData(data: unknown): unknown {
 /**
  * Decode one topic of a contract event into its symbol text.
  *
- * Topics reach this module in two shapes depending on the caller: as a
- * base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
+ * Topics reach this module in two shapes depending on the caller: as
+ * a base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
  * `getEvents` over JSON hands over) or as an already-decoded `xdr.ScVal`. Both
  * go through `scValToNative` so the text is identical either way.
  *
@@ -195,12 +198,16 @@ function topicsFromEvent(event: unknown): string[] | null {
     event?: { body?: unknown };
     body?: { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } };
   } | null;
+  // Localise the body lookup so the nested optional chain is walked once and
+  // the compiler can keep the intermediate in a register across the two
+  // candidate shapes. This is the hot loop of `topicsFromEvent`, which is
+  // called once per event in a diagnostic batch.
   const body = (wrapper?.event?.body ?? wrapper?.body) as
     | { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } }
     | undefined;
-  // Localise the value-v0 topics access so the hot loop does not re-walk the
-  // optional-chain twice per topic.
-  const topics = body?.v0?.topics ?? body?.value?.v0?.topics;
+  if (body === undefined) return null;
+  const v0 = body.v0;
+  const topics = v0?.topics ?? body.value?.v0?.topics;
   if (!Array.isArray(topics)) return null;
 
   const length = topics.length;
