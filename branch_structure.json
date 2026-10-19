@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-92-feat-types-readme-version-stamp-examples",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-92-feat-types-readme-version-stamp-examples": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-92-feat-types-readme-version-stamp-examples",
+    "origin"
+  ]
+}

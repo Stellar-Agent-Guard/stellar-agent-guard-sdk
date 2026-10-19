@@ -1,0 +1,85 @@
+{
+  "_provenance": {
+    "sourceRepo": "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+    "sourcePath": "docs/policy-templates.md",
+    "sourceCommit": "18a6ba64d797e2f99a3726913213f9e6372724f0",
+    "refreshCommand": "npm run vendor:refresh (preset fixtures refresh with the schema; this file updates in the same run once registered)",
+    "description": "Vendored copies of the contracts repo's four README policy presets (day-trader, payments-bot, watch-only, max-security), extracted from docs/policy-templates.md fenced json blocks. Contracts CI (src/policy_preset_tests.rs) installs every preset through the contract's own SPEC §8 validation path, so 'valid per the contract' is established upstream; this SDK-side test proves the vendored schema accepts exactly those artifacts.",
+    "vendoredAheadOfUpstream": "contracts #150 (examples: policy JSON files for each README preset) is open; these fixtures are vendored from the rendered presets pending that landing",
+    "updatedAt": "2026-09-30T00:00:00.000Z"
+  },
+  "presets": [
+    {
+      "name": "day-trader",
+      "policy": {
+        "active_from": 0,
+        "active_until": 0,
+        "allow_any_recipient": false,
+        "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+        "dms_grace_secs": 300,
+        "paused": false,
+        "per_tx_cap": "50000",
+        "protocols": [
+          {
+            "contract": "CCYIRHS5OIVHEBKM27BDOPS6N3XKJSBQW2JAAV2F47GJH4C7ESLYGKVM",
+            "fns": ["swap", "add_liquidity"]
+          }
+        ],
+        "recipients": ["GDUYLFVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRRX"],
+        "window_cap": "250000",
+        "window_secs": 300
+      }
+    },
+    {
+      "name": "payments-bot",
+      "policy": {
+        "active_from": 0,
+        "active_until": 0,
+        "allow_any_recipient": false,
+        "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+        "dms_grace_secs": 86400,
+        "paused": false,
+        "per_tx_cap": "1000",
+        "protocols": [],
+        "recipients": [
+          "GBQ6OQUM5FTH7M5AU4PXFGB5GZXDF742E6ORZUP6UUJ6IHA653Z6LPQL",
+          "GCR2RCC7QOFAHRNGHTAMQ4VZFXSG2ICZGL6DGW7X2OMKOJHY2MAWJANI"
+        ],
+        "window_cap": "10000",
+        "window_secs": 3600
+      }
+    },
+    {
+      "name": "watch-only",
+      "policy": {
+        "active_from": 0,
+        "active_until": 0,
+        "allow_any_recipient": false,
+        "assets": [],
+        "dms_grace_secs": 604800,
+        "paused": true,
+        "per_tx_cap": "0",
+        "protocols": [],
+        "recipients": [],
+        "window_cap": "0",
+        "window_secs": 86400
+      }
+    },
+    {
+      "name": "max-security",
+      "policy": {
+        "active_from": 0,
+        "active_until": 0,
+        "allow_any_recipient": false,
+        "assets": ["CBLQLJAG72M4XQRJMQHSKYIFVHQD7LNTNOQH2GRMCMBWMSLBSLTGTJC7"],
+        "dms_grace_secs": 3600,
+        "paused": false,
+        "per_tx_cap": "100",
+        "protocols": [],
+        "recipients": ["GCDCESJSIFS2K2MI5OIUWJUJZVEM2WM2PBEAZMFRC5QU7HVJETCXYC3G"],
+        "window_cap": "500",
+        "window_secs": 3600
+      }
+    }
+  ]
+}
