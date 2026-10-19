@@ -515,14 +515,20 @@ fields, and nothing else about it moves).
 ### Ordering rule
 
 - **Committed events are emitted in ledger order.** A page is sorted by `ledger`
-  ascending before it is yielded, and pages arrive in cursor order, so no
-  committed event overtakes an earlier-ledger one.
+  ascending before it is yielded (a missing ledger sorts last), and pages arrive
+  in cursor order, so no committed event overtakes an earlier-ledger one.
+- **Events on the same ledger use a stable tie-breaker.** They sort by
+  transaction hash, then topic, then stable `id`, each ascending with a missing
+  value last. Two entries that are still indistinguishable keep their input
+  order. The same comparator is applied by `poll()`, `watch()` and `watchAll()`,
+  so switching APIs cannot change committed-event order.
 - **Diagnostic events are emitted when the batch carrying them is observed**,
   tagged with `observedAt` (ISO-8601; defaults to the merge time). A refusal has
   no ledger — it was rolled back before broadcast — so it is positioned at its
   point of observation relative to the committed events already drained, not by a
   ledger. A decision observed at time T appears after the committed events
-  drained at or before T.
+  drained at or before T. Diagnostic batches are never re-sorted; their
+  observation order is preserved exactly as supplied.
 
 ### De-duplication rule
 
