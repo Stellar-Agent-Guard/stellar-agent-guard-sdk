@@ -17,6 +17,8 @@ import type { CheckResult } from "../../src/policy.ts";
 import {
   decodeCheckResult,
   decodePolicy,
+  definePolicy,
+  DEFAULT_GUARD_POLICY,
   deadManRemaining,
   describePolicy,
   extractTransferAmount,
@@ -28,7 +30,6 @@ import {
   readPersistentEntry,
   validateGuardPolicy,
   freezePolicy,
-  definePolicy,
   unsafeContractAddress,
   unsafeAccountAddress,
   unsafePublicKeyHex,
@@ -1225,99 +1226,6 @@ describe("freezePolicy", () => {
   });
 });
 
-describe("definePolicy", () => {
-  it("returns a full policy from a partial override merged over defaults", () => {
-    const policy = definePolicy({
-      recipients: [RECIPIENT],
-      per_tx_cap: 100n,
-    });
-    assert.equal(policy.per_tx_cap, 100n);
-    assert.deepEqual(policy.recipients, [RECIPIENT]);
-    // Fields not overridden come from the defaults.
-    assert.equal(typeof policy.window_secs, "bigint");
-    assert.equal(typeof policy.window_cap, "bigint");
-    assert.ok(Array.isArray(policy.assets));
-    assert.ok(Array.isArray(policy.protocols));
-    assert.equal(typeof policy.allow_any_recipient, "boolean");
-    assert.equal(typeof policy.paused, "boolean");
-  });
-
-  it("returns a frozen policy (top-level and nested collections)", () => {
-    const policy = definePolicy({ recipients: [RECIPIENT] });
-    assert.throws(() => {
-      (policy as { per_tx_cap: bigint }).per_tx_cap = 1n;
-    }, TypeError);
-    assert.throws(() => {
-      (policy.recipients as AccountAddress[]).push(RECIPIENT);
-    }, TypeError);
-  });
-
-  it("replaces nested lists entirely rather than concatenating (override wins)", () => {
-    // Merge-surprise on allowlists is dangerous: an override must never be
-    // silently unioned with the defaults, or an integrator could not narrow a
-    // default allowlist by supplying a shorter one.
-    const policy = definePolicy({
-      recipients: [RECIPIENT],
-      assets: [TOKEN],
-    });
-    assert.deepEqual(policy.recipients, [RECIPIENT]);
-    assert.deepEqual(policy.assets, [TOKEN]);
-  });
-
-  it("replaces nested protocol rule lists entirely", () => {
-    const policy = definePolicy({
-      protocols: [{ contract: TOKEN, fns: ["transfer"] }],
-    });
-    assert.deepEqual(policy.protocols, [{ contract: TOKEN, fns: ["transfer"] }]);
-  });
-
-  it("rejects unknown keys at runtime (typo guard)", () => {
-    assert.throws(
-      () =>
-        definePolicy({
-          // @ts-expect-error — unknown key must be rejected by the type system
-          window_cap2: 100n,
-        }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /window_cap2/);
-        return true;
-      },
-    );
-  });
-
-  it("rejects unknown keys passed through a runtime cast", () => {
-    const hostile = { recipients: [RECIPIENT], not_a_field: true } as unknown as Parameters<
-      typeof definePolicy
-    >[0];
-    assert.throws(() => definePolicy(hostile), /not_a_field/);
-  });
-
-  it("validates the merged policy and fails fast with structured failures", () => {
-    assert.throws(
-      () => definePolicy({ per_tx_cap: -1n }),
-      (error: unknown) => {
-        assert.ok(error instanceof Error);
-        assert.match(error.message, /per_tx_cap/);
-        return true;
-      },
-    );
-  });
-
-  it("rejects cross-field violations in the merged result", () => {
-    assert.throws(
-      () => definePolicy({ window_cap: 500n, window_secs: 0n }),
-      /window_cap/,
-    );
-  });
-
-  it("accepts an empty override and returns the defaults", () => {
-    const policy = definePolicy({});
-    assert.deepEqual(validateGuardPolicy(policy), []);
-    assert.doesNotThrow(() => policyToScVal(policy));
-  });
-});
-
 /**
  * Seeded property tests for `policyToScVal` against arbitrary valid policies
  * (issue #48).
@@ -1687,5 +1595,84 @@ describe("unsafe address casts", () => {
   it("returns already-validated values unchanged", () => {
     assert.equal(unsafeStrKeyAddress(RECIPIENT), RECIPIENT);
     assert.equal(unsafePublicKeyHex("ab".repeat(32)), "ab".repeat(32));
+  });
+});
+
+describe("definePolicy", () => {
+  it("fills omitted fields from the defaults", () => {
+    const policy = definePolicy({ per_tx_cap: 100n });
+    assert.equal(policy.per_tx_cap, 100n);
+    assert.equal(policy.window_secs, DEFAULT_GUARD_POLICY.window_secs);
+    assert.equal(policy.window_cap, DEFAULT_GUARD_POLICY.window_cap);
+    assert.deepEqual(policy.assets, DEFAULT_GUARD_POLICY.assets);
+    assert.deepEqual(policy.protocols, DEFAULT_GUARD_POLICY.protocols);
+    assert.deepEqual(policy.recipients, DEFAULT_GUARD_POLICY.recipients);
+    assert.equal(policy.allow_any_recipient, DEFAULT_GUARD_POLICY.allow_any_recipient);
+    assert.equal(policy.active_from, DEFAULT_GUARD_POLICY.active_from);
+    assert.equal(policy.active_until, DEFAULT_GUARD_POLICY.active_until);
+    assert.equal(policy.paused, DEFAULT_GUARD_POLICY.paused);
+    assert.equal(policy.dms_grace_secs, DEFAULT_GUARD_POLICY.dms_grace_secs);
+  });
+
+  it("returns a full GuardPolicy for an empty override", () => {
+    assert.deepEqual(definePolicy({}), DEFAULT_GUARD_POLICY);
+  });
+
+  it("replaces nested lists entirely rather than concatenating them", () => {
+    const policy = definePolicy({ recipients: [RECIPIENT] });
+    assert.deepEqual(policy.recipients, [RECIPIENT]);
+    assert.notEqual(policy.recipients.length, DEFAULT_GUARD_POLICY.recipients.length + 1);
+  });
+
+  it("replaces the protocols list entirely", () => {
+    const policy = definePolicy({ protocols: [{ contract: TOKEN, fns: null }] });
+    assert.deepEqual(policy.protocols, [{ contract: TOKEN, fns: null }]);
+  });
+
+  it("returns a frozen policy", () => {
+    const policy = definePolicy({ per_tx_cap: 100n });
+    assert.ok(Object.isFrozen(policy));
+    assert.ok(Object.isFrozen(policy.assets));
+    assert.ok(Object.isFrozen(policy.recipients));
+    assert.ok(Object.isFrozen(policy.protocols));
+    assert.throws(() => {
+      (policy as { per_tx_cap: bigint }).per_tx_cap = 1n;
+    }, TypeError);
+  });
+
+  it("runs validation and throws a structured failure on an invalid policy", () => {
+    assert.throws(
+      () => definePolicy({ per_tx_cap: -1n }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /per_tx_cap/);
+        assert.match(error.message, /negative_amount/);
+        return true;
+      },
+    );
+  });
+
+  it("rejects an unknown key at runtime (typo guard)", () => {
+    assert.throws(
+      () => definePolicy({ window_cap2: 100n } as unknown as Partial<PolicyConfig>),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /window_cap2/);
+        return true;
+      },
+    );
+  });
+
+  it("rejects an unknown key at the type level (excess-property check)", () => {
+    // @ts-expect-error — window_cap2 is not a PolicyConfig field
+    assert.throws(() => definePolicy({ window_cap2: 100n }));
+  });
+
+  it("does not mutate the defaults or the override", () => {
+    const override = { per_tx_cap: 100n };
+    const policy = definePolicy(override);
+    assert.equal(override.per_tx_cap, 100n);
+    assert.equal(DEFAULT_GUARD_POLICY.per_tx_cap, 0n);
+    assert.notEqual(policy as unknown, override);
   });
 });

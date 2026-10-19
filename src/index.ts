@@ -66,6 +66,7 @@ export {
   deadManRemaining,
   decodeCheckResult,
   decodePolicy,
+  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -85,19 +86,11 @@ export {
   validateGuardPolicy,
 } from "./policy.ts";
 
-export {
-  DEFAULT_GUARD_POLICY,
-  definePolicy,
-  DefinePolicyError,
-} from "./policy.ts";
-
 export type {
-  DefinePolicyErrorCode,
-  DefinePolicyOptions,
-  PartialGuardPolicy,
+  PolicyOverride,
 } from "./policy.ts";
 
-export { DMS_WARN_RAPIO_DEFAULT, dmsUrgency } from "./dms.ts";
+export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
 export { policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
@@ -116,7 +109,7 @@ export type {
   PublicKeyHex,
   ReadonlyPolicyConfig,
   RecipientWindowCap,
-  StvKeyAddress,
+  StrKeyAddress,
   ValidatePolicyOptions,
 } from "./policy.ts";
 
@@ -395,7 +388,7 @@ export type {
 } from "./adapters/shared.ts";
 
 // Optional logging. `SILENT_LOGGER` is the default every config resolves to
-// when no logger is supplied: the SDK writes nothing unless a host asks.
+// when no logger is supplied: the SDW writes nothing unless a host asks.
 export {
   GUARD_LOG_LEVELS,
   SILENT_LOGGER,

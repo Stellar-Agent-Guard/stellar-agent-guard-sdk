@@ -1,3 +1,4 @@
+
 import { Address, nativeToScVal, rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 /**
  * Guards against drift between this SDK and the deployed contract's types.
@@ -210,6 +211,7 @@ export const POLICY_RULE_IDS = [
   "self_as_protocol",
   "self_as_recipient",
   "self_as_recipient_cap",
+  "unknown_field",
 ] as const;
 
 export type PolicyRuleId = (typeof POLICY_RULE_IDS)[number];
@@ -218,6 +220,20 @@ export interface PolicyFailure {
   path: string;
   rule: PolicyRuleId;
   message: string;
+}
+
+/**
+ * Raised by `definePolicy` when the merged policy fails validation. Carries the
+ * full structured failure list so callers can surface every problem at once
+ * (form validation, pre-broadcast gates) rather than the first one encountered.
+ */
+export class PolicyValidationError extends Error {
+  readonly failures: readonly PolicyFailure[];
+  constructor(failures: PolicyFailure[]) {
+    super(`invalid guard policy: ${failures.map((f) => `${f.path} (${f.rule})`).join(", ")}`);
+    this.name = "PolicyValidationError";
+    this.failures = Object.freeze([...failures]);
+  }
 }
 
 export interface ValidatePolicyOptions {
@@ -231,117 +247,15 @@ export interface ValidatePolicyOptions {
 export type GuardPolicy = PolicyConfig;
 
 /**
- * Default guard policy used as the base for `definePolicy` overrides.
+ * Partial policy accepted by `definePolicy`. Every field is optional so a
+ * caller can override only what they care about; the builder deep-merges the
+ * rest from `DEFAULT_GUARD_POLICY`.
  *
- * Deny-by-default: no assets, no protocols, no recipients, `allow_any_recipient`
- * false, and `paused` false. Integrators override only the fields they need.
+ * Unknown keys are rejected at the type level via the excess-property check on
+ * object literals (a typo like `window_cap2` becomes a compile error) and at
+ * runtime by `definePolicy` itself (for values that bypass the type system).
  */
-export const DEFAULT_GUARD_POLICY: ReadonlyPolicyConfig = freezePolicy({
-  per_tx_cap: 0n,
-  window_secs: 0n,
-  window_cap: 0n,
-  assets: [],
-  protocols: [],
-  recipients: [],
-  allow_any_recipient: false,
-  active_from: 0n,
-  active_until: 0n,
-  paused: false,
-  dms_grace_secs: 0n,
-});
-
-const POLICY_KEYS = new Set<string>([
-  "per_tx_cap",
-  "window_secs",
-  "window_cap",
-  "assets",
-  "protocols",
-  "recipients",
-  "allow_any_recipient",
-  "active_from",
-  "active_until",
-  "paused",
-  "dms_grace_secs",
-  "recipient_window_caps",
-  "blocked_recipients",
-]);
-
-/**
- * Partial override accepted by `definePolicy`. Unknown keys are rejected at
- * compile time via the excess-property check on object literals.
- */
-export type PolicyOverride = Partial<PolicyConfig>;
-
-/**
- * Build a full `GuardPolicy` from a partial override, deep-merged over
- * `DEFAULT_GUARD_POLICY` and validated before return.
- *
- * Merge semantics: scalar fields override; array fields (`assets`, `protocols`,
- * `recipients`, `recipient_window_caps`, `blocked_recipients`) are **replaced
- * entirely** — never concatenated. Array merge on allowlists is a footgun
- * (silently widening or narrowing the allowlist), so override wins outright.
- *
- * Unknown keys are rejected at runtime (typos like `window_cap2` would
- * otherwise be silently ignored). Validation runs via `validateGuardPolicy`;
- * any failures throw a `PolicyValidationError` with the structured failures.
- */
-export function definePolicy(override: PolicyOverride = {}): ReadonlyPolicyConfig {
-  const raw = override as Record<string, unknown>;
-  const unknownKeys = Object.keys(raw).filter((k) => !POLICY_KEYS.has(k));
-  if (unknownKeys.length > 0) {
-    throw new PolicyValidationError(
-      `unknown policy key(s): ${unknownKeys.join(", ")}`,
-      unknownKeys.map((k) => ({
-        path: k,
-        rule: "invalid_type" as const,
-        message: `unknown policy key "${k}"`,
-      })),
-    );
-  }
-
-  const merged: PolicyConfig = {
-    per_tx_cap: (raw.per_tx_cap as bigint | undefined) ?? DEFAULT_GUARD_POLICY.per_tx_cap,
-    window_secs: (raw.window_secs as bigint | undefined) ?? DEFAULT_GUARD_POLICY.window_secs,
-    window_cap: (raw.window_cap as bigint | undefined) ?? DEFAULT_GUARD_POLICY.window_cap,
-    assets: raw.assets !== undefined ? [...(raw.assets as ContractAddress[])] : [...DEFAULT_GUARD_POLICY.assets],
-    protocols:
-      raw.protocols !== undefined
-        ? (raw.protocols as ProtocolRule[]).map((r) => ({
-            contract: r.contract,
-            fns: r.fns === null ? null : [...r.fns],
-          }))
-        : [...DEFAULT_GUARD_POLICY.protocols],
-    recipients:
-      raw.recipients !== undefined
-        ? [...(raw.recipients as AccountAddress[])]
-        : [...DEFAULT_GUARD_POLICY.recipients],
-    allow_any_recipient:
-      (raw.allow_any_recipient as boolean | undefined) ?? DEFAULT_GUARD_POLICY.allow_any_recipient,
-    active_from: (raw.active_from as bigint | undefined) ?? DEFAULT_GUARD_POLICY.active_from,
-    active_until: (raw.active_until as bigint | undefined) ?? DEFAULT_GUARD_POLICY.active_until,
-    paused: (raw.paused as boolean | undefined) ?? DEFAULT_GUARD_POLICY.paused,
-    dms_grace_secs:
-      (raw.dms_grace_secs as bigint | undefined) ?? DEFAULT_GUARD_POLICY.dms_grace_secs,
-  };
-  if (raw.recipient_window_caps !== undefined) {
-    merged.recipient_window_caps = (raw.recipient_window_caps as RecipientWindowCap[]).map((c) => ({
-      recipient: c.recipient,
-      cap: c.cap,
-    }));
-  }
-  if (raw.blocked_recipients !== undefined) {
-    merged.blocked_recipients = [...(raw.blocked_recipients as AccountAddress[])];
-  }
-
-  const failures = validateGuardPolicy(merged);
-  if (failures.length > 0) {
-    throw new PolicyValidationError(
-      `invalid policy: ${failures.map((f) => `${f.path}: ${f.message}`).join("; ")}`,
-      failures,
-    );
-  }
-  return freezePolicy(merged);
-}
+export type PartialGuardPolicy = Partial<PolicyConfig>;
 
 export interface GuardStatus {
   has_policy: boolean;
