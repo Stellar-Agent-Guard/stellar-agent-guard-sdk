@@ -12,18 +12,20 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
-import { Keypair, SorobanDataBuilder, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { ContractResponseError } from "../../src/errors.ts";
+import { Address, Keypair, SorobanDataBuilder, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { ContractResponseError, SigningError } from "../../src/errors.ts";
 import {
   BroadcastError,
   buildGuardAuthEntry,
   describeSimulationResources,
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
+  isValidAgentPublicKey,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   parseSimulationResourceFee,
   toAgentSigner,
+  validateAgentPublicKey,
   verifyAgentSignature,
   type AgentSigner,
   type ContractCall,
@@ -185,8 +187,12 @@ describe("verifyAgentSignature", () => {
   const agent = Keypair.random();
   const signature = agent.sign(payload);
 
-  it("accepts the exact payload/signature pair for strkey and raw public keys", () => {
+  it("accepts the exact payload/signature pair for strkey, hex, and raw public keys", () => {
     assert.equal(verifyAgentSignature(agent.publicKey(), payload, signature), true);
+    assert.equal(
+      verifyAgentSignature(Buffer.from(agent.rawPublicKey()).toString("hex"), payload, signature),
+      true,
+    );
     assert.equal(verifyAgentSignature(agent.rawPublicKey(), payload, signature), true);
   });
 
@@ -255,6 +261,102 @@ describe("describeSimulationResources", () => {
 });
 
 /**
+ * Agent signer identity validation (issue #295).
+ *
+ * The signing boundary accepts only verify-only encodings of the registered
+ * Ed25519 public key. A configuration mismatch must fail here, before the
+ * signer is invoked, rather than after a probe simulation surfaces a contract
+ * `__check_auth` failure that says nothing about which key was misconfigured.
+ */
+describe("agent public-key validation", () => {
+  const local = Keypair.random();
+  const validHex = Buffer.from(local.rawPublicKey()).toString("hex");
+
+  it("accepts a checksum-valid StrKey and returns it unchanged", () => {
+    assert.equal(validateAgentPublicKey(local.publicKey()), local.publicKey());
+    assert.equal(isValidAgentPublicKey(local.publicKey()), true);
+  });
+
+  it("accepts the raw 32-byte key as hex and normalises it to the StrKey form", () => {
+    assert.equal(validateAgentPublicKey(validHex), local.publicKey());
+    assert.equal(validateAgentPublicKey(validHex.toUpperCase()), local.publicKey());
+    assert.equal(isValidAgentPublicKey(validHex), true);
+  });
+
+  it("rejects a StrKey with a bad checksum", () => {
+    const invalid = local.publicKey().slice(0, -1) + (local.publicKey().endsWith("A") ? "B" : "A");
+    assert.throws(() => validateAgentPublicKey(invalid), (error: unknown) => {
+      assert.ok(error instanceof SigningError);
+      assert.match(error.message, /signer\.publicKey/);
+      return true;
+    });
+    assert.equal(isValidAgentPublicKey(invalid), false);
+  });
+
+  it("rejects secret seeds instead of deriving a public key from them", () => {
+    assert.throws(() => validateAgentPublicKey(local.secret()), (error: unknown) => {
+      assert.ok(error instanceof SigningError);
+      assert.match(error.message, /must not be a secret key/);
+      return true;
+    });
+    assert.equal(isValidAgentPublicKey(local.secret()), false);
+  });
+
+  it("rejects malformed and non-Ed25519 values", () => {
+    const malformed = [
+      "",
+      "not-a-stellar-key",
+      `0x${validHex}`,
+      validHex.slice(0, -1),
+      `${validHex}00`,
+      "g".repeat(64),
+      "C".repeat(56),
+      new Address(CALL.contract).toString(),
+      undefined,
+      null,
+      42,
+    ];
+    for (const value of malformed) {
+      assert.equal(isValidAgentPublicKey(value), false, `expected ${String(value)} to be rejected`);
+      assert.throws(
+        () => validateAgentPublicKey(value as string),
+        (error: unknown) => error instanceof SigningError,
+      );
+    }
+  });
+
+  it("rejects an invalid custom signer at construction", () => {
+    const invalid: AgentSigner = {
+      publicKey: "GINVALID",
+      signDigest: () => new Uint8Array(64),
+    };
+    assert.throws(() => toAgentSigner(invalid), (error: unknown) => error instanceof SigningError);
+  });
+
+  it("accepts a valid remote signer, including a hex-encoded identity", async () => {
+    const remote = Keypair.random();
+    const signer: AgentSigner = {
+      publicKey: Buffer.from(remote.rawPublicKey()).toString("hex"),
+      signDigest: (digest) => remote.sign(Buffer.from(digest)),
+    };
+
+    const entry = await buildGuardAuthEntry({
+      guard: GUARD,
+      call: CALL,
+      signer,
+      nonce: 3n,
+      signatureExpirationLedger: 100,
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
+    const addressCredentials = (
+      entry.credentials as unknown as { address: xdr.SorobanAddressCredentials }
+    ).address;
+    const signature = scValToNative(addressCredentials.signature) as Uint8Array;
+    assert.equal(signature.length, 64);
+  });
+});
+
+/**
  * The agent-signing seam (issue #29).
  *
  * `buildGuardAuthEntry` used to take a `Keypair` and call `.sign()` on it
@@ -282,9 +384,9 @@ describe("AgentSigner", () => {
     );
   });
 
-  it("passes an AgentSigner through unchanged", () => {
+  it("passes a valid AgentSigner through unchanged", () => {
     const custom: AgentSigner = {
-      publicKey: "GREMOTEAGENTSIGNER",
+      publicKey: Keypair.random().publicKey(),
       signDigest: () => new Uint8Array(64),
     };
     assert.equal(toAgentSigner(custom), custom, "no wrapping an already-adapted signer");
@@ -355,6 +457,34 @@ describe("AgentSigner", () => {
       false,
       "a signature over a real preimage must not validate against an unrelated digest",
     );
+  });
+
+  it("rejects an invalid signer identity before invoking signDigest", async () => {
+    let signs = 0;
+    const invalid: AgentSigner = {
+      publicKey: "not-a-stellar-public-key",
+      signDigest: () => {
+        signs += 1;
+        return new Uint8Array(64);
+      },
+    };
+
+    await assert.rejects(
+      buildGuardAuthEntry({
+        guard: GUARD,
+        call: CALL,
+        signer: invalid,
+        nonce: 1n,
+        signatureExpirationLedger: 100,
+        networkPassphrase,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.match(error.message, /signer\.publicKey/);
+        return true;
+      },
+    );
+    assert.equal(signs, 0, "the signer must not be invoked with an invalid public identity");
   });
 
   it("answers a V2 (address-bound) credential with the matching preimage", async () => {
