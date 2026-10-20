@@ -25,7 +25,11 @@ is discarded when the observed ledger advances. `policyRevision` may be a value
 or an async getter; changing it invalidates the matching entry. Call
 `invalidate(call?)` after policy or account-state changes. A cached verdict can
 be staler than one admitted transfer, so callers must accept that tradeoff
-explicitly.
+explicitly. Every verdict the cache hands out is an **independent snapshot**:
+editing a returned decision — the `allowed`/`kind` discriminant, a scalar such
+as `estimatedResourceFee`, or a nested `diagnosticEvents` entry — cannot change
+what a later cache hit receives. Snapshots, not frozen objects: a caller that
+edits what it was handed still gets no error, it simply edits its own copy.
 
 ## Methods
 

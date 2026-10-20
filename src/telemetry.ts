@@ -79,7 +79,9 @@ export interface GuardEvent {
   /**
    * Stable identity for this event, non-null on both streams.
    *
-   * `ledger:<txHash>:<topic>` for a committed event; `diag:<sha256>` for a
+   * `ledger:<txHash>:<topic>` for a committed event — plus the RPC's own event
+   * id as a fourth segment when the response reported one, so two same-topic
+   * events in one transaction stay distinct; `diag:<sha256>` for a
    * diagnostic one, which has no transaction to anchor on. Derived by
    * `guardEventId`; see `docs/event-schema.md` for the format and collisions.
    */
@@ -185,6 +187,17 @@ export interface GuardEventIdentityInput {
    * blocks within one simulation from colliding.
    */
   simulationIndex: number | null;
+  /**
+   * The RPC's own identity for this committed event
+   * (`Api.EventResponse.id`), when the response reported one; absent otherwise.
+   *
+   * This is the component that keeps two events with the *same* name topic in
+   * the *same* transaction apart (issue #275): the transaction and topic
+   * identify the pair only jointly. The RPC id is assigned per event and is
+   * stable across page boundaries and repeated reads, so it does not move an
+   * event's derived id between polls.
+   */
+  rpcEventId?: string | null;
 }
 
 /**
@@ -192,13 +205,19 @@ export interface GuardEventIdentityInput {
  *
  * One format per stream, because the two fail identity in opposite ways:
  *
- * - `ledger:<txHash>:<topic>` — a committed event is anchored on the
- *   transaction that emitted it, plus its name topic. The topic is part of the
- *   id because a single transaction emits several guard events: a `heartbeat`
- *   call commits both `event_auth_checked` and `event_heartbeat` (see the live
- *   capture in `docs/event-schema.md`), so `ledger:<txHash>` alone is not
- *   unique. If an RPC response ever omits the hash, the ledger sequence
- *   anchors instead — an id is always produced.
+ * - `ledger:<txHash>:<topic>[:<rpcEventId>]` — a committed event is anchored on
+ *   the transaction that emitted it, plus its name topic. The topic is part of
+ *   the id because a single transaction emits several guard events: a
+ *   `heartbeat` call commits both `event_auth_checked` and `event_heartbeat`
+ *   (see the live capture in `docs/event-schema.md`), so `ledger:<txHash>`
+ *   alone is not unique. When the RPC reports its own id for the event, that
+ *   id is appended as a fourth segment: a transaction can emit the same name
+ *   topic *twice*, and topic alone cannot tell those two events apart, so
+ *   without the position `watchAll()`'s de-duplication would drop the second
+ *   one as a duplicate of the first. The RPC id is stable across page
+ *   boundaries and repeated reads of the same event, so an id derived from it
+ *   does not move when a page is re-read. If an RPC response ever omits the
+ *   hash, the ledger sequence anchors instead — an id is always produced.
  *
  * - `diag:<sha256>` — a blocked decision never reaches a ledger (the guard
  *   returns `Err`, the host rolls the event back), so there is nothing to
@@ -219,7 +238,9 @@ export function guardEventId(event: GuardEventIdentityInput): string {
   if (event.source === "ledger") {
     const anchor =
       event.transactionHash ?? (event.ledger !== null ? String(event.ledger) : "unknown");
-    return `ledger:${anchor}:${event.topics[0] ?? ""}`;
+    const base = `ledger:${anchor}:${event.topics[0] ?? ""}`;
+    const position = event.rpcEventId;
+    return position ? `${base}:${position}` : base;
   }
   return `diag:${sha256Hex(diagnosticIdMaterial(event))}`;
 }
@@ -283,6 +304,12 @@ export type GuardEventContext = Omit<
   /** Position within the diagnostic batch; null on the ledger stream. */
   simulationIndex: number | null;
   /**
+   * The RPC's own event id on the ledger stream; absent otherwise. Kept out of
+   * the emitted `GuardEvent` — it is identity material, not a field a
+   * consumer reads (the derived `id` already carries it).
+   */
+  rpcEventId?: string | null;
+  /**
    * Observation time for a diagnostic event; omitted (→ `null`) on the
    * committed stream, which anchors on `ledgerClosedAt` instead.
    */
@@ -297,7 +324,7 @@ function interpret(
 ): GuardEvent | null {
   const topic = topics[0];
   if (!topic || !KNOWN_TOPICS.has(topic)) return null;
-  const { simulationIndex, observedAt, ...streamFacts } = context;
+  const { simulationIndex, observedAt, rpcEventId, ...streamFacts } = context;
   const kind = KIND_BY_TOPIC[topic] ?? "unknown";
   return {
     kind,
@@ -310,6 +337,7 @@ function interpret(
       topics,
       data,
       simulationIndex,
+      ...(rpcEventId !== undefined ? { rpcEventId } : {}),
     }),
     ...streamFacts,
     stream: streamFacts.stream,
@@ -907,6 +935,17 @@ export interface FailedTxPollResult {
   events: GuardEvent[];
   /** Cursor to resume the failed-transaction scan from. */
   cursor: string;
+  /**
+   * Present only when this page's scan **failed** (issue #280): the RPC
+   * rejected the read, so `events` is empty and `cursor` is the caller's own
+   * unchanged value — a failed page cannot fabricate progress, and the next
+   * scan re-reads exactly the transactions this one never got to.
+   *
+   * Reported here rather than swallowed, so a direct caller of
+   * `pollFailedTransactions()` and `watch()` see the same failure; `watch()`
+   * forwards it to `GuardTelemetryWatchParams.onFailedTxError`.
+   */
+  error?: unknown;
 }
 
 /**
@@ -1010,6 +1049,88 @@ function raceAbort(signal: AbortSignal | undefined, wait: () => Promise<void>): 
   });
 }
 
+/**
+ * Reject an unusable pagination or timing option at the public boundary
+ * (issue #283), naming the offending field.
+ *
+ * Every value validated here travels straight into an RPC request or a timer,
+ * where a non-finite, non-integer or negative number surfaces as a
+ * host-dependent error (or a silently wrong delay) instead of a diagnosis.
+ * Checking before any request is issued proves the misconfiguration locally at
+ * zero round-trips. An omitted option is always fine — each of these has a
+ * documented default — and `0` is a legal `pollIntervalMs` (an unjittered
+ * loop with no delay, which the test suites lean on), so only `limit` and the
+ * ledger positions require a strictly positive value.
+ */
+function assertIntegerOption(
+  value: number | undefined,
+  field: string,
+  requirement: "positive" | "non-negative",
+): void {
+  if (value === undefined) return;
+  const floor = requirement === "positive" ? 1 : 0;
+  if (!Number.isInteger(value) || value < floor) {
+    throw new TypeError(
+      `telemetry: ${field} must be a ${requirement} integer (received ${String(value)})`,
+    );
+  }
+}
+
+/**
+ * Validate one page-read's options before any RPC is issued (issue #283).
+ *
+ * Shared by `poll()` and `pollFailedTransactions()`, which take the same
+ * pagination fields, and by `watch()` before it builds its first page read.
+ * The cursor/range contradiction is rejected rather than
+ * silently resolved: the RPC refuses a request that mixes the two modes, so a
+ * host that wins the silent branch is told nothing about why its second field
+ * never took effect.
+ */
+function validatePollParams(
+  params: {
+    startLedger?: number;
+    cursor?: string;
+    limit?: number;
+  },
+  /** The public entry point, so the contradiction is reported where it was made. */
+  entry: "poll()" | "watch()" | "pollFailedTransactions()",
+): void {
+  assertIntegerOption(params.limit, "limit", "positive");
+  assertIntegerOption(params.startLedger, "startLedger", "positive");
+  if (params.cursor !== undefined && params.startLedger !== undefined) {
+    throw new TypeError(
+      `telemetry: ${entry} accepts either cursor or startLedger, not both — the RPC rejects a request that mixes the two modes`,
+    );
+  }
+}
+
+/**
+ * Validate one `watch()`/`watchAll()` call's options before any RPC is issued
+ * or any timer is armed (issue #283).
+ *
+ * Beyond the fields `poll()` takes, this covers the stream's own controls:
+ * `resumeLedger` (meaningless once `startLedger` pins the range — the resume
+ * point would be silently ignored), `pollIntervalMs` (non-negative, because a
+ * zero-delay loop is a legitimate way to drive the stream from injected
+ * `sleep`), and `jitter` (a closed two-value vocabulary — an unknown mode
+ * would otherwise fall through to `computePollDelay` and be read as anything).
+ */
+function validateWatchParams(params: GuardTelemetryWatchParams): void {
+  validatePollParams(params, "watch()");
+  assertIntegerOption(params.resumeLedger, "resumeLedger", "positive");
+  assertIntegerOption(params.pollIntervalMs, "pollIntervalMs", "non-negative");
+  if (params.jitter !== undefined && params.jitter !== "none" && params.jitter !== "full") {
+    throw new TypeError(
+      `telemetry: jitter must be "none" or "full" (received ${JSON.stringify(params.jitter)})`,
+    );
+  }
+  if (params.resumeLedger !== undefined && params.startLedger !== undefined) {
+    throw new TypeError(
+      "telemetry: watch() accepts either resumeLedger or startLedger, not both — an explicit startLedger pins the range, so a resume point could never apply",
+    );
+  }
+}
+
 export interface GuardTelemetryWatchParams {
   startLedger?: number;
   pollIntervalMs?: number;
@@ -1071,6 +1192,24 @@ export interface GuardTelemetryWatchParams {
    * summary as `PollResult.unknownTopics`. Additive (issue #287).
    */
   onUnknownTopics?: (unknownTopics: readonly GuardUnknownTopic[]) => void;
+  /**
+   * Called once per failed-transaction scan failure, while the committed
+   * stream keeps its own delivery untouched (issue #280).
+   *
+   * The opt-in `failedTx` stream can stop delivering — a rejected
+   * `getTransactions` page, or the head probe that seeds its cursor — without
+   * that being visible anywhere: committed events arrive as if nothing were
+   * missing. This callback is that visibility: it receives the failure that
+   * skipped a scan, and coverage resumes from the *unchanged* failed-tx cursor
+   * on the next loop, so no unread failed transaction is passed over.
+   *
+   * Failures stay isolated: the callback runs after the scan has already been
+   * abandoned, and a callback that throws is swallowed — an observability sink
+   * cannot stop telemetry, the same contract as `onGap` and
+   * `onUnknownTopics`. Omitting it changes nothing except who is told; the
+   * failure is still logged when a logger is configured.
+   */
+  onFailedTxError?: (error: unknown) => void;
   /**
    * Called once when the committed stream ends because of a terminal RPC
    * failure — after the bounded retry envelope is exhausted. Fail-visible
@@ -1796,6 +1935,7 @@ export class GuardTelemetryListener {
   async pollFailedTransactions(
     params: { cursor?: string; startLedger?: number; limit?: number } = {},
   ): Promise<FailedTxPollResult> {
+    validatePollParams(params, "pollFailedTransactions()");
     if (params.cursor === undefined && params.startLedger === undefined) {
       const latest = await this.config.server.getLatestLedger();
       const cursor = String(latest.sequence);
@@ -1827,9 +1967,14 @@ export class GuardTelemetryListener {
       this.record(events);
       this.recordHealthyFailedTxPoll(response.cursor);
       return { events, cursor: response.cursor };
-    } catch {
+    } catch (error) {
       this.recordFailedTxPoll();
-      return { events: [], cursor: params.cursor ?? String(params.startLedger) };
+      // A failed page must not fabricate progress: the cursor that comes back
+      // is the caller's own, so the next scan re-reads exactly the transactions
+      // this one never got to. The failure is reported on the result rather
+      // than swallowed (#280), so `watch()` can surface it through
+      // `onFailedTxError` while the committed stream carries on.
+      return { events: [], cursor: params.cursor ?? String(params.startLedger), error };
     }
   }
 
@@ -1847,6 +1992,9 @@ export class GuardTelemetryListener {
    * unrecognised topic is dropped rather than guessed at.
    */
   async poll(params: { startLedger?: number; cursor?: string; limit?: number } = {}): Promise<PollResult> {
+    // Rejected before the request object exists, let alone a request (#283):
+    // bad pagination must cost zero round trips and name its own field.
+    validatePollParams(params, "poll()");
     const request = (
       params.cursor
         ? { filters: [{ type: "contract" as const, contractIds: [this.config.guard] }], cursor: params.cursor, limit: params.limit }
@@ -1909,6 +2057,11 @@ export class GuardTelemetryListener {
           // Committed events anchor on the transaction hash, not on a position
           // within a page: a page boundary would otherwise change an event's id.
           simulationIndex: null,
+          // …but the RPC's own per-event id is stable across pages and repeat
+          // reads, so it can still separate two same-topic events emitted by
+          // one transaction (#275). Absent on responses that omit it, in which
+          // case the historical three-segment id is produced unchanged.
+          rpcEventId: event.id ?? null,
           // `includeRaw` is off unless the listener was constructed with it, so
           // the default path keeps discarding the RPC object (issue #94).
           ...(this.config.includeRaw ? { raw: event } : {}),
@@ -1950,6 +2103,27 @@ export class GuardTelemetryListener {
       oldestLedger,
       unknownTopics,
     };
+  }
+
+  /**
+   * Surface a failed-transaction scan failure without letting it touch the
+   * committed stream (issue #280).
+   *
+   * Always logged when a logger is configured — reduced coverage is a fact a
+   * host should be able to see without wiring a callback — then delivered to
+   * `onFailedTxError` when one was supplied. The callback is isolated: an
+   * observability sink that throws cannot stop telemetry, the same contract as
+   * `onGap` and `onUnknownTopics`.
+   */
+  private reportFailedTxError(params: GuardTelemetryWatchParams, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`failed-transaction scan failed: ${detail}`, { guard: this.config.guard });
+    if (!params.onFailedTxError) return;
+    try {
+      params.onFailedTxError(error);
+    } catch {
+      // Reporting reduced coverage must not reduce it any further.
+    }
   }
 
   /** Claim the single active-stream lease, or reject concurrent use. */
@@ -2028,6 +2202,9 @@ export class GuardTelemetryListener {
   private async *watchStream(
     params: GuardTelemetryWatchParams = {},
   ): AsyncGenerator<GuardEvent[], void, undefined> {
+    // The public boundary: a misconfiguration is reported with its field name
+    // before the first RPC probe, the cursor-store load, or the timer (#283).
+    validateWatchParams(params);
     const interval = params.pollIntervalMs ?? 5_000;
     const jitter = params.jitter ?? "full";
     const rng = params.rng ?? Math.random;
@@ -2152,14 +2329,25 @@ export class GuardTelemetryListener {
           });
           failedTxCursor = failedTxPage.cursor;
           failedTxEvents = failedTxPage.events;
+          // A page that failed inside the scanner reports it on its result,
+          // with the cursor left exactly where it was — surfaced, not swallowed.
+          if (failedTxPage.error !== undefined) {
+            this.reportFailedTxError(params, failedTxPage.error);
+          }
           // Persist the failed-tx stream's own cursor, independently of the
           // getEvents cursor (issue #279). A failed scan leaves the stored
           // cursor untouched so the page is retried after a restart.
           if (!this.failedTxScanFailed) {
             await this.activeFailedTxCursorStore.save(failedTxPage.cursor);
           }
-        } catch {
+        } catch (error) {
           // This optional stream must not interrupt committed event polling.
+          // A rejection that got that far (the head probe that seeds the
+          // scan's cursor) is reported the same way a failed page is; the
+          // cursor it never returned stays unset, so the scan restarts from
+          // the head rather than from a position that was not read.
+          if (signal?.aborted) return;
+          this.reportFailedTxError(params, error);
         }
       }
 

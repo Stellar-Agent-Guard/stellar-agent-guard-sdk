@@ -400,6 +400,66 @@ function callFingerprint(call: ContractCall): string {
   return sha256Hex(concatBytes(parts));
 }
 
+/**
+ * A structural copy of a value, so a caller cannot reach back into what the
+ * cache still retains (issue #273).
+ *
+ * Arrays and objects are rebuilt, byte arrays and dates are copied, and a class
+ * instance keeps its prototype — so an XDR value inside `diagnosticEvents` still
+ * answers its methods and a `GuardError` still passes `instanceof`. Cycles are
+ * handled through `seen`, and primitives (`bigint` included) are returned as
+ * they are: there is nothing to detach.
+ */
+function detachDecisionValue<T>(value: T, seen: WeakMap<object, unknown>): T {
+  if (value === null || typeof value !== "object") return value;
+  const source = value as unknown as object;
+  const existing = seen.get(source);
+  if (existing !== undefined) return existing as T;
+
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(source, copy);
+    for (const item of value) copy.push(detachDecisionValue(item, seen));
+    return copy as unknown as T;
+  }
+  if (value instanceof Date) {
+    const copy = new Date(value.getTime());
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  if (value instanceof Uint8Array) {
+    const copy = new Uint8Array(value);
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  if (value instanceof ArrayBuffer) {
+    const copy = value.slice(0);
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  const copy = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
+  seen.set(source, copy);
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    copy[key] = detachDecisionValue(item, seen);
+  }
+  return copy as unknown as T;
+}
+
+/**
+ * An independent snapshot of a verdict for the cache (issue #273).
+ *
+ * The cache stores one copy and hands out one copy per hit, so no caller ever
+ * holds the object the cache retains: editing the returned decision — the
+ * top-level `allowed`/`kind` discriminant, a scalar such as
+ * `estimatedResourceFee`, or a nested entry of `diagnosticEvents` — cannot
+ * change what a later cache hit receives. Verdicts are snapshots, never shared
+ * mutable objects and never frozen ones: a caller that edits what it was handed
+ * still gets no error, it simply edits its own copy.
+ */
+function snapshotDecision(decision: PreFlightDecision): PreFlightDecision {
+  return detachDecisionValue(decision, new WeakMap<object, unknown>());
+}
+
 function configFingerprint(config: PreFlightConfig): string {
   const parts: Uint8Array[] = [];
   hashPart(parts, config.networkPassphrase);
@@ -513,6 +573,14 @@ export class PreFlightInterceptor {
    * Accepts per-call `options` (e.g. `onStep` observability) without any
    * effect on the verdict itself; existing single-argument callers are
    * unaffected.
+   *
+   * **Snapshot semantics (issue #273):** a verdict served from the cache is an
+   * *independent snapshot*, not the object the cache retains — mutating it
+   * (the `allowed`/`kind` discriminant, a scalar field, or a nested
+   * `diagnosticEvents` entry) can never change what a later cache hit returns.
+   * A fresh verdict from a cache miss is likewise the caller's own object: the
+   * cache stores its own copy of it. Results are therefore returned as
+   * independent snapshots rather than being frozen.
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
@@ -533,7 +601,9 @@ export class PreFlightInterceptor {
             kind: cached.decision.kind,
             ledger: context.ledger,
           });
-          return cached.decision;
+          // A snapshot, never the stored object: the caller must not be able
+          // to edit what the next cache hit receives (issue #273).
+          return snapshotDecision(cached.decision);
         }
         this.cache.delete(context.key);
       }
@@ -627,8 +697,11 @@ export class PreFlightInterceptor {
     // An undetermined result is not a verdict and may be transient, so it is
     // deliberately not cached. Actual admissible/blocked results are.
     if (context && decision.kind !== "undetermined") {
+      // Store a copy, not the object being returned: the miss path hands this
+      // very decision to the caller, who must not be able to edit the entry a
+      // later hit is served from (issue #273).
       this.cache.set(context.key, {
-        decision,
+        decision: snapshotDecision(decision),
         ledger: context.ledger,
         expiresAt: context.expiresAt,
       });

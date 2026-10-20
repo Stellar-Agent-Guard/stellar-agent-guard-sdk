@@ -298,6 +298,38 @@ describe("GuardEvent.id", () => {
     assert.equal(heartbeat, `ledger:${txHash}:event_heartbeat`);
   });
 
+  it("keeps two same-topic events in one transaction distinct when the RPC reports their ids (issue #275)", () => {
+    // A heartbeat transaction can emit the same name topic twice. Topic alone
+    // cannot tell those apart, so the RPC's own per-event id is appended — and
+    // it is stable across page boundaries and repeated reads, so re-polling
+    // must not renumber either event.
+    const txHash = "ab".repeat(32);
+    const base = {
+      source: "ledger" as const,
+      topics: ["event_heartbeat"],
+      data: { at: 1789393232n },
+      contractId: GUARD,
+      ledger: 4674314,
+      transactionHash: txHash,
+      simulationIndex: null,
+    };
+    const first = guardEventId({ ...base, rpcEventId: "0000004674314-000000001" });
+    const second = guardEventId({ ...base, rpcEventId: "0000004674314-000000002" });
+
+    assert.equal(first, `ledger:${txHash}:event_heartbeat:0000004674314-000000001`);
+    assert.notEqual(first, second, "same transaction, same topic — only the position differs");
+    assert.equal(
+      guardEventId({ ...base, rpcEventId: "0000004674314-000000001" }),
+      first,
+      "a repeated read of the same event yields the same id",
+    );
+    assert.equal(
+      guardEventId(base),
+      `ledger:${txHash}:event_heartbeat`,
+      "without an RPC-reported id the historical three-segment id is produced",
+    );
+  });
+
   it("anchors a committed event on its transaction hash, not on its page position", () => {
     const first = guardEventId({
       source: "ledger",

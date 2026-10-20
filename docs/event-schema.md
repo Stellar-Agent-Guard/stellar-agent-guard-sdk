@@ -565,17 +565,27 @@ at.
 
 | Source | Format | Anchor |
 |---|---|---|
-| `ledger` | `ledger:<txHash>:<topic>` | the transaction that emitted it, plus its name topic |
+| `ledger` | `ledger:<txHash>:<topic>[:<rpcEventId>]` | the transaction that emitted it, its name topic, and the RPC's own per-event id when reported |
 | `diagnostic` | `diag:<sha256-hex>` | the event's own content (see below) |
 
 **Committed events keep a txHash-based id.** A heartbeat transaction emits
 *two* guard events — `event_auth_checked` and `event_heartbeat`, as the live
 capture above shows — so `ledger:<txHash>` alone is not unique and the name
-topic disambiguates. The id deliberately does **not** include the event's
-position within a `getEvents` page: a page boundary (a different `limit`, a
-resume from a cursor) would otherwise renumber an event that has not changed.
-If an RPC response ever omits the hash, the ledger sequence anchors instead, so
-an id is always produced.
+topic disambiguates.
+
+A transaction can also emit the *same* name topic more than once, which the
+topic cannot separate either. When the RPC reports its own `id` for the event
+(`Api.EventResponse.id`), it is appended as a fourth segment —
+`ledger:<txHash>:<topic>:<rpcEventId>` — so both events keep distinct ids and
+both survive `watchAll()`'s de-duplication instead of one being dropped as a
+duplicate of the other (issue #275). The RPC's id is assigned per event, not
+per read: it is stable across page boundaries and repeated reads, so appending
+it does not reintroduce the renumbering problem below. The id still excludes
+the event's *position within the returned page* (its index in `events[]`): a
+page boundary — a different `limit`, a resume from a cursor — would otherwise
+renumber an event that has not changed. When the response carries no `id`, the
+three-segment form is produced unchanged; if an RPC response ever omits the
+hash, the ledger sequence anchors instead, so an id is always produced.
 
 **Diagnostic events are hashed**, from exactly this input, in this order:
 
@@ -896,6 +906,13 @@ downtime coverage matters.
   failed `getTransactions` call leaves the tx cursor untouched so the page is
   retried, and never corrupts the committed stream (the scan runs inside its
   own try/catch in `watch`, matching `poll`'s skip-not-throw convention).
+  A failure is no longer *silent*, though: it is carried out on the
+  `FailedTxPollResult` as `error` for direct callers of
+  `pollFailedTransactions()`, and `watch()`/`watchAll()` forward it to the
+  `onFailedTxError(error)` callback (issue #280). Because the cursor comes back
+  unchanged, the next cycle re-reads exactly the page that failed — recovery
+  never steps over an unread failed transaction — and the callback is isolated
+  like `onGap`, so a throwing sink cannot stop committed delivery.
 
 ### Limitations
 

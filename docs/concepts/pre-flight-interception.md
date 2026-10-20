@@ -33,3 +33,9 @@ The TTL is capped at one approximate ledger-close interval. A cached verdict
 can be staler than one admitted transfer, so integrations that need immediate
 freshness after a transfer or policy change should leave the cache disabled,
 provide a revision getter, and invalidate explicitly.
+
+Verdicts are returned as **independent snapshots**, never as shared mutable
+objects and never frozen: mutating a returned decision — the `allowed`/`kind`
+discriminant, a scalar field, or a nested `diagnosticEvents` entry — cannot
+change what a later cache hit receives, because the cache stores its own copy
+and hands out a fresh one per hit.

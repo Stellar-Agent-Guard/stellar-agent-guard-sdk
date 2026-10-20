@@ -287,7 +287,9 @@ fingerprint, interceptor identity, and the supplied policy revision. The cache
 is discarded when the observed ledger advances, when the TTL expires, or when
 `invalidate()` is called. `ttlMs` and `ttlLedgers` are both capped at one
 approximate ledger-close interval; if both are supplied, `ttlMs` takes
-precedence.
+precedence. A cache hit is served as an **independent snapshot**: mutating the
+returned decision — its `allowed`/`kind` discriminant, a scalar field, or a
+nested `diagnosticEvents` entry — cannot change what a later cache hit returns.
 
 A **cached verdict can be staler than one admitted transfer**. The rolling spend
 window can change after a simulation while a cached result is still being
@@ -956,7 +958,7 @@ one-shot form.
 - `decodeCheckResult(raw): CheckResult` — Decodes `Allowed` or `Blocked(reason)`.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
-- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
+- `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>[:<rpcEventId>]` for committed events (the RPC's own per-event id is appended when the response reports one, so two same-topic events in one transaction stay distinct), `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids; two same-topic events in one transaction → different ids. Format and collision notes: [`docs/event-schema.md`](docs/event-schema.md).
 - `GuardLogger`, `GuardLoggerInput`, `GuardLogMeta`, `GUARD_LOG_LEVELS` — the optional, structurally-typed log sink shared by every config above; `SILENT_LOGGER` is what a config resolves to when none is supplied. See [Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask).
 - `explainReason(reason: string | number, locale?, overrides?): string` — Human-readable explanation of contract reason codes. The default call is unchanged; the optional `locale` catalog and per-reason `overrides` localise or reword a refusal without an i18n dependency. Reason keys, titles and remediation text: [`reasonMessages` / `reasonMessagesEn`](#reason-messages-issue-96).
 - `isDeadManFrozen(status: GuardStatus): boolean`

@@ -43,7 +43,10 @@ call returns `[]` and allocates nothing.
 Reads one page from the independent `getTransactions` cursor. Pass the returned
 cursor on the next call; omitting it starts at the current RPC head, without
 replaying older failures. Only failed transactions with diagnostics emitted by
-the configured guard are returned. RPC errors leave a supplied cursor unchanged.
+the configured guard are returned. RPC errors leave a supplied cursor unchanged
+and are reported on the result as `error` (issue #280) rather than thrown, so a
+direct caller can tell "no failures this page" from "this page could not be
+read".
 
 ### `watch(params?): AsyncIterable<GuardEventPage>`
 
@@ -52,7 +55,17 @@ Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, and `signal`.
+`jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, `onFailedTxError`, and `signal`.
+
+**Validated at this boundary (issue #283).** `limit`, `startLedger` and
+`resumeLedger` must be positive integers, `pollIntervalMs` a non-negative
+integer, and `jitter` either `"none"` or `"full"`; passing a `cursor` together
+with `startLedger`, or a `resumeLedger` together with `startLedger`, is a
+contradiction. Every violation throws a field-specific `TypeError` before any
+RPC request is issued or any timer is armed — invalid configuration costs zero
+round trips and names its own field instead of surfacing later as a
+host-dependent RPC error. `poll()` and `pollFailedTransactions()` validate the
+same fields the same way.
 
 #### Unknown topics
 
@@ -78,6 +91,23 @@ cursor. Use a separate listener when you need two independent streams.
 This is a deliberate fail-fast model, not isolation: rejecting the second stream
 is what makes cursor persistence and counters impossible to overwrite or
 double-count from two iterators on one listener.
+
+#### Failed-transaction scan failures (`onFailedTxError`)
+
+The `failedTx` scan is optional, and it must never take the committed stream
+with it — but a scan that quietly stops delivering is a coverage hole a monitor
+cannot see. Each scan failure (a rejected `getTransactions` page, or the head
+probe that seeds the scan's cursor) is therefore reported through
+`onFailedTxError(err)` (issue #280), *after* the scan has been abandoned:
+
+- committed-event delivery is untouched — the failure is caught, the stream
+  continues, and coverage resumes from the **unchanged** failed-tx cursor on the
+  next cycle, so no unread failed transaction is stepped over;
+- the callback is isolated like `onGap`: one that throws is swallowed and
+  cannot stop telemetry;
+- omitted, nothing changes except who is told — with a logger configured the
+  failure is logged either way, and direct callers of
+  `pollFailedTransactions()` read it on `FailedTxPollResult.error`.
 
 #### Mid-watch failures (`onStreamError`)
 
@@ -207,12 +237,15 @@ Events with missing or malformed identity fail closed. See
 Every decoded `GuardEvent` carries a stable, non-null `id` on both streams:
 
 -
-  `ledger:<txHash>:<topic>` for a committed event;
+  `ledger:<txHash>:<topic>[:<rpcEventId>]` for a committed event — the RPC's own
+  per-event id is appended as a fourth segment when the response reports one, so
+  two same-topic events in one transaction stay distinct (issue #275);
 - `diag:<sha256>` for a diagnostic (blocked) event, which has no transaction to
   anchor on because it was rolled back before broadcast.
 
 The same event re-parsed yields the same id; two different blocks within one
-simulation yield different ids. Format and collision notes:
+simulation yield different ids; two same-topic events in one transaction yield
+different ids. Format and collision notes:
 [`docs/event-schema.md`](../event-schema.md#event-identity--guardeventid).
 
 ## Strict offline fixture validation
