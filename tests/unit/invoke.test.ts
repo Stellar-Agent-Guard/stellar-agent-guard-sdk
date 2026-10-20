@@ -25,6 +25,7 @@ import {
 import { BroadcastError } from "../../src/tx.ts";
 import { SimulationError } from "../../src/errors.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
+import { FakeClock, type Clock } from "../../src/clock.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
 import type { InvokeStepEvent } from "../../src/invoke.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
@@ -1277,5 +1278,528 @@ describe("invoke() fee-bump retry lifecycle", () => {
 
     assert.equal(outcome.kind, "allowed");
     assert.equal(sendCalls.length, 2);
+  });
+});
+
+// ── Public option validation (issue #296) ────────────────────────────────────
+
+/**
+ * A server that fails loudly if any RPC method is touched. Table-driven option
+ * tests assert zero calls on it: invalid options must fail before RPC I/O, not
+ * after a probe simulation has already cost a round trip.
+ */
+function createUntouchableServer(): { server: rpc.Server; readonly calls: number } {
+  let calls = 0;
+  const touch = (name: string): never => {
+    calls += 1;
+    throw new Error(`RPC ${name} must not be called for invalid invoke options`);
+  };
+  const server = {
+    getAccount: async () => touch("getAccount"),
+    getLatestLedger: async () => touch("getLatestLedger"),
+    simulateTransaction: async () => touch("simulateTransaction"),
+    sendTransaction: async () => touch("sendTransaction"),
+    getTransaction: async () => touch("getTransaction"),
+  } as unknown as rpc.Server;
+  return {
+    server,
+    get calls() {
+      return calls;
+    },
+  };
+}
+
+describe("invoke() option validation", () => {
+  it("rejects invalid and contradictory options with field-specific errors before any RPC", async () => {
+    const cases: Array<{
+      label: string;
+      overrides: Partial<Parameters<typeof invoke>[0]>;
+      field: RegExp;
+    }> = [
+      { label: "retry.maxAttempts zero", overrides: { retry: { maxAttempts: 0 } }, field: /retry\.maxAttempts/ },
+      { label: "retry.maxAttempts fractional", overrides: { retry: { maxAttempts: 1.5 } }, field: /retry\.maxAttempts/ },
+      { label: "retry.maxAttempts NaN", overrides: { retry: { maxAttempts: Number.NaN } }, field: /retry\.maxAttempts/ },
+      { label: "retry.baseDelayMs negative", overrides: { retry: { baseDelayMs: -1 } }, field: /retry\.baseDelayMs/ },
+      { label: "retry.baseDelayMs infinite", overrides: { retry: { baseDelayMs: Number.POSITIVE_INFINITY } }, field: /retry\.baseDelayMs/ },
+      { label: "retry.maxDelayMs negative", overrides: { retry: { maxDelayMs: -1 } }, field: /retry\.maxDelayMs/ },
+      {
+        label: "retry.maxDelayMs below baseDelayMs",
+        overrides: { retry: { baseDelayMs: 100, maxDelayMs: 50 } },
+        field: /retry\.maxDelayMs/,
+      },
+      {
+        label: "retry aliases disagree",
+        overrides: { retry: { baseDelayMs: 100, initialDelayMs: 50 } },
+        field: /retry\.initialDelayMs/,
+      },
+      { label: "retry.random not a function", overrides: { retry: { random: 1 as unknown as () => number } }, field: /retry\.random/ },
+      { label: "retry.random and jitter both set", overrides: { retry: { random: () => 0.5, jitter: () => 0.5 } }, field: /retry\.jitter/ },
+      { label: "maxRetries negative", overrides: { maxRetries: -1 }, field: /maxRetries/ },
+      { label: "maxRetries fractional", overrides: { maxRetries: 1.5 }, field: /maxRetries/ },
+      { label: "feeBump.maxAttempts zero", overrides: { feeBump: { maxAttempts: 0 } }, field: /feeBump\.maxAttempts/ },
+      { label: "feeBump.feeMultiplier at one", overrides: { feeBump: { feeMultiplier: 1 } }, field: /feeBump\.feeMultiplier/ },
+      { label: "feeBump.feeMultiplier NaN", overrides: { feeBump: { feeMultiplier: Number.NaN } }, field: /feeBump\.feeMultiplier/ },
+      { label: "feeBump.initialInclusionFee zero", overrides: { feeBump: { initialInclusionFee: 0n } }, field: /feeBump\.initialInclusionFee/ },
+      { label: "pollAttempts zero", overrides: { pollAttempts: 0 }, field: /pollAttempts/ },
+      { label: "pollAttempts fractional", overrides: { pollAttempts: 2.5 }, field: /pollAttempts/ },
+      { label: "pollIntervalMs negative", overrides: { pollIntervalMs: -1 }, field: /pollIntervalMs/ },
+      { label: "pollIntervalMs NaN", overrides: { pollIntervalMs: Number.NaN }, field: /pollIntervalMs/ },
+      { label: "pollOptions.pollAttempts zero", overrides: { pollOptions: { pollAttempts: 0 } }, field: /pollOptions\.pollAttempts/ },
+      { label: "pollOptions.pollIntervalMs negative", overrides: { pollOptions: { pollIntervalMs: -1 } }, field: /pollOptions\.pollIntervalMs/ },
+      {
+        label: "top-level and nested pollAttempts disagree",
+        overrides: { pollAttempts: 1, pollOptions: { pollAttempts: 2 } },
+        field: /pollOptions\.pollAttempts/,
+      },
+      {
+        label: "top-level and nested pollIntervalMs disagree",
+        overrides: { pollIntervalMs: 1, pollOptions: { pollIntervalMs: 2 } },
+        field: /pollOptions\.pollIntervalMs/,
+      },
+      { label: "timeoutMs negative", overrides: { timeoutMs: -1 }, field: /timeoutMs/ },
+      { label: "deadlineMs zero", overrides: { deadlineMs: 0 }, field: /deadlineMs/ },
+      { label: "deadlineMs infinite", overrides: { deadlineMs: Number.POSITIVE_INFINITY }, field: /deadlineMs/ },
+    ];
+
+    for (const testCase of cases) {
+      const { server, calls } = createUntouchableServer();
+      await assert.rejects(
+        invoke(makeParams(server, testCase.overrides)),
+        (error: unknown) => {
+          assert.ok(error instanceof RangeError, testCase.label);
+          assert.match(error.message, testCase.field, testCase.label);
+          return true;
+        },
+      );
+      assert.equal(calls, 0, testCase.label);
+    }
+  });
+
+  it("rejects a jitter sample outside [0, 1) before scheduling another RPC", async () => {
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: "bad-jitter" }),
+      getTransaction: staleRejection,
+    });
+
+    await assert.rejects(
+      invoke(
+        makeParams(server, {
+          pollOptions: { pollAttempts: 1, pollIntervalMs: 0 },
+          retry: {
+            maxAttempts: 2,
+            baseDelayMs: 10,
+            random: () => 1,
+            sleep: async () => undefined,
+          },
+        }),
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof RangeError);
+        assert.match(error.message, /retry\.random/);
+        return true;
+      },
+    );
+    assert.equal(server.sendCount, 1);
+    assert.equal(server.simulationCount, 2);
+  });
+
+  it("applies maxRetries as an overall attempt bound", async () => {
+    let sleeps = 0;
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `bounded-${call}` }),
+      getTransaction: staleRejection,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        pollOptions: { pollAttempts: 1, pollIntervalMs: 0 },
+        maxRetries: 0,
+        retry: {
+          maxAttempts: 10,
+          sleep: async () => {
+            sleeps += 1;
+          },
+        },
+      }),
+    );
+
+    assert.ok(outcome instanceof InvokeRetryError);
+    assert.equal(outcome.attempts, 1);
+    assert.equal(outcome.retry.attempts, 1);
+    assert.equal(outcome.retry.maxAttempts, 1);
+    assert.equal(sleeps, 0);
+    assert.equal(server.sendCount, 1);
+  });
+});
+
+// ── Structured retry metadata (issue #297) ───────────────────────────────────
+
+const RETRY_METADATA_KEYS = [
+  "attempts",
+  "exhausted",
+  "maxAttempts",
+  "outcome",
+  "retried",
+  "retries",
+  "terminalCause",
+  "terminalFailure",
+  "totalDelayMs",
+];
+
+function sequenceRejection(): unknown {
+  return {
+    status: "FAILED",
+    hash: "sequence",
+    resultXdr: null,
+    diagnosticEventsXdr: ["tx_bad_seq"],
+  };
+}
+
+describe("invoke() retry metadata", () => {
+  const FAST = { pollAttempts: 1, pollIntervalMs: 0 };
+
+  it("records a successful stale-ledger recovery without leaking payloads", async () => {
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `recover-${call}` }),
+      getTransaction: (hash) =>
+        hash === "recover-1" ? staleRejection() : { status: "SUCCESS", ledger: 77 },
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST,
+        retry: { maxAttempts: 3, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+      }),
+    );
+
+    assert.equal(outcome.kind, "allowed");
+    const metadata = outcome.retry;
+    assert.ok(metadata);
+    assert.equal(metadata.attempts, 2);
+    assert.equal(metadata.retried, true);
+    assert.equal(metadata.exhausted, false);
+    assert.equal(metadata.totalDelayMs, 50);
+    assert.equal(metadata.terminalFailure, null);
+    assert.equal(metadata.terminalCause, null);
+    assert.equal(metadata.outcome, "allowed");
+    assert.deepEqual(metadata.retries, [
+      {
+        attempt: 1,
+        failure: "stale_ledger_resource_limit",
+        cause: "stale_ledger_resource_limit",
+        delayMs: 50,
+      },
+    ]);
+
+    assert.deepEqual(Object.keys(metadata).sort(), RETRY_METADATA_KEYS);
+    assert.deepEqual(Object.keys(metadata.retries[0]!).sort(), [
+      "attempt",
+      "cause",
+      "delayMs",
+      "failure",
+    ]);
+    const serialised = JSON.stringify(metadata);
+    assert.doesNotMatch(serialised, /resultXdr|diagnostic|signature|secret|AAAA/i);
+  });
+
+  it("records stale-ledger exhaustion and the terminal attempt", async () => {
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `stale-${call}` }),
+      getTransaction: staleRejection,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST,
+        retry: { maxAttempts: 2, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+      }),
+    );
+
+    assert.ok(outcome instanceof InvokeRetryError);
+    assert.equal(outcome.retry.attempts, 2);
+    assert.equal(outcome.retry.maxAttempts, 2);
+    assert.equal(outcome.retry.exhausted, true);
+    assert.equal(outcome.retry.terminalFailure, "stale_ledger_resource_limit");
+    assert.equal(outcome.retry.terminalCause, "stale_ledger_resource_limit");
+    assert.equal(outcome.retry.retries.length, 1);
+    assert.equal(outcome.retry.totalDelayMs, 50);
+  });
+
+  it("recovers from a sequence collision and records the class", async () => {
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `seq-${call}` }),
+      getTransaction: (hash) =>
+        hash === "seq-1" ? sequenceRejection() : { status: "SUCCESS", ledger: 88 },
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST,
+        retry: { maxAttempts: 3, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+      }),
+    );
+
+    assert.equal(outcome.kind, "allowed");
+    assert.ok(outcome.retry);
+    assert.equal(outcome.retry.retried, true);
+    assert.deepEqual(outcome.retry.retries.map((attempt) => attempt.failure), [
+      "sequence_number_collision",
+    ]);
+    assert.equal(outcome.retry.terminalFailure, null);
+  });
+
+  it("records sequence-collision exhaustion", async () => {
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `seq-${call}` }),
+      getTransaction: sequenceRejection,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST,
+        retry: { maxAttempts: 2, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+      }),
+    );
+
+    assert.ok(outcome instanceof InvokeRetryError);
+    assert.equal(outcome.retry.exhausted, true);
+    assert.equal(outcome.retry.terminalFailure, "sequence_number_collision");
+    assert.equal(outcome.retry.terminalCause, "sequence_number_collision");
+  });
+
+  it("records a successful min-fee fee bump", async () => {
+    const sendCalls: xdr.Transaction[] = [];
+    const server = {
+      getAccount: async () => ({ sequenceNumber: () => "100" }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => createSuccessSimulationResponse("500"),
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        if (sendCalls.length === 1) return createMinFeeErrorResponse("fee-1");
+        return { status: "PENDING" as const, hash: "fee-2" };
+      },
+      getTransaction: async () => ({ status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 1002 }),
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke({
+      server,
+      source: Keypair.random(),
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      feeBump: { maxAttempts: 2, feeMultiplier: 2 },
+      pollOptions: FAST_POLL,
+    });
+
+    assert.equal(outcome.kind, "allowed");
+    assert.ok(outcome.retry);
+    assert.equal(outcome.retry.attempts, 2);
+    assert.equal(outcome.retry.exhausted, false);
+    assert.equal(outcome.retry.totalDelayMs, 0);
+    assert.deepEqual(outcome.retry.retries, [
+      { attempt: 1, failure: "min_fee", cause: "undetermined", delayMs: 0 },
+    ]);
+  });
+
+  it("records min-fee exhaustion on the typed BroadcastError", async () => {
+    let sends = 0;
+    const server = {
+      getAccount: async () => ({ sequenceNumber: () => "100" }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => createSuccessSimulationResponse("500"),
+      sendTransaction: async () => createMinFeeErrorResponse(`fee-${++sends}`),
+      getTransaction: async () => ({ status: rpc.Api.GetTransactionStatus.FAILED, ledger: 1001 }),
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke({
+      server,
+      source: Keypair.random(),
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      feeBump: { maxAttempts: 2, feeMultiplier: 2 },
+      pollOptions: FAST_POLL,
+    });
+
+    assert.ok(outcome instanceof BroadcastError);
+    assert.ok(outcome.retry);
+    assert.equal(outcome.retry.attempts, 2);
+    assert.equal(outcome.retry.maxAttempts, 2);
+    assert.equal(outcome.retry.exhausted, true);
+    assert.equal(outcome.retry.terminalFailure, "min_fee");
+    assert.equal(outcome.retry.retries.length, 1);
+  });
+});
+
+// ── Overall deadline (issue #298) ────────────────────────────────────────────
+
+/**
+ * A deadline much larger than the real default RPC timeout, so the virtual
+ * clock—not a wall-clock timer on a slow CI runner—decides the test. Tests
+ * advance the injected clock past the deadline explicitly.
+ */
+const VIRTUAL_DEADLINE_MS = 60_000;
+
+function expectDeadlineError(outcome: Awaited<ReturnType<typeof invoke>>): RpcTimeoutError {
+  assert.equal(outcome.kind, "error");
+  if (outcome.kind !== "error") throw new Error("unreachable");
+  assert.ok(outcome.error instanceof RpcTimeoutError);
+  assert.equal(outcome.error.deadline, true);
+  assert.equal(outcome.error.cause, "timeout");
+  return outcome.error;
+}
+
+describe("invoke() overall deadline", () => {
+  it("fails closed during discovery before any simulation", async () => {
+    const clock = new FakeClock(0);
+    let simulations = 0;
+    let sends = 0;
+    const server = {
+      getAccount: async () => {
+        clock.advance(VIRTUAL_DEADLINE_MS + 1);
+        return new Account(Keypair.random().publicKey(), "100");
+      },
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        return probeSuccess();
+      },
+      sendTransaction: async () => {
+        sends += 1;
+        return { status: "PENDING" as const, hash: "unreachable" };
+      },
+      getTransaction: async () => ({ status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 1 }),
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke(makeParams(server, { deadlineMs: VIRTUAL_DEADLINE_MS, clock }));
+    const error = expectDeadlineError(outcome);
+    assert.equal(error.stage, "probe");
+    assert.equal(simulations, 0);
+    assert.equal(sends, 0);
+  });
+
+  it("fails closed while signing after a successful probe", async () => {
+    const clock = new FakeClock(0);
+    let simulations = 0;
+    let sends = 0;
+    const server = {
+      getAccount: async () => new Account(Keypair.random().publicKey(), "100"),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        if (simulations === 1) clock.advance(VIRTUAL_DEADLINE_MS + 1);
+        return probeSuccess();
+      },
+      sendTransaction: async () => {
+        sends += 1;
+        return { status: "PENDING" as const, hash: "unreachable" };
+      },
+      getTransaction: async () => ({ status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 1 }),
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke(makeParams(server, { deadlineMs: VIRTUAL_DEADLINE_MS, clock }));
+    const error = expectDeadlineError(outcome);
+    assert.equal(error.stage, "sign");
+    assert.equal(simulations, 1);
+    assert.equal(sends, 0);
+  });
+
+  it("never sleeps past the deadline during backoff", async () => {
+    const clock = new FakeClock(0);
+    const sleeps: number[] = [];
+    const server = createMockServer({
+      send: (call) => ({ status: "PENDING", hash: `deadline-${call}` }),
+      getTransaction: staleRejection,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        pollOptions: { pollAttempts: 1, pollIntervalMs: 0 },
+        deadlineMs: VIRTUAL_DEADLINE_MS,
+        clock,
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: VIRTUAL_DEADLINE_MS * 2,
+          maxDelayMs: VIRTUAL_DEADLINE_MS * 2,
+          random: () => 0.5,
+          sleep: async (delayMs) => {
+            sleeps.push(delayMs);
+            clock.advance(delayMs);
+          },
+        },
+      }),
+    );
+
+    const error = expectDeadlineError(outcome);
+    assert.equal(error.stage, "retry_backoff");
+    assert.deepEqual(sleeps, [VIRTUAL_DEADLINE_MS]);
+    assert.ok(outcome.kind === "error" && outcome.retry);
+    assert.equal(outcome.retry.attempts, 1);
+    assert.equal(outcome.retry.totalDelayMs, VIRTUAL_DEADLINE_MS);
+    assert.equal(outcome.retry.retries.length, 1);
+    assert.equal(server.sendCount, 1);
+    assert.equal(server.simulationCount, 2);
+  });
+
+  it("consumes the same budget in post-submit polling", async () => {
+    let now = 0;
+    const clock: Clock = {
+      now: () => now,
+      sleep: async (delayMs) => {
+        now += delayMs;
+      },
+    };
+    let polls = 0;
+    const server = {
+      getAccount: async () => new Account(Keypair.random().publicKey(), "100"),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => probeSuccess(),
+      sendTransaction: async () => ({ status: "PENDING" as const, hash: "poll-deadline" }),
+      getTransaction: async () => {
+        polls += 1;
+        return { status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 2 };
+      },
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke(
+      makeParams(server, {
+        deadlineMs: VIRTUAL_DEADLINE_MS,
+        clock,
+        pollOptions: { pollAttempts: 5, pollIntervalMs: VIRTUAL_DEADLINE_MS * 2 },
+      }),
+    );
+
+    const error = expectDeadlineError(outcome);
+    assert.equal(error.stage, "poll");
+    assert.equal(polls, 0, "the deadline must fire before another getTransaction");
+    assert.ok(outcome.kind === "error" && outcome.retry);
+    assert.equal(outcome.retry.attempts, 1);
+    assert.equal(outcome.retry.retries.length, 0);
+  });
+
+  it("reports a dry run as undetermined, never admissible, when the deadline expires", async () => {
+    const clock = new FakeClock(0);
+    let simulations = 0;
+    const server = {
+      getAccount: async () => new Account(Keypair.random().publicKey(), "100"),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        if (simulations === 2) clock.advance(VIRTUAL_DEADLINE_MS + 1);
+        return probeSuccess();
+      },
+      sendTransaction: async () => ({ status: "PENDING" as const, hash: "unreachable" }),
+      getTransaction: async () => ({ status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 1 }),
+    } as unknown as rpc.Server;
+
+    const outcome = await invoke(
+      makeParams(server, { dryRun: true, deadlineMs: VIRTUAL_DEADLINE_MS, clock }),
+    );
+
+    assert.equal(outcome.kind, "dry_run");
+    if (outcome.kind !== "dry_run") throw new Error("unreachable");
+    assert.equal(outcome.admissible, false);
+    assert.equal(outcome.verdict, "undetermined");
+    assert.ok(outcome.error instanceof RpcTimeoutError);
+    assert.equal(outcome.error.deadline, true);
+    assert.equal(outcome.fees.totalFeeStroops, 0n);
   });
 });
