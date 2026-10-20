@@ -170,6 +170,8 @@ export {
   type InvokeOutcome,
   type InvokePipelineStep,
   type InvokeParams,
+  type InvokeRetryAttempt,
+  type InvokeRetryMetadata,
   type InvokeStepEvent,
   type RetryableInvokeFailure,
 } from "./invoke.ts";
@@ -283,8 +285,10 @@ export {
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
+  isValidAgentPublicKey,
   keypairAgentSigner,
   toAgentSigner,
+  validateAgentPublicKey,
   verifyAgentSignature,
 } from "./tx.ts";
 
