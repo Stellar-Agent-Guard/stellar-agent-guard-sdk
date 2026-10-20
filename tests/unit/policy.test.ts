@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
 import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
+import { mulberry32, randomUint } from "./seeded-random.ts";
 import { PolicyDecodeError } from "../../src/errors.ts";
 import { POLICY_JSON_VERSION, policyFromJson, policyToJson } from "../../src/policy-json.ts";
 import type { CheckResult } from "../../src/policy.ts";
@@ -1488,33 +1489,12 @@ const PROTOCOL_FN_POOL = [
   "withdraw",
 ] as const;
 
-/** Deterministic PRNG — same stream on every CI run and every local replay. */
-function mulberry32(seed: number): () => number {
-  let state = seed >>> 0;
-  return () => {
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
 function randomBytes(rand: () => number, length: number): Buffer {
   const bytes = Buffer.allocUnsafe(length);
   for (let index = 0; index < length; index += 1) {
     bytes[index] = Math.floor(rand() * 256);
   }
   return bytes;
-}
-
-/** A `bits`-wide unsigned bigint drawn from `rand`, exactly in `[0, 2**bits - 1]`. */
-function randomUint(rand: () => number, bits: number): bigint {
-  let value = 0n;
-  for (let remaining = bits; remaining > 0; remaining -= 32) {
-    value = (value << 32n) | BigInt(Math.floor(rand() * 0x1_0000_0000));
-  }
-  const excess = (32 - (bits % 32)) % 32;
-  return excess === 0 ? value : value >> BigInt(excess);
 }
 
 /** An i128 amount in `[0, 2**127 - 1]`, occasionally pinned to its boundary. */
