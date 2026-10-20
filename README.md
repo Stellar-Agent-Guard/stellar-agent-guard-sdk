@@ -522,6 +522,11 @@ caller-owned bounds on the RPC calls they make:
   `DEFAULT_RPC_TIMEOUT_MS` (**30s**), because a network partition that leaves a
   guardrail call pending forever is a hang, not a fail-closed decision. Pass
   `timeoutMs: 0` to opt out and rely on `signal` alone.
+- `deadlineMs?: number` — **`invoke()` only**: one overall budget for the whole
+  action (discovery, signing, retries, broadcast and polling). Expiry is
+  fail-closed and reported as an `RpcTimeoutError` with `deadline: true`; it can
+  never become an `allowed` outcome. Pass `clock` to make the accounting
+  deterministic in tests. See `docs/api/invoke-pipeline.md`.
 
 **The typed error is the same; where it surfaces is deliberately not.** A bound
 that fires raises one class, `RpcTimeoutError` (carrying `stage` and whether it
@@ -856,8 +861,7 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
 - `CostPreChecker`
   - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
   - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
-  - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run: the bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`.
+  - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.  - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run; `options.deadlineMs` bounds the whole action including retries and polling. Either bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`. Terminal outcomes also carry additive `retry` metadata (attempt count, retryable classes, delays and exhaustion) with no payloads or XDR.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
 - `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 - `HeartbeatBlockedError` / `isRetryableHeartbeatFailure(error)` — The typed refusal of a blocked heartbeat, and the classifier that decides whether a failure is a transport failure (retryable) or a decision (never retried). See [Bounded retry for a transient outage](#bounded-retry-for-a-transient-outage).
