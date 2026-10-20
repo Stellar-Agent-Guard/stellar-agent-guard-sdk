@@ -1882,6 +1882,7 @@ describe("injectable transport config (shared { server? | url? })", () => {
       () =>
         new GuardTelemetryListener({
           server: { getEvents: async () => ({ events: [], cursor: "c", latestLedger: 1 }) } as never,
+          // @ts-expect-error intentionally passing both server and url
           url: "https://soroban-testnet.stellar.org",
           guard: GUARD,
         }),
