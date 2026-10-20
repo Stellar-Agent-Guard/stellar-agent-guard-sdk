@@ -10,6 +10,8 @@ import {
   InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
+  preflight,
+  preflightBatch,
   validateContractCall,
   type PreFlightCacheOptions,
   type PreFlightDecision,
@@ -91,6 +93,7 @@ function createMockServer(options?: {
       return (
         options?.simulateResponse ?? {
           minResourceFee: "100",
+          latestLedger: 123_456,
           result: {
             auth: [],
           },
@@ -114,6 +117,33 @@ function createTestInterceptor(server: rpc.Server) {
     source: Keypair.random(),
   });
 }
+
+describe("one-shot pre-flight helpers", () => {
+  function config() {
+    return {
+      server: createMockServer(),
+      networkPassphrase: "Test SDF Network ; September 2015",
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+    };
+  }
+
+  it("preflight() constructs an interceptor and checks one call", async () => {
+    const decision = await preflight(config(), validTransferCall());
+    assert.equal(decision.kind, "admissible");
+    assert.equal(
+      decision.kind === "admissible" ? decision.provenance?.ledger : undefined,
+      123_456,
+    );
+  });
+
+  it("preflightBatch() constructs an interceptor and checks a batch", async () => {
+    const decision = await preflightBatch(config(), []);
+    assert.equal(decision.overallAdmissible, true);
+    assert.equal(decision.calls.length, 0);
+  });
+});
 
 describe("validateContractCall validator unit tests", () => {
   describe("contract format validation", () => {
@@ -470,6 +500,99 @@ describe("boundary: valid-but-unusual inputs proceed to simulation", () => {
     const decision = await interceptor.check(call);
     assert.equal(decision.kind, "admissible");
     assert(mockServer.requestCount > 0, "Simulation RPC must be called for valid amount type");
+  });
+});
+
+describe("simulation ledger provenance (#347)", () => {
+  it("reports the ledger from the same simulation that produced the quote", async () => {
+    const mockServer = createMockServer();
+    const interceptor = createTestInterceptor(mockServer);
+
+    const decision = await interceptor.check(validTransferCall());
+
+    assert.equal(decision.kind, "admissible");
+    assert.deepEqual(decision.kind === "admissible" ? decision.provenance : undefined, {
+      ledger: 123_456,
+    });
+  });
+
+  it("omits provenance rather than inventing one when the response has no ledger", async () => {
+    const mockServer = createMockServer({
+      simulateResponse: {
+        minResourceFee: "100",
+        result: { auth: [] },
+        transactionData: {
+          getReadOnly: () => [],
+          getReadWrite: () => [],
+        },
+      },
+    });
+    const interceptor = createTestInterceptor(mockServer);
+
+    const decision = await interceptor.check(validTransferCall());
+
+    assert.equal(decision.kind, "admissible");
+    assert.equal(
+      decision.kind === "admissible" ? decision.provenance : "not-admissible",
+      undefined,
+    );
+  });
+
+  it("omits a malformed ledger instead of passing it through", async () => {
+    for (const latestLedger of [-1, 1.5, Number.NaN, "123", null]) {
+      const mockServer = createMockServer({
+        simulateResponse: {
+          minResourceFee: "100",
+          latestLedger,
+          result: { auth: [] },
+          transactionData: {
+            getReadOnly: () => [],
+            getReadWrite: () => [],
+          },
+        },
+      });
+      const interceptor = createTestInterceptor(mockServer);
+
+      const decision = await interceptor.check(validTransferCall());
+
+      assert.equal(decision.kind, "admissible");
+      assert.equal(
+        decision.kind === "admissible" ? decision.provenance : "not-admissible",
+        undefined,
+        `expected ${String(latestLedger)} to be omitted`,
+      );
+    }
+  });
+
+  it("never performs an additional ledger read to label the quote", async () => {
+    let latestLedgerCalls = 0;
+    const server = {
+      getAccount: async () => ({ sequenceNumber: () => "100" }),
+      getLatestLedger: async () => {
+        latestLedgerCalls += 1;
+        return { sequence: 999_999 };
+      },
+      simulateTransaction: async () => ({
+        minResourceFee: "100",
+        latestLedger: 500_000,
+        result: { auth: [] },
+        transactionData: {
+          getReadOnly: () => [],
+          getReadWrite: () => [],
+        },
+      }),
+    } as unknown as rpc.Server;
+    const interceptor = createTestInterceptor(server);
+
+    const decision = await interceptor.check(validTransferCall());
+
+    assert.equal(decision.kind, "admissible");
+    assert.deepEqual(decision.kind === "admissible" ? decision.provenance : undefined, {
+      ledger: 500_000,
+    });
+    // The check already reads the current ledger once for its cache context;
+    // provenance must add no further read and must not use that value.
+    assert.equal(latestLedgerCalls, 1, "provenance must come from the pricing simulation");
   });
 });
 

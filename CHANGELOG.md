@@ -15,6 +15,7 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Added
 
+- `provenance: { ledger: number } | null` on `CostDecision` and optional `provenance` on the admissible `PreFlightDecision`: priced quotes carry the ledger from the same simulation that produced them, with `null` when the RPC cannot establish a usable marker. Provenance is informational, not an execution guarantee, and is never obtained from a second racing ledger read (#347).
 - `signal` and `timeoutMs` on `check()`, `invoke()` and `CostPreChecker.check()`, plus `RpcTimeoutError` and `DEFAULT_RPC_TIMEOUT_MS`: a hung Soroban RPC can no longer leave a guardrail call pending forever. `check()`/`cost()` report a fired bound as a fail-closed `undetermined` verdict carrying the typed `RpcTimeoutError`; `invoke()` surfaces the same error through its `error` outcome (#114).
 - `dmsUrgency()` and `DMS_WARN_RATIO_DEFAULT`: client-side `'ok' | 'warn' | 'expired' | 'unknown'` dead-man countdown urgency, with the same edge semantics as `deadManRemaining` (#132).
 - `policyDiff()` and the `PolicyChange` type: set-aware structured diff between two policies for operator display (#131).
@@ -34,6 +35,7 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Changed
 
+- `formatFee()` is explicitly a non-negative fee formatter: a negative `bigint` or signed numeric string now throws `TypeError` instead of rendering an impossible negative XLM amount. Zero and every supported positive value format exactly as before (#346).
 - Committed telemetry pages now share one ordering rule across `poll()`, `watch()`, and `watchAll()`: ledger ascending, then transaction hash, topic, and stable id as tie-breakers for same-ledger events. Diagnostic observation order is unchanged (#289).
 - `GuardTelemetryListener` now rejects a concurrent `watch()`/`watchAll()` stream with `ConcurrentTelemetryStreamError` instead of letting two iterators race shared cursor, counter, and buffer state (#291).
 - RPC calls are now bounded by default: `timeoutMs` defaults to `DEFAULT_RPC_TIMEOUT_MS` (30s) instead of waiting indefinitely. Pass `timeoutMs: 0` to restore the previous unbounded behaviour, or `signal` to cancel from your own runtime (#114).
@@ -54,6 +56,8 @@ None.
 
 ### Fixed
 
+- `CostPreChecker` validates both the configured and per-call `maxFeeStroops` as a non-negative `bigint` before any simulation, throwing the typed `InvalidFeeCeilingError` (an `InvalidInputError`/`TypeError`) for negative or non-`bigint` values. A ceiling of `0n` remains a real ceiling, distinct from omission, and large valid ceilings are preserved exactly (#345).
+- Cross-adapter conformance now proves that a throwing or rejecting `onDecision`/`onBlocked` observer cannot stop an admissible handler or resume a refused one, alongside the existing isolation behavior (#312).
 - Framework adapters fail closed when `toContractCall`/`toContractCalls` throws or returns a malformed call: the handler never runs and the halt is reported as an `undetermined` decision with `AdapterMappingError` as the cause. Returning `null` (or an empty array) still means "not fund-moving" and passes the action through untouched (#316).
 - Adapter observer hooks (`onDecision`, `onBlocked`) are isolated from their failures: a synchronous throw or a rejected promise is swallowed — reported to `blockedHookLogger` when one is supplied — so a failing sink can never resume a halted action, turn a pass into a refusal, or surface as an unhandled rejection (#313).
 - `startHeartbeat()` now validates its inputs before the scheduler exists: a negative or non-finite `maxSkewMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, and an unusable retry budget are all rejected with an error naming the field — before the first beat, and before the grace window is read from the chain (#341).

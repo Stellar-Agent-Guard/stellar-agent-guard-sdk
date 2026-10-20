@@ -26,9 +26,13 @@
  */
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { concatBytes, sha256Hex, utf8Bytes } from "./hash.ts";
-import { GuardError, SimulationError } from "./errors.ts";
+import { GuardError, InvalidInputError, SimulationError } from "./errors.ts";
 import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
-import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
+import {
+  resourceBreakdownFromSimulation,
+  type CostProvenance,
+  type ResourceBreakdown,
+} from "./cost.ts";
 import {
   extractTransferAmount,
   readPersistentEntry,
@@ -43,30 +47,12 @@ import type { AgentSigner, ContractCall } from "./tx.ts";
 import { systemClock, type Clock } from "./clock.ts";
 
 /**
- * Thrown synchronously when a ContractCall has invalid shape or types
- * before any RPC round-trip is attempted.
- *
- * Distinguishes programmer errors (malformed contract ID, invalid symbol shape,
- * invalid argument types) from policy outcomes (blocked decisions).
+ * Re-exported from `errors.ts` for the existing import path. Thrown
+ * synchronously when a ContractCall has invalid shape or types before any RPC
+ * round-trip is attempted, distinguishing programmer errors from policy
+ * outcomes (blocked decisions).
  */
-export class InvalidInputError extends Error {
-  readonly field: string;
-  readonly rule: string;
-  readonly detail?: string | undefined;
-
-  constructor(field: string, rule: string, detail?: string) {
-    const message = detail
-      ? `Invalid input for '${field}': violates rule '${rule}' (${detail})`
-      : `Invalid input for '${field}': violates rule '${rule}'`;
-    super(message);
-    this.name = "InvalidInputError";
-    this.field = field;
-    this.rule = rule;
-    if (detail !== undefined) {
-      this.detail = detail;
-    }
-  }
-}
+export { InvalidInputError };
 
 /**
  * Validate a ContractCall's input shape before RPC dispatch.
@@ -192,6 +178,13 @@ export type PreFlightDecision =
       footprintKeys: number;
       /** Resource limits and footprint counts from the same simulation. */
       resourceBreakdown?: ResourceBreakdown;
+      /**
+       * Ledger snapshot the simulation priced against, read from that same
+       * simulation response. Informational only: it identifies the state the
+       * quote describes, not a guarantee that submission will land there.
+       * Omitted when the RPC response did not establish a usable ledger.
+       */
+      provenance?: CostProvenance;
     }
   | {
       allowed: false;
@@ -210,6 +203,24 @@ export type PreFlightDecision =
       /** Machine-readable cause; use `instanceof` instead of matching `detail`. */
       error?: GuardError;
     };
+
+/**
+ * Read the ledger marker out of the simulation that produced the quote.
+ *
+ * This deliberately reads the successful enforced simulation's own
+ * `latestLedger` instead of issuing `getLatestLedger()` again: a second read
+ * can land on a newer ledger and would then describe state the simulation never
+ * saw. The value is informational, and an absent or malformed marker is omitted
+ * rather than replaced with a fabricated sequence number.
+ */
+function provenanceFromSimulation(simulation: unknown): CostProvenance | undefined {
+  if (typeof simulation !== "object" || simulation === null) return undefined;
+  const ledger = (simulation as { latestLedger?: unknown }).latestLedger;
+  if (typeof ledger !== "number" || !Number.isSafeInteger(ledger) || ledger < 0) {
+    return undefined;
+  }
+  return { ledger };
+}
 
 /**
  * Options for a batched pre-flight check.
@@ -661,12 +672,14 @@ export class PreFlightInterceptor {
         };
         return decision;
       }
+      const provenance = provenanceFromSimulation(outcome.simulation);
       decision = {
         allowed: true,
         kind: "admissible",
         estimatedResourceFee,
         footprintKeys,
         ...(resourceBreakdown ? { resourceBreakdown } : {}),
+        ...(provenance ? { provenance } : {}),
       };
     }
 

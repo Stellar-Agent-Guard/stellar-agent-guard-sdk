@@ -1024,4 +1024,68 @@ this branch before merge** and replace this addendum with the fresh run output.
 No credentials, deployment or policy change are needed beyond what the suite
 already does.
 
+## Addendum — 2026-10-20 (cost ceilings, fee formatting, ledger provenance, observer isolation)
+
+Recorded because this PR touches the enforcement path (`src/preflight.ts`) and
+CI's `enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this contributor checkout, so `npm run test:integration` cannot begin its
+scenarios. No fresh Phase-2 transcript is claimed below. The CI gate verifies
+only that this file was touched — not the numbers — and the same limitation
+stated in every addendum above applies here unchanged.
+
+### What the PR changes on the enforcement path
+
+- `src/preflight.ts`: an admissible verdict now carries an optional
+  `provenance: { ledger }`, read from the **same** successful enforced
+  simulation's `latestLedger`. It is informational metadata only. A missing,
+  fractional, negative, non-numeric or unsafe marker is omitted rather than
+  fabricated, and no additional ledger RPC is made to label the quote.
+- `src/cost.ts`: the fee ceiling is validated as a non-negative `bigint` at
+  construction and before a per-call override is used, `formatFee()` rejects
+  negative fees, and `CostDecision` exposes the same provenance (or `null` on
+  blocked/undetermined arms).
+- `src/errors.ts`: `InvalidInputError` is shared from here, and the new
+  `InvalidFeeCeilingError` extends it. Invalid input remains a `TypeError` and
+  is still re-exported from `src/preflight.ts` for existing import paths.
+
+Unchanged, deliberately: the authorization preimage and nonce policy, the
+probe → sign → enforced-simulation ordering, resource assembly, block
+classification, and every existing verdict or outcome value. Provenance is
+copied out of the simulation response after the guard has already decided;
+validation rejects only malformed configuration before any RPC. The five
+scenarios recorded above are produced by the guard contract during enforced
+simulation, so the recorded results remain valid for them.
+
+### What did run locally (Node v24.21.0, matching the package's engine)
+
+```text
+npm run typecheck                        # clean
+npm run check:strict-ratchet             # ok
+npm run lint                             # clean
+npm test                                 # 1017 tests, 1016 pass, 0 fail, 1 skipped
+npm run test:coverage:floor              # ok — preflight.ts 95.84% lines / 84.51% branch / 100% funcs
+npm run build                            # clean
+npm run test:smoke                       # 173 named exports resolve via the ESM export map
+npm run test:exports                     # every declared subpath resolves; undeclared paths refused
+```
+
+The new behaviour is covered offline with mocks: `tests/unit/cost.test.ts`
+pins ceiling validation (negative, zero, omitted, per-call, large), negative
+`formatFee` rejection, and provenance mapping/serialization;
+`tests/unit/preflight.test.ts` pins provenance coming from the pricing
+simulation and its omission when unavailable; and
+`tests/unit/adapter-conformance.test.ts` proves across all four adapters that a
+throwing or rejecting `onDecision` cannot stop an admissible handler (while the
+existing blocked/undetermined assertions prove it cannot resume a refusal).
+
+These are mocks. They cannot substitute for the live run, and this addendum does
+not claim they do.
+
+**A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge** and replace this addendum with the fresh run output.
+No credentials, deployment or policy change are needed beyond what the suite
+already does.
+
 

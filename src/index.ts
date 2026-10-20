@@ -26,6 +26,8 @@ export {
   BroadcastError,
   ContractResponseError,
   GuardError,
+  InvalidFeeCeilingError,
+  InvalidInputError,
   PolicyDecodeError,
   SigningError,
   SimulationError,
@@ -202,7 +204,6 @@ export type {
 } from "./trace.ts";
 
 export {
-  InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
   preflight,
@@ -240,6 +241,7 @@ export type {
   CostPreCheckConfig,
   CostPreCheckOptions,
   CostPreCheckResult,
+  CostProvenance,
   CostWithDecision,
   FeeBreakdown,
   PolicyContext,
