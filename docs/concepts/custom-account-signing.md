@@ -29,3 +29,32 @@ automatically — `keypairAgentSigner` / `toAgentSigner` — so single-key calle
 are unchanged. This is the seam multi-key agent signing will use when the
 contracts repo's v2 decision lands; see
 [Multi-Key Agent Signing](multi-key-agent-signing.md).
+
+## Validating the signer identity
+
+The SDK validates `AgentSigner.publicKey` before it is ever used. Two verify-only
+forms are supported:
+
+- the registered account StrKey, `G…`, including its version byte and checksum;
+- the raw 32-byte Ed25519 public key encoded as 64 hexadecimal characters (the
+  form the guard contract stores). A hex key is normalised to its equivalent
+  `G…` StrKey for diagnostics.
+
+Validation runs when a signer is adapted (`keypairAgentSigner` / `toAgentSigner`)
+and again at the signing boundary (`buildGuardAuthEntry`, and before any RPC in
+`enforceCall`). A bad configuration therefore fails with a `SigningError` naming
+`signer.publicKey`, before the signer is invoked or a simulation is made, rather
+than surfacing later as an opaque `__check_auth` failure.
+
+Secret seeds (`S…`) are explicitly rejected and are never used to derive a
+public key. Supply the public identity only; a local `Keypair` still works by
+being wrapped, and the `AgentSigner` it produces exposes just the public key
+and a `signDigest` function.
+
+```ts
+import { Keypair, keypairAgentSigner, validateAgentPublicKey } from "stellar-agent-guard-sdk";
+
+const local = keypairAgentSigner(Keypair.random()); // validated at construction
+validateAgentPublicKey(local.publicKey);             // returns the G… form
+validateAgentPublicKey(local.publicKey.slice(0, -1) + "A"); // throws SigningError
+```
