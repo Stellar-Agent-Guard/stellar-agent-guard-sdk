@@ -15,6 +15,7 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Added
 
+- Agent-key rotation now validates StrKey checksums and converts supported `G...`, 32-byte, and 64-character hex public keys through one canonical path. Invalid values throw `InvalidInputError` naming `newAgent` and the accepted formats without echoing the supplied key (#303).
 - `provenance: { ledger: number } | null` on `CostDecision` and optional `provenance` on the admissible `PreFlightDecision`: priced quotes carry the ledger from the same simulation that produced them, with `null` when the RPC cannot establish a usable marker. Provenance is informational, not an execution guarantee, and is never obtained from a second racing ledger read (#347).
 - `signal` and `timeoutMs` on `check()`, `invoke()` and `CostPreChecker.check()`, plus `RpcTimeoutError` and `DEFAULT_RPC_TIMEOUT_MS`: a hung Soroban RPC can no longer leave a guardrail call pending forever. `check()`/`cost()` report a fired bound as a fail-closed `undetermined` verdict carrying the typed `RpcTimeoutError`; `invoke()` surfaces the same error through its `error` outcome (#114).
 - `dmsUrgency()` and `DMS_WARN_RATIO_DEFAULT`: client-side `'ok' | 'warn' | 'expired' | 'unknown'` dead-man countdown urgency, with the same edge semantics as `deadManRemaining` (#132).
