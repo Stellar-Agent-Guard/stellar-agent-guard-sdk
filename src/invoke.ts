@@ -16,6 +16,7 @@
  * which is the property the pre-flight interceptor is built to expose.
  */
 import { Account, Address, Keypair, Operation, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { systemClock, type Clock } from "./clock.ts";
 import { feeBreakdown, type FeeBreakdown } from "./cost.ts";
 import {
   BroadcastError,
@@ -32,6 +33,18 @@ import {
   type GuardLoggerInput,
 } from "./logger.ts";
 import type { TraceStepName, TraceStepStatus } from "./trace.ts";
+import type {
+  InvokeErrorCause,
+  InvokeRetryAttempt,
+  InvokeRetryMetadata,
+  RetryableInvokeFailure,
+} from "./retry.ts";
+export type {
+  InvokeErrorCause,
+  InvokeRetryAttempt,
+  InvokeRetryMetadata,
+  RetryableInvokeFailure,
+} from "./retry.ts";
 import {
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
@@ -51,6 +64,7 @@ import {
   type AgentSigner,
   type ContractCall,
   type SubmissionResult,
+  toAgentSigner,
 } from "./tx.ts";
 
 /** How the guard's authorization is produced for a call that needs it. */
@@ -97,19 +111,29 @@ export class RpcTimeoutError extends GuardError {
   readonly stage: string;
   /** True when the caller's own `AbortSignal` fired; false for a timeout. */
   readonly aborted: boolean;
+  /** True when the overall `deadlineMs` budget fired, false for `timeoutMs`. */
+  readonly deadline: boolean;
   /** The budget that fired, in milliseconds; absent when the bound was a signal abort. */
   readonly timeoutMs?: number | undefined;
 
-  constructor(params: { stage: string; aborted: boolean; timeoutMs?: number }) {
+  constructor(params: {
+    stage: string;
+    aborted: boolean;
+    timeoutMs?: number;
+    deadline?: boolean;
+  }) {
     const reason = params.aborted
       ? "aborted by caller signal"
-      : `exceeded timeout of ${params.timeoutMs}ms`;
+      : params.deadline
+        ? "exceeded the overall invoke deadline"
+        : `exceeded timeout of ${params.timeoutMs}ms`;
     // The classified cause the pipeline surfaces for an abort or a timeout:
     // callers branch on `cause === "timeout"`. The `stage` and `aborted` fields
     // carry the detail, so nothing is lost to the single coarse cause.
     super(`RPC call during '${params.stage}' ${reason}`, { cause: "timeout" });
     this.stage = params.stage;
     this.aborted = params.aborted;
+    this.deadline = params.deadline === true;
     if (params.timeoutMs !== undefined) this.timeoutMs = params.timeoutMs;
   }
 }
@@ -204,19 +228,12 @@ export const INVOKE_ERROR_CAUSES = {
   sequenceNumberCollision: "sequence_number_collision",
 } as const;
 
-export type InvokeErrorCause =
-  (typeof INVOKE_ERROR_CAUSES)[keyof typeof INVOKE_ERROR_CAUSES];
-
 /**
  * Failures that a fresh invocation pipeline can fix: a stale-ledger resource
- * declaration (see `isStaleLedgerResourceFailure`) or a sequence-number
- * collision (see `isSequenceNumberFailure`) in `tx.ts`. Both share the single
- * bounded retry policy in `invoke`.
+ * declaration (see `isStaleLedgerResourceFailure`), a sequence-number collision
+ * (see `isSequenceNumberFailure`) in `tx.ts`, or a minimum-fee broadcast
+ * rejection. They share the bounded retry policy in `invoke`.
  */
-export type RetryableInvokeFailure =
-  | "stale_ledger_resource_limit"
-  | "sequence_number_collision"
-  | "min_fee";
 
 /** The coarse cause each retryable failure reports once the budget is spent. */
 const RETRYABLE_CAUSES = {
@@ -241,6 +258,8 @@ export interface InvokeErrorOutcome {
   lastFee?: bigint | undefined;
   /** Submission result when broadcast was attempted. */
   submission?: SubmissionResult | undefined;
+  /** Structured retry metadata attached to the terminal outcome. */
+  retry?: InvokeRetryMetadata | undefined;
 }
 
 /**
@@ -267,8 +286,14 @@ export class InvokeRetryError extends Error {
   readonly diagnosticEvents: unknown[];
   /** An exhausted attempt is no longer itself retryable. */
   readonly retryable?: undefined;
+  /** Structured retry metadata; always present on an exhausted invocation. */
+  readonly retry: InvokeRetryMetadata;
 
-  constructor(params: { attempts: number; lastOutcome: InvokeErrorOutcome }) {
+  constructor(params: {
+    attempts: number;
+    lastOutcome: InvokeErrorOutcome;
+    retry?: InvokeRetryMetadata;
+  }) {
     const lastCause =
       params.lastOutcome.retryable === undefined
         ? (params.lastOutcome.cause ?? INVOKE_ERROR_CAUSES.undetermined)
@@ -285,6 +310,17 @@ export class InvokeRetryError extends Error {
     this.lastOutcome = params.lastOutcome;
     this.error = params.lastOutcome.error;
     this.diagnosticEvents = params.lastOutcome.diagnosticEvents;
+    this.retry = params.retry ?? {
+      attempts: params.attempts,
+      maxAttempts: params.attempts,
+      retried: params.attempts > 1,
+      exhausted: true,
+      totalDelayMs: 0,
+      retries: [],
+      terminalFailure: params.lastOutcome.retryable ?? null,
+      terminalCause: lastCause,
+      outcome: "error",
+    };
   }
 }
 
@@ -349,7 +385,12 @@ export interface FeeBumpConfig {
 }
 
 export type PipelineOutcome =
-  | { kind: "allowed"; submission: SubmissionResult }
+  | {
+      kind: "allowed";
+      submission: SubmissionResult;
+      /** Structured retry metadata attached to the terminal outcome. */
+      retry?: InvokeRetryMetadata | undefined;
+    }
   | {
       kind: "blocked";
       /** Reason symbol from the contract's own event/topic vocabulary. */
@@ -361,6 +402,8 @@ export type PipelineOutcome =
       transactionHash?: string;
       /** True only for a post-broadcast refusal; absent for free preflight blocks. */
       charged?: boolean;
+      /** Structured retry metadata attached to the terminal outcome. */
+      retry?: InvokeRetryMetadata | undefined;
     }
   | InvokeErrorOutcome
   | InvokeRetryError;
@@ -387,7 +430,10 @@ export interface InvokeRetryOptions {
   baseDelayMs?: number;
   /** Maximum full-jitter window in milliseconds. Default: 2,000. */
   maxDelayMs?: number;
-  /** RNG used for full jitter; it must return a value in [0, 1). */
+  /**
+   * RNG used for full jitter; it must return a finite value in `[0, 1)`.
+   * Supplying both `random` and `jitter` is rejected as contradictory.
+   */
   random?: () => number;
   /** Alias for `random`, useful when describing the jitter strategy. */
   jitter?: () => number;
@@ -424,12 +470,14 @@ export interface InvokeParams {
   pollOptions?: { pollAttempts?: number; pollIntervalMs?: number } | undefined;
   /**
    * Optional configuration for fee-bump retry when broadcast hits min-fee.
-   * If omitted, defaults to 3 attempts with a 2x fee multiplier.
+   * If omitted, defaults to 3 attempts with a 2x fee multiplier. Every field is
+   * validated at the public boundary before any RPC, signing or broadcast work.
    */
   feeBump?: FeeBumpConfig | undefined;
   /**
    * Overall maximum retries across retryable classes. If specified, bounds the
-   * total attempts across all triggers.
+   * total attempts across all triggers (so `0` means one attempt). When both
+   * this and a per-class budget are supplied, the tighter bound wins.
    */
   maxRetries?: number | undefined;
   /** Custom inclusion fee (used internally during fee-bump retries). */
@@ -448,6 +496,25 @@ export interface InvokeParams {
    * outcome as an abort.
    */
   timeoutMs?: number | undefined;
+  /**
+   * Overall time budget for the whole invocation, in milliseconds, measured
+   * from the moment `invoke()` starts. It bounds discovery, signing, enforced
+   * simulation, retry backoff, assembly, broadcast and post-submit polling in
+   * one budget: each RPC call and each delay consumes the same remaining time.
+   *
+   * Expiry is fail-closed. It produces an `error` outcome carrying a
+   * `RpcTimeoutError` with `deadline: true` (never `allowed`, never a dry run's
+   * `admissible`), even when the guard had already approved the call. Omit it
+   * to keep the per-call `timeoutMs` behaviour; pass a positive finite number
+   * of milliseconds. Cannot be combined with `timeoutMs: 0` into an unbounded
+   * pipeline: the deadline still applies.
+   */
+  deadlineMs?: number | undefined;
+  /**
+   * Time source used for deadline accounting and poll/backoff delays. Defaults
+   * to `systemClock`; inject a `FakeClock` for deterministic time control.
+   */
+  clock?: Clock | undefined;
   /**
    * Optional, logger-agnostic observability hook: one `InvokeStepEvent` per
    * pipeline-stage attempt, covering probe → sign → simulate → broadcast,
@@ -492,6 +559,283 @@ export interface InvokeStepEvent {
   durationMs: number;
   /** 0-based retry index: `0` normally, `1` on the stale-ledger re-run. */
   attempt: number;
+}
+
+/** Human-readable rendering of an option value for a field-specific error. */
+function describeOptionValue(value: unknown): string {
+  if (typeof value === "string") return JSON.stringify(value);
+  if (typeof value === "bigint") return `${value}n`;
+  if (typeof value === "function") return "function";
+  if (typeof value === "number" && Number.isNaN(value)) return "NaN";
+  return value === undefined ? "undefined" : String(value);
+}
+
+/** Throw a `RangeError` naming the exact option field and its expected shape. */
+function rejectOption(field: string, expected: string, value: unknown): never {
+  throw new RangeError(`${field} must be ${expected} (received ${describeOptionValue(value)})`);
+}
+
+function assertIntegerOption(field: string, value: unknown, minimum: number): void {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < minimum) {
+    rejectOption(field, `a safe integer >= ${minimum}`, value);
+  }
+}
+
+function assertFiniteOption(
+  field: string,
+  value: unknown,
+  minimum: number,
+  inclusive = true,
+): void {
+  if (
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    (inclusive ? value < minimum : value <= minimum)
+  ) {
+    rejectOption(
+      field,
+      `a finite number ${inclusive ? ">=" : ">"} ${minimum}`,
+      value,
+    );
+  }
+}
+
+/**
+ * Validate every caller-controlled option at the public `invoke()` boundary.
+ *
+ * This runs first, before the account queue, any signer is invoked, or any RPC
+ * request is made, so a `NaN`, a negative delay, a contradictory alias, or a
+ * nonsensical fee multiplier fails as a field-specific `RangeError` with zero
+ * network calls. The checks are deliberately runtime checks even where the
+ * TypeScript type already says the value is a number: JavaScript callers and
+ * JSON-derived config objects are not protected by the type system.
+ */
+function validateInvokeOptions(params: InvokeParams): void {
+  const retry = params.retry as InvokeRetryOptions | null | undefined;
+  if (retry !== undefined) {
+    if (retry === null || typeof retry !== "object") {
+      rejectOption("retry", "an object", retry);
+    }
+    if (retry.maxAttempts !== undefined) {
+      assertIntegerOption("retry.maxAttempts", retry.maxAttempts, 1);
+    }
+    if (retry.baseDelayMs !== undefined) {
+      assertFiniteOption("retry.baseDelayMs", retry.baseDelayMs, 0);
+    }
+    if (retry.initialDelayMs !== undefined) {
+      assertFiniteOption("retry.initialDelayMs", retry.initialDelayMs, 0);
+    }
+    if (retry.maxDelayMs !== undefined) {
+      assertFiniteOption("retry.maxDelayMs", retry.maxDelayMs, 0);
+    }
+    if (
+      retry.baseDelayMs !== undefined &&
+      retry.initialDelayMs !== undefined &&
+      retry.baseDelayMs !== retry.initialDelayMs
+    ) {
+      rejectOption(
+        "retry.initialDelayMs",
+        "equal to retry.baseDelayMs when both are provided",
+        retry.initialDelayMs,
+      );
+    }
+    const effectiveBaseDelay = retry.baseDelayMs ?? retry.initialDelayMs;
+    if (
+      effectiveBaseDelay !== undefined &&
+      retry.maxDelayMs !== undefined &&
+      retry.maxDelayMs < effectiveBaseDelay
+    ) {
+      rejectOption(
+        "retry.maxDelayMs",
+        "greater than or equal to retry.baseDelayMs",
+        retry.maxDelayMs,
+      );
+    }
+    if (retry.random !== undefined && typeof retry.random !== "function") {
+      rejectOption("retry.random", "a function returning a number in [0, 1)", retry.random);
+    }
+    if (retry.jitter !== undefined && typeof retry.jitter !== "function") {
+      rejectOption("retry.jitter", "a function returning a number in [0, 1)", retry.jitter);
+    }
+    if (retry.random !== undefined && retry.jitter !== undefined) {
+      rejectOption("retry.jitter", "omitted when retry.random is provided", retry.jitter);
+    }
+    if (retry.sleep !== undefined && typeof retry.sleep !== "function") {
+      rejectOption("retry.sleep", "a function returning a promise", retry.sleep);
+    }
+  }
+
+  if (params.maxRetries !== undefined) {
+    assertIntegerOption("maxRetries", params.maxRetries, 0);
+  }
+
+  const feeBump = params.feeBump as FeeBumpConfig | null | undefined;
+  if (feeBump !== undefined) {
+    if (feeBump === null || typeof feeBump !== "object") {
+      rejectOption("feeBump", "an object", feeBump);
+    }
+    if (feeBump.maxAttempts !== undefined) {
+      assertIntegerOption("feeBump.maxAttempts", feeBump.maxAttempts, 1);
+    }
+    if (feeBump.feeMultiplier !== undefined) {
+      assertFiniteOption("feeBump.feeMultiplier", feeBump.feeMultiplier, 1, false);
+    }
+    if (feeBump.initialInclusionFee !== undefined) {
+      if (
+        typeof feeBump.initialInclusionFee !== "bigint" ||
+        feeBump.initialInclusionFee <= 0n
+      ) {
+        rejectOption(
+          "feeBump.initialInclusionFee",
+          "a positive bigint in stroops",
+          feeBump.initialInclusionFee,
+        );
+      }
+    }
+  }
+
+  if (params.pollAttempts !== undefined) {
+    assertIntegerOption("pollAttempts", params.pollAttempts, 1);
+  }
+  if (params.pollIntervalMs !== undefined) {
+    assertFiniteOption("pollIntervalMs", params.pollIntervalMs, 0);
+  }
+
+  const pollOptions = params.pollOptions as
+    | { pollAttempts?: number; pollIntervalMs?: number }
+    | null
+    | undefined;
+  if (pollOptions !== undefined) {
+    if (pollOptions === null || typeof pollOptions !== "object") {
+      rejectOption("pollOptions", "an object", pollOptions);
+    }
+    if (pollOptions.pollAttempts !== undefined) {
+      assertIntegerOption("pollOptions.pollAttempts", pollOptions.pollAttempts, 1);
+    }
+    if (pollOptions.pollIntervalMs !== undefined) {
+      assertFiniteOption("pollOptions.pollIntervalMs", pollOptions.pollIntervalMs, 0);
+    }
+    if (
+      pollOptions.pollAttempts !== undefined &&
+      params.pollAttempts !== undefined &&
+      pollOptions.pollAttempts !== params.pollAttempts
+    ) {
+      rejectOption(
+        "pollOptions.pollAttempts",
+        "equal to pollAttempts when both are provided",
+        pollOptions.pollAttempts,
+      );
+    }
+    if (
+      pollOptions.pollIntervalMs !== undefined &&
+      params.pollIntervalMs !== undefined &&
+      pollOptions.pollIntervalMs !== params.pollIntervalMs
+    ) {
+      rejectOption(
+        "pollOptions.pollIntervalMs",
+        "equal to pollIntervalMs when both are provided",
+        pollOptions.pollIntervalMs,
+      );
+    }
+  }
+
+  if (params.timeoutMs !== undefined) {
+    assertFiniteOption("timeoutMs", params.timeoutMs, 0);
+  }
+  if (params.deadlineMs !== undefined) {
+    assertFiniteOption("deadlineMs", params.deadlineMs, 0, false);
+  }
+
+  const clock = params.clock as Clock | null | undefined;
+  if (clock !== undefined) {
+    if (
+      clock === null ||
+      typeof clock !== "object" ||
+      typeof clock.now !== "function" ||
+      typeof clock.sleep !== "function"
+    ) {
+      rejectOption("clock", "an object with now() and sleep()", clock);
+    }
+  }
+}
+
+/**
+ * An absolute deadline measured on the invocation's injected clock.
+ *
+ * `deadlineMs` is a duration, so it is converted once at the start of the call.
+ * Every retry, backoff and poll then reads the same absolute instant, which is
+ * what makes the budget shared rather than restarted per stage.
+ */
+interface InvokeDeadline {
+  /** Absolute clock time, in milliseconds, at which the budget is spent. */
+  readonly at: number;
+  /** Milliseconds left; negative once the deadline has passed. */
+  remainingMs(): number;
+  /** True at or after the deadline instant. */
+  expired(): boolean;
+}
+
+function makeDeadline(params: InvokeParams, clock: Clock): InvokeDeadline | undefined {
+  if (params.deadlineMs === undefined) return undefined;
+  const at = clock.now() + params.deadlineMs;
+  return {
+    at,
+    remainingMs: () => at - clock.now(),
+    expired: () => clock.now() >= at,
+  };
+}
+
+/** The fail-closed error for a spent overall deadline. */
+function deadlineTimeout(stage: string): RpcTimeoutError {
+  return new RpcTimeoutError({ stage, aborted: false, deadline: true });
+}
+
+function assertWithinDeadline(deadline: InvokeDeadline | undefined, stage: string): void {
+  if (deadline !== undefined && deadline.remainingMs() <= 0) {
+    throw deadlineTimeout(stage);
+  }
+}
+
+/**
+ * Bound the outer RPC race by the smaller of the per-call timeout and the
+ * overall deadline. `timeoutMs: 0` disables the per-call bound but never the
+ * deadline, so an opt-out of one cannot silently opt out of the other.
+ */
+function outerRpcTimeout(
+  params: InvokeParams,
+  deadline: InvokeDeadline | undefined,
+): number | undefined {
+  if (deadline === undefined) return params.timeoutMs;
+  const remaining = deadline.remainingMs();
+  if (remaining <= 0) return 0;
+  const perCall = params.timeoutMs ?? DEFAULT_RPC_TIMEOUT_MS;
+  return perCall === 0 ? remaining : Math.min(perCall, remaining);
+}
+
+function resolvePollOptions(params: InvokeParams): {
+  pollAttempts?: number;
+  pollIntervalMs?: number;
+} {
+  const pollAttempts = params.pollOptions?.pollAttempts ?? params.pollAttempts;
+  const pollIntervalMs = params.pollOptions?.pollIntervalMs ?? params.pollIntervalMs;
+  return {
+    ...(pollAttempts !== undefined ? { pollAttempts } : {}),
+    ...(pollIntervalMs !== undefined ? { pollIntervalMs } : {}),
+  };
+}
+
+function resolveFeeBumpOptions(params: InvokeParams): {
+  maxAttempts: number;
+  feeMultiplier: number;
+  initialInclusionFee: bigint;
+} {
+  const requested = params.feeBump?.maxAttempts ?? 3;
+  const overall = params.maxRetries !== undefined ? params.maxRetries + 1 : Number.POSITIVE_INFINITY;
+  return {
+    maxAttempts: Math.max(1, Math.min(requested, overall)),
+    feeMultiplier: params.feeBump?.feeMultiplier ?? 2,
+    initialInclusionFee: params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE),
+  };
 }
 
 /**
@@ -794,10 +1138,16 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
     options.baseDelayMs * 2 ** Math.max(0, attempt - 1),
   );
   const sample = options.random();
-  // A custom RNG should return [0, 1), but clamp a bad edge value rather than
-  // allowing a production retry policy to be disabled by an out-of-range sample.
-  const normalized = Number.isFinite(sample) ? Math.min(Math.max(sample, 0), 1) : 0;
-  return Math.floor(window * normalized);
+  // A custom RNG must return [0, 1). Clamping a bad value would hide a
+  // misconfigured source and could silently disable the intended distribution;
+  // fail with the field named instead, before the retry sleeps or any further
+  // RPC is made.
+  if (!Number.isFinite(sample) || sample < 0 || sample >= 1) {
+    throw new RangeError(
+      `retry.random must return a finite value in [0, 1) (received ${describeOptionValue(sample)})`,
+    );
+  }
+  return Math.floor(window * sample);
 }
 
 /**
@@ -902,18 +1252,50 @@ export function invoke(
 ): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
 export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
 export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+  // The public boundary: every option is validated before the account queue,
+  // signing or any RPC. A bad option is a field-specific RangeError, not an
+  // `undetermined` outcome produced after a wasted simulation.
+  validateInvokeOptions(params);
+
+  const clock = params.clock ?? systemClock;
+  const deadline = makeDeadline(params, clock);
+  if (deadline !== undefined && deadline.expired()) {
+    return timeoutOutcome(deadlineTimeout("invoke"));
+  }
+
   // A dry run performs exactly one pass: it never reaches broadcast, so there
   // is no stale-ledger rejection to retry, no sleep to justify, and nothing to
-  // serialize against the account queue.
-  if (params.dryRun) return invokeDryRun(params);
+  // serialize against the account queue. The same deadline and per-call bound
+  // still apply, and expiry is reported as an `undetermined` dry run.
+  if (params.dryRun) {
+    try {
+      return await withRpcAbort(
+        {
+          stage: "invoke",
+          signal: params.signal,
+          timeoutMs: outerRpcTimeout(params, deadline),
+        },
+        () => invokeDryRun(params, deadline, clock),
+      );
+    } catch (error) {
+      if (error instanceof RpcTimeoutError) return dryRunTimeoutResult(error);
+      throw error;
+    }
+  }
 
   try {
     // Every RPC the pipeline makes sits inside this bound: an already-aborted
     // signal short-circuits before the account is looked up, and a mid-flight
     // abort or a fired timeout rejects promptly with `RpcTimeoutError`.
     return await withRpcAbort(
-      { stage: "invoke", signal: params.signal, timeoutMs: params.timeoutMs },
-      () => invokeWithQueue(params),
+      {
+        stage: "invoke",
+        signal: params.signal,
+        // With a deadline, the outer race is the smaller of the per-call bound
+        // and the time left; `timeoutMs: 0` disables only the former.
+        timeoutMs: outerRpcTimeout(params, deadline),
+      },
+      () => invokeWithQueue(params, deadline, clock),
     );
   } catch (error) {
     if (error instanceof RpcTimeoutError) {
@@ -925,70 +1307,194 @@ export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
   }
 }
 
-async function invokeWithQueue(params: InvokeParams): Promise<InvokeOutcome> {
+/**
+ * Build the additive retry record once, so the outcome, the typed error and the
+ * logger all describe the same attempts. Only numbers, attempt indexes and
+ * retryable-class names are copied — never details, XDR, hashes or diagnostics.
+ */
+function retryMetadata(params: {
+  attempts: number;
+  maxAttempts: number;
+  retries: readonly InvokeRetryAttempt[];
+  totalDelayMs: number;
+  exhausted: boolean;
+  outcome: "allowed" | "blocked" | "error";
+  terminalFailure: RetryableInvokeFailure | null;
+  terminalCause: InvokeErrorCause | null;
+}): InvokeRetryMetadata {
+  return {
+    attempts: params.attempts,
+    maxAttempts: params.maxAttempts,
+    retried: params.retries.length > 0,
+    exhausted: params.exhausted,
+    totalDelayMs: params.totalDelayMs,
+    retries: params.retries.map((attempt) => ({ ...attempt })),
+    terminalFailure: params.terminalFailure,
+    terminalCause: params.terminalCause,
+    outcome: params.outcome,
+  };
+}
+
+async function invokeWithQueue(
+  params: InvokeParams,
+  deadline: InvokeDeadline | undefined,
+  clock: Clock,
+): Promise<InvokeOutcome> {
   const sourceKey = await params.source.publicKey();
   return withAccountQueue(params.server, sourceKey, async () => {
     const retry = resolveRetryOptions(params.retry);
     const logger = resolveLogger(params.logger);
-
-    const configuredFeeMax =
-      params.feeBump?.maxAttempts ??
-      (params.maxRetries !== undefined ? params.maxRetries + 1 : 3);
-    const maxFeeAttempts = Math.max(1, configuredFeeMax);
-    const feeMultiplier = params.feeBump?.feeMultiplier ?? 2;
-    let currentInclusionFee = params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE);
+    const poll = resolvePollOptions(params);
+    const feeOptions = resolveFeeBumpOptions(params);
+    const generalMaxAttempts = Math.min(
+      retry.maxAttempts,
+      params.maxRetries !== undefined ? params.maxRetries + 1 : Number.POSITIVE_INFINITY,
+    );
+    let currentInclusionFee = feeOptions.initialInclusionFee;
 
     let feeAttempt = 0;
     let generalAttempt = 0;
+    const retries: InvokeRetryAttempt[] = [];
+    let totalDelayMs = 0;
 
-    while (true) {
-      generalAttempt += 1;
-      feeAttempt += 1;
-      // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
-      const outcome = await invokePipeline(params, generalAttempt - 1, {
-        inclusionFee: currentInclusionFee,
+    const metadata = (
+      outcome: "allowed" | "blocked" | "error",
+      terminalFailure: RetryableInvokeFailure | null,
+      terminalCause: InvokeErrorCause | null,
+      exhausted: boolean,
+      maxAttempts: number = generalMaxAttempts,
+    ): InvokeRetryMetadata =>
+      retryMetadata({
+        attempts: generalAttempt,
+        maxAttempts,
+        retries,
+        totalDelayMs,
+        exhausted,
+        outcome,
+        terminalFailure,
+        terminalCause,
       });
 
-      if (outcome.kind !== "error" || outcome.retryable === undefined) {
-        logTerminalOutcome(logger, outcome);
-        return outcome;
-      }
+    const deadlineErrorOutcome = (error: RpcTimeoutError): InvokeErrorOutcome => ({
+      ...timeoutOutcome(error),
+      retry: metadata("error", null, null, false),
+    });
 
-      if (outcome.retryable === "min_fee") {
-        if (feeAttempt < maxFeeAttempts) {
-          const bumped = BigInt(Math.ceil(Number(currentInclusionFee) * feeMultiplier));
-          currentInclusionFee = bumped > currentInclusionFee ? bumped : currentInclusionFee + 100n;
-          continue;
+    try {
+      while (true) {
+        assertWithinDeadline(deadline, "probe");
+        generalAttempt += 1;
+        feeAttempt += 1;
+        // `attempt` is the 0-based index `onStep` reports; `attempts` is the count.
+        const outcome = await invokePipeline(params, generalAttempt - 1, {
+          inclusionFee: currentInclusionFee,
+          deadline,
+          clock,
+          poll,
+        });
+
+        if (outcome.kind !== "error" || outcome.retryable === undefined) {
+          const terminal = outcome.kind === "error" ? outcome : null;
+          const enriched = {
+            ...outcome,
+            retry: metadata(
+              outcome.kind,
+              terminal?.retryable ?? null,
+              terminal?.cause ?? null,
+              false,
+            ),
+          } as PipelineOutcome;
+          logTerminalOutcome(logger, enriched);
+          return enriched;
         }
 
-        const broadcastError = new BroadcastError({
-          attempts: feeAttempt,
-          lastFee: outcome.lastFee ?? currentInclusionFee,
-          failure: outcome.submission?.failure ?? {
-            resultXdr: null,
-            resultCode: "result=txInsufficientFee",
-            message: outcome.detail,
-            diagnosticEvents: [],
+        if (outcome.retryable === "min_fee") {
+          if (feeAttempt < feeOptions.maxAttempts) {
+            retries.push({
+              attempt: generalAttempt,
+              failure: "min_fee",
+              cause: RETRYABLE_CAUSES.min_fee,
+              delayMs: 0,
+            });
+            const bumped = BigInt(
+              Math.ceil(Number(currentInclusionFee) * feeOptions.feeMultiplier),
+            );
+            currentInclusionFee = bumped > currentInclusionFee ? bumped : currentInclusionFee + 100n;
+            continue;
+          }
+
+          const broadcastError = new BroadcastError({
+            attempts: feeAttempt,
+            lastFee: outcome.lastFee ?? currentInclusionFee,
+            failure: outcome.submission?.failure ?? {
+              resultXdr: null,
+              resultCode: "result=txInsufficientFee",
+              message: outcome.detail,
+              diagnosticEvents: [],
+            },
+            detail: outcome.detail,
+            retry: metadata(
+              "error",
+              "min_fee",
+              RETRYABLE_CAUSES.min_fee,
+              true,
+              feeOptions.maxAttempts,
+            ),
+          });
+          return broadcastError;
+        }
+
+        if (generalAttempt >= generalMaxAttempts) {
+          logger.warn(`invoke retry budget exhausted after ${generalAttempt} attempt(s)`, {
+            attempts: generalAttempt,
+            maxAttempts: generalMaxAttempts,
+            retryable: outcome.retryable,
+          });
+          return new InvokeRetryError({
+            attempts: generalAttempt,
+            lastOutcome: outcome,
+            retry: metadata(
+              "error",
+              outcome.retryable,
+              RETRYABLE_CAUSES[outcome.retryable],
+              true,
+            ),
+          });
+        }
+
+        const delay = fullJitterDelay(generalAttempt, retry);
+        const remaining = deadline?.remainingMs();
+        if (remaining !== undefined && remaining <= 0) {
+          return deadlineErrorOutcome(deadlineTimeout("retry_backoff"));
+        }
+        // The backoff consumes the same budget as the RPC calls: never sleep
+        // past the deadline, and if the bounded sleep reaches it, fail closed.
+        const sleepMs = remaining === undefined ? delay : Math.min(delay, remaining);
+        logger.debug(
+          `retrying invoke after a retryable failure (attempt ${generalAttempt} of ${generalMaxAttempts})`,
+          {
+            attempt: generalAttempt,
+            maxAttempts: generalMaxAttempts,
+            retryable: outcome.retryable,
+            delayMs: sleepMs,
           },
-          detail: outcome.detail,
+        );
+        retries.push({
+          attempt: generalAttempt,
+          failure: outcome.retryable,
+          cause: RETRYABLE_CAUSES[outcome.retryable],
+          delayMs: sleepMs,
         });
-        return broadcastError;
+        totalDelayMs += sleepMs;
+        const sleep = params.retry?.sleep ?? ((delayMs: number) => clock.sleep(delayMs));
+        await sleep(sleepMs);
+        if (deadline?.expired()) {
+          return deadlineErrorOutcome(deadlineTimeout("retry_backoff"));
+        }
       }
-
-      if (generalAttempt >= retry.maxAttempts) {
-        logger.warn(`invoke retry budget exhausted after ${generalAttempt} attempt(s)`, {
-          attempts: generalAttempt,
-          maxAttempts: retry.maxAttempts,
-          retryable: outcome.retryable,
-        });
-        return new InvokeRetryError({ attempts: generalAttempt, lastOutcome: outcome });
-      }
-
-      logger.debug(
-        `retrying invoke after a retryable failure (attempt ${generalAttempt} of ${retry.maxAttempts})`,
-        { attempt: generalAttempt, maxAttempts: retry.maxAttempts, retryable: outcome.retryable },
-      );
-      await retry.sleep(fullJitterDelay(generalAttempt, retry));
+    } catch (error) {
+      if (error instanceof RpcTimeoutError) return deadlineErrorOutcome(error);
+      throw error;
     }
   });
 }
@@ -1034,28 +1540,57 @@ function logTerminalOutcome(logger: GuardLogger, outcome: InvokeOutcome): void {
  * invocation's trace are the same measurement of the same code. The last two
  * are local to this function: classifying the guard's answer, and pricing it.
  */
-async function invokeDryRun(params: InvokeParams): Promise<InvokeDryRunResult> {
+function dryRunTimeoutResult(error: RpcTimeoutError): InvokeDryRunResult {
+  return {
+    kind: "dry_run",
+    admissible: false,
+    verdict: "undetermined",
+    reason: null,
+    detail: error.message,
+    error,
+    fees: {
+      resourceFeeStroops: 0n,
+      inclusionFeeStroops: 0n,
+      totalFeeStroops: 0n,
+    },
+    diagnostics: [],
+    steps: [],
+  };
+}
+
+async function invokeDryRun(
+  params: InvokeParams,
+  deadline: InvokeDeadline | undefined,
+  clock: Clock,
+): Promise<InvokeDryRunResult> {
   const steps: InvokePipelineStep[] = [];
   const observer = params.onStep;
-  const enforced = await enforceCall(
-    {
-      ...params,
-      onStep: (event) => {
-        // A dry run can never reach broadcast, so a broadcast stage is a bug
-        // rather than a stage to report. Dropping it here keeps that guarantee
-        // in the trace itself, not just in the control flow.
-        if (event.status !== "start" && event.name !== "broadcast") {
-          steps.push({
-            name: event.name,
-            durationMs: event.durationMs,
-            ok: event.status === "ok",
-          });
-        }
-        observer?.(event);
+  let enforced: EnforcementOutcome;
+  try {
+    enforced = await enforceCall(
+      {
+        ...params,
+        onStep: (event) => {
+          // A dry run can never reach broadcast, so a broadcast stage is a bug
+          // rather than a stage to report. Dropping it here keeps that guarantee
+          // in the trace itself, not just in the control flow.
+          if (event.status !== "start" && event.name !== "broadcast") {
+            steps.push({
+              name: event.name,
+              durationMs: event.durationMs,
+              ok: event.status === "ok",
+            });
+          }
+          observer?.(event);
+        },
       },
-    },
-    0,
-  );
+      0,
+      { deadline, clock },
+    );
+  } catch (error) {
+    if (error instanceof RpcTimeoutError) return dryRunTimeoutResult(error);
+    throw error;
+  }
   const verdictStartedAt = performance.now();
 
   let verdict: InvokeDryRunVerdict =
@@ -1159,7 +1694,12 @@ export type EnforcementOutcome =
 async function invokePipeline(
   params: InvokeParams,
   attempt: number,
-  options?: { inclusionFee?: bigint | undefined },
+  options?: {
+    inclusionFee?: bigint | undefined;
+    deadline?: InvokeDeadline | undefined;
+    clock?: Clock | undefined;
+    poll?: { pollAttempts?: number; pollIntervalMs?: number };
+  },
 ): Promise<PipelineOutcome> {
   const { server } = params;
   const onStep = stepHook(params.onStep, resolveLogger(params.logger));
@@ -1169,6 +1709,7 @@ async function invokePipeline(
       ...(options?.inclusionFee !== undefined ? { fee: options.inclusionFee } : {}),
     },
     attempt,
+    { deadline: options?.deadline, clock: options?.clock },
   );
   if (enforced.kind === "error") {
     // The guard never made a decision, so this is `undetermined` and not
@@ -1180,6 +1721,11 @@ async function invokePipeline(
     };
   }
   if (enforced.kind !== "admissible") return enforced;
+
+  // The guard may have approved just as the budget ran out. Approval is not an
+  // admissible result for the *invocation*: assembly, signing and broadcast
+  // would all happen outside the caller's deadline, so fail closed instead.
+  assertWithinDeadline(options?.deadline, "broadcast");
 
   // ── Step 4: assemble real resources, sign the envelope, broadcast ─────
   const sourcePubKey = await params.source.publicKey();
@@ -1212,25 +1758,28 @@ async function invokePipeline(
   }
 
   let submission: SubmissionResult;
-  const pollAttempts = params.pollOptions?.pollAttempts ?? params.pollAttempts;
-  const pollIntervalMs = params.pollOptions?.pollIntervalMs ?? params.pollIntervalMs;
+  const poll = options?.poll ?? resolvePollOptions(params);
   const signers: Array<Keypair | AdminSigner> = [
     params.source,
     ...(params.accountSigners ?? []),
   ];
 
+  assertWithinDeadline(options?.deadline, "broadcast");
   try {
     submission = await withStepTiming(
       onStep,
       { name: "broadcast", attempt },
       () =>
         submitAndPoll(server, assembled.transaction, signers, {
-          pollAttempts,
-          pollIntervalMs,
+          pollAttempts: poll.pollAttempts,
+          pollIntervalMs: poll.pollIntervalMs,
+          clock: options?.clock,
+          deadlineAt: options?.deadline?.at,
         }),
       (result) => result.failure !== null,
     );
   } catch (error) {
+    if (error instanceof RpcTimeoutError) throw error;
     const typed =
       error instanceof GuardError ? error : new BroadcastError(String(error), { cause: error });
     return {
@@ -1239,6 +1788,12 @@ async function invokePipeline(
       error: typed,
       diagnosticEvents: [],
     };
+  }
+  if (submission.deadlineExceeded) {
+    // The transaction may still land; the caller's budget is nevertheless spent,
+    // and reporting that as a normal broadcast failure would invite a retry the
+    // deadline was meant to prevent.
+    throw new RpcTimeoutError({ stage: "poll", aborted: false, deadline: true });
   }
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the
@@ -1302,10 +1857,34 @@ async function invokePipeline(
 export async function enforceCall(
   params: InvokeParams,
   attempt: number = 0,
+  options: { deadline?: InvokeDeadline | undefined; clock?: Clock | undefined } = {},
 ): Promise<EnforcementOutcome> {
+  validateInvokeOptions(params);
+  const clock = options.clock ?? params.clock ?? systemClock;
+  const deadline = options.deadline ?? makeDeadline(params, clock);
   const { server, source, call, networkPassphrase } = params;
   const logger = resolveLogger(params.logger);
   const onStep = stepHook(params.onStep, logger);
+
+  // Validate the agent identity before the first RPC. A misconfigured signer is
+  // a setup error, not a contract verdict, and it should cost zero network round
+  // trips. `toAgentSigner` accepts a `Keypair` or an already-adapted signer and
+  // rejects secret seeds, checksum-invalid StrKeys and malformed values.
+  if (params.guardAuth) {
+    try {
+      toAgentSigner(params.guardAuth.agent);
+    } catch (error) {
+      return {
+        kind: "error",
+        detail: error instanceof Error ? error.message : String(error),
+        error:
+          error instanceof SigningError
+            ? error
+            : new SigningError("could not validate the agent signer identity", { cause: error }),
+        diagnosticEvents: [],
+      };
+    }
+  }
 
   let operation: xdr.Operation;
   let expiration: number;
@@ -1314,6 +1893,7 @@ export async function enforceCall(
   let first: rpc.Api.SimulateTransactionResponse;
 
   try {
+    assertWithinDeadline(deadline, "probe");
     operation = Operation.invokeContractFunction({
       contract: call.contract,
       function: call.fn,
@@ -1322,8 +1902,11 @@ export async function enforceCall(
     // `publicKey()` may be async: an `AdminSigner` is allowed to resolve its
     // identity late (a remote or threshold signer).
     const sourcePubKey = await source.publicKey();
+    assertWithinDeadline(deadline, "probe");
     const sourceAccount = await server.getAccount(sourcePubKey);
+    assertWithinDeadline(deadline, "probe");
     const latest = await server.getLatestLedger();
+    assertWithinDeadline(deadline, "probe");
     expiration = latest.sequence + SIG_EXPIRATION_LEDGERS;
     // `TransactionBuilder` advances the sequence of the `Account` it is handed,
     // so every build in this function gets its own instance built from the same
@@ -1349,6 +1932,9 @@ export async function enforceCall(
       (response) => rpc.Api.isSimulationError(response),
     );
   } catch (error) {
+    // A spent overall deadline is a cancellation, not a simulation failure;
+    // keep its typed stage and `deadline` flag intact for the caller.
+    if (error instanceof RpcTimeoutError) throw error;
     // Ledger lookup or transport failure: the guard was never asked, so this is
     // `undetermined` rather than a refusal. The original error is kept as the
     // typed cause — it is the only thing that explains *why* the probe failed.
@@ -1393,6 +1979,7 @@ export async function enforceCall(
   // reports a real `fail`; `enforceCall` converts it straight back into the
   // error outcome the pipeline has always returned, detail text unchanged.
   const signRequiredAuth = async (): Promise<xdr.SorobanAuthorizationEntry[]> => {
+    assertWithinDeadline(deadline, "sign");
     let requiredAuth: xdr.SorobanAuthorizationEntry[];
     try {
       requiredAuth = requiredAuthorizationEntries(success);
@@ -1513,6 +2100,7 @@ export async function enforceCall(
         throw new SigningStageError(detail, new SigningError(detail, { address, cause: error }));
       }
     }
+    assertWithinDeadline(deadline, "sign");
     return signedAuth;
   };
 
@@ -1542,10 +2130,12 @@ export async function enforceCall(
   let signedOperation: xdr.Operation;
   let enforced: rpc.Api.SimulateTransactionResponse;
   try {
+    assertWithinDeadline(deadline, "simulate");
     const simulated = await withStepTiming(
       onStep,
       { name: "simulate", attempt },
       async () => {
+        assertWithinDeadline(deadline, "simulate");
         const authorized = Operation.invokeContractFunction({
           contract: call.contract,
           function: call.fn,
@@ -1566,6 +2156,7 @@ export async function enforceCall(
     signedOperation = simulated.operation;
     enforced = simulated.response;
   } catch (cause) {
+    if (cause instanceof RpcTimeoutError) throw cause;
     return {
       kind: "error",
       detail: `enforced simulation could not be prepared or run: ${
@@ -1635,6 +2226,11 @@ export async function enforceCall(
       diagnosticEvents: events,
     };
   }
+
+  // Approval that arrives exactly as the budget expires is not an admissible
+  // result: the caller has no time left to act on it, and `invokePipeline`
+  // must not go on to assemble or broadcast.
+  assertWithinDeadline(deadline, "simulate");
 
   return {
     kind: "admissible",
