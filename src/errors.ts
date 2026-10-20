@@ -7,6 +7,7 @@
  * `GuardError`, so a single `instanceof GuardError` check remains sufficient for
  * integrations that do not need a finer category.
  */
+import type { InvokeRetryMetadata } from "./retry.ts";
 
 function causeOptions(cause: unknown): ErrorOptions | undefined {
   return cause === undefined ? undefined : { cause };
@@ -62,6 +63,8 @@ export interface BroadcastFailureParams {
   lastFee: bigint;
   failure: BroadcastFailurePayload;
   detail?: string | undefined;
+  /** Structured retry metadata; additive, and safe to log. */
+  retry?: InvokeRetryMetadata | undefined;
 }
 
 /** Submission failed after assembly, or the RPC rejected the send request. */
@@ -73,15 +76,25 @@ export class BroadcastError extends GuardError {
   readonly lastFee?: bigint | undefined;
   readonly failure?: BroadcastFailurePayload | undefined;
   readonly detail?: string | undefined;
+  /** Structured retry metadata; present when a retry budget was involved. */
+  readonly retry?: InvokeRetryMetadata | undefined;
 
   constructor(
     message: string,
-    options?: { transactionHash?: string | null; cause?: unknown },
+    options?: {
+      transactionHash?: string | null;
+      cause?: unknown;
+      retry?: InvokeRetryMetadata | undefined;
+    },
   );
   constructor(params: BroadcastFailureParams);
   constructor(
     messageOrParams: string | BroadcastFailureParams,
-    options: { transactionHash?: string | null; cause?: unknown } = {},
+    options: {
+      transactionHash?: string | null;
+      cause?: unknown;
+      retry?: InvokeRetryMetadata | undefined;
+    } = {},
   ) {
     if (typeof messageOrParams === "string") {
       super(messageOrParams, causeOptions(options.cause));
@@ -91,6 +104,7 @@ export class BroadcastError extends GuardError {
       this.lastFee = undefined;
       this.failure = undefined;
       this.detail = undefined;
+      this.retry = options.retry;
     } else {
       const detail = messageOrParams.detail ?? messageOrParams.failure.message;
       super(
@@ -102,6 +116,7 @@ export class BroadcastError extends GuardError {
       this.lastFee = messageOrParams.lastFee;
       this.failure = messageOrParams.failure;
       this.detail = detail;
+      this.retry = messageOrParams.retry;
     }
   }
 
