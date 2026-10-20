@@ -23,6 +23,9 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - `onBeat` receives the number of attempts a beat took in its new `attempt` field (#340).
 - `validateGuardEventXdr()`: strict offline validation for captured event XDR, reporting every failure with its input index, stable path, pipeline stage, and code, while leaving the resilient live decoders unchanged (#290).
 - Unknown committed-event topics are now observable without a logger: `poll()` returns `unknownTopics` (`{ topic, count }[]`) and `watch()`/`watchAll()` accept `onUnknownTopics`, exposing decoded names and per-page counts only — never raw XDR or source payloads. Unknown topics still stay out of `GuardEvent` and the listener buffer (#287).
+- `validateAgentPublicKey()` and `isValidAgentPublicKey()`: agent signer identities are checked at construction and before signing. Supported forms are a checksum-valid `G…` StrKey and the raw 32-byte key as 64 hex characters; secret seeds and malformed values are rejected with a `SigningError` naming `signer.publicKey` (#295).
+- Structured retry metadata on every terminal `invoke()` outcome, `InvokeRetryError` and fee-bump-exhausted `BroadcastError`: `retry.attempts`, `maxAttempts`, `retried`, `exhausted`, `totalDelayMs`, the per-class `retries` list and the terminal failure. It contains no secrets, signatures, diagnostic payloads, hashes or XDR (#297).
+- `deadlineMs` and `clock` on `invoke()`: one overall time budget shared by discovery, signing, retries, broadcast and polling, with expiry reported as a fail-closed `RpcTimeoutError` carrying `deadline: true` (#298).
 
 ### Changed
 
@@ -31,6 +34,7 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 - RPC calls are now bounded by default: `timeoutMs` defaults to `DEFAULT_RPC_TIMEOUT_MS` (30s) instead of waiting indefinitely. Pass `timeoutMs: 0` to restore the previous unbounded behaviour, or `signal` to cancel from your own runtime (#114).
 - `recent()` on the telemetry listener and on `GuardEventRingBuffer` returns **detached snapshots**: the array, the events, their decoded `data`/`decision` and the opt-in `raw` payload are copies, so a consumer can no longer change the retained state by editing what it was handed (#344).
 - A heartbeat that the guard **refuses** is now reported as a failed beat (a typed `HeartbeatBlockedError` through `onError`) instead of being counted as an accepted beat (#340).
+- `invoke()` validates `retry`, `maxRetries`, `feeBump`, `pollAttempts`/`pollIntervalMs`, `timeoutMs` and `deadlineMs` before signing or any RPC, and rejects contradictory aliases with field-specific `RangeError`s. `maxRetries` now bounds the total attempts for every retryable class, not only fee bumps; a jitter sample outside `[0, 1)` is rejected instead of clamped (#296).
 
 ### Deprecated
 
