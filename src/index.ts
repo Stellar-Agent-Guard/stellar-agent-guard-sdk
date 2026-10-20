@@ -195,9 +195,11 @@ export {
 } from "./preflight.ts";
 
 export type {
+  BatchStagingSource,
   CheckBatchOptions,
   PolicyRevision,
   PreFlightBatchDecision,
+  PreFlightBatchStaging,
   PreFlightCacheOptions,
   PreFlightCheckOptions,
   PreFlightConfig,
@@ -341,7 +343,10 @@ export {
   type HeartbeatHandle,
   type HeartbeatOptions,
   type HeartbeatRetryOptions,
+  type HeartbeatStopOptions,
+  type HeartbeatStopResult,
   type HeartbeatSubmission,
+  type HeartbeatSubmitContext,
   type SubmitHeartbeatParams,
 } from "./heartbeat.ts";
 

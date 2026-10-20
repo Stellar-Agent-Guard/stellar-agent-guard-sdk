@@ -31,7 +31,7 @@ import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./in
 import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
 import {
   extractTransferAmount,
-  fetchGuardPolicyAndWindow,
+  readPersistentEntry,
   type ContractAddress,
   type ReadonlyPolicyConfig,
 } from "./policy.ts";
@@ -244,6 +244,33 @@ export interface CheckBatchOptions {
   timeoutMs?: number | undefined;
 }
 
+/**
+ * Where the committed window spend used for batch staging came from.
+ *
+ * The distinction matters: an explicit `initialWindowSpent` (including `0n`)
+ * is a caller-provided snapshot and is trusted, while a failed live read means
+ * the SDK does not know the committed spend. A missing `Window` ledger entry is
+ * a definitive "nothing committed yet", not a failed read.
+ */
+export type BatchStagingSource = "provided" | "ledger" | "absent" | "unavailable";
+
+/** The staging snapshot a batch verdict was evaluated against. */
+export interface PreFlightBatchStaging {
+  /**
+   * Committed window spend used for staging, or `null` when a required live
+   * read failed. An explicitly supplied `0n` is reported as `0n` with source
+   * `"provided"` — never confused with an unavailable read.
+   */
+  windowSpent: bigint | null;
+  /** Where `windowSpent` came from. */
+  source: BatchStagingSource;
+  /**
+   * True when a positive SAC transfer needed state that could not be read, so
+   * the batch could not be staged to a definite verdict.
+   */
+  unavailable: boolean;
+}
+
 export interface PreFlightBatchDecision {
   /**
    * Overall batch verdict: true only if every call in the batch is admissible.
@@ -255,6 +282,17 @@ export interface PreFlightBatchDecision {
    * Alias for `admissible`.
    */
   overallAdmissible: boolean;
+
+  /**
+   * Overall batch classification. `undetermined` means the batch cannot be
+   * reported as admissible because required staging state was unavailable (or
+   * an individual call was undetermined); `blocked` means at least one call was
+   * definitely refused. Always set on a result returned by `checkBatch()`.
+   */
+  kind?: "admissible" | "blocked" | "undetermined";
+
+  /** Human-readable explanation when `kind` is `undetermined`. */
+  detail?: string;
 
   /**
    * Per-call decisions in the exact order of the input batch.
@@ -271,6 +309,12 @@ export interface PreFlightBatchDecision {
    * that were admissible.
    */
   totalEstimatedResourceFee: bigint;
+
+  /**
+   * The window snapshot used for staging. Omitted for an empty batch, which
+   * performs no staging.
+   */
+  staging?: PreFlightBatchStaging;
 }
 
 /** A caller-supplied policy revision token used as part of the cache key. */
@@ -678,6 +722,14 @@ export class PreFlightInterceptor {
    *    `window_cap_exceeded`.
    * 4. If any call is blocked or undetermined, the overall batch `admissible` is false.
    *
+   * Staging state is fail-closed. An explicit `initialWindowSpent` (including
+   * `0n`) is a caller snapshot and is trusted; an absent `Window` ledger entry
+   * means no spend has been committed yet. A *failed* policy or window read is
+   * different: when a positive transfer needs that state, the affected calls
+   * are reported `undetermined` and the batch is never reported admissible from
+   * missing state. Non-transfer calls, and batches whose known cap is zero, do
+   * not need the snapshot and are unaffected.
+   *
    * Documented approximation vs true batch simulation:
    * This sequential simulation with staged window accounting is an off-chain approximation
    * of the contract's atomic auth batch evaluation:
@@ -701,34 +753,94 @@ export class PreFlightInterceptor {
       return {
         admissible: true,
         overallAdmissible: true,
+        kind: "admissible",
         verdicts: [],
         calls: [],
         totalEstimatedResourceFee: 0n,
       };
     }
 
-    // Resolve policy and initial window spend for staging
-    let policy: ReadonlyPolicyConfig | null = options?.policy ?? this.config.policy ?? null;
-    let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
+    // Resolve policy and committed window spend. `undefined` means "not
+    // supplied"; an explicit `null` policy is a caller decision that there is
+    // no policy to enforce, not a missing read.
+    const suppliedPolicy =
+      options?.policy !== undefined ? options.policy : this.config.policy;
+    const suppliedWindowSpent = options?.initialWindowSpent;
 
-    if (policy === null || options?.initialWindowSpent === undefined) {
-      try {
-        const fetched = await fetchGuardPolicyAndWindow(this.config.server, this.config.guard);
-        if (policy === null) {
-          policy = fetched.policy;
+    let policy: ReadonlyPolicyConfig | null = suppliedPolicy ?? null;
+    let policyStatus: BatchStagingSource = suppliedPolicy === undefined ? "unavailable" : "provided";
+    let policyReadError: unknown;
+
+    let initialWindowSpent = suppliedWindowSpent ?? 0n;
+    let windowStatus: BatchStagingSource =
+      suppliedWindowSpent === undefined ? "unavailable" : "provided";
+    let windowReadError: unknown;
+
+    if (suppliedPolicy === undefined || suppliedWindowSpent === undefined) {
+      // Read the missing entries independently: one failed read must not hide a
+      // successful read of the other, and the result must distinguish an absent
+      // entry (a definitive zero/no-policy answer) from an RPC failure.
+      const [policyRead, windowRead] = await Promise.allSettled([
+        suppliedPolicy === undefined
+          ? readPersistentEntry(this.config.server, this.config.guard, "Policy")
+          : Promise.resolve(null),
+        suppliedWindowSpent === undefined
+          ? readPersistentEntry(this.config.server, this.config.guard, "Window")
+          : Promise.resolve(null),
+      ]);
+
+      if (suppliedPolicy === undefined) {
+        if (policyRead.status === "rejected") {
+          policyReadError = policyRead.reason;
+        } else if (policyRead.value === null) {
+          policyStatus = "absent";
+        } else if (policyRead.value.value && typeof policyRead.value.value === "object") {
+          policy = policyRead.value.value as ReadonlyPolicyConfig;
+          policyStatus = "ledger";
+        } else {
+          // A present but malformed policy is not evidence of "no cap".
+          policyStatus = "unavailable";
+          policyReadError = new Error("Policy ledger entry did not contain a policy object");
         }
-        if (options?.initialWindowSpent === undefined) {
-          initialWindowSpent = fetched.windowSpent;
+      }
+
+      if (suppliedWindowSpent === undefined) {
+        if (windowRead.status === "rejected") {
+          windowReadError = windowRead.reason;
+        } else if (windowRead.value === null) {
+          initialWindowSpent = 0n;
+          windowStatus = "absent";
+        } else if (windowRead.value.value && typeof windowRead.value.value === "object") {
+          try {
+            const windowValue = windowRead.value.value as { total?: bigint | number };
+            initialWindowSpent = BigInt(windowValue.total ?? 0);
+            windowStatus = "ledger";
+          } catch (error) {
+            windowReadError = error;
+            windowStatus = "unavailable";
+          }
+        } else {
+          // A present but malformed window entry is not evidence of zero spend.
+          windowStatus = "unavailable";
+          windowReadError = new Error("Window ledger entry did not contain a window object");
         }
-      } catch {
-        // Fall back gracefully if ledger entry fetch is not possible (e.g. mock server in unit tests)
       }
     }
 
     let stagedWindowSpent = 0n;
-    let allAdmissible = true;
     let totalEstimatedResourceFee = 0n;
     const verdicts: PreFlightDecision[] = [];
+    let stagingRequired = false;
+    let stagingUnavailableDetail: string | undefined;
+    let stagingUnavailableError: unknown;
+
+    const describeUnavailable = (source: string, error: unknown): string => {
+      const reason = error instanceof Error ? `: ${error.message}` : "";
+      return (
+        `batch staging state unavailable: could not read the guard ${source}${reason}; ` +
+        "the rolling window cap cannot be evaluated for this transfer"
+      );
+    };
 
     const checkOptions: PreFlightCheckOptions = {
       ...(options?.onStep ? { onStep: options.onStep } : {}),
@@ -741,41 +853,98 @@ export class PreFlightInterceptor {
 
       if (decision.kind === "admissible") {
         const amount = extractTransferAmount(call);
-        const windowCap = policy?.window_cap ?? 0n;
 
-        // If this is a transfer with a positive amount and a window cap is defined:
-        if (amount !== null && amount > 0n && windowCap > 0n) {
-          const projectedSpend = initialWindowSpent + stagedWindowSpent + amount;
-          if (projectedSpend > windowCap) {
-            const blockedDecision: PreFlightDecision = {
+        if (amount !== null && amount > 0n) {
+          const windowCap = policy?.window_cap ?? 0n;
+          const policyKnown = policyStatus !== "unavailable";
+
+          if (!policyKnown) {
+            stagingRequired = true;
+            stagingUnavailableDetail ??= describeUnavailable("policy", policyReadError);
+            stagingUnavailableError ??= policyReadError;
+          } else if (windowCap > 0n) {
+            stagingRequired = true;
+            if (windowStatus === "unavailable") {
+              stagingUnavailableDetail ??= describeUnavailable(
+                "committed window spend",
+                windowReadError,
+              );
+              stagingUnavailableError ??= windowReadError;
+            }
+          }
+
+          if (stagingUnavailableDetail !== undefined) {
+            // The individual simulation is admissible, but a batch verdict
+            // cannot be staged from state we do not have. Report it as
+            // undetermined rather than silently staging against zero.
+            verdicts.push({
               allowed: false,
-              kind: "blocked",
-              reason: "window_cap_exceeded",
-              explanation: explainReason("window_cap_exceeded"),
-              detail: `staged window cap exceeded: cumulative spend ${projectedSpend} > window_cap ${windowCap}`,
-              diagnosticEvents: [],
-            };
-            verdicts.push(blockedDecision);
-            allAdmissible = false;
+              kind: "undetermined",
+              detail: stagingUnavailableDetail,
+              error:
+                stagingUnavailableError instanceof GuardError
+                  ? stagingUnavailableError
+                  : new SimulationError(stagingUnavailableDetail, {
+                      stage: "preflight",
+                      ...(stagingUnavailableError === undefined
+                        ? {}
+                        : { cause: stagingUnavailableError }),
+                    }),
+            });
             continue;
           }
-          stagedWindowSpent += amount;
+
+          if (windowCap > 0n) {
+            const projectedSpend = initialWindowSpent + stagedWindowSpent + amount;
+            if (projectedSpend > windowCap) {
+              verdicts.push({
+                allowed: false,
+                kind: "blocked",
+                reason: "window_cap_exceeded",
+                explanation: explainReason("window_cap_exceeded"),
+                detail: `staged window cap exceeded: cumulative spend ${projectedSpend} > window_cap ${windowCap}`,
+                diagnosticEvents: [],
+              });
+              continue;
+            }
+            stagedWindowSpent += amount;
+          }
         }
 
         verdicts.push(decision);
         totalEstimatedResourceFee += decision.estimatedResourceFee;
       } else {
         verdicts.push(decision);
-        allAdmissible = false;
       }
     }
 
+    const hasBlocked = verdicts.some((verdict) => verdict.kind === "blocked");
+    const undeterminedVerdict = verdicts.find((verdict) => verdict.kind === "undetermined");
+    const kind: PreFlightBatchDecision["kind"] = hasBlocked
+      ? "blocked"
+      : undeterminedVerdict
+        ? "undetermined"
+        : "admissible";
+
     return {
-      admissible: allAdmissible,
-      overallAdmissible: allAdmissible,
+      admissible: kind === "admissible",
+      overallAdmissible: kind === "admissible",
+      kind,
+      ...(kind === "undetermined" && undeterminedVerdict?.kind === "undetermined"
+        ? { detail: undeterminedVerdict.detail }
+        : {}),
       verdicts,
       calls: verdicts,
       totalEstimatedResourceFee,
+      ...(stagingRequired || windowStatus !== "unavailable"
+        ? {
+            staging: {
+              windowSpent: windowStatus === "unavailable" ? null : initialWindowSpent,
+              source: windowStatus,
+              unavailable: stagingUnavailableDetail !== undefined,
+            },
+          }
+        : {}),
     };
   }
 
@@ -823,10 +992,16 @@ export class PreFlightInterceptor {
         });
       }
       if (verdict.kind === "undetermined") {
-        throw new PreFlightUndeterminedError(verdict.detail);
+        throw new PreFlightUndeterminedError(verdict.detail, {
+          ...(verdict.error === undefined ? {} : { cause: verdict.error }),
+        });
       }
     }
-    throw new PreFlightUndeterminedError("batch refused by guardrails");
+    throw new PreFlightUndeterminedError(
+      decision.kind === "undetermined" && decision.detail !== undefined
+        ? decision.detail
+        : "batch refused by guardrails",
+    );
   }
 }
 

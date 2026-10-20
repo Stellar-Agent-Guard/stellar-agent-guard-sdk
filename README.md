@@ -813,17 +813,18 @@ const hb = await startHeartbeat({
   graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
 });
 
-// on shutdown:
-await hb.stop();
+// on shutdown: request cancellation, wait up to 5s for the in-flight beat
+const stop = await hb.stop({ timeoutMs: 5_000 });
+if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 ```
 
-- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
-- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule. A submission that outlives several slots skips the stale ones instead of firing a catch-up burst.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; each cadence slot skipped while a submission was in flight is counted too. Alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
 - Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
-- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and by default it resolves once an in-flight beat has settled. `stop()` first aborts the submission context's `signal`; pass `stop({ timeoutMs })` or set `stopTimeoutMs` when a custom transport might not settle, and inspect `{ reason, settled }` on the result.
 - When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
 - A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
-- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
+- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a negative or non-finite `stopTimeoutMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
 
 #### Bounded retry for a transient outage
 
@@ -845,6 +846,10 @@ const hb = await startHeartbeat({
 - The delay before the next attempt is a full-jitter sample of a bounded window, so agents that hit the same outage do not retry in a synchronized herd.
 - The attempt that failed and the delay before the next one are announced through `onWarning`; the failure that ends the beat is reported once through `onError`, with the original error. A successful beat reports how many attempts it took in `onBeat`'s `attempt`.
 
+#### Stopping with an in-flight submission
+
+A custom `submit(beat, { signal })` receives an `AbortSignal` that `stop()` aborts before waiting. The default is still graceful: `stop()` waits for the submission promise to settle, so a transport that honours the signal shuts down promptly. If the transport may never settle, bound the wait with `stop({ timeoutMs })` (or `stopTimeoutMs` on `startHeartbeat`); a fired bound returns `{ reason: "timeout", settled: false }`, while a graceful settle returns the in-flight submission's value or terminal error. No deadline is applied unless you ask for one.
+
 The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
 ## API Reference
@@ -857,6 +862,7 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
   - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
   - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
+  - `checkBatch(calls, options?): Promise<PreFlightBatchDecision>` — Stages SAC transfer amounts against the rolling window and returns an `undetermined` batch verdict when a required policy/window read fails instead of assuming zero spend. `assertBatchAllowed()` is the throw-on-refusal form.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
   - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
@@ -889,17 +895,18 @@ const hb = await startHeartbeat({
   graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
 });
 
-// on shutdown:
-await hb.stop();
+// on shutdown: request cancellation, wait up to 5s for the in-flight beat
+const stop = await hb.stop({ timeoutMs: 5_000 });
+if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 ```
 
-- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
-- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule. A submission that outlives several slots skips the stale ones instead of firing a catch-up burst.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; each cadence slot skipped while a submission was in flight is counted too. Alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
 - Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
-- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and by default it resolves once an in-flight beat has settled. `stop()` first aborts the submission context's `signal`; pass `stop({ timeoutMs })` or set `stopTimeoutMs` when a custom transport might not settle, and inspect `{ reason, settled }` on the result.
 - When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
 - A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
-- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
+- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a negative or non-finite `stopTimeoutMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
 
 #### Bounded retry for a transient outage
 
@@ -920,6 +927,10 @@ const hb = await startHeartbeat({
 - Only a **transport** failure is retried (a `BroadcastError`, an `RpcTimeoutError`, a `SimulationError`). A **policy block is never retried**: the guard made a decision, and hammering a call it has already refused only adds load. An error the SDK cannot classify is reported, not retried.
 - The delay before the next attempt is a full-jitter sample of a bounded window, so agents that hit the same outage do not retry in a synchronized herd.
 - The attempt that failed and the delay before the next one are announced through `onWarning`; the failure that ends the beat is reported once through `onError`, with the original error. A successful beat reports how many attempts it took in `onBeat`'s `attempt`.
+
+#### Stopping with an in-flight submission
+
+A custom `submit(beat, { signal })` receives an `AbortSignal` that `stop()` aborts before waiting. The default is still graceful: `stop()` waits for the submission promise to settle, so a transport that honours the signal shuts down promptly. If the transport may never settle, bound the wait with `stop({ timeoutMs })` (or `stopTimeoutMs` on `startHeartbeat`); a fired bound returns `{ reason: "timeout", settled: false }`, while a graceful settle returns the in-flight submission's value or terminal error. No deadline is applied unless you ask for one.
 
 The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
