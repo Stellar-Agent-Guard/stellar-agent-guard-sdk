@@ -374,14 +374,19 @@ describe("injected logger receives the decision points", () => {
       guardAuth: { guard: GUARD, agent: Keypair.random() },
       pollAttempts: 1,
       pollIntervalMs: 0,
-      retry: { maxAttempts: 2, sleep: async () => {} },
+      retry: { maxAttempts: 2, sleep: async () => {}, random: () => 0.5 },
       logger: log.logger,
     });
 
     assert.ok(outcome instanceof InvokeRetryError);
     const retries = log.at("debug").filter((line) => line.message.startsWith("retrying invoke"));
     assert.equal(retries.length, 1, "one retry, one line");
-    assert.deepEqual(retries[0]!.meta, { attempt: 1, maxAttempts: 2, retryable: "stale_ledger_resource_limit" });
+    assert.deepEqual(retries[0]!.meta, {
+      attempt: 1,
+      maxAttempts: 2,
+      retryable: "stale_ledger_resource_limit",
+      delayMs: 50,
+    });
 
     const exhausted = log.at("warn");
     assert.equal(exhausted.length, 1);
