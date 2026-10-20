@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { mulberry32, randomUint } from "./seeded-random.ts";
 import { PolicyDecodeError } from "../../src/errors.ts";
+import { POLICY_JSON_VERSION, policyFromJson, policyToJson } from "../../src/policy-json.ts";
 import type { CheckResult } from "../../src/policy.ts";
 import {
   decodeCheckResult,
@@ -356,6 +357,49 @@ describe("decodePolicy", () => {
         assert.equal(error.path, "assets[0]");
         return true;
       },
+    );
+  });
+});
+
+describe("policy JSON codec", () => {
+  it("round-trips every policy field without floating-point conversion", () => {
+    const policy = samplePolicy({
+      per_tx_cap: 9_007_199_254_740_993n,
+      window_secs: 2n ** 64n - 1n,
+      window_cap: -(2n ** 127n),
+      active_from: 123n,
+      active_until: 2n ** 64n - 1n,
+      dms_grace_secs: 456n,
+      recipient_window_caps: [{ recipient: RECIPIENT, cap: 987_654_321_012_345_678n }],
+      blocked_recipients: [RECIPIENT],
+    });
+    const encoded = policyToJson(policy);
+
+    assert.equal(encoded.version, POLICY_JSON_VERSION);
+    assert.equal(encoded.per_tx_cap, "9007199254740993");
+    assert.equal(typeof encoded.window_cap, "string");
+    assert.deepEqual(policyFromJson(JSON.stringify(encoded)), policy);
+    assert.deepEqual(policyFromJson(encoded), policy);
+  });
+
+  it("rejects numeric bigint fields, unknown fields, and out-of-range values with paths", () => {
+    const encoded = policyToJson(samplePolicy()) as unknown as Record<string, unknown>;
+
+    assert.throws(
+      () => policyFromJson({ ...encoded, per_tx_cap: 1 }),
+      (error: unknown) => error instanceof PolicyDecodeError && error.path === "policy.per_tx_cap",
+    );
+    assert.throws(
+      () => policyFromJson({ ...encoded, unknown: true }),
+      (error: unknown) => error instanceof PolicyDecodeError && error.path === "policy.unknown",
+    );
+    assert.throws(
+      () => policyFromJson({ ...encoded, window_secs: (2n ** 64n).toString() }),
+      (error: unknown) => error instanceof PolicyDecodeError && error.path === "policy.window_secs",
+    );
+    assert.throws(
+      () => policyFromJson({ ...encoded, protocols: [{ contract: TOKEN, fns: [], extra: true }] }),
+      (error: unknown) => error instanceof PolicyDecodeError && error.path === "policy.protocols[0].extra",
     );
   });
 });

@@ -172,7 +172,10 @@ Both framework adapters wrap the same `PreFlightInterceptor` but expose differen
 | `admissible` | Passes through; the wrapped tool handler runs. | Returns `true`; the action is a candidate for execution. |
 | `blocked(reason)` | Halts the tool call and returns a `ToolMessage` carrying the contract `reason` and explanation; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
 | `undetermined(cause)` | Halts the tool call with a formatted `ToolMessage` (fails closed); the tool handler never runs. | Returns `false` (fails closed); the action is excluded from candidate execution. |
-| Mapping error (`toContractCall` returns `null`/malformed) | Halts with a formatted `ToolMessage` describing the mapping failure; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
+| Mapping failure (`toContractCall`/`toContractCalls` throws or returns a malformed call) | Halts with an error `ToolMessage` describing the mapping failure (reported to `onBlocked` as `undetermined`); the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
+| Not fund-moving (`toContractCall` returns `null`) | Passes through untouched: `null` means "no funds move", not "allowed", so no verdict is invented. | Returns `true` for the same reason; the guard has no opinion. |
+
+Adapter callbacks (`onDecision`, `onBlocked`) are never awaited. A callback that throws, or returns a promise that rejects, is isolated — it is reported to the optional `blockedHookLogger` and can never resume a halted action or become an unhandled rejection (issue #313). Every adapter also accepts `signal` and `timeoutMs`, which are forwarded to the pre-flight check; an abort or a fired timeout yields the same fail-closed `undetermined` halt as any other enforcement failure (issue #315).
 
 
 #### Branded Address Types (v0.2.0+)
