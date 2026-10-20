@@ -129,6 +129,85 @@ export function addressToScVal(strkey: string): xdr.ScVal {
 }
 
 /**
+ * The public-key forms an `AgentSigner.publicKey` may use.
+ *
+ * Both are verify-only encodings of the same 32-byte Ed25519 public key:
+ *
+ *  - the registered account StrKey (`G…`, with its version byte and checksum), and
+ *  - the raw 32-byte key encoded as 64 hexadecimal characters (the shape the
+ *    guard contract stores and `PublicKeyHex` describes in `policy.ts`).
+ *
+ * A secret seed (`S…`) is explicitly not a supported identity. The SDK never
+ * derives a public key from one or accepts private key material at this
+ * boundary; callers that sign locally pass a `Keypair`, which exposes only its
+ * public identity to `AgentSigner`.
+ */
+const AGENT_PUBLIC_KEY_FORMS =
+  "a checksum-valid G... Ed25519 StrKey or a 64-character hex-encoded 32-byte public key";
+const HEX_AGENT_PUBLIC_KEY = /^[0-9a-fA-F]{64}$/;
+
+/** Decode 64 hexadecimal characters into the 32-byte Ed25519 public key. */
+function hexToEd25519PublicKey(hex: string): Uint8Array {
+  const bytes = new Uint8Array(32);
+  for (let index = 0; index < 32; index++) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Validate an agent signer's public identity and return it in its canonical
+ * `G…` form.
+ *
+ * Validation is deliberately performed at the signer boundary —
+ * `keypairAgentSigner` / `toAgentSigner` construction and again before
+ * `buildGuardAuthEntry` invokes `signDigest` — so a configuration mismatch is an
+ * actionable `SigningError` instead of a contract-level `__check_auth` failure
+ * after an RPC round trip. The input is only ever inspected: this helper never
+ * derives, stores, or accepts private key material.
+ *
+ * @throws {SigningError} when the value is not one of the supported public-key
+ * forms, including a checksum-invalid StrKey, a malformed hex value, or a
+ * secret seed (`S…`).
+ */
+export function validateAgentPublicKey(publicKey: string): string {
+  if (typeof publicKey !== "string" || publicKey.length === 0) {
+    throw new SigningError(
+      `signer.publicKey must be ${AGENT_PUBLIC_KEY_FORMS}`,
+    );
+  }
+
+  if (publicKey.startsWith("S") && StrKey.isValidEd25519SecretSeed(publicKey)) {
+    throw new SigningError(
+      "signer.publicKey must not be a secret key (S...): supply the registered public key " +
+        "(G...) or its 32-byte hex encoding, never private key material",
+    );
+  }
+
+  if (HEX_AGENT_PUBLIC_KEY.test(publicKey)) {
+    return StrKey.encodeEd25519PublicKey(hexToEd25519PublicKey(publicKey));
+  }
+
+  if (StrKey.isValidEd25519PublicKey(publicKey)) return publicKey;
+
+  throw new SigningError(
+    `signer.publicKey is not a supported agent identity: expected ${AGENT_PUBLIC_KEY_FORMS} ` +
+      `(received ${JSON.stringify(publicKey)})`,
+  );
+}
+
+/** Non-throwing form of {@link validateAgentPublicKey}, for setup diagnostics. */
+export function isValidAgentPublicKey(publicKey: unknown): boolean {
+  if (typeof publicKey !== "string") return false;
+  try {
+    validateAgentPublicKey(publicKey);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Verify an Ed25519 agent-auth signature without accepting or deriving a
  * private key.
  *
@@ -151,7 +230,11 @@ export function verifyAgentSignature(
 ): boolean {
   try {
     const rawPublicKey =
-      typeof publicKey === "string" ? StrKey.decodeEd25519PublicKey(publicKey) : publicKey;
+      typeof publicKey === "string"
+        ? HEX_AGENT_PUBLIC_KEY.test(publicKey)
+          ? hexToEd25519PublicKey(publicKey)
+          : StrKey.decodeEd25519PublicKey(publicKey)
+        : publicKey;
     if (rawPublicKey.length !== 32 || payload.length !== 32 || signature.length !== 64) return false;
     return verifyEd25519(payload, signature, rawPublicKey);
   } catch {
@@ -238,8 +321,9 @@ export interface AgentSigner {
  * behaviour the SDK has always had.
  */
 export function keypairAgentSigner(agent: Keypair): AgentSigner {
+  const publicKey = validateAgentPublicKey(agent.publicKey());
   return {
-    publicKey: agent.publicKey(),
+    publicKey,
     signDigest: (digest) => agent.sign(digest),
   };
 }
@@ -253,7 +337,12 @@ export function keypairAgentSigner(agent: Keypair): AgentSigner {
  */
 export function toAgentSigner(signer: AgentSigner | Keypair): AgentSigner {
   if (typeof (signer as AgentSigner).signDigest === "function") {
-    return signer as AgentSigner;
+    const custom = signer as AgentSigner;
+    // Validate at the first boundary that sees the identity, before any probe,
+    // signing or network I/O. The signer is returned unchanged so a remote or
+    // threshold implementation keeps its own identity representation.
+    validateAgentPublicKey(custom.publicKey);
+    return custom;
   }
   return keypairAgentSigner(signer as Keypair);
 }
@@ -600,6 +689,11 @@ export interface SubmissionResult {
   hash: string;
   status: string;
   ledger: number | null;
+  /**
+   * True when an overall invocation deadline stopped post-broadcast polling.
+   * The transaction may still be included; absence is the normal case.
+   */
+  deadlineExceeded?: boolean;
   /** Present when the network rejected the transaction after broadcast. */
   failure: {
     resultXdr: string | null;
@@ -765,6 +859,23 @@ export function describeSubmissionFailure(failure: NonNullable<SubmissionResult[
   return lines.join("\n");
 }
 
+/** The fail-closed result when the overall invocation deadline stops polling. */
+function deadlineExceededResult(hash: string): SubmissionResult {
+  return {
+    hash,
+    status: "TIMEOUT",
+    ledger: null,
+    deadlineExceeded: true,
+    failure: {
+      resultXdr: null,
+      resultCode: null,
+      message: "overall invoke deadline exceeded before ledger inclusion",
+      diagnosticEvents: [],
+    },
+    events: [],
+  };
+}
+
 /** Submit a signed transaction and poll until it is included in a ledger. */
 export async function submitAndPoll(
   server: rpc.Server,
@@ -774,6 +885,8 @@ export async function submitAndPoll(
     pollAttempts?: number | undefined;
     pollIntervalMs?: number | undefined;
     clock?: Clock | undefined;
+    /** Absolute clock time at which polling must stop; consumes the same budget. */
+    deadlineAt?: number | undefined;
   } = {},
 ): Promise<SubmissionResult> {
   const clock = options.clock ?? systemClock;
@@ -799,6 +912,12 @@ export async function submitAndPoll(
   } catch (error) {
     throw new BroadcastError("transaction submission request failed", { cause: error });
   }
+  // The send may itself have consumed the rest of the budget. Check before
+  // interpreting its result, so a success-shaped response cannot outrun the
+  // caller's deadline.
+  if (options.deadlineAt !== undefined && clock.now() >= options.deadlineAt) {
+    return deadlineExceededResult(sent.hash);
+  }
   if (sent.status === "ERROR") {
     return {
       hash: sent.hash,
@@ -817,7 +936,14 @@ export async function submitAndPoll(
   const attempts = options.pollAttempts ?? 20;
   const interval = options.pollIntervalMs ?? 3_000;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    await clock.sleep(interval);
+    if (options.deadlineAt !== undefined) {
+      const remaining = options.deadlineAt - clock.now();
+      if (remaining <= 0) return deadlineExceededResult(sent.hash);
+      await clock.sleep(Math.min(interval, remaining));
+      if (clock.now() >= options.deadlineAt) return deadlineExceededResult(sent.hash);
+    } else {
+      await clock.sleep(interval);
+    }
     let result: Awaited<ReturnType<rpc.Server["getTransaction"]>>;
     try {
       result = await server.getTransaction(sent.hash);
@@ -826,6 +952,11 @@ export async function submitAndPoll(
         transactionHash: sent.hash,
         cause: error,
       });
+    }
+    // A poll that answers at or after the deadline is not an admissible result,
+    // even when it says SUCCESS: the caller's budget was already spent.
+    if (options.deadlineAt !== undefined && clock.now() >= options.deadlineAt) {
+      return deadlineExceededResult(sent.hash);
     }
     if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
       return {
