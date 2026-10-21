@@ -33,7 +33,13 @@
  */
 import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { GuardError } from "./errors.ts";
-import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
+import {
+  GUARD_AUTH_RESULTS,
+  GUARD_EVENT_TOPICS,
+  decodeAuthDecision,
+  normalizeEventData,
+  type GuardAuthDecision,
+} from "./events.ts";
 import { bytesToHex, sha256Hex, utf8Length } from "./hash.ts";
 import { topicSymbols } from "./invoke.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
@@ -241,9 +247,7 @@ function diagnosticIdMaterial(event: GuardEventIdentityInput): string {
     ...event.topics,
     stableStringify(event.data),
   ];
-  return parts
-    .map((part) => `${utf8Length(part)}:${part}`)
-    .join("");
+  return parts.map((part) => `${utf8Length(part)}:${part}`).join("");
 }
 
 /**
@@ -290,11 +294,7 @@ export type GuardEventContext = Omit<
 };
 
 /** Interpret an already-decoded topic list plus data as a `GuardEvent`. */
-function interpret(
-  topics: string[],
-  data: unknown,
-  context: GuardEventContext,
-): GuardEvent | null {
+function interpret(topics: string[], data: unknown, context: GuardEventContext): GuardEvent | null {
   const topic = topics[0];
   if (!topic || !KNOWN_TOPICS.has(topic)) return null;
   const { simulationIndex, observedAt, ...streamFacts } = context;
@@ -512,7 +512,10 @@ function matchesRecentFilter(event: GuardEvent, filter: RecentEventFilter): bool
   if (filter.reason !== undefined && event.decision?.reason !== filter.reason) return false;
   // A diagnostic event has no ledger; a ledger bound therefore excludes it,
   // rather than silently treating `null` as "inside the range".
-  if (filter.fromLedger !== undefined && (event.ledger === null || event.ledger < filter.fromLedger)) {
+  if (
+    filter.fromLedger !== undefined &&
+    (event.ledger === null || event.ledger < filter.fromLedger)
+  ) {
     return false;
   }
   if (filter.toLedger !== undefined && (event.ledger === null || event.ledger > filter.toLedger)) {
@@ -1648,8 +1651,7 @@ export async function* mergeGuardEventStreams(
         );
         let nextCommitted = 0;
         for (const event of page) {
-          const ordered =
-            event.stream === "committed" ? orderedCommitted[nextCommitted++]! : event;
+          const ordered = event.stream === "committed" ? orderedCommitted[nextCommitted++]! : event;
           if (emitted.has(ordered.id)) continue;
           emitted.add(ordered.id);
           yield ordered;
@@ -2160,17 +2162,18 @@ export class GuardTelemetryListener {
       return { events: [], cursor };
     }
 
-    const request: rpc.Api.GetTransactionsRequest = params.cursor !== undefined
-      ? {
-          pagination: {
-            cursor: params.cursor,
-            ...(params.limit !== undefined ? { limit: params.limit } : {}),
-          },
-        }
-      : {
-          startLedger: params.startLedger!,
-          ...(params.limit !== undefined ? { pagination: { limit: params.limit } } : {}),
-        };
+    const request: rpc.Api.GetTransactionsRequest =
+      params.cursor !== undefined
+        ? {
+            pagination: {
+              cursor: params.cursor,
+              ...(params.limit !== undefined ? { limit: params.limit } : {}),
+            },
+          }
+        : {
+            startLedger: params.startLedger!,
+            ...(params.limit !== undefined ? { pagination: { limit: params.limit } } : {}),
+          };
 
     try {
       const response = await this.config.server.getTransactions(request);
@@ -2203,10 +2206,16 @@ export class GuardTelemetryListener {
    * than silent. The topic vocabulary then narrows further, and an
    * unrecognised topic is dropped rather than guessed at.
    */
-  async poll(params: { startLedger?: number; cursor?: string; limit?: number } = {}): Promise<PollResult> {
+  async poll(
+    params: { startLedger?: number; cursor?: string; limit?: number } = {},
+  ): Promise<PollResult> {
     const request = (
       params.cursor
-        ? { filters: [{ type: "contract" as const, contractIds: [this.config.guard] }], cursor: params.cursor, limit: params.limit }
+        ? {
+            filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
+            cursor: params.cursor,
+            limit: params.limit,
+          }
         : {
             filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
             startLedger: params.startLedger,
@@ -2253,24 +2262,20 @@ export class GuardTelemetryListener {
         continue;
       }
       const topics = event.topic.map((topic) => String(scValToNative(topic)));
-      const decoded = interpret(
-        topics,
-        decodeData(event.value),
-        {
-          source: "ledger",
-          stream: "committed",
-          contractId,
-          ledger: event.ledger,
-          ledgerClosedAt: event.ledgerClosedAt ?? null,
-          transactionHash: event.txHash ?? null,
-          // Committed events anchor on the transaction hash, not on a position
-          // within a page: a page boundary would otherwise change an event's id.
-          simulationIndex: null,
-          // `includeRaw` is off unless the listener was constructed with it, so
-          // the default path keeps discarding the RPC object (issue #94).
-          ...(this.config.includeRaw ? { raw: event } : {}),
-        },
-      );
+      const decoded = interpret(topics, decodeData(event.value), {
+        source: "ledger",
+        stream: "committed",
+        contractId,
+        ledger: event.ledger,
+        ledgerClosedAt: event.ledgerClosedAt ?? null,
+        transactionHash: event.txHash ?? null,
+        // Committed events anchor on the transaction hash, not on a position
+        // within a page: a page boundary would otherwise change an event's id.
+        simulationIndex: null,
+        // `includeRaw` is off unless the listener was constructed with it, so
+        // the default path keeps discarding the RPC object (issue #94).
+        ...(this.config.includeRaw ? { raw: event } : {}),
+      });
       if (decoded) {
         events.push(decoded);
       } else {
@@ -2590,7 +2595,7 @@ export class GuardTelemetryListener {
       for (const event of events) this.counters?.record(event);
 
       await this.activeCursorStore.save(page.cursor, this.cursorScope("events"));
-      
+
       if (events.length > 0) yield events;
 
       // Advance confirmed coverage. A page that reached the RPC's head confirms
@@ -2602,9 +2607,7 @@ export class GuardTelemetryListener {
         .filter((ledger): ledger is number => ledger !== null);
       const fullPage = params.limit !== undefined && page.events.length >= params.limit;
       expectedFrom =
-        fullPage && ledgers.length > 0
-          ? Math.max(...ledgers) + 1
-          : page.latestLedger + 1;
+        fullPage && ledgers.length > 0 ? Math.max(...ledgers) + 1 : page.latestLedger + 1;
 
       if (signal?.aborted) return;
       const delay = computePollDelay(interval, jitter, rng);
@@ -2737,11 +2740,7 @@ function toJsonSafe(value: unknown): unknown {
   if (value === undefined) return undefined;
   if (value === null) return null;
   if (typeof value === "bigint") return value.toString();
-  if (
-    typeof value === "boolean" ||
-    typeof value === "number" ||
-    typeof value === "string"
-  ) {
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
     return value;
   }
   if (value instanceof Uint8Array) return `bytes:${bytesToHex(value)}`;

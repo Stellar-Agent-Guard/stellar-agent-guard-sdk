@@ -21,12 +21,7 @@
 import { Keypair, rpc } from "@stellar/stellar-sdk";
 import { DEFAULT_NETWORK_PASSPHRASE } from "./admin.ts";
 import { BroadcastError, GuardError, SimulationError } from "./errors.ts";
-import {
-  invoke,
-  RpcTimeoutError,
-  type InvokeDryRunVerdict,
-  type InvokeOutcome,
-} from "./invoke.ts";
+import { invoke, RpcTimeoutError, type InvokeDryRunVerdict, type InvokeOutcome } from "./invoke.ts";
 import { unsafeContractAddress, type PolicyConfig } from "./policy.ts";
 import { explainReason, GuardBlockedError } from "./reasons.ts";
 import type { AgentSigner, AdminSigner } from "./tx.ts";
@@ -621,10 +616,7 @@ function resolveRetryOptions(options: HeartbeatRetryOptions | undefined): Resolv
  * releasing them in a synchronized thundering herd.
  */
 function fullJitterDelay(attempt: number, options: ResolvedHeartbeatRetry): number {
-  const window = Math.min(
-    options.maxDelayMs,
-    options.baseDelayMs * 2 ** Math.max(0, attempt - 1),
-  );
+  const window = Math.min(options.maxDelayMs, options.baseDelayMs * 2 ** Math.max(0, attempt - 1));
   const sample = options.random();
   // A custom RNG should return [0, 1), but clamp a bad edge value rather than
   // allowing a production retry policy to be disabled by an out-of-range sample.
@@ -735,7 +727,10 @@ function classifyHeartbeatOutcome(outcome: InvokeOutcome): HeartbeatOutcomeClass
  * returned as a failure so it never advances `lastBeatAt`/`lastBeatSecond`.
  */
 async function attemptSubmission(
-  submit: (beat: HeartbeatBeat, context: HeartbeatSubmitContext) => Promise<HeartbeatSubmission | void>,
+  submit: (
+    beat: HeartbeatBeat,
+    context: HeartbeatSubmitContext,
+  ) => Promise<HeartbeatSubmission | void>,
   beat: HeartbeatBeat,
   context: HeartbeatSubmitContext,
 ): Promise<HeartbeatAttemptResult> {

@@ -36,10 +36,7 @@ export {
   SimulationError,
 } from "./errors.ts";
 
-export type {
-  PolicyEncodingFailure,
-  PolicyEncodingRuleId,
-} from "./errors.ts";
+export type { PolicyEncodingFailure, PolicyEncodingRuleId } from "./errors.ts";
 
 export { FakeClock, systemClock } from "./clock.ts";
 

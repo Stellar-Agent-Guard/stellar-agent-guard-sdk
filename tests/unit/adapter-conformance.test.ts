@@ -85,12 +85,54 @@ interface Scenario {
 }
 
 const SCENARIOS: Scenario[] = [
-  { name: "admissible", decision: ADMISSIBLE, mapping: "maps", halts: false, decisions: 1, blockedHooks: 0 },
-  { name: "blocked", decision: BLOCKED, mapping: "maps", halts: true, decisions: 1, blockedHooks: 1 },
-  { name: "undetermined", decision: UNDETERMINED, mapping: "maps", halts: true, decisions: 1, blockedHooks: 1 },
-  { name: "mapping throws", decision: ADMISSIBLE, mapping: "throws", halts: true, decisions: 0, blockedHooks: 1 },
-  { name: "mapping malformed", decision: ADMISSIBLE, mapping: "malformed", halts: true, decisions: 0, blockedHooks: 1 },
-  { name: "mapping null (not fund-moving)", decision: ADMISSIBLE, mapping: "null", halts: false, decisions: 0, blockedHooks: 0 },
+  {
+    name: "admissible",
+    decision: ADMISSIBLE,
+    mapping: "maps",
+    halts: false,
+    decisions: 1,
+    blockedHooks: 0,
+  },
+  {
+    name: "blocked",
+    decision: BLOCKED,
+    mapping: "maps",
+    halts: true,
+    decisions: 1,
+    blockedHooks: 1,
+  },
+  {
+    name: "undetermined",
+    decision: UNDETERMINED,
+    mapping: "maps",
+    halts: true,
+    decisions: 1,
+    blockedHooks: 1,
+  },
+  {
+    name: "mapping throws",
+    decision: ADMISSIBLE,
+    mapping: "throws",
+    halts: true,
+    decisions: 0,
+    blockedHooks: 1,
+  },
+  {
+    name: "mapping malformed",
+    decision: ADMISSIBLE,
+    mapping: "malformed",
+    halts: true,
+    decisions: 0,
+    blockedHooks: 1,
+  },
+  {
+    name: "mapping null (not fund-moving)",
+    decision: ADMISSIBLE,
+    mapping: "null",
+    halts: false,
+    decisions: 0,
+    blockedHooks: 0,
+  },
 ];
 
 function mapperFor(scenario: Scenario): () => ContractCall | null {
@@ -335,7 +377,11 @@ describe("cross-framework conformance matrix (issue #317)", () => {
           assert.equal(outcome.halted, scenario.halts, `${scenario.name}: halt state`);
           assert.equal(decisionCount(), scenario.decisions, `${scenario.name}: onDecision calls`);
           if (adapter.hasBlockedHook) {
-            assert.equal(blocked.length, scenario.blockedHooks, `${scenario.name}: onBlocked calls`);
+            assert.equal(
+              blocked.length,
+              scenario.blockedHooks,
+              `${scenario.name}: onBlocked calls`,
+            );
           }
         });
       }
@@ -382,9 +428,13 @@ describe("call-mapping failures fail closed (issue #316)", () => {
   it("flags a malformed single-call return as a typed AdapterMappingError", () => {
     assert.throws(
       () =>
-        mapContractCalls({}, {
-          toContractCall: () => ({ contract: "", fn: "transfer", args: [] }) as unknown as ContractCall,
-        }),
+        mapContractCalls(
+          {},
+          {
+            toContractCall: () =>
+              ({ contract: "", fn: "transfer", args: [] }) as unknown as ContractCall,
+          },
+        ),
       isMappingError,
     );
   });
@@ -392,9 +442,12 @@ describe("call-mapping failures fail closed (issue #316)", () => {
   it("flags a malformed batch entry and names its index", () => {
     assert.throws(
       () =>
-        mapContractCalls({}, {
-          toContractCalls: () => [{ contract: GUARD, fn: "", args: [] }] as ContractCall[],
-        }),
+        mapContractCalls(
+          {},
+          {
+            toContractCalls: () => [{ contract: GUARD, fn: "", args: [] }] as ContractCall[],
+          },
+        ),
       (error: unknown) => {
         assert.ok(error instanceof AdapterMappingError);
         assert.equal(error.field, "toContractCalls");
@@ -546,11 +599,15 @@ describe("cancellation and timeout forwarding (issue #315)", () => {
     it(`${adapter.name}: forwards signal and timeoutMs to the pre-flight check`, async () => {
       const controller = new AbortController();
       const { seen, interceptor } = capturing(ADMISSIBLE);
-      const outcome = await adapter.run(SCENARIOS[0]!, {}, {
-        interceptor,
-        signal: controller.signal,
-        timeoutMs: 250,
-      });
+      const outcome = await adapter.run(
+        SCENARIOS[0]!,
+        {},
+        {
+          interceptor,
+          signal: controller.signal,
+          timeoutMs: 250,
+        },
+      );
 
       assert.equal(seen.length, 1);
       assert.equal(seen[0]!.signal, controller.signal);
@@ -566,10 +623,14 @@ describe("cancellation and timeout forwarding (issue #315)", () => {
           options?.signal?.aborted ? UNDETERMINED : ADMISSIBLE,
       } as unknown as PreFlightInterceptor;
 
-      const outcome = await adapter.run(SCENARIOS[0]!, {}, {
-        interceptor: signalAware,
-        signal: controller.signal,
-      });
+      const outcome = await adapter.run(
+        SCENARIOS[0]!,
+        {},
+        {
+          interceptor: signalAware,
+          signal: controller.signal,
+        },
+      );
       assert.equal(outcome.entered, 0, "an aborted pre-flight check still executed the handler");
       assert.equal(outcome.halted, true);
     });
@@ -580,11 +641,15 @@ describe("cancellation and timeout forwarding (issue #315)", () => {
     const configured = new AbortController();
     const { seen, interceptor } = capturing(ADMISSIBLE);
     const mcp = HARNESSES.find((candidate) => candidate.name === "mcp")!;
-    await mcp.run(SCENARIOS[0]!, {}, {
-      interceptor,
-      signal: configured.signal,
-      hostSignal: host.signal,
-    });
+    await mcp.run(
+      SCENARIOS[0]!,
+      {},
+      {
+        interceptor,
+        signal: configured.signal,
+        hostSignal: host.signal,
+      },
+    );
     assert.equal(seen[0]!.signal, host.signal);
   });
 
@@ -593,11 +658,15 @@ describe("cancellation and timeout forwarding (issue #315)", () => {
     const configured = new AbortController();
     const { seen, interceptor } = capturing(ADMISSIBLE);
     const langchain = HARNESSES.find((candidate) => candidate.name === "langchain")!;
-    await langchain.run(SCENARIOS[0]!, {}, {
-      interceptor,
-      signal: configured.signal,
-      hostSignal: host.signal,
-    });
+    await langchain.run(
+      SCENARIOS[0]!,
+      {},
+      {
+        interceptor,
+        signal: configured.signal,
+        hostSignal: host.signal,
+      },
+    );
     assert.equal(seen[0]!.signal, host.signal);
   });
 

@@ -290,10 +290,7 @@ describe("startHeartbeat", () => {
   });
 
   it("rejects a non-positive interval", async () => {
-    await assert.rejects(
-      startHeartbeat(baseOptions({ intervalMs: 0 })),
-      RangeError,
-    );
+    await assert.rejects(startHeartbeat(baseOptions({ intervalMs: 0 })), RangeError);
   });
 
   it("reports the default-submission misconfiguration through onError", async () => {
@@ -332,9 +329,7 @@ describe("startHeartbeat grace validation", () => {
   it("validates against a policy read from the chain", async () => {
     const policy = { dms_grace_secs: 30n } as PolicyConfig;
     await assert.rejects(
-      startHeartbeat(
-        baseOptions({ intervalMs: 20_000, readPolicy: async () => policy }),
-      ),
+      startHeartbeat(baseOptions({ intervalMs: 20_000, readPolicy: async () => policy })),
       HeartbeatIntervalError,
     );
   });
@@ -457,11 +452,7 @@ describe("startHeartbeat bounded retry (issue #340)", () => {
     assert.equal(warnings.length, 1, "the attempt and its delay are announced");
     assert.match(warnings[0]!, /attempt 1 of 3/);
     assert.match(warnings[0]!, /retrying in 50ms/);
-    assert.deepEqual(
-      delays,
-      [0, 50],
-      "the backoff is the full-jitter sample of the base window",
-    );
+    assert.deepEqual(delays, [0, 50], "the backoff is the full-jitter sample of the base window");
 
     await clock.tick();
     assert.equal(attempts, 2);
@@ -612,9 +603,7 @@ describe("startHeartbeat bounded retry (issue #340)", () => {
     );
     // A policy refusal is a decision, never a transport failure.
     assert.equal(
-      isRetryableHeartbeatFailure(
-        new GuardBlockedError({ reason: "paused", stage: "submission" }),
-      ),
+      isRetryableHeartbeatFailure(new GuardBlockedError({ reason: "paused", stage: "submission" })),
       false,
     );
     assert.equal(
@@ -657,8 +646,7 @@ describe("startHeartbeat input validation (issue #341)", () => {
   it("rejects a negative maxSkewMs", async () => {
     await assert.rejects(
       startHeartbeat(baseOptions({ maxSkewMs: -1 })),
-      (error: unknown) =>
-        error instanceof RangeError && /maxSkewMs/.test((error as Error).message),
+      (error: unknown) => error instanceof RangeError && /maxSkewMs/.test((error as Error).message),
     );
   });
 
@@ -688,8 +676,7 @@ describe("startHeartbeat input validation (issue #341)", () => {
   it("rejects a negative bigint grace window", async () => {
     await assert.rejects(
       startHeartbeat(baseOptions({ graceSecs: -1n })),
-      (error: unknown) =>
-        error instanceof RangeError && /graceSecs/.test((error as Error).message),
+      (error: unknown) => error instanceof RangeError && /graceSecs/.test((error as Error).message),
     );
   });
 
@@ -711,14 +698,8 @@ describe("startHeartbeat input validation (issue #341)", () => {
 
   it("rejects an unusable retry budget", async () => {
     await assert.rejects(startHeartbeat(baseOptions({ retry: { maxAttempts: 0 } })), RangeError);
-    await assert.rejects(
-      startHeartbeat(baseOptions({ retry: { maxAttempts: 1.5 } })),
-      RangeError,
-    );
-    await assert.rejects(
-      startHeartbeat(baseOptions({ retry: { baseDelayMs: -1 } })),
-      RangeError,
-    );
+    await assert.rejects(startHeartbeat(baseOptions({ retry: { maxAttempts: 1.5 } })), RangeError);
+    await assert.rejects(startHeartbeat(baseOptions({ retry: { baseDelayMs: -1 } })), RangeError);
     await assert.rejects(
       startHeartbeat(baseOptions({ retry: { maxDelayMs: Number.NaN } })),
       RangeError,
@@ -859,9 +840,7 @@ describe("startHeartbeat stop contract (issue #338)", () => {
 
   it("rejects a negative stop deadline without stopping the scheduler", async () => {
     const clock = fakeClock();
-    const handle = await startHeartbeat(
-      baseOptions({ now: clock.now, wait: clock.wait }),
-    );
+    const handle = await startHeartbeat(baseOptions({ now: clock.now, wait: clock.wait }));
 
     await assert.rejects(handle.stop({ timeoutMs: -1 }), RangeError);
     assert.equal(handle.stopped, false, "an invalid stop call must not tear the scheduler down");

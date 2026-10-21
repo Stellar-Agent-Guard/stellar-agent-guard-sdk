@@ -119,7 +119,9 @@ function scriptedServer(pages: ScriptedPage[]) {
       requests.push(request);
       const page = pages[requests.length - 1];
       if (!page) {
-        throw new Error(`getEvents called ${requests.length} times; only ${pages.length} pages scripted`);
+        throw new Error(
+          `getEvents called ${requests.length} times; only ${pages.length} pages scripted`,
+        );
       }
       return { events: page.events, cursor: page.cursor, latestLedger: 500 };
     },
@@ -175,7 +177,11 @@ describe("watch(signal) cursor persistence", () => {
 
     const pages = await take(listener, 1);
 
-    assert.deepEqual(pages, [[decodedEvent(501)]], "the resumed page's events are decoded and delivered");
+    assert.deepEqual(
+      pages,
+      [[decodedEvent(501)]],
+      "the resumed page's events are decoded and delivered",
+    );
     assert.equal(
       pages[0]?.[0]?.id,
       "ledger:tx-501:event_heartbeat",
@@ -183,7 +189,11 @@ describe("watch(signal) cursor persistence", () => {
     );
     assert.equal(rec.loadCount(), 1, "load is consulted once, when watch starts");
     assert.equal(requests[0]?.cursor, "cursor-42", "the first poll resumes from the stored cursor");
-    assert.equal(requests[0]?.startLedger, undefined, "a cursor poll must not also send a ledger range");
+    assert.equal(
+      requests[0]?.startLedger,
+      undefined,
+      "a cursor poll must not also send a ledger range",
+    );
   });
 
   it("saves once per poll, before the page is delivered", async () => {
@@ -229,9 +239,21 @@ describe("watch(signal) cursor persistence", () => {
     const resumed = await take(second, 1);
     const resumedRequest = requests[2];
 
-    assert.deepEqual(resumed, [[decodedEvent(503)]], "the first page after restart is the next one, not history");
-    assert.equal(resumedRequest?.cursor, "cursor-3", "the restart poll continues from the saved cursor");
-    assert.equal(resumedRequest?.startLedger, undefined, "no re-fetch from a ledger range after restart");
+    assert.deepEqual(
+      resumed,
+      [[decodedEvent(503)]],
+      "the first page after restart is the next one, not history",
+    );
+    assert.equal(
+      resumedRequest?.cursor,
+      "cursor-3",
+      "the restart poll continues from the saved cursor",
+    );
+    assert.equal(
+      resumedRequest?.startLedger,
+      undefined,
+      "no re-fetch from a ledger range after restart",
+    );
   });
 
   it("without a cursorStore the first run starts at the default head position", async () => {
@@ -239,11 +261,18 @@ describe("watch(signal) cursor persistence", () => {
     const { server, requests, latestLedgerCalls } = scriptedServer([page, page]);
     const listener = new GuardTelemetryListener({ server, guard: GUARD });
 
-    assert.ok(listener.activeCursorStore instanceof InMemoryCursorStore, "the default store is in-memory");
+    assert.ok(
+      listener.activeCursorStore instanceof InMemoryCursorStore,
+      "the default store is in-memory",
+    );
 
     await take(listener, 1);
 
-    assert.equal(latestLedgerCalls(), 1, "with nothing persisted, the default head position is used");
+    assert.equal(
+      latestLedgerCalls(),
+      1,
+      "with nothing persisted, the default head position is used",
+    );
     assert.equal(requests[0]?.startLedger, 499);
     assert.equal(requests[0]?.cursor, undefined);
   });
@@ -260,8 +289,16 @@ describe("watch(signal) cursor persistence", () => {
     await take(listener, 1); // the "restart": watch() invoked again on the same listener
     const secondRunRequest = requests[1];
 
-    assert.equal(secondRunRequest?.cursor, "cursor-2", "the second watch continues where the first stopped");
-    assert.equal(secondRunRequest?.startLedger, undefined, "it does not fall back to the default head");
+    assert.equal(
+      secondRunRequest?.cursor,
+      "cursor-2",
+      "the second watch continues where the first stopped",
+    );
+    assert.equal(
+      secondRunRequest?.startLedger,
+      undefined,
+      "it does not fall back to the default head",
+    );
   });
 
   it("an explicit startLedger pins the start and overrides any stored cursor", async () => {
@@ -401,10 +438,7 @@ describe("unknown event topics (issue #287)", () => {
   it("watch() surfaces a new topic through the callback and keeps polling", async () => {
     const pages: ScriptedPage[] = [
       {
-        events: [
-          rawLedgerEvent(501, "tx-future", "event_future"),
-          rawLedgerEvent(502, "tx-known"),
-        ],
+        events: [rawLedgerEvent(501, "tx-future", "event_future"), rawLedgerEvent(502, "tx-known")],
         cursor: "cursor-1",
       },
       { events: [rawLedgerEvent(503, "tx-known-2")], cursor: "cursor-2" },
@@ -443,7 +477,10 @@ describe("single active stream (issue #291)", () => {
 
     const first = listener.watch({ pollIntervalMs: 1 });
     const firstPage = await first.next();
-    assert.deepEqual(firstPage.value?.map((event) => event.ledger), [501]);
+    assert.deepEqual(
+      firstPage.value?.map((event) => event.ledger),
+      [501],
+    );
 
     const second = listener.watch({ pollIntervalMs: 1 });
     await assert.rejects(
@@ -536,7 +573,13 @@ describe("listener health snapshot (issue #286)", () => {
     // The snapshot is detached: editing it cannot reach listener state.
     during.cursors.committed = "tampered";
     during.failedTx.degraded = true;
-    during.gaps.push({ fromLedger: 1, toLedger: 2, reason: "history_pruned", retainedFromLedger: 3, retainedToLedger: 4 });
+    during.gaps.push({
+      fromLedger: 1,
+      toLedger: 2,
+      reason: "history_pruned",
+      retainedFromLedger: 3,
+      retainedToLedger: 4,
+    });
     const after = listener.health();
     assert.equal(after.cursors.committed, "cursor-1");
     assert.equal(after.failedTx.degraded, false);
@@ -696,10 +739,17 @@ describe("InMemoryCursorStore", () => {
     // Another guard on the same network, and the same guard on another
     // network, see neither cursor.
     assert.equal(
-      await store.load({ network: "soroban-testnet.stellar.org", guard: "C".padEnd(56, "B"), stream: "events" }),
+      await store.load({
+        network: "soroban-testnet.stellar.org",
+        guard: "C".padEnd(56, "B"),
+        stream: "events",
+      }),
       null,
     );
-    assert.equal(await store.load({ network: "mainnet.example.com", guard: GUARD, stream: "events" }), null);
+    assert.equal(
+      await store.load({ network: "mainnet.example.com", guard: GUARD, stream: "events" }),
+      null,
+    );
   });
 
   it("keeps unscoped calls on their own slot, as before issue #282", async () => {
@@ -782,7 +832,10 @@ describe("durable cursor scoping (issue #282)", () => {
 
   it("the same guard on two networks cannot load the other network's cursor", async () => {
     const firstPage = { events: [rawLedgerEvent(501)], cursor: "cursor-mainnet" };
-    const { server, requests } = scriptedServer([firstPage, { events: [], cursor: "cursor-testnet" }]);
+    const { server, requests } = scriptedServer([
+      firstPage,
+      { events: [], cursor: "cursor-testnet" },
+    ]);
     const shared = new InMemoryCursorStore();
 
     const mainnet = new GuardTelemetryListener({
@@ -802,7 +855,11 @@ describe("durable cursor scoping (issue #282)", () => {
     await take(testnet, 1);
 
     const testnetFirstRequest = requests[1];
-    assert.equal(testnetFirstRequest?.cursor, undefined, "the mainnet cursor does not leak into testnet");
+    assert.equal(
+      testnetFirstRequest?.cursor,
+      undefined,
+      "the mainnet cursor does not leak into testnet",
+    );
     assert.equal(testnetFirstRequest?.startLedger, 499);
   });
 

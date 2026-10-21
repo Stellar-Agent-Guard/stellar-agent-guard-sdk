@@ -33,7 +33,11 @@ import type { PreFlightDecision } from "../../src/preflight.ts";
 import type { ContractCall } from "../../src/tx.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 
-const CALL: ContractCall = { contract: unsafeContractAddress("C".padEnd(56, "A")), fn: "transfer", args: [] };
+const CALL: ContractCall = {
+  contract: unsafeContractAddress("C".padEnd(56, "A")),
+  fn: "transfer",
+  args: [],
+};
 const RECORDED_RESOURCE_PAYLOAD = JSON.parse(
   readFileSync(new URL("../fixtures/simulation-resource-payload.json", import.meta.url), "utf8"),
 ) as unknown;
@@ -215,10 +219,7 @@ describe("CostPreChecker fee ceiling validation (#345)", () => {
       },
     });
 
-    await assert.rejects(
-      checker.check(CALL, { maxFeeStroops: -5n }),
-      InvalidFeeCeilingError,
-    );
+    await assert.rejects(checker.check(CALL, { maxFeeStroops: -5n }), InvalidFeeCeilingError);
     assert.equal(calls, 0, "a malformed budget must not spend an RPC");
   });
 
@@ -285,7 +286,9 @@ describe("CostPreChecker", () => {
       readWriteEntries: 1,
       storageEntries: 3,
     };
-    const checker = new CostPreChecker({ interceptor: fakeInterceptor(admissible(2_000n, 3, breakdown)) });
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissible(2_000n, 3, breakdown)),
+    });
     const decision = await checker.check(CALL);
 
     assert.equal(decision.kind, "within_budget");
@@ -478,11 +481,14 @@ describe("formatFee", () => {
       );
     }
     // A number is a distinct, deliberate refusal: precision is already gone.
-    assert.throws(() => formatFee(1 as unknown as bigint), (err: unknown) => {
-      assert(err instanceof TypeError);
-      assert.match(err.message, /lost precision/);
-      return true;
-    });
+    assert.throws(
+      () => formatFee(1 as unknown as bigint),
+      (err: unknown) => {
+        assert(err instanceof TypeError);
+        assert.match(err.message, /lost precision/);
+        return true;
+      },
+    );
     assert.throws(() => formatFee(1.5 as unknown as bigint), TypeError);
   });
 
@@ -500,8 +506,7 @@ describe("formatFee", () => {
       const rendered = formatFee(stroops);
       const [whole = "", fraction = ""] = rendered.split(".");
       const back =
-        BigInt(whole) * STROOPS_PER_XLM +
-        (fraction === "" ? 0n : BigInt(fraction.padEnd(7, "0")));
+        BigInt(whole) * STROOPS_PER_XLM + (fraction === "" ? 0n : BigInt(fraction.padEnd(7, "0")));
       assert.equal(back, stroops, `round-trip of ${stroops}`);
     }
   });
@@ -649,7 +654,11 @@ describe("CostPreChecker policyContext integration", () => {
     assert.equal(decision.reason, "window_cap_exceeded");
     assert.ok(decision.policyContext !== null);
     assert.equal(decision.policyContext.perTxCapOk, true, "per-tx cap was not exceeded");
-    assert.equal(decision.policyContext.windowRemainingEstimate, null, "never report 0 for unavailable window state");
+    assert.equal(
+      decision.policyContext.windowRemainingEstimate,
+      null,
+      "never report 0 for unavailable window state",
+    );
     assert.equal(decision.policyContext.reason, "window_cap_exceeded");
     assert.equal(decision.totalFeeStroops, 0n);
   });
@@ -785,8 +794,12 @@ describe("CostPreChecker window-spend snapshot (issue #311)", () => {
       contract: unsafeContractAddress("C".padEnd(56, "A")),
       fn: "transfer",
       args: [
-        nativeToScVal("GDUT5FVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUUWYM", { type: "address" }),
-        nativeToScVal("GDUYKWVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRHT", { type: "address" }),
+        nativeToScVal("GDUT5FVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUUWYM", {
+          type: "address",
+        }),
+        nativeToScVal("GDUYKWVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRHT", {
+          type: "address",
+        }),
         nativeToScVal(amount, { type: "i128" }),
       ],
     };
@@ -798,17 +811,21 @@ describe("CostPreChecker window-spend snapshot (issue #311)", () => {
       contract: unsafeContractAddress("C".padEnd(56, "A")),
       fn: "transfer_from",
       args: [
-        nativeToScVal("GDUT5FVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUUWYM", { type: "address" }),
-        nativeToScVal("GDUYKWVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRHT", { type: "address" }),
-        nativeToScVal("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44", { type: "address" }),
+        nativeToScVal("GDUT5FVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUUWYM", {
+          type: "address",
+        }),
+        nativeToScVal("GDUYKWVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRHT", {
+          type: "address",
+        }),
+        nativeToScVal("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44", {
+          type: "address",
+        }),
         nativeToScVal(amount, { type: "i128" }),
       ],
     };
   }
 
-  function snapshot(
-    overrides: Partial<WindowSpendSnapshot> = {},
-  ): WindowSpendSnapshot {
+  function snapshot(overrides: Partial<WindowSpendSnapshot> = {}): WindowSpendSnapshot {
     return {
       ledger: LEDGER,
       windowCapStroops: 10_000n,
@@ -1028,7 +1045,11 @@ describe("CostPreChecker window-spend snapshot (issue #311)", () => {
       { ledger: 1, windowCapStroops: 1n, windowSpentStroops: -1n },
     ] as unknown as WindowSpendSnapshot[]) {
       assert.throws(
-        () => new CostPreChecker({ interceptor: fakeInterceptor(admissibleAt(LEDGER)), windowSnapshot: invalid }),
+        () =>
+          new CostPreChecker({
+            interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+            windowSnapshot: invalid,
+          }),
         TypeError,
         `must reject ${JSON.stringify(invalid, (_k, v) => (typeof v === "bigint" ? String(v) : v))}`,
       );

@@ -153,7 +153,10 @@ export interface VendorReport {
 }
 
 /** Stable, byte-exact provenance header for a vendored artifact. */
-export function provenanceHeader(artifact: VendoredArtifact, digest: string): Record<string, unknown> {
+export function provenanceHeader(
+  artifact: VendoredArtifact,
+  digest: string,
+): Record<string, unknown> {
   const contentKey = artifact.contentKey ?? "schema";
   return {
     _provenance: {

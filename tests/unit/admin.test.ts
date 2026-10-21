@@ -313,7 +313,10 @@ describe("admin helpers forward signal and timeoutMs", () => {
         }>,
     },
     { name: "submitFreeze", run: (params) => submitFreeze(params) as Promise<{ kind: string }> },
-    { name: "submitUnfreeze", run: (params) => submitUnfreeze(params) as Promise<{ kind: string }> },
+    {
+      name: "submitUnfreeze",
+      run: (params) => submitUnfreeze(params) as Promise<{ kind: string }>,
+    },
     {
       name: "submitRotateAgentKey",
       run: (params) =>
@@ -380,6 +383,9 @@ describe("admin helpers forward signal and timeoutMs", () => {
     });
 
     assert.equal(outcome.kind, "allowed");
-    assert.equal(outcome.kind === "allowed" ? outcome.submission.hash : undefined, "admin_tx_hash_123");
+    assert.equal(
+      outcome.kind === "allowed" ? outcome.submission.hash : undefined,
+      "admin_tx_hash_123",
+    );
   });
 });

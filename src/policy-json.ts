@@ -65,7 +65,11 @@ const REQUIRED_FIELDS = [
   "paused",
   "dms_grace_secs",
 ] as const;
-const OPTIONAL_FIELDS = ["recipient_window_caps", "blocked_recipients", "protocol_calls_per_window"] as const;
+const OPTIONAL_FIELDS = [
+  "recipient_window_caps",
+  "blocked_recipients",
+  "protocol_calls_per_window",
+] as const;
 const I128_MIN = -(2n ** 127n);
 const I128_MAX = 2n ** 127n - 1n;
 const U64_MAX = 2n ** 64n - 1n;
@@ -142,12 +146,14 @@ export function policyFromJson(input: unknown): PolicyConfig {
     per_tx_cap: jsonInteger(root.per_tx_cap, "policy.per_tx_cap", "i128", I128_MIN, I128_MAX),
     window_secs: jsonInteger(root.window_secs, "policy.window_secs", "u64", 0n, U64_MAX),
     window_cap: jsonInteger(root.window_cap, "policy.window_cap", "i128", I128_MIN, I128_MAX),
-    assets: jsonArray(root.assets, "policy.assets").map((value, index) =>
-      jsonAddress(value, `policy.assets[${index}]`, "contract") as ContractAddress,
+    assets: jsonArray(root.assets, "policy.assets").map(
+      (value, index) =>
+        jsonAddress(value, `policy.assets[${index}]`, "contract") as ContractAddress,
     ),
     protocols,
-    recipients: jsonArray(root.recipients, "policy.recipients").map((value, index) =>
-      jsonAddress(value, `policy.recipients[${index}]`, "account") as AccountAddress,
+    recipients: jsonArray(root.recipients, "policy.recipients").map(
+      (value, index) =>
+        jsonAddress(value, `policy.recipients[${index}]`, "account") as AccountAddress,
     ),
     allow_any_recipient: jsonBoolean(root.allow_any_recipient, "policy.allow_any_recipient"),
     active_from: jsonInteger(root.active_from, "policy.active_from", "u64", 0n, U64_MAX),

@@ -61,10 +61,10 @@ import { unsafeContractAddress, unsafeAccountAddress } from "../src/policy.ts";
 
 const RPC_URL = process.env["PHASE2_RPC_URL"] ?? "https://soroban-testnet.stellar.org";
 const GUARD = unsafeContractAddress(
-  process.env["PHASE2_GUARD"] ?? "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"
+  process.env["PHASE2_GUARD"] ?? "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
 );
 const TOKEN = unsafeContractAddress(
-  process.env["PHASE2_TOKEN"] ?? "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"
+  process.env["PHASE2_TOKEN"] ?? "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
 );
 /** The allowlisted recipient recorded in `tests/fixtures/phase2-instance.json`. */
 const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
@@ -74,7 +74,10 @@ const OUT_DIR = resolve(process.cwd(), "tests/fixtures/rpc");
 /** Read the SDK version the fixtures were captured with, for the provenance header. */
 async function sdkVersion(): Promise<string> {
   const pkg = JSON.parse(
-    await readFile(resolve(process.cwd(), "node_modules/@stellar/stellar-sdk/package.json"), "utf8"),
+    await readFile(
+      resolve(process.cwd(), "node_modules/@stellar/stellar-sdk/package.json"),
+      "utf8",
+    ),
   ) as { version: string };
   return pkg.version;
 }
@@ -146,7 +149,9 @@ async function main(): Promise<void> {
     fee: "100",
     networkPassphrase: NETWORK_PASSPHRASE,
   })
-    .addOperation(Operation.invokeContractFunction({ contract: GUARD, function: "status", args: [] }))
+    .addOperation(
+      Operation.invokeContractFunction({ contract: GUARD, function: "status", args: [] }),
+    )
     .setTimeout(30)
     .build();
   const rawSuccess = await server._simulateTransaction(readTx);

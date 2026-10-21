@@ -227,7 +227,12 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
 
       if (calls.length === 1) {
         const decision = await options.interceptor.check(calls[0]!, checkOptions);
-        runDecisionHook(options.onDecision, [request, decision], "langchain", options.blockedHookLogger);
+        runDecisionHook(
+          options.onDecision,
+          [request, decision],
+          "langchain",
+          options.blockedHookLogger,
+        );
         if (decision.allowed) return handler(request);
 
         // Operator-facing half of the refusal, wired through the shared primitive
@@ -279,7 +284,10 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
 }
 
 /** Human- and model-readable refusal text, sourced from the contract's reason. */
-function describeRefusal(decision: PreFlightDecision & { allowed: false }, toolName: string): string {
+function describeRefusal(
+  decision: PreFlightDecision & { allowed: false },
+  toolName: string,
+): string {
   if (decision.kind === "blocked") {
     return (
       `stellar-agent-guard blocked '${toolName}': ${decision.reason} — ${decision.explanation}\n` +

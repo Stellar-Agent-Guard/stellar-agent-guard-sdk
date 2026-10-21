@@ -23,9 +23,7 @@ describe("browser-safe root entry (issue #325)", () => {
       logLevel: "silent",
     });
 
-    const builtins = Object.keys(result.metafile.inputs).filter((path) =>
-      path.startsWith("node:"),
-    );
+    const builtins = Object.keys(result.metafile.inputs).filter((path) => path.startsWith("node:"));
     assert.deepEqual(
       builtins,
       [],

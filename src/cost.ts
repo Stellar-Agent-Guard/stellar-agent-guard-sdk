@@ -241,20 +241,17 @@ function resourceCount(value: unknown): number | undefined {
     return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : undefined;
   }
   if (typeof value === "string" && value.trim() === "") return undefined;
-  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  const number =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isSafeInteger(number) && number >= 0 ? number : undefined;
 }
 
-function footprintCounts(value: unknown):
-  | { readOnlyEntries: number; readWriteEntries: number; storageEntries: number }
-  | undefined {
+function footprintCounts(
+  value: unknown,
+): { readOnlyEntries: number; readWriteEntries: number; storageEntries: number } | undefined {
   const footprint = recordOf(value);
-  const readOnly = footprint
-    ? firstDefined(footprint, "readOnly", "read_only")
-    : undefined;
-  const readWrite = footprint
-    ? firstDefined(footprint, "readWrite", "read_write")
-    : undefined;
+  const readOnly = footprint ? firstDefined(footprint, "readOnly", "read_only") : undefined;
+  const readWrite = footprint ? firstDefined(footprint, "readWrite", "read_write") : undefined;
   if (!Array.isArray(readOnly) || !Array.isArray(readWrite)) return undefined;
   const readOnlyEntries = readOnly.length;
   const readWriteEntries = readWrite.length;
@@ -273,7 +270,9 @@ function footprintCounts(value: unknown):
  * object used by recorded RPC fixtures. Missing or malformed fields return
  * `undefined` as a whole, never a partially fabricated zero-filled breakdown.
  */
-export function resourceBreakdownFromSimulation(simulation: unknown): ResourceBreakdown | undefined {
+export function resourceBreakdownFromSimulation(
+  simulation: unknown,
+): ResourceBreakdown | undefined {
   const response = recordOf(simulation);
   const transactionData = response?.transactionData ?? simulation;
   let transaction: Record<string, unknown> | undefined;
@@ -302,9 +301,7 @@ export function resourceBreakdownFromSimulation(simulation: unknown): ResourceBr
   if (!builtRecord) return undefined;
   const resources = recordOf(builtRecord.resources) ?? builtRecord;
   const instructions = resourceCount(resources.instructions);
-  const diskReadBytes = resourceCount(
-    firstDefined(resources, "diskReadBytes", "disk_read_bytes"),
-  );
+  const diskReadBytes = resourceCount(firstDefined(resources, "diskReadBytes", "disk_read_bytes"));
   const writeBytes = resourceCount(firstDefined(resources, "writeBytes", "write_bytes"));
   const footprint = footprintCounts(resources.footprint);
   if (
@@ -615,7 +612,11 @@ function validateWindowSnapshot(snapshot: WindowSpendSnapshot): WindowSpendSnaps
       `windowSnapshot must be an object, received ${snapshot === null ? "null" : typeof snapshot}`,
     );
   }
-  if (typeof snapshot.ledger !== "number" || !Number.isSafeInteger(snapshot.ledger) || snapshot.ledger < 0) {
+  if (
+    typeof snapshot.ledger !== "number" ||
+    !Number.isSafeInteger(snapshot.ledger) ||
+    snapshot.ledger < 0
+  ) {
     throw new TypeError(
       `windowSnapshot.ledger must be a non-negative safe integer, received ${String(snapshot.ledger)}`,
     );
@@ -781,9 +782,7 @@ export class CostPreChecker {
     // Validate at the configuration boundary: a typo must fail here, not turn
     // every later quote into a fabricated over-budget answer.
     this.maxFeeStroops =
-      config.maxFeeStroops === undefined
-        ? undefined
-        : validateFeeCeiling(config.maxFeeStroops);
+      config.maxFeeStroops === undefined ? undefined : validateFeeCeiling(config.maxFeeStroops);
     this.windowSnapshot =
       config.windowSnapshot === undefined || config.windowSnapshot === null
         ? null
@@ -796,10 +795,7 @@ export class CostPreChecker {
   }
 
   /** Price a call. Equivalent to `(await this.checkWithCost(call, options)).cost`. */
-  async check(
-    call: ContractCall,
-    options?: CostPreCheckOptions,
-  ): Promise<CostDecision> {
+  async check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostDecision> {
     return (await this.checkWithCost(call, options)).cost;
   }
 
@@ -831,7 +827,7 @@ export class CostPreChecker {
     const ceiling =
       options?.maxFeeStroops !== undefined
         ? validateFeeCeiling(options.maxFeeStroops)
-        : this.maxFeeStroops ?? null;
+        : (this.maxFeeStroops ?? null);
     // Same boundary for the window snapshot: an unusable snapshot is a
     // configuration error, checked before any RPC, and `null` explicitly
     // clears a configured snapshot for this one check.
@@ -881,7 +877,7 @@ export class CostPreChecker {
     // Provenance travels with the verdict from the same simulation. A block or
     // an undetermined run has no priced snapshot, so it is explicitly null
     // rather than an invented ledger marker.
-    const provenance = decision.kind === "admissible" ? decision.provenance ?? null : null;
+    const provenance = decision.kind === "admissible" ? (decision.provenance ?? null) : null;
     if (decision.kind === "blocked") {
       return {
         kind: "blocked",
