@@ -124,6 +124,11 @@ export interface ProtocolRule {
   contract: ContractAddress;
   /** `null` means "any function on this contract". */
   fns: string[] | null;
+  /**
+   * Pause this rule without pausing the whole policy (issue #260). Optional;
+   * absent means `false`, which is what the encoder emits for it.
+   */
+  paused?: boolean;
 }
 
 export interface RecipientWindowCap {
@@ -145,6 +150,14 @@ export interface PolicyConfig {
   dms_grace_secs: bigint;
   recipient_window_caps?: RecipientWindowCap[];
   blocked_recipients?: AccountAddress[];
+  /**
+   * Cap on protocol calls per rolling window (issue #260). The contract's
+   * `u32` field, so a safe `number` — not a `bigint` — is the exact type; the
+   * encoder refuses anything outside `[0, 2^32 - 1]` rather than truncating.
+   * Absent means the contract default of `0` (no cap), which is what the
+   * encoder emits for it.
+   */
+  protocol_calls_per_window?: number;
 }
 
 /** Recursively marks every property and array element as readonly. */
@@ -270,6 +283,21 @@ export type CheckResult =
  * host's `Symbol` comparison uses.
  */
 export function policyToScVal(policy: ReadonlyPolicyConfig): xdr.ScVal {
+  // `protocol_calls_per_window` is a contract-side `u32`: validate the range
+  // here rather than let a narrowing conversion or a silent truncation decide
+  // (issue #260). Absent means the contract default of 0.
+  const protocolCallsPerWindow = policy.protocol_calls_per_window ?? 0;
+  if (
+    !Number.isInteger(protocolCallsPerWindow) ||
+    protocolCallsPerWindow < 0 ||
+    protocolCallsPerWindow > U32_MAX
+  ) {
+    throw new TypeError(
+      `protocol_calls_per_window must be an integer in [0, ${U32_MAX}], ` +
+        `received ${String(protocolCallsPerWindow)}`,
+    );
+  }
+
   const entries: Array<{ key: string; val: xdr.ScVal }> = [
     { key: "per_tx_cap", val: nativeToScVal(policy.per_tx_cap, { type: "i128" }) },
     { key: "window_secs", val: nativeToScVal(policy.window_secs, { type: "u64" }) },
@@ -291,6 +319,10 @@ export function policyToScVal(policy: ReadonlyPolicyConfig): xdr.ScVal {
                   ? xdr.ScVal.scvVoid()
                   : xdr.ScVal.scvVec(rule.fns.map((fn) => xdr.ScVal.scvSymbol(fn))),
             },
+            // Per-rule pause flag: absent means false, emitted explicitly so
+            // the map always carries the contract struct's full field set
+            // (issue #260, cross-repo parity vectors).
+            { key: "paused", val: xdr.ScVal.scvBool(rule.paused ?? false) },
           ]),
         ),
       ),
@@ -299,11 +331,39 @@ export function policyToScVal(policy: ReadonlyPolicyConfig): xdr.ScVal {
       key: "recipients",
       val: xdr.ScVal.scvVec(policy.recipients.map((address) => new Address(address).toScVal())),
     },
+    {
+      key: "recipient_window_caps",
+      val: xdr.ScVal.scvVec(
+        (policy.recipient_window_caps ?? []).map((cap) =>
+          sortedScMap([
+            { key: "cap", val: nativeToScVal(cap.cap, { type: "i128" }) },
+            { key: "recipient", val: new Address(cap.recipient).toScVal() },
+          ]),
+        ),
+      ),
+    },
+    {
+      key: "blocked_recipients",
+      val: xdr.ScVal.scvVec(
+        (policy.blocked_recipients ?? []).map((address) => new Address(address).toScVal()),
+      ),
+    },
     { key: "allow_any_recipient", val: xdr.ScVal.scvBool(policy.allow_any_recipient) },
     { key: "active_from", val: nativeToScVal(policy.active_from, { type: "u64" }) },
     { key: "active_until", val: nativeToScVal(policy.active_until, { type: "u64" }) },
     { key: "paused", val: xdr.ScVal.scvBool(policy.paused) },
     { key: "dms_grace_secs", val: nativeToScVal(policy.dms_grace_secs, { type: "u64" }) },
+    {
+      key: "protocol_calls_per_window",
+      val: nativeToScVal(protocolCallsPerWindow, { type: "u32" }),
+    },
+    // The contract struct carries a per-asset cap list this SDK's PolicyConfig
+    // has no vocabulary for. It is emitted as an empty vector — a policy that
+    // sets no asset caps — so the map always holds the struct's full field set
+    // and byte-parity with the contract's canonical encoding holds (issue
+    // #260). `decodePolicy` refuses a *non-empty* `asset_caps` rather than
+    // silently dropping it.
+    { key: "asset_caps", val: xdr.ScVal.scvVec([]) },
   ];
   return sortedScMap(entries);
 }
@@ -312,19 +372,36 @@ const POLICY_FIELDS = [
   "active_from",
   "active_until",
   "allow_any_recipient",
+  "asset_caps",
   "assets",
+  "blocked_recipients",
   "dms_grace_secs",
   "paused",
   "per_tx_cap",
+  "protocol_calls_per_window",
   "protocols",
+  "recipient_window_caps",
   "recipients",
   "window_cap",
   "window_secs",
 ] as const;
-const PROTOCOL_RULE_FIELDS = ["contract", "fns"] as const;
+/**
+ * Fields the contract's struct carries but a policy may legitimately omit;
+ * the decoder fills them from contract defaults (issue #260). The eleven core
+ * fields stay required, so a truncated map still fails loudly.
+ */
+const POLICY_OPTIONAL_FIELDS = [
+  "asset_caps",
+  "blocked_recipients",
+  "protocol_calls_per_window",
+  "recipient_window_caps",
+] as const;
+const PROTOCOL_RULE_FIELDS = ["contract", "fns", "paused"] as const;
+const PROTOCOL_RULE_OPTIONAL_FIELDS = ["paused"] as const;
 const I128_MIN = -(2n ** 127n);
 const I128_MAX = 2n ** 127n - 1n;
 const U64_MAX = 2n ** 64n - 1n;
+const U32_MAX = 4_294_967_295;
 
 /**
  * Decode a `PolicyConfig` returned by the guard's `policy()` read, or the map
@@ -356,8 +433,21 @@ const U64_MAX = 2n ** 64n - 1n;
  */
 export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
   try {
-    const fields = symbolMap(policyMap(scVal), "policy", POLICY_FIELDS);
-    return {
+    const fields = symbolMap(policyMap(scVal), "policy", POLICY_FIELDS, POLICY_OPTIONAL_FIELDS);
+
+    // `asset_caps` is part of the contract struct this SDK's PolicyConfig has
+    // no vocabulary for. An empty list is the policy the SDK itself encodes;
+    // a non-empty one carries caps the SDK would silently drop, so it is
+    // refused (fail-closed, issue #260) rather than misread.
+    const assetCaps = fields.get("asset_caps");
+    if (assetCaps !== undefined && policyVec(assetCaps, "asset_caps").length > 0) {
+      throw policyDecodeFailure(
+        "asset_caps",
+        "non-empty asset_caps are not supported by this SDK version",
+      );
+    }
+
+    const policy: PolicyConfig = {
       per_tx_cap: policyInteger(
         fields.get("per_tx_cap")!,
         "per_tx_cap",
@@ -391,6 +481,39 @@ export function decodePolicy(scVal: xdr.ScVal): PolicyConfig {
         U64_MAX,
       ),
     };
+
+    // The additive fields (issue #260) are omitted from the result when they
+    // hold the contract's default (empty list / zero), so a policy decoded
+    // from an eleven-field map and one from a fifteen-field map compare equal
+    // when they mean the same thing — and round-trip with `policyToScVal`.
+    const recipientWindowCaps = fields.get("recipient_window_caps");
+    if (recipientWindowCaps !== undefined) {
+      const caps = policyVec(recipientWindowCaps, "recipient_window_caps").map((item, index) => {
+        const path = `recipient_window_caps[${index}]`;
+        const capFields = symbolMap(item, path, ["recipient", "cap"]);
+        return {
+          recipient: policyAddress(capFields.get("recipient")!, `${path}.recipient`) as AccountAddress,
+          cap: policyInteger(capFields.get("cap")!, `${path}.cap`, "i128", I128_MIN, I128_MAX),
+        };
+      });
+      if (caps.length > 0) policy.recipient_window_caps = caps;
+    }
+
+    const blockedRecipients = fields.get("blocked_recipients");
+    if (blockedRecipients !== undefined) {
+      const blocked = addressVector(blockedRecipients, "blocked_recipients").map(
+        (a) => a as AccountAddress,
+      );
+      if (blocked.length > 0) policy.blocked_recipients = blocked;
+    }
+
+    const protocolCallsPerWindow = fields.get("protocol_calls_per_window");
+    if (protocolCallsPerWindow !== undefined) {
+      const value = policyU32(protocolCallsPerWindow, "protocol_calls_per_window");
+      if (value !== 0) policy.protocol_calls_per_window = value;
+    }
+
+    return policy;
   } catch (error) {
     if (error instanceof PolicyDecodeError) throw error;
     throw policyDecodeFailure("policy", "could not decode ScVal", error);
@@ -422,6 +545,7 @@ function symbolMap(
   scVal: xdr.ScVal,
   path: string,
   expectedFields: readonly string[],
+  optionalFields: readonly string[] = [],
 ): Map<string, xdr.ScVal> {
   if (scVal.type !== "scvMap") throw policyDecodeFailure(path, `expected a map, got ${scVal.type}`);
 
@@ -445,7 +569,9 @@ function symbolMap(
     previous = name;
   }
 
-  const missing = expectedFields.filter((name) => !fields.has(name));
+  const missing = expectedFields.filter(
+    (name) => !optionalFields.includes(name) && !fields.has(name),
+  );
   if (missing.length > 0) throw policyDecodeFailure(path, `missing field(s): ${missing.join(", ")}`);
   return fields;
 }
@@ -495,6 +621,26 @@ function policyBoolean(scVal: xdr.ScVal, path: string): boolean {
   return value;
 }
 
+/** Decode a contract-side `u32` field (issue #260), range-checked. */
+function policyU32(scVal: xdr.ScVal, path: string): number {
+  if (scVal.type !== "scvU32" && scVal.type !== "scvString") {
+    throw policyDecodeFailure(path, `expected u32 (scvU32), or a decimal string, got ${scVal.type}`);
+  }
+  const native = scValToNative(scVal);
+  let value: number;
+  if (typeof native === "number") {
+    value = native;
+  } else if (typeof native === "string" && /^\d+$/.test(native)) {
+    value = Number(native);
+  } else {
+    throw policyDecodeFailure(path, "value is not a base-10 integer");
+  }
+  if (!Number.isInteger(value) || value < 0 || value > U32_MAX) {
+    throw policyDecodeFailure(path, `${value} is outside the supported [0, ${U32_MAX}] range`);
+  }
+  return value;
+}
+
 function policyVec(scVal: xdr.ScVal, path: string): xdr.ScVal[] {
   if (scVal.type !== "scvVec") {
     throw policyDecodeFailure(path, `expected Vec, got ${scVal.type}`);
@@ -525,12 +671,17 @@ function addressVector(scVal: xdr.ScVal, path: string): string[] {
 function protocolRules(scVal: xdr.ScVal): ProtocolRule[] {
   return policyVec(scVal, "protocols").map((rule, index) => {
     const path = `protocols[${index}]`;
-    const fields = symbolMap(rule, path, PROTOCOL_RULE_FIELDS);
+    const fields = symbolMap(rule, path, PROTOCOL_RULE_FIELDS, PROTOCOL_RULE_OPTIONAL_FIELDS);
     const contractAddr = policyAddress(fields.get("contract")!, `${path}.contract`);
-    return {
+    const decoded: ProtocolRule = {
       contract: contractAddr as ContractAddress,
       fns: functionSymbols(fields.get("fns")!, `${path}.fns`),
     };
+    // `paused: false` is the contract default and is omitted, so a rule that
+    // never paused round-trips to the object it started as (issue #260).
+    const paused = fields.get("paused");
+    if (paused !== undefined && policyBoolean(paused, `${path}.paused`)) decoded.paused = true;
+    return decoded;
   });
 }
 

@@ -246,11 +246,13 @@ export type {
   FeeBreakdown,
   PolicyContext,
   ResourceBreakdown,
+  WindowSpendSnapshot,
 } from "./cost.ts";
 
 export {
   ConcurrentTelemetryStreamError,
   DEFAULT_JITTER_FRACTION,
+  DEFAULT_TELEMETRY_RETRY_OPTIONS,
   GuardEventRingBuffer,
   GuardTelemetryListener,
   InMemoryCursorStore,
@@ -270,6 +272,8 @@ export {
   telemetryFromDecision,
   TELEMETRY_EVENT_RECORD_VERSION,
   type CursorStore,
+  type CursorStoreScope,
+  type CursorStreamKind,
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardEventBufferOptions,
@@ -295,6 +299,7 @@ export {
   type PollSleep,
   type RecentEventFilter,
   type TelemetryJitter,
+  type TelemetryRetryOptions,
 } from "./telemetry.ts";
 
 export {

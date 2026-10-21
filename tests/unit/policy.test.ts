@@ -148,11 +148,15 @@ describe("policyToScVal", () => {
       "active_from",
       "active_until",
       "allow_any_recipient",
+      "asset_caps",
       "assets",
+      "blocked_recipients",
       "dms_grace_secs",
       "paused",
       "per_tx_cap",
+      "protocol_calls_per_window",
       "protocols",
+      "recipient_window_caps",
       "recipients",
       "window_cap",
       "window_secs",
@@ -165,7 +169,7 @@ describe("policyToScVal", () => {
     ) as unknown as { map: Array<{ key: xdr.ScVal; val: xdr.ScVal }> };
     const protocols = val.map.find((entry) => String(scValToNative(entry.key)) === "protocols")!;
     const ruleVec = (protocols.val as unknown as { vec: xdr.ScVal[] }).vec;
-    assert.deepEqual(encodedKeys(ruleVec[0]!), ["contract", "fns"]);
+    assert.deepEqual(encodedKeys(ruleVec[0]!), ["contract", "fns", "paused"]);
   });
 
   it("round-trips through scValToNative without losing cap precision", () => {
@@ -1462,17 +1466,21 @@ const U64_MAX = 2n ** 64n - 1n;
 /**
  * The committed `PolicyConfig` field list, spelled out deliberately rather than
  * derived: this is the assertion that catches a field added to the type but
- * omitted from the encoder.
+ * omitted from the encoder. The full contract struct, aligned by issue #260.
  */
 const POLICY_FIELD_LIST = [
   "active_from",
   "active_until",
   "allow_any_recipient",
+  "asset_caps",
   "assets",
+  "blocked_recipients",
   "dms_grace_secs",
   "paused",
   "per_tx_cap",
+  "protocol_calls_per_window",
   "protocols",
+  "recipient_window_caps",
   "recipients",
   "window_cap",
   "window_secs",
@@ -1620,11 +1628,13 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
         rules.forEach((rule, index) => {
           const ruleEntries = mapEntries(rule);
           const ruleKeys = ruleEntries.map((entry) => String(scValToNative(entry.key)));
-          assert.deepEqual(ruleKeys, ["contract", "fns"], `protocols[${index}] rule shape`);
+          assert.deepEqual(ruleKeys, ["contract", "fns", "paused"], `protocols[${index}] rule shape`);
 
           const contract = ruleEntries.find((entry) => String(scValToNative(entry.key)) === "contract")!;
           const fns = ruleEntries.find((entry) => String(scValToNative(entry.key)) === "fns")!;
+          const rulePaused = ruleEntries.find((entry) => String(scValToNative(entry.key)) === "paused")!;
           assert.equal(contract.val.type, "scvAddress", `protocols[${index}].contract must be an address`);
+          assert.equal(rulePaused.val.type, "scvBool", `protocols[${index}].paused must be a bool`);
 
           if (policy.protocols[index]!.fns === null) {
             assert.equal(fns.val.type, "scvVoid", `protocols[${index}].fns null must encode as Void`);

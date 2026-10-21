@@ -111,6 +111,25 @@ backoff, then a clean end**: the listener retries up to `maxRetries` (default
 once with the terminal error and completes the iterator normally. The stream
 never dies silently and never leaves an unhandled rejection behind.
 
+The envelope is configurable per stream (issue #285):
+
+```ts
+watch({
+  retry: {
+    maxRetries: 8,      // retry attempts after a failed poll; integer >= 0 (default 5)
+    baseDelayMs: 250,   // first backoff delay, doubled per attempt; >= 0 (default 100)
+    maxDelayMs: 10_000, // cap on any single delay; >= 0 (default: pollIntervalMs)
+  },
+});
+```
+
+Every value is validated **before the first poll**: an unusable policy throws
+a `TypeError` when the stream starts, rather than degrading mid-run into an
+untuned request storm or an accidental no-retry. `maxRetries: 0` makes the
+first failure terminal. Every backoff delay is abort-aware — a `signal` abort
+ends the wait immediately. Defaults are exported as
+`DEFAULT_TELEMETRY_RETRY_OPTIONS` and match the historical behavior exactly.
+
 Failure-mode matrix:
 
 | Failure | Retried? | `onStreamError` | Iterator |
@@ -325,11 +344,30 @@ letting the cursor outlive the process:
 ```ts
 interface CursorStore {
   /** The cursor to resume from, or `null` on first run. Consulted once, at start. */
-  load(): Promise<string | null>;
+  load(scope?: CursorStoreScope): Promise<string | null>;
   /** Persist the cursor advanced by one poll. Called once per poll. */
-  save(cursor: string): Promise<void>;
+  save(cursor: string, scope?: CursorStoreScope): Promise<void>;
+}
+
+/** Stable identity of one durable cursor slot (issue #282). */
+interface CursorStoreScope {
+  /** RPC endpoint host the listener polls. */
+  network: string;
+  /** Canonical guard contract id the cursor belongs to. */
+  guard: string;
+  /** Which stream the cursor resumes: "events" | "failed_tx". */
+  stream: CursorStreamKind;
 }
 ```
+
+- **Scoping (issue #282):** every `load()`/`save()` the listener performs
+  carries a `CursorStoreScope` — the network host, the canonical guard id and
+  the stream kind — so one backing store (a file, a Redis instance, a
+  database) can serve many listeners without one resuming from another
+  stream's cursor. A pre-existing two-method store that ignores the scope
+  argument keeps working exactly as before (it holds one slot, as it always
+  did); the built-in `InMemoryCursorStore` is scope-aware. To key records by
+  scope, use all three fields — for example `"<network>|<guard>|<stream>"`.
 
 - `load()` is consulted once, when `watch()` starts. A stored cursor wins over
   the default head position — resume-after-restart is exactly the case where
@@ -382,6 +420,26 @@ const listener = new GuardTelemetryListener({
 Redis is the same shape (`GET`/`SET` on one key), as is a single-row database
 table. Whatever the backend, the cursor is one opaque string — store it
 verbatim, do not parse it.
+
+A store that should serve **several** listeners from one backend keys by the
+scope it is given:
+
+```ts
+const scopedFileCursorStore: CursorStore = {
+  async load(scope) {
+    const key = scope ? `cursor-${scope.network}-${scope.guard}-${scope.stream}.txt` : "cursor.txt";
+    try {
+      return await readFile(key, "utf8");
+    } catch {
+      return null;
+    }
+  },
+  async save(cursor, scope) {
+    const key = scope ? `cursor-${scope.network}-${scope.guard}-${scope.stream}.txt` : "cursor.txt";
+    await writeFile(key, cursor, "utf8");
+  },
+};
+```
 
 ### Delivery contract: at-least-once
 
