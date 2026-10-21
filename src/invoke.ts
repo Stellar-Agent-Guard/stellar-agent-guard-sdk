@@ -518,6 +518,41 @@ export interface InvokeParams {
   /** Custom inclusion fee (used internally during fee-bump retries). */
   fee?: bigint | string | undefined;
   /**
+   * Hard ceiling, in stroops, on the total fee this call may pay:
+   * `resourceFee + inclusionFee`. Accepts a non-negative `bigint` or a decimal
+   * string (never a `number`: fee amounts are money and precision must not be
+   * silently lost).
+   *
+   * Enforced **before every broadcast**, from the price the enforced simulation
+   * just returned plus the inclusion fee that attempt would declare. A breach
+   * is a fail-closed `error` outcome carrying a typed `FeeCapExceededError`
+   * with the exact numbers, and no `sendTransaction` call is made.
+   *
+   * The check is performed per attempt, so it also bounds fee-bump retries and
+   * stale-ledger re-runs: a fee spike can raise the price between attempts, and
+   * the cap is re-evaluated against each attempt's own simulation, never
+   * against the first attempt's estimate. A retry therefore can never exceed
+   * the caller's ceiling.
+   *
+   * A dry run is priced the same way and reports `undetermined` when the price
+   * would breach the cap — nothing is broadcast either way.
+   */
+  maxFeeCap?: bigint | string | undefined;
+  /**
+   * Optional transaction memo, attached as a Stellar **text** memo of at most
+   * 28 UTF-8 bytes. Payment bots use this for compliance and traceability
+   * references that need to travel with the transaction itself.
+   *
+   * The memo is part of every envelope the pipeline builds — the discovery
+   * probe, the enforced simulation and the broadcast transaction — so the
+   * simulated transaction is the one that is submitted. `undefined` and the
+   * empty string both mean "no memo", preserving the default behaviour.
+   *
+   * An over-long or non-string value is rejected with a field-specific
+   * `RangeError` at the public boundary, before any RPC work.
+   */
+  memo?: string | undefined;
+  /**
    * Caller-owned cancellation. When aborted, the pipeline stops at the next
    * RPC boundary and `invoke()` returns its `error` outcome carrying an
    * `RpcTimeoutError` (see `RpcTimeoutError` for the local-only cancellation

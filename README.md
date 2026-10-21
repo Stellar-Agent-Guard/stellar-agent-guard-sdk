@@ -1271,6 +1271,13 @@ const result = await verifyGuardWasm(readFileSync("guard.wasm"));
 if (!result.ok) {
   throw new Error(`WASM mismatch: got ${result.actual}, expected ${result.expected}`);
 }
+/** Attach an optional text memo to a transaction being built.*
+ *
+ * One implementation for both build paths, so a memo can never appear on the
+ * broadcast envelope but be missing from the enforced simulation (or vice
+ * versa). `undefined` and `""` are deliberately equivalent to "no memo": an
+ * empty text memo is legal on Stellar, but a caller that passed an empty
+ * string from an optional config field means "unset", and todays
 ```
 
 `verifyGuardWasm` hashes with WebCrypto (`crypto.subtle`), so the identical call runs in Node and in the browser and needs no extra dependency. It is async, because `crypto.subtle.digest` is. `GUARD_WASM_HASH` is exported if you need the constant on its own.
