@@ -316,6 +316,20 @@ describe("policyToScVal validation", () => {
       );
     });
 
+    it("rejects a non-boolean per-rule paused flag", () => {
+      const error = reject(
+        samplePolicy({
+          protocols: [
+            { contract: TOKEN, fns: ["transfer"], paused: "yes" as unknown as boolean },
+          ],
+        }),
+      );
+      assert.deepEqual(
+        error.failures.map((failure) => [failure.path, failure.rule]),
+        [["protocols[0].paused", "invalid_type"]],
+      );
+    });
+
     it("rejects an empty or overly long Soroban symbol", () => {
       const error = reject(
         samplePolicy({
@@ -350,6 +364,17 @@ describe("policyToScVal validation", () => {
         ],
       );
       assert.match(error.failures[1]!.message, /expected an integer/);
+    });
+
+    it("accepts the contract's optional extended fields when well-formed", () => {
+      const draft = samplePolicy({
+        protocols: [{ contract: TOKEN, fns: ["transfer"], paused: true }],
+        recipient_window_caps: [{ recipient: RECIPIENT, cap: 50n }],
+        blocked_recipients: [RECIPIENT],
+        protocol_calls_per_window: 12,
+      });
+      assert.deepEqual(validatePolicyForEncoding(draft), []);
+      assert.doesNotThrow(() => policyToScVal(draft));
     });
 
     it("reports missing recipient cap fields", () => {
@@ -408,6 +433,20 @@ describe("policyToScVal validation", () => {
       );
       assert.match(error.failures[0]!.message, /not a safe integer/);
       assert.match(error.failures[1]!.message, /expected a bigint integer/);
+    });
+
+    it("validates protocol_calls_per_window as the contract's u32", () => {
+      const over = reject(samplePolicy({ protocol_calls_per_window: 2 ** 32 }));
+      assert.deepEqual(
+        over.failures.map((failure) => [failure.path, failure.rule]),
+        [["protocol_calls_per_window", "integer_out_of_range"]],
+      );
+
+      const fractional = reject(samplePolicy({ protocol_calls_per_window: 1.5 }));
+      assert.deepEqual(
+        fractional.failures.map((failure) => [failure.path, failure.rule]),
+        [["protocol_calls_per_window", "invalid_type"]],
+      );
     });
 
     it("accumulates failures from unrelated fields in one pass", () => {
