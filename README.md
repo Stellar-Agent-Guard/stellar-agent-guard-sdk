@@ -3,8 +3,8 @@
 <img src="Gemini_Generated_Image_mvimg2mvimg2mvim.jpeg" alt="Stellar Agent Guard" width="700"/>
 </p>
 <p align="center">
-<a href="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml">
-<img src="https://github.com/aigbagbobila/stellar-agent-guard-sdk/actions/workflows/ci.yml/badge.svg" alt="CI"/>
+<a href="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/actions/workflows/ci.yml">
+<img src="https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/actions/workflows/ci.yml/badge.svg" alt="CI (Node 24 and 26)"/>
 </a>
 <a href="LICENSE">
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"/>
@@ -70,7 +70,7 @@ npm install stellar-agent-guard-sdk
 ```
 
 > **Module Format & Environment Note:**
-> `stellar-agent-guard-sdk` is published strictly as **pure ESM** (`"type": "module"`) targeting **Node.js >= 24.0.0** (declared in `engines`).
+> `stellar-agent-guard-sdk` is published strictly as **pure ESM** (`"type": "module"`) targeting **Node.js >= 24.0.0** (declared in `engines`). CI runs its tests on Node 24 (LTS) and Node 26 (Current), with typecheck and lint on Node 24.
 >
 > If your project or toolchain runs in CommonJS (e.g. legacy LangChain setups, Jest configs, or `.cjs` scripts), load the SDK using the dynamic `await import()` pattern:
 >
