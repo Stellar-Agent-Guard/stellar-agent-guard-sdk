@@ -216,6 +216,7 @@ export class PolicyDecodeError extends GuardError {
 }
 
 /**
+/**
  * Stable identifiers for policy *encoding* failures.
  *
  * Deliberately separate from `POLICY_RULE_IDS` (SPEC §8 semantics): these rules
@@ -272,6 +273,56 @@ export class PolicyEncodeError extends InvalidInputError {
     );
     this.path = first.path;
     this.failures = Object.freeze(failures.map((failure) => Object.freeze({ ...failure })));
+  }
+}
+
+/**
+ * A policy file could not be read from disk (issue #105).
+ *
+ * Distinct from `PolicyDecodeError` on purpose: "the file is not there" is an
+ * operational problem with a filesystem path, while "the bytes are not a
+ * policy" is a content problem. `code` preserves the platform errno
+ * (`ENOENT`, `EACCES`, `EISDIR`, ...) so a shell script can branch on the cause
+ * without parsing a message.
+ */
+export class PolicyFileReadError extends GuardError {
+  /** The path the caller asked to load. */
+  readonly path: string;
+  /** The Node errno code, when the runtime reported one. */
+  readonly code: string | null;
+
+  constructor(message: string, options: { path: string; code?: string | null; cause?: unknown }) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.code = options.code ?? null;
+  }
+}
+
+/**
+ * A policy file parsed as JSON but failed SPEC §8 policy validation (issue #105).
+ *
+ * Every failure is carried, not just the first one: a policy file is edited as
+ * a whole, so reporting one violation per run would turn a form fix into a
+ * guessing game. The validator's structured `path`/`rule`/`message` shape is
+ * reused rather than flattened into a string.
+ */
+export class PolicyValidationError extends GuardError {
+  /** The file that failed validation. */
+  readonly path: string;
+  /** Every policy failure, in the validator's order. */
+  readonly failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+
+  constructor(
+    message: string,
+    options: {
+      path: string;
+      failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+      cause?: unknown;
+    },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.failures = [...options.failures];
   }
 }
 
