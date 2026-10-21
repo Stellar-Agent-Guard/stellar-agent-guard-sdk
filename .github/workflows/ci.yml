@@ -91,6 +91,13 @@ jobs:
       - name: lint
         run: npm run lint
 
+      # Docs-vs-package.json consistency (issue: npm run script hygiene): every
+      # `npm run <name>` referenced in README/CONTRIBUTING/docs must exist in
+      # package.json scripts. Fails CI on drift, so a renamed or removed script
+      # cannot leave a stale command in the docs.
+      - name: docs script references
+        run: npm run check:doc-scripts
+
       - name: unit tests
         run: npm test
 
