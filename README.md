@@ -229,7 +229,7 @@ if (!isContractAddress(userInput)) {
 
 #### Throw vs. Verdict Contract
 
-The same doctrine extends to adapter construction: **misconfiguration throws at construction; blocked actions return/throw as documented.** Adapter factories (`createLangChainGuardMiddleware`, `createGuardValidator`) validate their options synchronously before returning, so a missing `toContractCall`, an interceptor lacking a `check` method, or an empty options object fails fast at setup — never mid-loop on the first live tool call. See [Adapter options validation](#adapter-options-validation-fail-fast-at-construction) below.
+The same doctrine extends to adapter construction: **misconfiguration throws at construction; blocked actions return/throw as documented.** All adapters validate their options synchronously when their guard is created, so a missing call mapper, an interceptor lacking the required check method, or an empty options object fails fast at setup — never mid-loop on the first live tool call. See [Adapter options validation](#adapter-options-validation-fail-fast-at-construction) below.
 
 Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
 
@@ -240,6 +240,32 @@ Pre-flight policy interception makes an intentional asymmetric distinction betwe
 ### Adapter options validation (fail-fast at construction)
 
 Adapter factories validate their options **synchronously at construction time**, before any action runs. A misconfigured adapter throws a typed `GuardError` (subclass `AdapterConfigError`) naming the offending field and its expected shape — it never surfaces as a mid-loop failure on the first production tool call.
+
+### Shared adapter core (contributor guide)
+
+Every framework adapter uses [`src/adapters/core.ts`](src/adapters/core.ts) for option validation, call mapping, single or batch evaluation, observer dispatch, and fail-closed mapping errors. The core returns `pass-through`, `allowed`, or `halt`; `renderHalt()` shapes the halt as a message, boolean, or typed exception. Framework code only translates its native input into a call and shapes the result for its hook.
+
+Adding an adapter takes **about 30 lines of framework-specific wiring**, after its public option and hook types are defined:
+
+```ts
+const evaluation = await evaluateAction(action, {
+  adapter: "myadapter",
+  interceptor: options.interceptor,
+  toContractCall: (input) => options.toContractCall(input),
+  onDecision: (input, decision) => options.onDecision?.(input, decision),
+  onBlocked: options.onBlocked,
+  blockedHookLogger: options.blockedHookLogger,
+  signal: options.signal,
+  timeoutMs: options.timeoutMs,
+});
+
+if (evaluation.kind === "pass-through" || evaluation.kind === "allowed") {
+  return runFrameworkAction(action);
+}
+return frameworkHalt(renderHalt(evaluation.verdict, { kind: "message", toolName }));
+```
+
+Keep each adapter’s `onDecision` payload and halt style aligned with its framework contract. Add behavior expectations to the shared adapter conformance tests; the existing verdict harness should remain unchanged for behavior-preserving refactors.
 
 ### Fidelity & limits
 

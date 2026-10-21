@@ -7,9 +7,8 @@
  * adapter throws a single `AdapterConfigError` naming each offending field,
  * before the first agent action ever reaches the guard.
  *
- * Keeping the checks here -- rather than inline in `langchain.ts` and
- * `elizaos.ts` -- means the two adapters fail with the same wording and the
- * same error type, and a new adapter gets the checks for free.
+ * `core.ts` composes these checks for every adapter, so they fail with the
+ * same wording and error type and a new adapter gets the checks for free.
  */
 import { AdapterConfigError } from "../errors.ts";
 
@@ -60,6 +59,17 @@ export function validateOptionalFunction(
     field,
     expected: "a function when provided",
     message: `\`${field}\` must be a function when provided (got ${describeValue(value)}).`,
+  };
+}
+
+
+/** An optional option that, when present, must be a string. */
+export function validateOptionalString(field: string, value: unknown): AdapterConfigIssue | undefined {
+  if (value === undefined || typeof value === "string") return undefined;
+  return {
+    field,
+    expected: "a string when provided",
+    message: `\`${field}\` must be a string when provided (got ${describeValue(value)}).`,
   };
 }
 
