@@ -24,35 +24,16 @@
  * call is the same fail-closed halt (issue #316): the validator returns `false`
  * and `onBlocked` reports an `undetermined` halt. This is the documented
  * contract the shared verdict-fixture harness asserts against.
- * Options are validated at construction time (see `src/adapters/validate.ts`):
+ * Options are validated at construction time (see `src/adapters/core.ts`):
  * a misconfigured adapter throws `AdapterConfigError` before any action runs,
  * rather than failing mid-loop on the first tool call.
  */
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
-import {
-  throwAdapterConfigError,
-  validateBatchInterceptor,
-  validateBlockedHookLogger,
-  validateContractMapping,
-  validateInterceptor,
-  validateOptionalFunction,
-  validateOptionalSignal,
-  validateOptionalTimeout,
-  type AdapterConfigIssue,
-} from "./validate.ts";
-import {
-  blockedInfoFor,
-  blockedInfoForBatch,
-  checkOptionsFor,
-  mappingFailureFor,
-  normalizeMappedCall,
-  normalizeMappedCalls,
-  runBlockedHook,
-  runDecisionHook,
-  type BlockedHookLogger,
-  type GuardBlockedHook,
-} from "./shared.ts";
+import { evaluateAction, renderHalt, validateAdapterOptions } from "./core.ts";
+import { validateOptionalFunction } from "./validate.ts";
+import type { AdapterConfigIssue } from "./validate.ts";
+import type { BlockedHookLogger, GuardBlockedHook } from "./shared.ts";
 
 /** The subset of ElizaOS's `Validator` signature this adapter implements. */
 export type ElizaValidator = (
@@ -124,27 +105,10 @@ export interface ElizaGuardOptions {
  * `false`, so the action never executes either way.
  */
 export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator {
-  const issues: AdapterConfigIssue[] = [];
-  const interceptorIssue = validateInterceptor(options.interceptor);
-  if (interceptorIssue) issues.push(interceptorIssue);
-  issues.push(...validateContractMapping(options));
-  if (options.toContractCalls) {
-    const batchIssue = validateBatchInterceptor(options.interceptor);
-    if (batchIssue) issues.push(batchIssue);
-  }
-  const blockedLoggerIssue = validateBlockedHookLogger(options.blockedHookLogger);
-  if (blockedLoggerIssue) issues.push(blockedLoggerIssue);
+  const extraIssues: AdapterConfigIssue[] = [];
   const baseValidateIssue = validateOptionalFunction("baseValidate", options.baseValidate);
-  if (baseValidateIssue) issues.push(baseValidateIssue);
-  const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
-  if (onDecisionIssue) issues.push(onDecisionIssue);
-  const onBlockedIssue = validateOptionalFunction("onBlocked", options.onBlocked);
-  if (onBlockedIssue) issues.push(onBlockedIssue);
-  const signalIssue = validateOptionalSignal(options.signal);
-  if (signalIssue) issues.push(signalIssue);
-  const timeoutIssue = validateOptionalTimeout(options.timeoutMs);
-  if (timeoutIssue) issues.push(timeoutIssue);
-  throwAdapterConfigError("elizaos", issues);
+  if (baseValidateIssue) extraIssues.push(baseValidateIssue);
+  validateAdapterOptions("elizaos", options, extraIssues);
 
   return async (runtime, message, state, handlerOptions) => {
     if (options.baseValidate) {
@@ -152,49 +116,24 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
       if (!baseOk) return false; // the action was not applicable in the first place
     }
 
-    let calls: ContractCall[];
-    try {
-      calls = options.toContractCalls
-        ? normalizeMappedCalls(options.toContractCalls(message, state), "toContractCalls")
-        : normalizeMappedCall(options.toContractCall?.(message, state), "toContractCall");
-    } catch (error) {
-      // A mapper failure is a fail-closed halt, not an "applicable" action
-      // (issue #316): the runtime drops the action before its handler runs.
-      const failure = mappingFailureFor("elizaos", error);
-      runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
-      return false;
-    }
-    if (calls.length === 0) return true; // not fund-moving; nothing for the guard to say
-
-    const checkOptions = checkOptionsFor(options);
-
-    if (calls.length === 1) {
-      const decision = await options.interceptor.check(calls[0]!, checkOptions);
-      runDecisionHook(options.onDecision, [decision], "elizaos", options.blockedHookLogger);
-      if (decision.allowed) return true;
-
-      runBlockedHook(
-        options.onBlocked,
-        blockedInfoFor("elizaos", calls[0]!, decision),
-        options.blockedHookLogger,
-      );
-      return false;
-    }
-
-    // Batch mapping: a single refusal drops the whole action before its handler
-    // runs; every per-call verdict is reported through `onDecision`.
-    const batch = await options.interceptor.checkBatch(calls, checkOptions);
-    for (const verdict of batch.verdicts) {
-      runDecisionHook(options.onDecision, [verdict], "elizaos", options.blockedHookLogger);
-    }
-    if (batch.admissible) return true;
-
-    runBlockedHook(
-      options.onBlocked,
-      blockedInfoForBatch("elizaos", calls, batch.verdicts),
-      options.blockedHookLogger,
-    );
-    return false;
+    const action = { message, state };
+    const evaluation = await evaluateAction(action, {
+      adapter: "elizaos",
+      interceptor: options.interceptor,
+      ...(options.toContractCall
+        ? { toContractCall: ({ message: currentMessage, state: currentState }) => options.toContractCall!(currentMessage, currentState) }
+        : {}),
+      ...(options.toContractCalls
+        ? { toContractCalls: ({ message: currentMessage, state: currentState }) => options.toContractCalls!(currentMessage, currentState) }
+        : {}),
+      ...(options.signal !== undefined ? { signal: options.signal } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      onBlocked: options.onBlocked,
+      blockedHookLogger: options.blockedHookLogger,
+      onDecision: (_action, decision) => options.onDecision?.(decision),
+    });
+    if (evaluation.kind === "halt") return renderHalt(evaluation.verdict, { kind: "boolean" });
+    return true;
   };
 }
 

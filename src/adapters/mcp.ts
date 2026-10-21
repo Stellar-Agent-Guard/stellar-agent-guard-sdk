@@ -27,18 +27,8 @@
 import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
-import {
-  blockedInfoFor,
-  blockedInfoForBatch,
-  checkOptionsFor,
-  hostAbortSignal,
-  mapContractCalls,
-  mappingFailureFor,
-  runBlockedHook,
-  runDecisionHook,
-  type BlockedHookLogger,
-  type GuardBlockedHook,
-} from "./shared.ts";
+import { evaluateAction, renderHalt, validateAdapterOptions } from "./core.ts";
+import { hostAbortSignal, type BlockedHookLogger, type GuardBlockedHook } from "./shared.ts";
 
 /** The one field of a tool call this adapter reads. */
 export interface McpToolCallRequest {
@@ -130,55 +120,10 @@ async function guardMcpRequest<T extends McpToolResult>(
   options: McpGuardOptions,
   hostSignal?: AbortSignal | undefined,
 ): Promise<T | McpToolResult> {
-  let calls: ContractCall[];
-  try {
-    calls = mapContractCalls(request, options);
-  } catch (error) {
-    // Fail closed on a mapper failure (issue #316): the tool body never runs and
-    // the halt is reported as undetermined, without a mapped `call`.
-    const failure = mappingFailureFor("mcp", error);
-    runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
-    return {
-      content: [{ type: "text", text: describeMcpRefusal(failure.decision, request.name) }],
-      isError: true,
-    };
-  }
-  if (calls.length === 0) return proceed();
-
-  const checkOptions = checkOptionsFor(options, hostSignal);
-
-  if (calls.length === 1) {
-    const decision = await options.interceptor.check(calls[0]!, checkOptions);
-    runDecisionHook(options.onDecision, [request, decision], "mcp", options.blockedHookLogger);
-    if (decision.allowed) return proceed();
-
-    runBlockedHook(
-      options.onBlocked,
-      blockedInfoFor("mcp", calls[0]!, decision),
-      options.blockedHookLogger,
-    );
-    return {
-      content: [{ type: "text", text: describeMcpRefusal(decision, request.name) }],
-      isError: true,
-    };
-  }
-
-  // Batch mapping: report every per-call verdict, and refuse the whole action if
-  // any call is blocked or undetermined (all-or-nothing).
-  const batch = await options.interceptor.checkBatch(calls, checkOptions);
-  for (const verdict of batch.verdicts) {
-    runDecisionHook(options.onDecision, [request, verdict], "mcp", options.blockedHookLogger);
-  }
-  if (batch.admissible) return proceed();
-
-  runBlockedHook(
-    options.onBlocked,
-    blockedInfoForBatch("mcp", calls, batch.verdicts),
-    options.blockedHookLogger,
-  );
-  const refusal = batch.verdicts.find((verdict) => !verdict.allowed)!;
+  const evaluation = await evaluateAction(request, { ...options, adapter: "mcp" }, hostSignal);
+  if (evaluation.kind === "pass-through" || evaluation.kind === "allowed") return proceed();
   return {
-    content: [{ type: "text", text: describeMcpRefusal(refusal, request.name) }],
+    content: [{ type: "text", text: renderHalt(evaluation.verdict, { kind: "message", toolName: request.name }) }],
     isError: true,
   };
 }
@@ -196,6 +141,7 @@ export function guardMcpToolHandler<T extends McpToolResult>(
   handler: McpToolHandler<T>,
   options: McpGuardOptions,
 ): McpToolHandler<T | McpToolResult> {
+  validateAdapterOptions("mcp", options);
   return (args, extra) =>
     guardMcpRequest(
       { name: toolName, arguments: args },
@@ -217,26 +163,6 @@ export function guardMcpCallTool<T extends McpToolResult>(
   callTool: McpCallTool<T>,
   options: McpGuardOptions,
 ): McpCallTool<T | McpToolResult> {
+  validateAdapterOptions("mcp", options);
   return (request) => guardMcpRequest(request, () => callTool(request), options);
-}
-
-/**
- * Human- and model-readable refusal text. MCP results are model-visible, so the
- * wording mirrors the other adapters': name the tool, quote the contract reason
- * and its explanation, and state that nothing was submitted.
- */
-function describeMcpRefusal(
-  decision: PreFlightDecision & { allowed: false },
-  toolName: string,
-): string {
-  if (decision.kind === "blocked") {
-    return (
-      `stellar-agent-guard blocked '${toolName}': ${decision.reason} — ${decision.explanation}\n` +
-      `No transaction was submitted, so nothing was spent and no fee was paid.`
-    );
-  }
-  return (
-    `stellar-agent-guard could not determine whether '${toolName}' is permitted; ` +
-    `it was not executed.\n${decision.detail}`
-  );
 }
