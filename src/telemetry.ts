@@ -1780,6 +1780,14 @@ export class GuardTelemetryListener {
   private readonly counters: GuardDecisionCounters | null;
 
   constructor(config: GuardTelemetryConfig | GuardTelemetryLocalConfig = {}) {
+    // Exactly one of `server` or `url` must be supplied.
+    const supplied = config as { server?: unknown; url?: unknown };
+    if ((supplied.server !== undefined) === (supplied.url !== undefined)) {
+      throw new TypeError(
+        "GuardTelemetryListener config must supply exactly one of `server` or `url`.",
+      );
+    }
+    
     const resolved = config as GuardTelemetryConfig;
     this.config = resolved;
     this.guardContractId = canonicalContractId(resolved.guard) ?? resolved.guard ?? "";
