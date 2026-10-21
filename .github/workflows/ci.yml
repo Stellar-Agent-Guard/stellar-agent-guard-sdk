@@ -40,7 +40,8 @@
 #
 # Every gate is still enforced; none is dropped, and none moved out of `ci`:
 #   typecheck -> `typecheck`        lint      -> `lint`
-#   test      -> `unit tests`       build     -> `build`
+#   format    -> `format check`      test      -> `unit tests`
+#   build     -> `build`
 #   (plus `smoke test export resolution`, `export-map resolution (pack + install
 #    + import)`, `evidence structure check`, and `enforcement-path evidence gate`.)
 # ---------------------------------------------------------------------------
@@ -90,6 +91,12 @@ jobs:
 
       - name: lint
         run: npm run lint
+
+      # Formatting gate (issue #138): Prettier owns whitespace, so review no
+      # longer re-litigates it. Golden/evidence fixtures and hand-wrapped
+      # Markdown are excluded in `.prettierignore` with the rationale there.
+      - name: format check
+        run: npm run format:check
 
       - name: unit tests
         run: npm test

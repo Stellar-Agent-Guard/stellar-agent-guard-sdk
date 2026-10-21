@@ -24,13 +24,28 @@ import { describe, it } from "node:test";
 import { rpc, xdr } from "@stellar/stellar-sdk";
 import {
   ConcurrentTelemetryStreamError,
+  DEFAULT_TELEMETRY_RETRY_OPTIONS,
   GuardTelemetryListener,
   InMemoryCursorStore,
   type CursorStore,
   type GuardEvent,
   type GuardTelemetryHealthSnapshot,
   type GuardUnknownTopic,
+  type TelemetryRetryOptions,
 } from "../../src/telemetry.ts";
+
+/** Pull up to `count` pages from a watch stream, then stop. */
+async function takeFrom(
+  stream: AsyncIterable<GuardEvent[]>,
+  count: number,
+): Promise<GuardEvent[][]> {
+  const pages: GuardEvent[][] = [];
+  for await (const events of stream) {
+    pages.push(events);
+    if (pages.length >= count) break;
+  }
+  return pages;
+}
 
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
 
@@ -104,7 +119,9 @@ function scriptedServer(pages: ScriptedPage[]) {
       requests.push(request);
       const page = pages[requests.length - 1];
       if (!page) {
-        throw new Error(`getEvents called ${requests.length} times; only ${pages.length} pages scripted`);
+        throw new Error(
+          `getEvents called ${requests.length} times; only ${pages.length} pages scripted`,
+        );
       }
       return { events: page.events, cursor: page.cursor, latestLedger: 500 };
     },
@@ -160,7 +177,11 @@ describe("watch(signal) cursor persistence", () => {
 
     const pages = await take(listener, 1);
 
-    assert.deepEqual(pages, [[decodedEvent(501)]], "the resumed page's events are decoded and delivered");
+    assert.deepEqual(
+      pages,
+      [[decodedEvent(501)]],
+      "the resumed page's events are decoded and delivered",
+    );
     assert.equal(
       pages[0]?.[0]?.id,
       "ledger:tx-501:event_heartbeat",
@@ -168,7 +189,11 @@ describe("watch(signal) cursor persistence", () => {
     );
     assert.equal(rec.loadCount(), 1, "load is consulted once, when watch starts");
     assert.equal(requests[0]?.cursor, "cursor-42", "the first poll resumes from the stored cursor");
-    assert.equal(requests[0]?.startLedger, undefined, "a cursor poll must not also send a ledger range");
+    assert.equal(
+      requests[0]?.startLedger,
+      undefined,
+      "a cursor poll must not also send a ledger range",
+    );
   });
 
   it("saves once per poll, before the page is delivered", async () => {
@@ -214,9 +239,21 @@ describe("watch(signal) cursor persistence", () => {
     const resumed = await take(second, 1);
     const resumedRequest = requests[2];
 
-    assert.deepEqual(resumed, [[decodedEvent(503)]], "the first page after restart is the next one, not history");
-    assert.equal(resumedRequest?.cursor, "cursor-3", "the restart poll continues from the saved cursor");
-    assert.equal(resumedRequest?.startLedger, undefined, "no re-fetch from a ledger range after restart");
+    assert.deepEqual(
+      resumed,
+      [[decodedEvent(503)]],
+      "the first page after restart is the next one, not history",
+    );
+    assert.equal(
+      resumedRequest?.cursor,
+      "cursor-3",
+      "the restart poll continues from the saved cursor",
+    );
+    assert.equal(
+      resumedRequest?.startLedger,
+      undefined,
+      "no re-fetch from a ledger range after restart",
+    );
   });
 
   it("without a cursorStore the first run starts at the default head position", async () => {
@@ -224,11 +261,18 @@ describe("watch(signal) cursor persistence", () => {
     const { server, requests, latestLedgerCalls } = scriptedServer([page, page]);
     const listener = new GuardTelemetryListener({ server, guard: GUARD });
 
-    assert.ok(listener.activeCursorStore instanceof InMemoryCursorStore, "the default store is in-memory");
+    assert.ok(
+      listener.activeCursorStore instanceof InMemoryCursorStore,
+      "the default store is in-memory",
+    );
 
     await take(listener, 1);
 
-    assert.equal(latestLedgerCalls(), 1, "with nothing persisted, the default head position is used");
+    assert.equal(
+      latestLedgerCalls(),
+      1,
+      "with nothing persisted, the default head position is used",
+    );
     assert.equal(requests[0]?.startLedger, 499);
     assert.equal(requests[0]?.cursor, undefined);
   });
@@ -245,8 +289,16 @@ describe("watch(signal) cursor persistence", () => {
     await take(listener, 1); // the "restart": watch() invoked again on the same listener
     const secondRunRequest = requests[1];
 
-    assert.equal(secondRunRequest?.cursor, "cursor-2", "the second watch continues where the first stopped");
-    assert.equal(secondRunRequest?.startLedger, undefined, "it does not fall back to the default head");
+    assert.equal(
+      secondRunRequest?.cursor,
+      "cursor-2",
+      "the second watch continues where the first stopped",
+    );
+    assert.equal(
+      secondRunRequest?.startLedger,
+      undefined,
+      "it does not fall back to the default head",
+    );
   });
 
   it("an explicit startLedger pins the start and overrides any stored cursor", async () => {
@@ -386,10 +438,7 @@ describe("unknown event topics (issue #287)", () => {
   it("watch() surfaces a new topic through the callback and keeps polling", async () => {
     const pages: ScriptedPage[] = [
       {
-        events: [
-          rawLedgerEvent(501, "tx-future", "event_future"),
-          rawLedgerEvent(502, "tx-known"),
-        ],
+        events: [rawLedgerEvent(501, "tx-future", "event_future"), rawLedgerEvent(502, "tx-known")],
         cursor: "cursor-1",
       },
       { events: [rawLedgerEvent(503, "tx-known-2")], cursor: "cursor-2" },
@@ -428,7 +477,10 @@ describe("single active stream (issue #291)", () => {
 
     const first = listener.watch({ pollIntervalMs: 1 });
     const firstPage = await first.next();
-    assert.deepEqual(firstPage.value?.map((event) => event.ledger), [501]);
+    assert.deepEqual(
+      firstPage.value?.map((event) => event.ledger),
+      [501],
+    );
 
     const second = listener.watch({ pollIntervalMs: 1 });
     await assert.rejects(
@@ -521,7 +573,13 @@ describe("listener health snapshot (issue #286)", () => {
     // The snapshot is detached: editing it cannot reach listener state.
     during.cursors.committed = "tampered";
     during.failedTx.degraded = true;
-    during.gaps.push({ fromLedger: 1, toLedger: 2, reason: "history_pruned", retainedFromLedger: 3, retainedToLedger: 4 });
+    during.gaps.push({
+      fromLedger: 1,
+      toLedger: 2,
+      reason: "history_pruned",
+      retainedFromLedger: 3,
+      retainedToLedger: 4,
+    });
     const after = listener.health();
     assert.equal(after.cursors.committed, "cursor-1");
     assert.equal(after.failedTx.degraded, false);
@@ -668,5 +726,398 @@ describe("InMemoryCursorStore", () => {
     await store.save("cursor-1");
     await store.save("cursor-2");
     assert.equal(await store.load(), "cursor-2");
+  });
+
+  it("scopes records to network/guard/stream so slots never collide (issue #282)", async () => {
+    const store = new InMemoryCursorStore();
+    const base = { network: "soroban-testnet.stellar.org", guard: GUARD };
+    await store.save("events-cursor", { ...base, stream: "events" });
+    await store.save("failed-tx-cursor", { ...base, stream: "failed_tx" });
+
+    assert.equal(await store.load({ ...base, stream: "events" }), "events-cursor");
+    assert.equal(await store.load({ ...base, stream: "failed_tx" }), "failed-tx-cursor");
+    // Another guard on the same network, and the same guard on another
+    // network, see neither cursor.
+    assert.equal(
+      await store.load({
+        network: "soroban-testnet.stellar.org",
+        guard: "C".padEnd(56, "B"),
+        stream: "events",
+      }),
+      null,
+    );
+    assert.equal(
+      await store.load({ network: "mainnet.example.com", guard: GUARD, stream: "events" }),
+      null,
+    );
+  });
+
+  it("keeps unscoped calls on their own slot, as before issue #282", async () => {
+    const store = new InMemoryCursorStore();
+    await store.save("legacy");
+    await store.save("scoped", { network: "n", guard: GUARD, stream: "events" });
+    assert.equal(await store.load(), "legacy", "the unscoped slot is unchanged by a scoped save");
+    assert.equal(
+      await store.load({ network: "n", guard: GUARD, stream: "events" }),
+      "scoped",
+      "and a scoped save does not disturb the unscoped slot",
+    );
+  });
+});
+
+describe("durable cursor scoping (issue #282)", () => {
+  const OTHER_GUARD = "CAJJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4LNU";
+
+  /** A `CursorStore` recording both cursors and the scopes it was given. */
+  function scopedRecordingStore() {
+    const records = new Map<string, string>();
+    const scopes: Array<{ network: string; guard: string; stream: string } | undefined> = [];
+    const key = (scope?: { network: string; guard: string; stream: string }) =>
+      scope === undefined ? "<unscoped>" : `${scope.network}|${scope.guard}|${scope.stream}`;
+    const store: CursorStore = {
+      async load(scope) {
+        scopes.push(scope);
+        return records.get(key(scope)) ?? null;
+      },
+      async save(cursor, scope) {
+        scopes.push(scope);
+        records.set(key(scope), cursor);
+      },
+    };
+    return { store, records, scopes };
+  }
+
+  it("the listener keys every load/save to its network, guard and stream", async () => {
+    const page = { events: [rawLedgerEvent(501)], cursor: "cursor-2" };
+    const { server } = scriptedServer([page, page]);
+    const rec = scopedRecordingStore();
+    const listener = new GuardTelemetryListener({
+      server,
+      guard: GUARD,
+      rpcUrl: "https://soroban-testnet.stellar.org:443",
+      cursorStore: rec.store,
+    });
+
+    await take(listener, 1);
+
+    const expected = {
+      network: "soroban-testnet.stellar.org",
+      guard: GUARD,
+      stream: "events",
+    };
+    assert.deepEqual(rec.scopes, [expected, expected], "one scoped load, one scoped save");
+    assert.equal(rec.records.get("soroban-testnet.stellar.org|" + GUARD + "|events"), "cursor-2");
+  });
+
+  it("two listeners with different guards sharing one store cannot load each other's cursor", async () => {
+    const firstPage = { events: [rawLedgerEvent(501)], cursor: "cursor-a" };
+    const { server, requests } = scriptedServer([firstPage, { events: [], cursor: "cursor-b" }]);
+    const shared = new InMemoryCursorStore();
+
+    // Listener A persists its cursor into the shared store…
+    const a = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: shared });
+    await take(a, 1);
+    assert.equal(
+      await shared.load({ network: "unknown-network", guard: GUARD, stream: "events" }),
+      "cursor-a",
+    );
+
+    // …and listener B, following a different guard, must not resume from it.
+    const b = new GuardTelemetryListener({ server, guard: OTHER_GUARD, cursorStore: shared });
+    await take(b, 1);
+    const bFirstRequest = requests[1];
+    assert.equal(bFirstRequest?.cursor, undefined, "B never sees A's cursor");
+    assert.equal(bFirstRequest?.startLedger, 499, "B starts at the default head position instead");
+  });
+
+  it("the same guard on two networks cannot load the other network's cursor", async () => {
+    const firstPage = { events: [rawLedgerEvent(501)], cursor: "cursor-mainnet" };
+    const { server, requests } = scriptedServer([
+      firstPage,
+      { events: [], cursor: "cursor-testnet" },
+    ]);
+    const shared = new InMemoryCursorStore();
+
+    const mainnet = new GuardTelemetryListener({
+      server,
+      guard: GUARD,
+      rpcUrl: "https://rpc.mainnet.example.com",
+      cursorStore: shared,
+    });
+    await take(mainnet, 1);
+
+    const testnet = new GuardTelemetryListener({
+      server,
+      guard: GUARD,
+      rpcUrl: "https://soroban-testnet.stellar.org",
+      cursorStore: shared,
+    });
+    await take(testnet, 1);
+
+    const testnetFirstRequest = requests[1];
+    assert.equal(
+      testnetFirstRequest?.cursor,
+      undefined,
+      "the mainnet cursor does not leak into testnet",
+    );
+    assert.equal(testnetFirstRequest?.startLedger, 499);
+  });
+
+  it("a restart on the same guard and network still resumes from the scoped cursor", async () => {
+    const pages: ScriptedPage[] = [
+      { events: [rawLedgerEvent(501)], cursor: "cursor-2" },
+      { events: [rawLedgerEvent(502)], cursor: "cursor-3" },
+    ];
+    const { server, requests } = scriptedServer(pages);
+    const shared = new InMemoryCursorStore();
+    const config = {
+      server,
+      guard: GUARD,
+      rpcUrl: "https://soroban-testnet.stellar.org",
+      cursorStore: shared,
+    };
+
+    await take(new GuardTelemetryListener(config), 1);
+    await take(new GuardTelemetryListener(config), 1);
+
+    assert.equal(requests[1]?.cursor, "cursor-2", "the scoped cursor still outlives the listener");
+    assert.equal(requests[1]?.startLedger, undefined);
+  });
+
+  it("a pre-#282 two-method store keeps working unchanged", async () => {
+    const page = { events: [rawLedgerEvent(501)], cursor: "cursor-9" };
+    const { server, requests } = scriptedServer([page, page]);
+    // Exactly the old contract: no scope parameter anywhere.
+    let stored: string | null = "cursor-8";
+    const legacyStore: CursorStore = {
+      async load() {
+        return stored;
+      },
+      async save(cursor) {
+        stored = cursor;
+      },
+    };
+
+    const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: legacyStore });
+    await take(listener, 1);
+
+    assert.equal(requests[0]?.cursor, "cursor-8", "the legacy store still resumes the stream");
+    assert.equal(stored, "cursor-9", "and still receives the advanced cursor");
+  });
+});
+
+describe("configurable bounded poll retry (issue #285)", () => {
+  /** A `getEvents` mock that throws `failures` times, then serves `page`. */
+  function flakyServer(failures: number, page: ScriptedPage) {
+    let calls = 0;
+    const server = {
+      async getLatestLedger() {
+        return { sequence: 500 };
+      },
+      async getEvents() {
+        calls += 1;
+        if (calls <= failures) throw new Error("rpc unavailable");
+        return { events: page.events, cursor: page.cursor, latestLedger: 500 };
+      },
+    };
+    return { server: server as unknown as rpc.Server, calls: () => calls };
+  }
+
+  /** A `getEvents` mock that always fails. */
+  function deadServer() {
+    let calls = 0;
+    const server = {
+      async getLatestLedger() {
+        return { sequence: 500 };
+      },
+      async getEvents() {
+        calls += 1;
+        throw new Error("rpc unavailable");
+      },
+    };
+    return { server: server as unknown as rpc.Server, calls: () => calls };
+  }
+
+  it("exposes the historical defaults without a retry option", () => {
+    assert.deepEqual(DEFAULT_TELEMETRY_RETRY_OPTIONS, { maxRetries: 5, baseDelayMs: 100 });
+  });
+
+  it("recovers immediately on the first retry, with the documented backoff", async () => {
+    const page = { events: [rawLedgerEvent(501)], cursor: "cursor-2" };
+    const { server, calls } = flakyServer(1, page);
+    const delays: number[] = [];
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const pages = await takeFrom(
+      listener.watch({
+        pollIntervalMs: 1,
+        startLedger: 500,
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+        retry: { maxRetries: 3, baseDelayMs: 100, maxDelayMs: 1_000 },
+      }),
+      1,
+    );
+
+    assert.deepEqual(pages, [[decodedEvent(501)]], "the recovered page is delivered");
+    assert.equal(calls(), 2, "one failure, one successful retry");
+    assert.deepEqual(delays.slice(0, 1), [100], "first retry waits exactly the base delay");
+    const health = listener.health();
+    assert.equal(
+      health.lastSuccessfulPollLedger,
+      500,
+      "the recovered poll is recorded as the last healthy one",
+    );
+    assert.equal(health.consecutiveFailures, 0, "a recovery clears the failure streak");
+  });
+
+  it("applies deterministic exponential backoff capped at maxDelayMs", async () => {
+    const { server, calls } = flakyServer(3, { events: [rawLedgerEvent(501)], cursor: "cursor-2" });
+    const delays: number[] = [];
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    await takeFrom(
+      listener.watch({
+        pollIntervalMs: 1,
+        startLedger: 500,
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+        retry: { maxRetries: 3, baseDelayMs: 100, maxDelayMs: 250 },
+      }),
+      1,
+    );
+
+    assert.deepEqual(delays, [100, 200, 250], "base doubling, then the explicit cap");
+    assert.equal(calls(), 4, "one initial attempt plus three retries");
+  });
+
+  it("defaults the backoff cap to the poll interval", async () => {
+    const { server } = flakyServer(3, { events: [rawLedgerEvent(501)], cursor: "cursor-2" });
+    const delays: number[] = [];
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    await takeFrom(
+      listener.watch({
+        pollIntervalMs: 300,
+        startLedger: 500,
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+        retry: { maxRetries: 3, baseDelayMs: 100 },
+      }),
+      1,
+    );
+
+    assert.deepEqual(delays, [100, 200, 300], "the poll interval remains the implicit cap");
+  });
+
+  it("ends fail-visibly once the configured budget is exhausted", async () => {
+    const { server, calls } = deadServer();
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const delays: number[] = [];
+    let streamErrors = 0;
+    let streamError: unknown = null;
+
+    for await (const _events of listener.watch({
+      pollIntervalMs: 1,
+      startLedger: 500,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      retry: { maxRetries: 2, baseDelayMs: 10, maxDelayMs: 100 },
+      onStreamError: (error) => {
+        streamErrors += 1;
+        streamError = error;
+      },
+    })) {
+      assert.fail("a terminal stream must not yield");
+    }
+
+    assert.deepEqual(delays, [10, 20], "exactly maxAttempts backoff delays, then stop");
+    assert.equal(calls(), 3, "one initial attempt plus the two configured retries");
+    assert.equal(streamErrors, 1, "onStreamError fires exactly once, at exhaustion");
+    assert.ok(streamError instanceof Error);
+    const health = listener.health();
+    assert.equal(health.state, "failed");
+    assert.equal(health.consecutiveFailures, 3);
+  });
+
+  it("maxRetries: 0 makes the first failure terminal — no retry at all", async () => {
+    const { server, calls } = deadServer();
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const delays: number[] = [];
+
+    for await (const _events of listener.watch({
+      pollIntervalMs: 1,
+      startLedger: 500,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+      retry: { maxRetries: 0 },
+    })) {
+      assert.fail("a terminal stream must not yield");
+    }
+
+    assert.deepEqual(delays, [], "no delay is ever taken without a retry budget");
+    assert.equal(calls(), 1);
+    assert.equal(listener.health().state, "failed");
+  });
+
+  it("an abort during a retry backoff ends the stream promptly", async () => {
+    const { server, calls } = deadServer();
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const controller = new AbortController();
+    let streamErrors = 0;
+
+    for await (const _events of listener.watch({
+      pollIntervalMs: 1,
+      startLedger: 500,
+      signal: controller.signal,
+      // Simulates the caller aborting while the first backoff delay is pending.
+      sleep: async () => {
+        controller.abort();
+      },
+      retry: { maxRetries: 5, baseDelayMs: 100 },
+      onStreamError: () => {
+        streamErrors += 1;
+      },
+    })) {
+      assert.fail("a terminal stream must not yield");
+    }
+
+    assert.equal(calls(), 1, "the abort interrupts the backoff before any further poll");
+    assert.equal(streamErrors, 0, "an aborted stream is teardown, not a failure");
+  });
+
+  it("rejects an unusable retry policy before issuing any RPC", async () => {
+    for (const retry of [
+      { maxRetries: -1 },
+      { maxRetries: 2.5 },
+      { baseDelayMs: -1 },
+      { baseDelayMs: Number.POSITIVE_INFINITY },
+      { maxDelayMs: -1 },
+      { maxDelayMs: Number.NaN },
+      "aggressive",
+    ] as unknown as TelemetryRetryOptions[]) {
+      const { server, calls } = deadServer();
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      await assert.rejects(
+        async () => {
+          for await (const _events of listener.watch({
+            pollIntervalMs: 1,
+            startLedger: 500,
+            sleep: async () => {},
+            retry,
+          })) {
+            // no pages expected: validation fails first
+          }
+        },
+        TypeError,
+        `must reject ${JSON.stringify(retry)}`,
+      );
+      assert.equal(calls(), 0, "validation happens before the first poll");
+    }
   });
 });

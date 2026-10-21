@@ -33,7 +33,13 @@
  */
 import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { GuardError } from "./errors.ts";
-import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
+import {
+  GUARD_AUTH_RESULTS,
+  GUARD_EVENT_TOPICS,
+  decodeAuthDecision,
+  normalizeEventData,
+  type GuardAuthDecision,
+} from "./events.ts";
 import { bytesToHex, sha256Hex, utf8Length } from "./hash.ts";
 import { topicSymbols } from "./invoke.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
@@ -241,9 +247,7 @@ function diagnosticIdMaterial(event: GuardEventIdentityInput): string {
     ...event.topics,
     stableStringify(event.data),
   ];
-  return parts
-    .map((part) => `${utf8Length(part)}:${part}`)
-    .join("");
+  return parts.map((part) => `${utf8Length(part)}:${part}`).join("");
 }
 
 /**
@@ -290,11 +294,7 @@ export type GuardEventContext = Omit<
 };
 
 /** Interpret an already-decoded topic list plus data as a `GuardEvent`. */
-function interpret(
-  topics: string[],
-  data: unknown,
-  context: GuardEventContext,
-): GuardEvent | null {
+function interpret(topics: string[], data: unknown, context: GuardEventContext): GuardEvent | null {
   const topic = topics[0];
   if (!topic || !KNOWN_TOPICS.has(topic)) return null;
   const { simulationIndex, observedAt, ...streamFacts } = context;
@@ -512,7 +512,10 @@ function matchesRecentFilter(event: GuardEvent, filter: RecentEventFilter): bool
   if (filter.reason !== undefined && event.decision?.reason !== filter.reason) return false;
   // A diagnostic event has no ledger; a ledger bound therefore excludes it,
   // rather than silently treating `null` as "inside the range".
-  if (filter.fromLedger !== undefined && (event.ledger === null || event.ledger < filter.fromLedger)) {
+  if (
+    filter.fromLedger !== undefined &&
+    (event.ledger === null || event.ledger < filter.fromLedger)
+  ) {
     return false;
   }
   if (filter.toLedger !== undefined && (event.ledger === null || event.ledger > filter.toLedger)) {
@@ -729,6 +732,11 @@ export interface GuardTelemetryConfig {
    * listener restarts. Without one, a restart resumes from the head (skipping
    * events emitted while the process was dead) or replays history (if
    * `startLedger` is used).
+   *
+   * Every load/save is scoped to this listener's network, guard and stream
+   * (issue #282), so one backing store can safely serve several listeners
+   * without cursor cross-talk. A pre-#282 two-method store still works — it
+   * simply keeps a single slot, as it always did.
    */
   cursorStore?: CursorStore;
   /**
@@ -1010,6 +1018,92 @@ function raceAbort(signal: AbortSignal | undefined, wait: () => Promise<void>): 
   });
 }
 
+/**
+ * Bounded retry policy for a failed committed poll (issue #285).
+ *
+ * Every field is optional and additive: with no `retry` option the watch loop
+ * behaves exactly as before — five retries, exponential backoff starting at
+ * 100 ms and capped at the poll interval (see
+ * `DEFAULT_TELEMETRY_RETRY_OPTIONS`). Operators running against RPCs with
+ * different rate limits can now tune recovery latency and request pressure
+ * without forking the loop.
+ *
+ * The policy is **bounded by construction**: retries never continue past
+ * `maxAttempts`, every delay is capped by `maxDelayMs`, and every delay is
+ * abort-aware — a `signal` abort ends the wait immediately and the stream ends
+ * quietly, exactly as in the unconfigured default path.
+ */
+export interface TelemetryRetryOptions {
+  /**
+   * Retry attempts allowed after a failed poll. Must be an integer >= 0;
+   * default 5 — the envelope the loop always applied. `0` disables retrying
+   * (the first failure is terminal), preserving the fail-visible
+   * `onStreamError` path.
+   */
+  maxRetries?: number;
+  /**
+   * Base backoff delay in milliseconds, doubled before each subsequent
+   * attempt. Must be finite and >= 0; default 100. `0` retries immediately.
+   */
+  baseDelayMs?: number;
+  /**
+   * Cap on any single backoff delay, in milliseconds. Must be finite and
+   * >= 0; default: the stream's poll interval (`pollIntervalMs`), which is
+   * the cap the loop always applied implicitly.
+   */
+  maxDelayMs?: number;
+}
+
+/** The defaults behind `TelemetryRetryOptions` (issue #285). */
+export const DEFAULT_TELEMETRY_RETRY_OPTIONS = {
+  maxRetries: 5,
+  baseDelayMs: 100,
+} as const;
+
+/** The retry policy with every default filled in. */
+interface ResolvedTelemetryRetry {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+/**
+ * Fill in the retry defaults and reject an unusable policy (issue #285).
+ *
+ * The bounds are checked **before the first poll**, so a typo in the retry
+ * configuration fails loudly at the start of the stream instead of silently
+ * becoming an untuned request storm (or an accidental no-retry) mid-run.
+ */
+function resolveTelemetryRetry(
+  options: TelemetryRetryOptions | undefined,
+  intervalMs: number,
+): ResolvedTelemetryRetry {
+  if (options !== undefined && (typeof options !== "object" || options === null)) {
+    throw new TypeError(
+      `telemetry retry must be an object, received ${options === null ? "null" : typeof options}`,
+    );
+  }
+  const maxRetries = options?.maxRetries ?? DEFAULT_TELEMETRY_RETRY_OPTIONS.maxRetries;
+  const baseDelayMs = options?.baseDelayMs ?? DEFAULT_TELEMETRY_RETRY_OPTIONS.baseDelayMs;
+  const maxDelayMs = options?.maxDelayMs ?? intervalMs;
+  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
+    throw new TypeError(
+      `telemetry retry.maxRetries must be an integer >= 0, received ${String(maxRetries)}`,
+    );
+  }
+  if (typeof baseDelayMs !== "number" || !Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
+    throw new TypeError(
+      `telemetry retry.baseDelayMs must be finite and >= 0, received ${String(baseDelayMs)}`,
+    );
+  }
+  if (typeof maxDelayMs !== "number" || !Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+    throw new TypeError(
+      `telemetry retry.maxDelayMs must be finite and >= 0, received ${String(maxDelayMs)}`,
+    );
+  }
+  return { maxRetries, baseDelayMs, maxDelayMs };
+}
+
 export interface GuardTelemetryWatchParams {
   startLedger?: number;
   pollIntervalMs?: number;
@@ -1032,6 +1126,16 @@ export interface GuardTelemetryWatchParams {
   jitter?: TelemetryJitter;
   /** Optional RNG injector for deterministic unit testing (defaults to Math.random). */
   rng?: () => number;
+  /**
+   * Bounded retry policy for a failed committed poll (issue #285).
+   *
+   * Omitted — the default — the loop retries a failed poll five times with
+   * exponential backoff from 100 ms, capped at the poll interval, exactly as
+   * before. Every configured value is validated before the first poll; an
+   * invalid policy throws a `TypeError` when the stream starts, before any RPC
+   * is issued.
+   */
+  retry?: TelemetryRetryOptions;
   /**
    * Optional sleep handler, for testing without wall-clock delays.
    *
@@ -1547,8 +1651,7 @@ export async function* mergeGuardEventStreams(
         );
         let nextCommitted = 0;
         for (const event of page) {
-          const ordered =
-            event.stream === "committed" ? orderedCommitted[nextCommitted++]! : event;
+          const ordered = event.stream === "committed" ? orderedCommitted[nextCommitted++]! : event;
           if (emitted.has(ordered.id)) continue;
           emitted.add(ordered.id);
           yield ordered;
@@ -1578,19 +1681,104 @@ export async function* mergeGuardEventStreams(
   }
 }
 
-export interface CursorStore {
-  save(cursor: string): Promise<void>;
-  load(): Promise<string | null>;
+/**
+ * Which of a listener's two durable streams a cursor belongs to (issue #282).
+ *
+ * The two streams' cursors are opaque and **not interchangeable**: resuming
+ * the committed `getEvents` stream from a failed-transaction scan cursor (or
+ * the reverse) would replay or skip events. The kind is part of the cursor's
+ * durable identity so a shared backing store cannot mix them.
+ */
+export type CursorStreamKind = "events" | "failed_tx";
+
+/**
+ * The stable identity of one durable cursor slot (issue #282).
+ *
+ * A cursor is only meaningful relative to **one** stream of one guard on one
+ * network: the same guard address on testnet and mainnet are different chains,
+ * and two guards on one chain are different event streams. Scoping every
+ * record to this triple is what lets one backing store (a file, a Redis
+ * instance, a database) safely serve many listeners without one resuming from
+ * another's position.
+ */
+export interface CursorStoreScope {
+  /** Stable network identity — the RPC endpoint host the listener polls. */
+  network: string;
+  /** Canonical guard contract id (`C...`) the cursor belongs to. */
+  guard: string;
+  /** Which of the listener's two streams the cursor resumes. */
+  stream: CursorStreamKind;
 }
 
+/**
+ * Persistence adapter for a watch cursor.
+ *
+ * The scope argument is **additive and optional**: an existing two-method
+ * implementation (`save(cursor)` / `load()`) still satisfies this interface
+ * and behaves exactly as before (issue #282 keeps the contract source
+ * compatible). A store that wants to serve several listeners from one backing
+ * resource accepts the scope and keys its records by it — the SDK's
+ * `InMemoryCursorStore` does, and the listener always passes a concrete
+ * scope.
+ */
+export interface CursorStore {
+  save(cursor: string, scope?: CursorStoreScope): Promise<void>;
+  load(scope?: CursorStoreScope): Promise<string | null>;
+}
+
+/**
+ * The default in-memory store, keyed by full cursor scope (issue #282).
+ *
+ * One instance can therefore serve listeners for different guards, networks
+ * and streams without their cursors colliding, while unscoped `save()` /
+ * `load()` calls (a direct user, or a caller that predates scoping) share one
+ * default slot exactly as the previous single-slot implementation did.
+ */
 export class InMemoryCursorStore implements CursorStore {
-  private cursor: string | null = null;
-  async save(cursor: string): Promise<void> {
-    this.cursor = cursor;
+  private readonly cursors = new Map<string, string>();
+
+  /** Key for direct, unscoped use — the pre-#282 single-slot behavior. */
+  private static readonly UNSCOPED_KEY = "\u0000unscoped\u0000";
+
+  /** Stable map key for a scope; unscoped calls share one slot. */
+  private static key(scope?: CursorStoreScope): string {
+    return scope === undefined
+      ? InMemoryCursorStore.UNSCOPED_KEY
+      : `${scope.network}\u0000${scope.guard}\u0000${scope.stream}`;
   }
-  async load(): Promise<string | null> {
-    return this.cursor;
+
+  async save(cursor: string, scope?: CursorStoreScope): Promise<void> {
+    this.cursors.set(InMemoryCursorStore.key(scope), cursor);
   }
+  async load(scope?: CursorStoreScope): Promise<string | null> {
+    return this.cursors.get(InMemoryCursorStore.key(scope)) ?? null;
+  }
+}
+
+/**
+ * Derive the stable network identity used in cursor scopes (issue #282).
+ *
+ * The RPC endpoint's host is the identity: the same guard address on two hosts
+ * of the same network resumes the same stream, while two networks never share
+ * one — even behind a failover URL, which is precisely the mis-resume the
+ * scope exists to prevent. Falls back to `"unknown-network"` when no URL is
+ * available (a purely local listener), rather than fabricating one.
+ */
+function cursorNetworkIdentity(config: GuardTelemetryConfig): string {
+  // `serverUrl` is the stellar-sdk server's own URL; a purely local listener
+  // (no transport) has no server at all, hence the defensive read.
+  const serverUrl = (config.server as unknown as { serverUrl?: unknown } | undefined)?.serverUrl;
+  const candidates: Array<unknown> = [config.rpcUrl, serverUrl];
+  for (const candidate of candidates) {
+    if (candidate instanceof URL) return candidate.host || "unknown-network";
+    if (typeof candidate !== "string" || candidate === "") continue;
+    try {
+      return new URL(candidate).host || "unknown-network";
+    } catch {
+      // Not a URL — try the next candidate rather than trusting a raw string.
+    }
+  }
+  return "unknown-network";
 }
 
 /**
@@ -1648,6 +1836,12 @@ export class GuardTelemetryListener {
    * deliberately separate from `activeCursorStore` (issue #279).
    */
   readonly activeFailedTxCursorStore: CursorStore;
+
+  /**
+   * Stable network identity for this listener's cursor scopes (issue #282):
+   * the RPC endpoint host, shared by every cursor slot this listener writes.
+   */
+  private readonly cursorNetwork: string;
 
   /**
    * Null unless `config.buffer` is set: with no buffer requested, there is no
@@ -1791,6 +1985,7 @@ export class GuardTelemetryListener {
     const resolved = config as GuardTelemetryConfig;
     this.config = resolved;
     this.guardContractId = canonicalContractId(resolved.guard) ?? resolved.guard ?? "";
+    this.cursorNetwork = cursorNetworkIdentity(resolved);
     this.logger = resolveLogger(resolved.logger);
     this.buffer = resolved.buffer ? new GuardEventRingBuffer(resolved.buffer.max) : null;
     this.activeCursorStore = resolved.cursorStore ?? new InMemoryCursorStore();
@@ -1813,6 +2008,18 @@ export class GuardTelemetryListener {
    */
   observe(event: GuardEvent): void {
     this.counters?.record(event);
+  }
+
+  /**
+   * The durable scope for one of this listener's cursor slots (issue #282).
+   *
+   * Every `load`/`save` on a cursor store carries this identity, so two
+   * listeners that share one backing store — different guards, different
+   * networks, or the committed stream vs the failed-transaction scan — can
+   * never overwrite or resume from each other's cursor.
+   */
+  private cursorScope(stream: CursorStreamKind): CursorStoreScope {
+    return { network: this.cursorNetwork, guard: this.guardContractId, stream };
   }
 
   /**
@@ -1963,17 +2170,18 @@ export class GuardTelemetryListener {
       return { events: [], cursor };
     }
 
-    const request: rpc.Api.GetTransactionsRequest = params.cursor !== undefined
-      ? {
-          pagination: {
-            cursor: params.cursor,
-            ...(params.limit !== undefined ? { limit: params.limit } : {}),
-          },
-        }
-      : {
-          startLedger: params.startLedger!,
-          ...(params.limit !== undefined ? { pagination: { limit: params.limit } } : {}),
-        };
+    const request: rpc.Api.GetTransactionsRequest =
+      params.cursor !== undefined
+        ? {
+            pagination: {
+              cursor: params.cursor,
+              ...(params.limit !== undefined ? { limit: params.limit } : {}),
+            },
+          }
+        : {
+            startLedger: params.startLedger!,
+            ...(params.limit !== undefined ? { pagination: { limit: params.limit } } : {}),
+          };
 
     try {
       const response = await this.config.server.getTransactions(request);
@@ -2006,10 +2214,16 @@ export class GuardTelemetryListener {
    * than silent. The topic vocabulary then narrows further, and an
    * unrecognised topic is dropped rather than guessed at.
    */
-  async poll(params: { startLedger?: number; cursor?: string; limit?: number } = {}): Promise<PollResult> {
+  async poll(
+    params: { startLedger?: number; cursor?: string; limit?: number } = {},
+  ): Promise<PollResult> {
     const request = (
       params.cursor
-        ? { filters: [{ type: "contract" as const, contractIds: [this.config.guard] }], cursor: params.cursor, limit: params.limit }
+        ? {
+            filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
+            cursor: params.cursor,
+            limit: params.limit,
+          }
         : {
             filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
             startLedger: params.startLedger,
@@ -2056,24 +2270,20 @@ export class GuardTelemetryListener {
         continue;
       }
       const topics = event.topic.map((topic) => String(scValToNative(topic)));
-      const decoded = interpret(
-        topics,
-        decodeData(event.value),
-        {
-          source: "ledger",
-          stream: "committed",
-          contractId,
-          ledger: event.ledger,
-          ledgerClosedAt: event.ledgerClosedAt ?? null,
-          transactionHash: event.txHash ?? null,
-          // Committed events anchor on the transaction hash, not on a position
-          // within a page: a page boundary would otherwise change an event's id.
-          simulationIndex: null,
-          // `includeRaw` is off unless the listener was constructed with it, so
-          // the default path keeps discarding the RPC object (issue #94).
-          ...(this.config.includeRaw ? { raw: event } : {}),
-        },
-      );
+      const decoded = interpret(topics, decodeData(event.value), {
+        source: "ledger",
+        stream: "committed",
+        contractId,
+        ledger: event.ledger,
+        ledgerClosedAt: event.ledgerClosedAt ?? null,
+        transactionHash: event.txHash ?? null,
+        // Committed events anchor on the transaction hash, not on a position
+        // within a page: a page boundary would otherwise change an event's id.
+        simulationIndex: null,
+        // `includeRaw` is off unless the listener was constructed with it, so
+        // the default path keeps discarding the RPC object (issue #94).
+        ...(this.config.includeRaw ? { raw: event } : {}),
+      });
       if (decoded) {
         events.push(decoded);
       } else {
@@ -2193,6 +2403,10 @@ export class GuardTelemetryListener {
     const rng = params.rng ?? Math.random;
     const signal = params.signal;
     const sleep: PollSleep = params.sleep ?? defaultPollSleep;
+    // Validate the retry policy before the first poll (issue #285): an
+    // unusable configuration must fail loudly here, not degrade into an
+    // untuned request storm or an accidental no-retry mid-stream.
+    const retry = resolveTelemetryRetry(params.retry, interval);
     let cursor = params.cursor;
     let startLedger = params.startLedger;
     let failedTxCursor: string | undefined;
@@ -2209,13 +2423,16 @@ export class GuardTelemetryListener {
     this.healthStartedAt = this.nowIso();
 
     if (cursor === undefined && startLedger === undefined) {
-      cursor = (await this.activeCursorStore.load()) ?? undefined;
+      cursor = (await this.activeCursorStore.load(this.cursorScope("events"))) ?? undefined;
     }
 
     if (this.config.failedTx) {
       // The failed-transaction stream resumes from its own store, never from
-      // `cursorStore` (issue #279): the cursors are not interchangeable.
-      failedTxCursor = (await this.activeFailedTxCursorStore.load()) ?? undefined;
+      // `cursorStore` (issue #279): the cursors are not interchangeable. The
+      // scope makes that separation durable even if a caller hands both
+      // streams the same backing store (issue #282).
+      failedTxCursor =
+        (await this.activeFailedTxCursorStore.load(this.cursorScope("failed_tx"))) ?? undefined;
       this.failedTxCursorState = failedTxCursor ?? null;
     }
 
@@ -2262,13 +2479,18 @@ export class GuardTelemetryListener {
         // `onStreamError` once with the terminal error and complete the
         // iterator normally. A callback that throws propagates (the consumer
         // asked for it); without a callback the error is retrievable via
-        // `getLastError()`.
-        const maxAttempts = 5;
+        // `getLastError()`. The envelope is the resolved retry policy
+        // (issue #285); its defaults are the historical five retries.
         let terminal: unknown = error;
         let recovered: PollResult | null = null;
-        while (attempts < maxAttempts) {
+        while (attempts < retry.maxRetries) {
           attempts += 1;
-          const backoff = Math.min(interval, 100 * 2 ** (attempts - 1));
+          // Exponential backoff, capped: the base doubles per attempt and can
+          // never exceed the cap (the poll interval by default). `Math.min`
+          // also absorbs the float overflow of `2 ** n` for a large budget.
+          const backoff = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempts - 1));
+          // Abort-aware: an abort during the backoff ends the stream promptly
+          // instead of waiting out the delay.
           await raceAbort(signal, () => sleep(backoff, signal));
           if (signal?.aborted) return;
           try {
@@ -2316,7 +2538,10 @@ export class GuardTelemetryListener {
           // getEvents cursor (issue #279). A failed scan leaves the stored
           // cursor untouched so the page is retried after a restart.
           if (!this.failedTxScanFailed) {
-            await this.activeFailedTxCursorStore.save(failedTxPage.cursor);
+            await this.activeFailedTxCursorStore.save(
+              failedTxPage.cursor,
+              this.cursorScope("failed_tx"),
+            );
           }
         } catch {
           // This optional stream must not interrupt committed event polling.
@@ -2377,8 +2602,8 @@ export class GuardTelemetryListener {
       // diagnostic half of its merged stream for the same reason.
       for (const event of events) this.counters?.record(event);
 
-      await this.activeCursorStore.save(page.cursor);
-      
+      await this.activeCursorStore.save(page.cursor, this.cursorScope("events"));
+
       if (events.length > 0) yield events;
 
       // Advance confirmed coverage. A page that reached the RPC's head confirms
@@ -2390,9 +2615,7 @@ export class GuardTelemetryListener {
         .filter((ledger): ledger is number => ledger !== null);
       const fullPage = params.limit !== undefined && page.events.length >= params.limit;
       expectedFrom =
-        fullPage && ledgers.length > 0
-          ? Math.max(...ledgers) + 1
-          : page.latestLedger + 1;
+        fullPage && ledgers.length > 0 ? Math.max(...ledgers) + 1 : page.latestLedger + 1;
 
       if (signal?.aborted) return;
       const delay = computePollDelay(interval, jitter, rng);
@@ -2525,11 +2748,7 @@ function toJsonSafe(value: unknown): unknown {
   if (value === undefined) return undefined;
   if (value === null) return null;
   if (typeof value === "bigint") return value.toString();
-  if (
-    typeof value === "boolean" ||
-    typeof value === "number" ||
-    typeof value === "string"
-  ) {
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
     return value;
   }
   if (value instanceof Uint8Array) return `bytes:${bytesToHex(value)}`;

@@ -29,7 +29,12 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke, type InvokeOutcome } from "../../src/invoke.ts";
-import { policyToScVal, unsafeContractAddress, unsafeAccountAddress, type PolicyConfig } from "../../src/policy.ts";
+import {
+  policyToScVal,
+  unsafeContractAddress,
+  unsafeAccountAddress,
+  type PolicyConfig,
+} from "../../src/policy.ts";
 import { readPersistentEntry } from "../../scripts/inspect-deployment.ts";
 
 export const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
@@ -317,10 +322,7 @@ export async function readWindowTotal(
 }
 
 /** The guarded account's SAC balance, as recorded on the token contract. */
-export async function guardTokenBalance(
-  server: rpc.Server,
-  config: Phase2Config,
-): Promise<bigint> {
+export async function guardTokenBalance(server: rpc.Server, config: Phase2Config): Promise<bigint> {
   const raw = await readContract(
     server,
     config.token,
@@ -336,13 +338,7 @@ export async function readPolicy(
   server: rpc.Server,
   config: Phase2Config,
 ): Promise<PolicyConfig | null> {
-  const raw = await readContract(
-    server,
-    config.guard,
-    "policy",
-    [],
-    config.keys.admin.publicKey(),
-  );
+  const raw = await readContract(server, config.guard, "policy", [], config.keys.admin.publicKey());
   return raw === null ? null : (raw as PolicyConfig);
 }
 
@@ -351,18 +347,13 @@ export async function readStatus(
   server: rpc.Server,
   config: Phase2Config,
 ): Promise<{ has_policy: boolean; admin_frozen: boolean; heartbeat_expired: boolean }> {
-  const raw = await readContract(
-    server,
-    config.guard,
-    "status",
-    [],
-    config.keys.admin.publicKey(),
-  );
+  const raw = await readContract(server, config.guard, "status", [], config.keys.admin.publicKey());
   return raw as { has_policy: boolean; admin_frozen: boolean; heartbeat_expired: boolean };
 }
 
 export const FIXTURE_PATH = "tests/fixtures/phase2-instance.json";
-export const REDEPLOY_INSTRUCTION = "fixture needs redeploy — run scripts/deploy-phase2-instance.ts";
+export const REDEPLOY_INSTRUCTION =
+  "fixture needs redeploy — run scripts/deploy-phase2-instance.ts";
 
 export interface FixtureEnforcementInstance {
   guard: string;
@@ -407,7 +398,9 @@ export function assertFixtureSchema(data: unknown): asserts data is Phase2Instan
 
   const inst = root["phase2EnforcementInstance"];
   if (!inst || typeof inst !== "object") {
-    throw new Error(`Invalid fixture schema: phase2EnforcementInstance must be an object. ${REDEPLOY_INSTRUCTION}`);
+    throw new Error(
+      `Invalid fixture schema: phase2EnforcementInstance must be an object. ${REDEPLOY_INSTRUCTION}`,
+    );
   }
   const instObj = inst as Record<string, unknown>;
   for (const key of [
@@ -435,7 +428,9 @@ export function assertFixtureSchema(data: unknown): asserts data is Phase2Instan
   }
   for (const role of ["admin", "agent", "recipient", "outsider"]) {
     if (!(role in addresses)) {
-      throw new Error(`Invalid fixture schema: addresses missing role '${role}'. ${REDEPLOY_INSTRUCTION}`);
+      throw new Error(
+        `Invalid fixture schema: addresses missing role '${role}'. ${REDEPLOY_INSTRUCTION}`,
+      );
     }
   }
 }
@@ -485,8 +480,8 @@ export async function assertPreconditions(
   } catch (err) {
     throw new Error(
       `[FIXTURE PRECONDITION FAILED] Guard contract ${config.guard} does not exist on testnet ledger.\n` +
-      `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
-      REDEPLOY_INSTRUCTION,
+        `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
+        REDEPLOY_INSTRUCTION,
       { cause: err },
     );
   }
@@ -500,8 +495,8 @@ export async function assertPreconditions(
   } catch (err) {
     throw new Error(
       `[FIXTURE PRECONDITION FAILED] Failed reading status or policy from guard ${config.guard}.\n` +
-      `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
-      REDEPLOY_INSTRUCTION,
+        `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
+        REDEPLOY_INSTRUCTION,
       { cause: err },
     );
   }
@@ -509,8 +504,8 @@ export async function assertPreconditions(
   if (!status || !status.has_policy || status.admin_frozen || status.heartbeat_expired || !policy) {
     throw new Error(
       `[FIXTURE PRECONDITION FAILED] Guard policy is invalid or frozen ` +
-      `(has_policy: ${status?.has_policy}, admin_frozen: ${status?.admin_frozen}, heartbeat_expired: ${status?.heartbeat_expired}).\n` +
-      REDEPLOY_INSTRUCTION,
+        `(has_policy: ${status?.has_policy}, admin_frozen: ${status?.admin_frozen}, heartbeat_expired: ${status?.heartbeat_expired}).\n` +
+        REDEPLOY_INSTRUCTION,
     );
   }
 
@@ -523,8 +518,8 @@ export async function assertPreconditions(
   } catch (err) {
     throw new Error(
       `[FIXTURE PRECONDITION FAILED] Agent account ${config.keys.agent.publicKey()} does not exist on testnet.\n` +
-      `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
-      REDEPLOY_INSTRUCTION,
+        `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
+        REDEPLOY_INSTRUCTION,
       { cause: err },
     );
   }
@@ -532,8 +527,8 @@ export async function assertPreconditions(
   if (agentBalanceXlm < minAgentXlm) {
     throw new Error(
       `[FIXTURE PRECONDITION FAILED] Agent account ${config.keys.agent.publicKey()} native balance ` +
-      `(${agentBalanceXlm} XLM) is below minimum required (${minAgentXlm} XLM).\n` +
-      REDEPLOY_INSTRUCTION,
+        `(${agentBalanceXlm} XLM) is below minimum required (${minAgentXlm} XLM).\n` +
+        REDEPLOY_INSTRUCTION,
     );
   }
 
@@ -544,8 +539,8 @@ export async function assertPreconditions(
   } catch (err) {
     throw new Error(
       `[FIXTURE PRECONDITION FAILED] Failed reading guard token balance from token contract ${config.token}.\n` +
-      `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
-      REDEPLOY_INSTRUCTION,
+        `Detail: ${err instanceof Error ? err.message : String(err)}\n` +
+        REDEPLOY_INSTRUCTION,
       { cause: err },
     );
   }
@@ -553,7 +548,7 @@ export async function assertPreconditions(
   if (tokenBalance < minTokenBalance) {
     throw new Error(
       `[FIXTURE PRECONDITION FAILED] Guard token balance (${tokenBalance}) is below minimum required (${minTokenBalance}).\n` +
-      REDEPLOY_INSTRUCTION,
+        REDEPLOY_INSTRUCTION,
     );
   }
 

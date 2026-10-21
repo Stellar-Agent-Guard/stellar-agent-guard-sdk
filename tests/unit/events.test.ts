@@ -139,10 +139,16 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
 
   it("verifies fixture provenance and hermetic vendoring", () => {
     assert.ok(fixture._provenance, "Fixture must include _provenance header");
-    assert.equal(fixture._provenance.sourceRepo, "Stellar-Agent-Guard/stellar-agent-guard-contracts");
+    assert.equal(
+      fixture._provenance.sourceRepo,
+      "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+    );
     assert.ok(fixture._provenance.sourceCommit.length >= 7, "Commit hash must be present");
     assert.equal(fixture._provenance.refreshCommand, "npm run sync:fixtures");
-    assert.ok(Array.isArray(fixture.entries) && fixture.entries.length > 0, "Fixture entries must be non-empty");
+    assert.ok(
+      Array.isArray(fixture.entries) && fixture.entries.length > 0,
+      "Fixture entries must be non-empty",
+    );
   });
 
   for (const entry of fixture.entries) {
@@ -153,7 +159,9 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
           const scVal = xdr.ScVal.fromXDR(xdrBase64, "base64");
           return String(scValToNative(scVal));
         } catch (err) {
-          assert.fail(`[${entry.name}] field 'topicsXdr[${idx}]' failed ScVal base64 decode: ${String(err)}`);
+          assert.fail(
+            `[${entry.name}] field 'topicsXdr[${idx}]' failed ScVal base64 decode: ${String(err)}`,
+          );
         }
       });
 
@@ -258,11 +266,10 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
 });
 
 describe("normalizeU64", () => {
-  
   it("normalizes a string of digits to a bigint", () => {
     assert.equal(normalizeU64("1789393232"), 1789393232n);
   });
-  
+
   it("never loses precision for >2^53", () => {
     const large = "9007199254740993"; // Number.MAX_SAFE_INTEGER + 2
     assert.equal(normalizeU64(large), 9007199254740993n);
@@ -288,14 +295,11 @@ describe("normalizeEventData (issue #276)", () => {
   });
 
   it("keeps numeric-looking identifiers on other kinds as strings", () => {
-    assert.deepEqual(
-      normalizeEventData({ by: "12345", id: "98765" }, "initialized"),
-      { by: "12345", id: "98765" },
-    );
-    assert.deepEqual(
-      normalizeEventData({ reason: "12345" }, "auth_checked"),
-      { reason: "12345" },
-    );
+    assert.deepEqual(normalizeEventData({ by: "12345", id: "98765" }, "initialized"), {
+      by: "12345",
+      id: "98765",
+    });
+    assert.deepEqual(normalizeEventData({ reason: "12345" }, "auth_checked"), { reason: "12345" });
   });
 
   it("does not normalise an unknown event kind", () => {
@@ -335,7 +339,11 @@ describe("decodeGuardEventXdr", () => {
 
   it("decodes a blocked event and keeps its reason", () => {
     const decision = decodeGuardEventXdr(
-      contractEventXdr([GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "per_tx_cap_exceeded"]),
+      contractEventXdr([
+        GUARD_EVENT_TOPICS.authChecked,
+        GUARD_AUTH_RESULTS.blocked,
+        "per_tx_cap_exceeded",
+      ]),
     );
     assert.deepEqual(decision, {
       result: "blocked",
@@ -346,7 +354,10 @@ describe("decodeGuardEventXdr", () => {
 
   it("accepts the DiagnosticEvent wrapper a simulation error carries", () => {
     const topics = [GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "paused"];
-    assert.deepEqual(decodeGuardEventXdr(diagnosticEventXdr(topics)), decodeGuardEventXdr(contractEventXdr(topics)));
+    assert.deepEqual(
+      decodeGuardEventXdr(diagnosticEventXdr(topics)),
+      decodeGuardEventXdr(contractEventXdr(topics)),
+    );
   });
 
   it("honours an explicit source for a ledger-read payload", () => {
@@ -362,15 +373,24 @@ describe("decodeGuardEventXdr", () => {
   });
 
   it("rejects the un-prefixed topic the docs use, so docs drift cannot pass", () => {
-    assert.equal(decodeGuardEventXdr(contractEventXdr(["auth_checked", "blocked", "paused"])), null);
+    assert.equal(
+      decodeGuardEventXdr(contractEventXdr(["auth_checked", "blocked", "paused"])),
+      null,
+    );
   });
 
   it("agrees with the object-path decode for the same event", () => {
-    const topics = [GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "window_cap_exceeded"];
-    assert.deepEqual(decodeGuardEventXdr(contractEventXdr(topics)), decodeAuthDecision(topics, "diagnostic"));
+    const topics = [
+      GUARD_EVENT_TOPICS.authChecked,
+      GUARD_AUTH_RESULTS.blocked,
+      "window_cap_exceeded",
+    ];
+    assert.deepEqual(
+      decodeGuardEventXdr(contractEventXdr(topics)),
+      decodeAuthDecision(topics, "diagnostic"),
+    );
   });
 });
-
 
 describe("validateGuardEventXdr (strict offline validation)", () => {
   it("reports malformed XDR and unknown topics by input index and stage, keeping valid neighbours", () => {
@@ -424,11 +444,7 @@ describe("validateGuardEventXdr (strict offline validation)", () => {
   });
 
   it("reports an invalid decision result at the result-topic path", () => {
-    const invalid = contractEventXdr([
-      GUARD_EVENT_TOPICS.authChecked,
-      "maybe",
-      "paused",
-    ]);
+    const invalid = contractEventXdr([GUARD_EVENT_TOPICS.authChecked, "maybe", "paused"]);
 
     const report = validateGuardEventXdr([invalid]);
 

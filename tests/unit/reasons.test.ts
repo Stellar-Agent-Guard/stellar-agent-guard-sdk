@@ -151,31 +151,40 @@ describe("explainReason", () => {
  * changed behavior a consumer depends on.
  */
 const GOLDEN_EXPLANATIONS: Record<GuardReason, string> = {
-  unauthorized: "The presented signature did not verify against the account's registered agent key.",
+  unauthorized:
+    "The presented signature did not verify against the account's registered agent key.",
   already_initialized: "The guard account has already been initialized.",
   not_initialized: "The guard account has no registered agent key yet.",
   invalid_config: "The policy configuration was rejected by validation and was not applied.",
   invalid_amount: "The transfer amount was zero or negative.",
   no_pending_admin: "The account has no pending admin rotation to confirm or cancel.",
   admin_frozen: "An admin froze the account (freeze), or the dead-man switch grace window lapsed.",
-  heartbeat_expired: "The dead-man switch fired: no heartbeat within the policy's grace window, so the account is frozen until an admin unfreezes it.",
+  heartbeat_expired:
+    "The dead-man switch fired: no heartbeat within the policy's grace window, so the account is frozen until an admin unfreezes it.",
   no_policy: "No policy is installed (never set, or revoked) — the account is default-deny.",
   paused: "The policy's admin kill switch is engaged.",
-  outside_active_window: "The current ledger time is outside the policy's active_from/active_until window.",
+  outside_active_window:
+    "The current ledger time is outside the policy's active_from/active_until window.",
   asset_not_allowed: "The SAC token being called is not in the policy's assets list.",
   recipient_not_allowed: "The transfer recipient is not in the policy's recipients allowlist.",
   per_tx_cap_exceeded: "The transfer amount exceeds the policy's per-transaction cap.",
   window_cap_exceeded: "The transfer would push cumulative spend over the rolling-window cap.",
   protocol_not_allowed: "The contract being called is not in the policy's protocols allowlist.",
-  function_not_allowed: "The function being called on an allowlisted contract is not in its function allowlist.",
-  unknown_contract: "The contract being called is neither the account itself, an allowlisted asset, nor an allowlisted protocol (default deny).",
+  function_not_allowed:
+    "The function being called on an allowlisted contract is not in its function allowlist.",
+  unknown_contract:
+    "The contract being called is neither the account itself, an allowlisted asset, nor an allowlisted protocol (default deny).",
   self_function_not_allowed: "The call targets a guard function that the agent key may not invoke.",
   create_contract_not_allowed: "The account may not authorize contract creation.",
   recipient_blocked: "The transfer recipient is explicitly blocked by the account's policy.",
-  protocol_call_rate_exceeded: "The call would push the rolling protocol-call count past its configured limit.",
-  decision_invariant_violation: "The guard's decision engine hit an internal invariant, so the call was refused rather than allowed.",
-  asset_fn_not_allowed: "The call invoked a function other than `transfer` on an allowlisted asset.",
-  too_many_auth_contexts: "The call carried more authorization contexts than the guard's decision engine evaluates.",
+  protocol_call_rate_exceeded:
+    "The call would push the rolling protocol-call count past its configured limit.",
+  decision_invariant_violation:
+    "The guard's decision engine hit an internal invariant, so the call was refused rather than allowed.",
+  asset_fn_not_allowed:
+    "The call invoked a function other than `transfer` on an allowlisted asset.",
+  too_many_auth_contexts:
+    "The call carried more authorization contexts than the guard's decision engine evaluates.",
 };
 
 describe("explainReason golden snapshot (issue #96)", () => {
@@ -204,14 +213,8 @@ describe("explainReason golden snapshot (issue #96)", () => {
 
 describe("reasonMessages structure (issue #96)", () => {
   it("lists every reason exactly once, derived from the single code source", () => {
-    assert.deepEqual(
-      Object.keys(reasonMessages).sort(),
-      Object.keys(GUARD_REASON_CODES).sort(),
-    );
-    assert.deepEqual(
-      Object.keys(reasonMessagesEn).sort(),
-      Object.keys(GUARD_REASON_CODES).sort(),
-    );
+    assert.deepEqual(Object.keys(reasonMessages).sort(), Object.keys(GUARD_REASON_CODES).sort());
+    assert.deepEqual(Object.keys(reasonMessagesEn).sort(), Object.keys(GUARD_REASON_CODES).sort());
   });
 
   it("namespaces distinct title/body/remediation keys per reason and carries the code", () => {
@@ -266,10 +269,7 @@ describe("explainReason localisation (issue #96)", () => {
     const fr: Record<string, string> = {
       [reasonMessages.paused.bodyKey]: "Le coupe-circuit administrateur est actif.",
     };
-    assert.equal(
-      explainReason("paused", fr, { paused: "overridden" }),
-      "overridden",
-    );
+    assert.equal(explainReason("paused", fr, { paused: "overridden" }), "overridden");
   });
 });
 

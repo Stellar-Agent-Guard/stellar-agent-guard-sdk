@@ -46,9 +46,16 @@ function run(): void {
 
     writeFileSync(
       join(consumerDir, "package.json"),
-      JSON.stringify({ name: "stellar-agent-guard-clean-consumer", private: true, type: "module" }, null, 2),
+      JSON.stringify(
+        { name: "stellar-agent-guard-clean-consumer", private: true, type: "module" },
+        null,
+        2,
+      ),
     );
-    npm(["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", tarball], consumerDir);
+    npm(
+      ["install", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund", tarball],
+      consumerDir,
+    );
 
     const runtimeCheck = [
       `const sdk = await import(${JSON.stringify("stellar-agent-guard-sdk")});`,
@@ -95,7 +102,9 @@ function run(): void {
       ],
       { cwd: consumerDir, stdio: "inherit" },
     );
-    console.log("packed install check OK: production-only consumer imported and typechecked the SDK tarball");
+    console.log(
+      "packed install check OK: production-only consumer imported and typechecked the SDK tarball",
+    );
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }

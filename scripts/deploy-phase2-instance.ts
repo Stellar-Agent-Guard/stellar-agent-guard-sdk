@@ -37,14 +37,21 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke } from "../src/invoke.ts";
-import { policyToScVal, unsafeAccountAddress, unsafeContractAddress, type PolicyConfig } from "../src/policy.ts";
+import {
+  policyToScVal,
+  unsafeAccountAddress,
+  unsafeContractAddress,
+  type PolicyConfig,
+} from "../src/policy.ts";
 import { summarizeDiagnosticEvents } from "../src/tx.ts";
 import { assertFixtureSchema } from "../tests/integration/harness.ts";
 import { json, parseArgs, verifyWasmIdentity } from "./inspect-deployment.ts";
 
 /** The Phase 1 artifact — the same bytes must be deployed for Phase 2. */
 const PHASE1_WASM_HASH = "f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63";
-const PHASE1_GUARD = unsafeContractAddress("CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7");
+const PHASE1_GUARD = unsafeContractAddress(
+  "CAYJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4CU7",
+);
 const TESTNET_RPC = "https://soroban-testnet.stellar.org";
 const TESTNET_PASSPHRASE = Networks.TESTNET;
 const ENV_PATH = ".env.phase2";
@@ -459,8 +466,8 @@ async function submitSimple(
       return { hash: sent.hash, ledger: result.ledger ?? null };
     }
     if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
-      const diagnostic = (result as unknown as { diagnosticEventsXdr?: unknown[] })
-        .diagnosticEventsXdr ?? [];
+      const diagnostic =
+        (result as unknown as { diagnosticEventsXdr?: unknown[] }).diagnosticEventsXdr ?? [];
       throw new Error(
         [`tx ${sent.hash} failed`, ...summarizeDiagnosticEvents(diagnostic)].join("\n  "),
       );
@@ -521,7 +528,9 @@ async function main(): Promise<void> {
     outsider: fromEnv(ENV_KEYS.outsider) ?? (created.push("outsider"), Keypair.random()),
   };
   const agentRawPubkey = Buffer.from(StrKey.decodeEd25519PublicKey(keys.agent.publicKey()));
-  step(`[1] keys: ${created.length === 0 ? "reused from .env.phase2" : `generated ${created.join(", ")}`}`);
+  step(
+    `[1] keys: ${created.length === 0 ? "reused from .env.phase2" : `generated ${created.join(", ")}`}`,
+  );
   for (const name of created) {
     await fund(server, keys[name as keyof Keys].publicKey());
   }
@@ -554,7 +563,9 @@ async function main(): Promise<void> {
     decimals = await readContract(server, token, "decimals", [], keys.issuer.publicKey());
     step(`    tx ${submitted.hash}\n    token ${token} (decimals ${String(decimals.value)})`);
   } else {
-    step(`[2] SAC test token already deployed\n    token ${token} (decimals ${String(decimals.value)})`);
+    step(
+      `[2] SAC test token already deployed\n    token ${token} (decimals ${String(decimals.value)})`,
+    );
   }
 
   // ── Guard instance from the Phase 1 WASM hash ─────────────────────────
@@ -607,10 +618,7 @@ async function main(): Promise<void> {
       call: {
         contract: unsafeContractAddress(guard),
         fn: "initialize",
-        args: [
-          new Address(keys.admin.publicKey()).toScVal(),
-          xdr.ScVal.scvBytes(agentRawPubkey),
-        ],
+        args: [new Address(keys.admin.publicKey()).toScVal(), xdr.ScVal.scvBytes(agentRawPubkey)],
       },
       networkPassphrase: TESTNET_PASSPHRASE,
       accountSigners: [keys.admin],
@@ -711,12 +719,18 @@ async function main(): Promise<void> {
     const outcome = await invoke({
       server,
       source: keys.admin,
-      call: { contract: unsafeContractAddress(guard), fn: "set_policy", args: [policyToScVal(policy)] },
+      call: {
+        contract: unsafeContractAddress(guard),
+        fn: "set_policy",
+        args: [policyToScVal(policy)],
+      },
       networkPassphrase: TESTNET_PASSPHRASE,
       accountSigners: [keys.admin],
     });
     if (outcome instanceof Error || outcome.kind !== "allowed") {
-      throw new Error(`set_policy failed: ${outcome instanceof Error ? outcome.message : json(outcome)}`);
+      throw new Error(
+        `set_policy failed: ${outcome instanceof Error ? outcome.message : json(outcome)}`,
+      );
     }
     record("setPolicy", outcome.submission);
     step(`    tx ${outcome.submission.hash} (ledger ${outcome.submission.ledger})`);

@@ -17,6 +17,8 @@
 
 # Stellar Agent Guard — SDK
 
+**New here?** The [glossary of guard terms](docs/glossary.md) is the quickest way to learn the shared vocabulary (admissible, blocked, undetermined, DMS, SAC, auth entry) with links to the authoritative contract and SDK sections.
+
 <!-- 📚 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) -->
 
 **Non-custodial TypeScript SDK and pre-flight policy interception firewall for AI agents on Stellar.**
@@ -62,6 +64,109 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 > **A verdict is a prediction, not a settlement guarantee.** Before relying on a
 > pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
 > known gaps in simulation fidelity, and what the SDK does about each.
+
+New to the vocabulary (allowlist, DMS, admissible, pre-flight)? Start with the
+[glossary](docs/glossary.md).
+
+### 60-second quickstart: see the guard say no
+
+One contiguous path: install, point at the Phase-2 testnet fixture, simulate a
+transfer that violates its per-transaction cap, and print the verdict. Pre-flight
+is read-only — it broadcasts nothing and pays no network fee.
+
+```bash
+npm install stellar-agent-guard-sdk
+set -a; . ./.env.phase2; set +a   # agent + funded source secrets
+npx tsx quickstart.ts
+```
+
+```ts
+/**
+ * 60-second quickstart (issue #127): see the guard say no.
+ *
+ * Mirrored verbatim in README.md (except the package import specifier, which the
+ * unit test rewrites to this file's relative import). `npm run typecheck`
+ * typechecks this file, so the README block cannot drift from code that
+ * compiles.
+ *
+ * Pre-flight is read-only: this runs the guard's `__check_auth` in simulation,
+ * prints the verdict and never broadcasts. The enforced simulation does sign the
+ * agent auth entry and reads a funded source account, so two testnet secrets are
+ * required — the verdict itself costs no fee and no funds move.
+ */
+import { Keypair, nativeToScVal, rpc } from "@stellar/stellar-sdk";
+import { PreFlightInterceptor, isContractAddress } from "stellar-agent-guard-sdk";
+
+const RPC_URL = "https://soroban-testnet.stellar.org";
+const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+
+// Phase-2 testnet fixture (tests/fixtures/phase2-instance.json). Override these
+// three with your own instance's addresses if you deployed one.
+const GUARD =
+  process.env.STELLAR_GUARD ?? "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+const TOKEN =
+  process.env.STELLAR_TOKEN ?? "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+const RECIPIENT =
+  process.env.STELLAR_RECIPIENT ?? "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH";
+
+async function runQuickstart(): Promise<void> {
+  // The fixture's agent secret and a funded testnet source account. The
+  // fixture's secrets are deliberately not committed; see README "Live testnet
+  // suite" for provisioning your own instance.
+  const agentSecret = process.env.PHASE2_AGENT_SECRET;
+  const sourceSecret = process.env.PHASE2_ADMIN_SECRET;
+  if (!agentSecret || !sourceSecret) {
+    throw new Error("set PHASE2_AGENT_SECRET and PHASE2_ADMIN_SECRET (see .env.phase2.example)");
+  }
+  if (!isContractAddress(GUARD) || !isContractAddress(TOKEN)) {
+    throw new Error("STELLAR_GUARD and STELLAR_TOKEN must be contract (C...) addresses");
+  }
+
+  const interceptor = new PreFlightInterceptor({
+    server: new rpc.Server(RPC_URL),
+    networkPassphrase: NETWORK_PASSPHRASE,
+    guard: GUARD,
+    agent: Keypair.fromSecret(agentSecret),
+    source: Keypair.fromSecret(sourceSecret),
+  });
+
+  // 1001 is above the fixture policy's per_tx_cap of 1000, so this transfer is
+  // refused before anything is signed for broadcast (the same refusal is
+  // recorded in tests/fixtures/integration-evidence.md).
+  const decision = await interceptor.check({
+    contract: TOKEN,
+    fn: "transfer",
+    args: [
+      nativeToScVal(GUARD, { type: "address" }),
+      nativeToScVal(RECIPIENT, { type: "address" }),
+      nativeToScVal(1_001n, { type: "i128" }),
+    ],
+  });
+
+  console.log(decision.kind === "blocked" ? `blocked: ${decision.reason}` : decision.kind);
+}
+
+await runQuickstart();
+```
+
+Expected output — 1001 exceeds the fixture policy's `per_tx_cap` of 1000; the
+same refusal is recorded in
+[`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md):
+
+```text
+blocked: per_tx_cap_exceeded
+```
+
+The enforced simulation signs the agent auth entry and reads a funded source
+account, so two testnet secrets are required; the verdict itself spends nothing.
+The fixture's secrets are not published — [`npm run deploy:phase2`](docs/installation.md)
+provisions your own instance, or use the keys for the instance you are
+integrating.
+
+**Next steps:** [signing and submission](docs/concepts/custom-account-signing.md) ·
+[heartbeat](#keep-the-dead-man-switch-alive-startheartbeat) ·
+[framework adapters](#framework-middleware-langchain--elizaos) ·
+[agent runtime support](docs/runtime-support.md).
 
 ### Installation
 
@@ -275,6 +380,7 @@ const interceptor = new PreFlightInterceptor({
   source,
   cache: {
     ttlLedgers: 1, // maximum one approximate five-second ledger window
+    maxEntries: 256, // bound distinct call fingerprints held at once
     policyRevision: () => readPolicyRevision(),
   },
 });
@@ -293,6 +399,14 @@ is discarded when the observed ledger advances, when the TTL expires, or when
 `invalidate()` is called. `ttlMs` and `ttlLedgers` are both capped at one
 approximate ledger-close interval; if both are supplied, `ttlMs` takes
 precedence.
+
+`maxEntries` bounds the cache's cardinality. When it is full, storing a new
+call fingerprint evicts the **least-recently-used** entry (a cache hit refreshes
+recency), so an agent making many distinct calls cannot grow the cache without
+limit. Eviction only removes entries; a lookup still requires a current-ledger,
+unexpired entry, so a bounded cache can never serve an expired or cross-ledger
+verdict — the worst it does is force a fresh simulation for a recently cached
+fingerprint. Omit `maxEntries` for the previous unbounded behaviour.
 
 A **cached verdict can be staler than one admitted transfer**. The rolling spend
 window can change after a simulation while a cached result is still being
@@ -520,21 +634,34 @@ read `signal` as *stop soon and stop asking*, not *cancel the socket*.
 
 ### Bounding a check or an invoke (`signal` and `timeoutMs`)
 
-`check()`, `CostPreChecker.check()` and `invoke()` each accept two optional
-caller-owned bounds on the RPC calls they make:
+`check()`, `checkBatch()`, `CostPreChecker.check()` and `invoke()` each accept
+two optional caller-owned bounds on the RPC calls they make:
 
 - `signal?: AbortSignal` — your runtime's cancellation (a tool-loop deadline, a
   shutdown hook, a user's "stop"). An **already-aborted** signal returns before
-  any RPC call is issued.
+  any RPC call is issued. On a batch it stops the batch: no further call is
+  started, and every unfinished call is reported as fail-closed `undetermined`.
 - `timeoutMs?: number` — a per-RPC-call budget in milliseconds. It defaults to
   `DEFAULT_RPC_TIMEOUT_MS` (**30s**), because a network partition that leaves a
   guardrail call pending forever is a hang, not a fail-closed decision. Pass
   `timeoutMs: 0` to opt out and rely on `signal` alone.
-- `deadlineMs?: number` — **`invoke()` only**: one overall budget for the whole
-  action (discovery, signing, retries, broadcast and polling). Expiry is
-  fail-closed and reported as an `RpcTimeoutError` with `deadline: true`; it can
-  never become an `allowed` outcome. Pass `clock` to make the accounting
+- `deadlineMs?: number` — **`invoke()` and `checkBatch()`**: one overall budget
+  for the whole action (for a batch: policy read plus every staged call). Expiry
+  is fail-closed and reported as an `RpcTimeoutError` with `deadline: true`; it
+  can never become an `allowed` outcome. On a batch, calls that never started are
+  `undetermined` rather than skipped. Pass `clock` to make the accounting
   deterministic in tests. See `docs/api/invoke-pipeline.md`.
+
+**Concurrent identical checks are coalesced.** `PreFlightInterceptor` shares one
+in-flight discovery/enforcement run when the same call and config are checked at
+the same time, so an agent framework issuing duplicate tool checks in one
+planning turn does not pay for duplicate RPCs. This is not a cache: the entry is
+removed as soon as the run settles, including on failure or `undetermined`. Each
+waiter still applies its own `signal`/`timeoutMs` — one caller giving up never
+cancels a result another waiter is entitled to — while the shared run itself
+keeps the pipeline's default `DEFAULT_RPC_TIMEOUT_MS` bound. Checks that supply
+`onStep` keep their own run so each trace sees every event, and
+`coalesceInFlight: false` disables coalescing entirely.
 
 **The typed error is the same; where it surfaces is deliberately not.** A bound
 that fires raises one class, `RpcTimeoutError` (carrying `stage` and whether it
@@ -544,6 +671,7 @@ questions:
 | Call | Fired bound |
 | --- | --- |
 | `check()` / `CostPreChecker.check()` | the fail-closed `undetermined` **verdict** (`decision.error instanceof RpcTimeoutError`) — the guard reached no decision, which is what `undetermined` already means |
+| `checkBatch()` | `undetermined` verdicts for the call in flight and for every call that never started; the completed verdicts keep their own kind |
 | `invoke()` | `invoke`'s `error` **outcome** (`outcome.error instanceof RpcTimeoutError`) — the pipeline never reached broadcast |
 
 ```ts
@@ -646,6 +774,32 @@ if (failures.length > 0) {
   // Safe-exit before encode or broadcast
 } else {
   // Proceed with policyToScVal(draftPolicy) and broadcast
+}
+```
+
+#### Loading a policy from a JSON file (Node only)
+
+Script and cron integrations keep policy as JSON, so `stellar-agent-guard-sdk/fs`
+reads, parses and validates a file in one call. The subpath is the only place the
+SDK touches `node:fs`; the root import stays browser-safe. Each failure mode is a
+distinct typed error, so a shell script can branch on the cause:
+
+```ts
+import { PolicyFileReadError, PolicyValidationError } from "stellar-agent-guard-sdk";
+import { loadPolicyFromFile } from "stellar-agent-guard-sdk/fs";
+
+try {
+  const policy = await loadPolicyFromFile("policy.json");
+  // `policy` is a validated GuardPolicy ready for policyToScVal()/broadcast.
+} catch (error) {
+  if (error instanceof PolicyFileReadError) {
+    console.error(`cannot read ${error.path} (${error.code})`);
+  } else if (error instanceof PolicyValidationError) {
+    // Every SPEC §8 failure, not just the first.
+    for (const failure of error.failures) console.error(failure.rule, failure.path);
+  } else {
+    throw error; // PolicyDecodeError: invalid JSON or policy shape
+  }
 }
 ```
 
@@ -870,8 +1024,9 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
 ### Interception & Execution
 
 - `PreFlightInterceptor`
-  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
+  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Concurrent identical `check()` calls share one in-flight run by default; pass `coalesceInFlight: false` to disable that.
   - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
+  - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Returns one verdict per call with all-or-nothing `admissible` semantics. `options.signal` bounds the whole batch, `options.deadlineMs` sets one overall budget, and `options.timeoutMs` stays per-call. A cancelled or over-budget batch stops before the next call and reports every unfinished call as `undetermined`.
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
   - `checkBatch(calls, options?): Promise<PreFlightBatchDecision>` — Stages SAC transfer amounts against the rolling window and returns an `undetermined` batch verdict when a required policy/window read fails instead of assuming zero spend. `assertBatchAllowed()` is the throw-on-refusal form.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
