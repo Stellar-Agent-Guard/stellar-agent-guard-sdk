@@ -313,3 +313,40 @@ the live run, and this addendum does not claim otherwise.
 this branch before merge** and replace this addendum with the fresh run output.
 No credentials, deployment or policy change are needed beyond what the suite
 already does.
+
+## Addendum — 2026-10-21 (PR: decode policy and window from one validated ledger snapshot + secret scanning)
+
+Recorded because this PR touches `src/policy.ts` on the enforcement path and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this contributor checkout, so `npm run test:integration` cannot execute here.
+No fresh Phase-2 transcript is claimed below. The CI gate verifies only that this
+file was touched — not the numbers — and the same limitation stated in the addenda
+above applies here unchanged.
+
+### What the PR changes on the enforcement path
+
+- `src/policy.ts`: `fetchGuardPolicyAndWindow()` now requests both the `Policy`
+  and `Window` persistent contract-data entries in a single `getLedgerEntries`
+  RPC call (with a fallback to separate calls for backward compatibility) and
+  extracts/decodes the underlying `contractData` `ScVal` entries via
+  `decodePolicy`.
+- Unchanged: how the guard authorization entry is built or signed, how the
+  enforced simulation runs `__check_auth`, and how on-chain policy verdicts are
+  classified. The five live enforcement scenarios recorded above are unaffected.
+- Outside the enforcement path: adds `scripts/check-secrets.ts` (`npm run check:secrets`)
+  for repository secret scanning.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm test
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+A maintainer with `.env.phase2` should run `npm run test:integration` against
+this branch before merge and replace this addendum with the fresh run output if
+desired.

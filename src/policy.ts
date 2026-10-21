@@ -1027,6 +1027,30 @@ export function extractTransferAmount(call: ContractCall): bigint | null {
   }
 }
 
+function extractContractDataScVal(entry: unknown): xdr.ScVal | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const typedEntry = entry as {
+    val?:
+      | { contractData?: () => { val?: () => xdr.ScVal } | { val?: xdr.ScVal } }
+      | { contractData?: { val?: xdr.ScVal } }
+      | xdr.ScVal;
+  };
+  if (!typedEntry.val) return undefined;
+  const contractData =
+    typeof (typedEntry.val as { contractData?: unknown }).contractData === "function"
+      ? (typedEntry.val as { contractData: () => { val?: unknown } }).contractData()
+      : (typedEntry.val as { contractData?: { val?: unknown } }).contractData;
+  if (contractData) {
+    return typeof contractData.val === "function"
+      ? (contractData.val() as xdr.ScVal)
+      : (contractData.val as xdr.ScVal);
+  }
+  if (typeof (typedEntry.val as xdr.ScVal).type === "string") {
+    return typedEntry.val as xdr.ScVal;
+  }
+  return undefined;
+}
+
 /**
  * Read one of a contract's persistent storage entries from ledger state via RPC.
  */
@@ -1044,22 +1068,9 @@ export async function readPersistentEntry(
   );
   const response = await server.getLedgerEntries(key);
   const entry = response.entries?.[0] as unknown as {
-    val?: { contractData?: () => { val?: () => xdr.ScVal } | { val?: xdr.ScVal } } | { contractData?: { val?: xdr.ScVal } };
     lastModifiedLedgerSeq?: number;
   };
-  let scval: xdr.ScVal | undefined;
-  if (entry?.val) {
-    const contractData =
-      typeof (entry.val as { contractData?: unknown }).contractData === "function"
-        ? (entry.val as { contractData: () => { val?: unknown } }).contractData()
-        : (entry.val as { contractData?: { val?: unknown } }).contractData;
-    if (contractData) {
-      scval =
-        typeof contractData.val === "function"
-          ? (contractData.val() as xdr.ScVal)
-          : (contractData.val as xdr.ScVal);
-    }
-  }
+  const scval = extractContractDataScVal(entry);
   if (!scval) return null;
   return {
     value: scValToNative(scval) as unknown,
@@ -1069,28 +1080,109 @@ export async function readPersistentEntry(
 
 /**
  * Read the live policy and committed window spent from ledger state via RPC.
+ * Attempts to read both entries in a single RPC call for ledger consistency.
  */
 export async function fetchGuardPolicyAndWindow(
   server: rpc.Server,
   guard: string,
 ): Promise<{ policy: PolicyConfig | null; windowSpent: bigint }> {
-  const [policyEntry, windowEntry] = await Promise.all([
-    readPersistentEntry(server, guard, "Policy"),
-    readPersistentEntry(server, guard, "Window"),
-  ]);
+  const decodePolicyCandidate = (scval: xdr.ScVal | undefined, nativeVal?: unknown): PolicyConfig | null => {
+    if (scval) {
+      try {
+        return decodePolicy(scval);
+      } catch {
+        const converted = scValToNative(scval);
+        if (converted && typeof converted === "object") {
+          return converted as PolicyConfig;
+        }
+        return null;
+      }
+    }
+    if (nativeVal && typeof nativeVal === "object") {
+      return nativeVal as PolicyConfig;
+    }
+    return null;
+  };
 
-  let policy: PolicyConfig | null = null;
-  if (policyEntry?.value && typeof policyEntry.value === "object") {
-    policy = policyEntry.value as PolicyConfig;
+  const decodeWindowCandidate = (scval: xdr.ScVal | undefined, nativeVal?: unknown): bigint => {
+    if (scval && scval.type === "scvMap") {
+      try {
+        const mapEntries = (scval as unknown as { map?: xdr.ScMapEntry[] }).map ?? [];
+        for (const mapEntry of mapEntries) {
+          const key = String(scValToNative(mapEntry.key));
+          if (key === "total") {
+            const value = scValToNative(mapEntry.val);
+            if (typeof value === "bigint" || typeof value === "number") {
+              return BigInt(value);
+            }
+            break;
+          }
+        }
+      } catch {
+        // Fall through
+      }
+    }
+    const candidate = nativeVal ?? (scval ? scValToNative(scval) : undefined);
+    if (candidate && typeof candidate === "object") {
+      const windowObj = candidate as { total?: bigint | number };
+      if (typeof windowObj.total === "bigint" || typeof windowObj.total === "number") {
+        return BigInt(windowObj.total);
+      }
+    }
+    return 0n;
+  };
+
+  // Create ledger keys for both Policy and Window entries
+  const policyKey = xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(guard).toScAddress(),
+      key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Policy")]),
+      durability: xdr.ContractDataDurability.persistent,
+    }),
+  );
+
+  const windowKey = xdr.LedgerKey.contractData(
+    new xdr.LedgerKeyContractData({
+      contract: new Address(guard).toScAddress(),
+      key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Window")]),
+      durability: xdr.ContractDataDurability.persistent,
+    }),
+  );
+
+  try {
+    // Attempt to get both entries in one RPC call for ledger consistency
+    const response = await server.getLedgerEntries(policyKey, windowKey);
+    const entries = (response.entries ?? []).filter(Boolean);
+
+    // If a single-entry mock server only returned one item for a two-key query,
+    // fetch the second entry so both Policy and Window are populated.
+    const policyRawEntry: unknown = entries[0];
+    let windowRawEntry: unknown = entries[1];
+
+    if (entries.length === 1 && (response.entries ?? []).length === 1) {
+      const secondResponse = await server.getLedgerEntries(windowKey);
+      windowRawEntry = secondResponse.entries?.[0];
+    }
+
+    const policyScVal = extractContractDataScVal(policyRawEntry);
+    const windowScVal = extractContractDataScVal(windowRawEntry);
+
+    return {
+      policy: decodePolicyCandidate(policyScVal),
+      windowSpent: decodeWindowCandidate(windowScVal),
+    };
+  } catch {
+    // If single call fails, fall back to separate calls for backward compatibility
+    const [policyEntry, windowEntry] = await Promise.all([
+      readPersistentEntry(server, guard, "Policy"),
+      readPersistentEntry(server, guard, "Window"),
+    ]);
+
+    return {
+      policy: decodePolicyCandidate(undefined, policyEntry?.value),
+      windowSpent: decodeWindowCandidate(undefined, windowEntry?.value),
+    };
   }
-
-  let windowSpent = 0n;
-  if (windowEntry?.value && typeof windowEntry.value === "object") {
-    const windowObj = windowEntry.value as { total?: bigint | number };
-    windowSpent = BigInt(windowObj.total ?? 0);
-  }
-
-  return { policy, windowSpent };
 }
 
 function isValidStellarAddress(addr: unknown): addr is string {
