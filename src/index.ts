@@ -29,18 +29,18 @@ export {
   InvalidFeeCeilingError,
   InvalidInputError,
   PolicyDecodeError,
+  PolicyEncodeError,
+  PolicyFileReadError,
+  PolicyValidationError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
 
-export {
-  FakeClock,
-  systemClock,
-} from "./clock.ts";
+export type { PolicyEncodingFailure, PolicyEncodingRuleId } from "./errors.ts";
 
-export type {
-  Clock,
-} from "./clock.ts";
+export { FakeClock, systemClock } from "./clock.ts";
+
+export type { Clock } from "./clock.ts";
 
 export {
   GuardBlockedError,
@@ -86,12 +86,10 @@ export {
   unsafePublicKeyHex,
   unsafeStrKeyAddress,
   validateGuardPolicy,
+  validatePolicyForEncoding,
 } from "./policy.ts";
 
-export type {
-  ActiveWindowState,
-  DescribePolicyOptions,
-} from "./policy.ts";
+export type { ActiveWindowState, DescribePolicyOptions } from "./policy.ts";
 
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
 export { policyDiff } from "./policy-diff.ts";
@@ -194,14 +192,9 @@ export {
   type SubmissionAcceptedEvent,
 } from "./invoke.ts";
 
-export {
-  TRACE_STEP_NAMES,
-} from "./trace.ts";
+export { TRACE_STEP_NAMES } from "./trace.ts";
 
-export type {
-  TraceStepName,
-  TraceStepStatus,
-} from "./trace.ts";
+export type { TraceStepName, TraceStepStatus } from "./trace.ts";
 
 export {
   PreFlightInterceptor,
@@ -246,11 +239,14 @@ export type {
   FeeBreakdown,
   PolicyContext,
   ResourceBreakdown,
+  WindowSpendSnapshot,
 } from "./cost.ts";
 
 export {
   ConcurrentTelemetryStreamError,
   DEFAULT_JITTER_FRACTION,
+  DEFAULT_MAX_BUFFERED_PAGES,
+  DEFAULT_TELEMETRY_RETRY_OPTIONS,
   GuardEventRingBuffer,
   GuardTelemetryListener,
   InMemoryCursorStore,
@@ -270,6 +266,8 @@ export {
   telemetryFromDecision,
   TELEMETRY_EVENT_RECORD_VERSION,
   type CursorStore,
+  type CursorStoreScope,
+  type CursorStreamKind,
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardEventBufferOptions,
@@ -296,6 +294,7 @@ export {
   type PollSleep,
   type RecentEventFilter,
   type TelemetryJitter,
+  type TelemetryRetryOptions,
 } from "./telemetry.ts";
 
 export {
@@ -340,11 +339,7 @@ export {
   submitUnfreeze,
 } from "./admin.ts";
 
-export type {
-  AdminOpParams,
-  RotateAgentKeyParams,
-  SetPolicyParams,
-} from "./admin.ts";
+export type { AdminOpParams, RotateAgentKeyParams, SetPolicyParams } from "./admin.ts";
 
 export {
   GUARD_WASM_HASH,
@@ -378,9 +373,7 @@ export {
 // at construction time (see `src/adapters/validate.ts`), so a misconfigured
 // adapter throws `AdapterConfigError` before the first action rather than
 // failing mid-loop.
-export {
-  createLangChainGuardMiddleware,
-} from "./adapters/langchain.ts";
+export { createLangChainGuardMiddleware } from "./adapters/langchain.ts";
 
 export type {
   LangChainGuardOptions,
@@ -388,16 +381,9 @@ export type {
   LangChainToolMessage,
 } from "./adapters/langchain.ts";
 
-export {
-  createGuardValidator,
-  guardAction,
-} from "./adapters/elizaos.ts";
+export { createGuardValidator, guardAction } from "./adapters/elizaos.ts";
 
-export type {
-  ElizaActionLike,
-  ElizaGuardOptions,
-  ElizaValidator,
-} from "./adapters/elizaos.ts";
+export type { ElizaActionLike, ElizaGuardOptions, ElizaValidator } from "./adapters/elizaos.ts";
 
 export {
   throwAdapterConfigError,
@@ -420,10 +406,7 @@ export {
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
 
-export {
-  guardMcpCallTool,
-  guardMcpToolHandler,
-} from "./adapters/mcp.ts";
+export { guardMcpCallTool, guardMcpToolHandler } from "./adapters/mcp.ts";
 
 export type {
   McpCallTool,

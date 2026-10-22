@@ -71,7 +71,10 @@ describe("pinned framework revisions (issue #319)", () => {
   it("records every exercised pin in docs/integration-hooks.md", () => {
     const doc = readFileSync(resolve(process.cwd(), "docs/integration-hooks.md"), "utf8");
     for (const [framework, pin] of Object.entries(COMPATIBILITY_PINS)) {
-      assert.ok(doc.includes(pin), `${framework} pin "${pin}" is missing from docs/integration-hooks.md`);
+      assert.ok(
+        doc.includes(pin),
+        `${framework} pin "${pin}" is missing from docs/integration-hooks.md`,
+      );
     }
   });
 });
@@ -91,7 +94,11 @@ describe("LangChain hook shape — AgentMiddleware.wrapToolCall", () => {
       return "sent";
     });
 
-    assert.equal(entered, 0, "wrapToolCall's continuation is the tool body: a block must not call it");
+    assert.equal(
+      entered,
+      0,
+      "wrapToolCall's continuation is the tool body: a block must not call it",
+    );
     assert.equal((result as { status?: string }).status, "error");
   });
 

@@ -77,7 +77,7 @@ diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor. Empty pages are skipped, and the existing event-array
 contract is unchanged.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, and `signal`.
+`maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, and `signal`.
 
 ### `watchPages(params?): AsyncIterable<GuardTelemetryWatchPage>`
 
@@ -123,6 +123,25 @@ backoff, then a clean end**: the listener retries up to `maxRetries` (default
 once with the terminal error and completes the iterator normally. The stream
 never dies silently and never leaves an unhandled rejection behind.
 
+The envelope is configurable per stream (issue #285):
+
+```ts
+watch({
+  retry: {
+    maxRetries: 8,      // retry attempts after a failed poll; integer >= 0 (default 5)
+    baseDelayMs: 250,   // first backoff delay, doubled per attempt; >= 0 (default 100)
+    maxDelayMs: 10_000, // cap on any single delay; >= 0 (default: pollIntervalMs)
+  },
+});
+```
+
+Every value is validated **before the first poll**: an unusable policy throws
+a `TypeError` when the stream starts, rather than degrading mid-run into an
+untuned request storm or an accidental no-retry. `maxRetries: 0` makes the
+first failure terminal. Every backoff delay is abort-aware — a `signal` abort
+ends the wait immediately. Defaults are exported as
+`DEFAULT_TELEMETRY_RETRY_OPTIONS` and match the historical behavior exactly.
+
 Failure-mode matrix:
 
 | Failure | Retried? | `onStreamError` | Iterator |
@@ -138,25 +157,58 @@ If the callback itself throws, that throw **propagates** out of the `for await`
 loop — the consumer asked for halt-on-first-error semantics by supplying a
 throwing callback, so it is not swallowed.
 
+#### Bounded look-ahead (backpressure, issue #36)
+
+`watch()` fetches through a bounded look-ahead pump: at most
+`maxBufferedPages` pages (`DEFAULT_MAX_BUFFERED_PAGES`, `2`, by default) are
+prefetched between the pump and the consumer, plus at most one request in
+flight, and the pump pulls sequentially — never more than one `getEvents` at a
+time. A consumer that processes slower than the poll cadence (a dashboard
+render loop, a file logger) therefore **throttles the fetches** once the bound
+is reached, instead of letting the stream race ahead with pages nobody has
+consumed (memory growth, rate-limit burn):
+
+```ts
+watch({
+  maxBufferedPages: 2, // pages buffered ahead of the consumer; integer >= 0
+});
+```
+
+The bound changes pacing, never the delivered sequence: same order, no loss,
+no duplicates — and `maxBufferedPages: 0` disables look-ahead entirely,
+restoring strict consumer-paced polling (one page fetched per pull), exactly
+the stream this option pre-dates.
+
+The stored cursor never leads the consumer's position: each page's cursors
+are saved **at delivery**, before the batch is yielded, so pages that were
+fetched but not delivered when a consumer stops are re-read after a restart
+(at-least-once, never lose-the-tail). A consumer that stops pulling stops the
+fetches once the bound is reached; a `break` after N pages drags no extra
+fetch past its own stop.
+
+The bound is validated **before the first poll**: a non-integer or negative
+value throws a `TypeError` when the stream starts, the same fail-loudly
+contract as `retry`.
+
 #### Aborting (`signal`)
 
 Aborting ends the stream as a normal exit, never a throw:
 
 - an abort before the first pull issues no RPC call at all — not even the
-  `getLatestLedger` probe that resolves a default `startLedger;
--
-  an abort between pages prevents the next poll and does not serve out the
+  `getLatestLedger` probe that resolves a default `startLedger`;
+- an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
-- an abort while a request is in flight lets that request's rejection go 
-  quietly as teardown instead of surfacing an `AbortError` or an unhandled
-  rejection.
+- an abort while a request is in flight ends the iterator without waiting for
+  that request, and the late response is discarded; its rejection goes quietly
+  as teardown instead of surfacing an `AbortError` or an unhandled rejection.
 
 **In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^17 exposes
 `getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
-there is no supported way to cancel a request that has already been sent. The
-worst case between `signal.abort()` and the iterator ending is therefore **one
-request duration**, never a full poll interval. The README's
+there is no supported way to cancel a request that has already been sent. It is
+not awaited either: `signal.abort()` ends the iterator immediately, even with a
+`getEvents` call pending, so a stop never waits out a request duration. The
+README's
 [“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
 section states the same boundary for consumers.
 
@@ -337,11 +389,30 @@ letting the cursor outlive the process:
 ```ts
 interface CursorStore {
   /** The cursor to resume from, or `null` on first run. Consulted once, at start. */
-  load(): Promise<string | null>;
+  load(scope?: CursorStoreScope): Promise<string | null>;
   /** Persist the cursor advanced by one poll. Called once per poll. */
-  save(cursor: string): Promise<void>;
+  save(cursor: string, scope?: CursorStoreScope): Promise<void>;
+}
+
+/** Stable identity of one durable cursor slot (issue #282). */
+interface CursorStoreScope {
+  /** RPC endpoint host the listener polls. */
+  network: string;
+  /** Canonical guard contract id the cursor belongs to. */
+  guard: string;
+  /** Which stream the cursor resumes: "events" | "failed_tx". */
+  stream: CursorStreamKind;
 }
 ```
+
+- **Scoping (issue #282):** every `load()`/`save()` the listener performs
+  carries a `CursorStoreScope` — the network host, the canonical guard id and
+  the stream kind — so one backing store (a file, a Redis instance, a
+  database) can serve many listeners without one resuming from another
+  stream's cursor. A pre-existing two-method store that ignores the scope
+  argument keeps working exactly as before (it holds one slot, as it always
+  did); the built-in `InMemoryCursorStore` is scope-aware. To key records by
+  scope, use all three fields — for example `"<network>|<guard>|<stream>"`.
 
 - `load()` is consulted once, when `watch()` starts. A stored cursor wins over
   the default head position — resume-after-restart is exactly the case where
@@ -394,6 +465,26 @@ const listener = new GuardTelemetryListener({
 Redis is the same shape (`GET`/`SET` on one key), as is a single-row database
 table. Whatever the backend, the cursor is one opaque string — store it
 verbatim, do not parse it.
+
+A store that should serve **several** listeners from one backend keys by the
+scope it is given:
+
+```ts
+const scopedFileCursorStore: CursorStore = {
+  async load(scope) {
+    const key = scope ? `cursor-${scope.network}-${scope.guard}-${scope.stream}.txt` : "cursor.txt";
+    try {
+      return await readFile(key, "utf8");
+    } catch {
+      return null;
+    }
+  },
+  async save(cursor, scope) {
+    const key = scope ? `cursor-${scope.network}-${scope.guard}-${scope.stream}.txt` : "cursor.txt";
+    await writeFile(key, cursor, "utf8");
+  },
+};
+```
 
 ### Delivery contract: at-least-once
 

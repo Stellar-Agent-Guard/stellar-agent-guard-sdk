@@ -48,7 +48,10 @@ export function agentPubkeyToScVal(newAgent: string | Uint8Array | Keypair): xdr
 }
 
 /** Build a contract call for set_policy, reusing canonical policyToScVal. */
-export function buildSetPolicyCall(guard: ContractAddress, policy: ReadonlyPolicyConfig): ContractCall {
+export function buildSetPolicyCall(
+  guard: ContractAddress,
+  policy: ReadonlyPolicyConfig,
+): ContractCall {
   return {
     contract: guard,
     fn: "set_policy",

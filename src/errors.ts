@@ -216,6 +216,117 @@ export class PolicyDecodeError extends GuardError {
 }
 
 /**
+/**
+ * Stable identifiers for policy *encoding* failures.
+ *
+ * Deliberately separate from `POLICY_RULE_IDS` (SPEC §8 semantics): these rules
+ * describe whether a draft can be represented as the contract's `PolicyConfig`
+ * at all, not whether the resulting policy is sensible. A SPEC rule id would be
+ * misleading for an integer that simply does not fit the wire type.
+ */
+export type PolicyEncodingRuleId =
+  | "invalid_type"
+  | "missing_field"
+  | "invalid_address"
+  | "invalid_symbol"
+  | "integer_out_of_range";
+
+/** One actionable, field-level reason a policy draft cannot be encoded. */
+export interface PolicyEncodingFailure {
+  /** Dotted path into the policy object, e.g. `protocols[1].fns[0]`. */
+  path: string;
+  /** Stable rule identifier for the failed encoding check. */
+  rule: PolicyEncodingRuleId;
+  /** Human-readable detail naming the offending value. */
+  message: string;
+}
+
+/**
+ * A policy draft could not be encoded as contract `ScVal` because one or more
+ * fields violate the wire contract.
+ *
+ * The policy-editor counterpart to `PolicyDecodeError`: both report a dotted
+ * `path`, so the same form can highlight a field whether the bad value came
+ * from a draft before submission or from a policy read back off-chain. Every
+ * failure is collected before the error is thrown, and no partial `ScVal` is
+ * ever produced — `failures` is the complete list a form should render, while
+ * `path`/`rule`/`field` describe the first one.
+ *
+ * This is invalid caller input (it is caught before any RPC or encoding work),
+ * so it extends `InvalidInputError` and remains an `instanceof TypeError`.
+ */
+export class PolicyEncodeError extends InvalidInputError {
+  /** Dotted path of the first failure; equal to `failures[0]?.path`. */
+  readonly path: string;
+  /** Every encoding failure found, in policy field order. */
+  readonly failures: readonly PolicyEncodingFailure[];
+
+  constructor(failures: readonly PolicyEncodingFailure[]) {
+    const [first, ...rest] = failures;
+    if (first === undefined) {
+      throw new TypeError("PolicyEncodeError requires at least one failure");
+    }
+    super(
+      first.path,
+      first.rule,
+      rest.length === 0 ? first.message : `${first.message} (and ${rest.length} more failure(s))`,
+    );
+    this.path = first.path;
+    this.failures = Object.freeze(failures.map((failure) => Object.freeze({ ...failure })));
+  }
+}
+
+/**
+ * A policy file could not be read from disk (issue #105).
+ *
+ * Distinct from `PolicyDecodeError` on purpose: "the file is not there" is an
+ * operational problem with a filesystem path, while "the bytes are not a
+ * policy" is a content problem. `code` preserves the platform errno
+ * (`ENOENT`, `EACCES`, `EISDIR`, ...) so a shell script can branch on the cause
+ * without parsing a message.
+ */
+export class PolicyFileReadError extends GuardError {
+  /** The path the caller asked to load. */
+  readonly path: string;
+  /** The Node errno code, when the runtime reported one. */
+  readonly code: string | null;
+
+  constructor(message: string, options: { path: string; code?: string | null; cause?: unknown }) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.code = options.code ?? null;
+  }
+}
+
+/**
+ * A policy file parsed as JSON but failed SPEC §8 policy validation (issue #105).
+ *
+ * Every failure is carried, not just the first one: a policy file is edited as
+ * a whole, so reporting one violation per run would turn a form fix into a
+ * guessing game. The validator's structured `path`/`rule`/`message` shape is
+ * reused rather than flattened into a string.
+ */
+export class PolicyValidationError extends GuardError {
+  /** The file that failed validation. */
+  readonly path: string;
+  /** Every policy failure, in the validator's order. */
+  readonly failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+
+  constructor(
+    message: string,
+    options: {
+      path: string;
+      failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+      cause?: unknown;
+    },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.failures = [...options.failures];
+  }
+}
+
+/**
  * An adapter's call mapper could not produce a contract call.
  *
  * `toContractCall`/`toContractCalls` is application code: when it throws, or

@@ -56,11 +56,16 @@ function diagnostic(contract: Buffer | null, topics: string[]): xdr.DiagnosticEv
   });
 }
 
-const blockedAuthChecked = () => diagnostic(GUARD_BYTES, ["event_auth_checked", "blocked", "per_tx_cap_exceeded"]);
+const blockedAuthChecked = () =>
+  diagnostic(GUARD_BYTES, ["event_auth_checked", "blocked", "per_tx_cap_exceeded"]);
 const allowedAuthChecked = () => diagnostic(GUARD_BYTES, ["event_auth_checked", "allowed", ""]);
 const hostNoise = () => diagnostic(null, ["fn_call", "transfer"]);
 const otherContractAuthChecked = () =>
-  diagnostic(Buffer.from(StrKey.decodeContract(OTHER)), ["event_auth_checked", "blocked", "recipient_not_allowed"]);
+  diagnostic(Buffer.from(StrKey.decodeContract(OTHER)), [
+    "event_auth_checked",
+    "blocked",
+    "recipient_not_allowed",
+  ]);
 
 /** A real envelope whose single operation invokes `contract`. */
 function invokeEnvelope(contract: string): xdr.TransactionEnvelope {
@@ -69,9 +74,7 @@ function invokeEnvelope(contract: string): xdr.TransactionEnvelope {
     fee: "100",
     networkPassphrase: Networks.TESTNET,
   })
-    .addOperation(
-      Operation.invokeContractFunction({ contract, function: "transfer", args: [] }),
-    )
+    .addOperation(Operation.invokeContractFunction({ contract, function: "transfer", args: [] }))
     .setTimeout(30)
     .build()
     .toEnvelope();
@@ -146,7 +149,9 @@ function harness(options: {
   };
   let eventsPage = 0;
   let txPage = 0;
-  const pages = options.eventsPages ?? [{ events: [], cursor: "events-cursor-0", latestLedger: 501 }];
+  const pages = options.eventsPages ?? [
+    { events: [], cursor: "events-cursor-0", latestLedger: 501 },
+  ];
   const server = {
     getLatestLedger: async () => ({ sequence: options.latestLedger ?? 500 }),
     getEvents: async (request: Record<string, unknown>) => {
@@ -224,7 +229,12 @@ describe("guardEventsFromFailedTransaction", () => {
 
   it("normalises an allowed decision's empty reason symbol like every other stream", () => {
     const events = guardEventsFromFailedTransaction(
-      { txHash: HASH, ledger: 4_675_000, createdAt: 1_789_400_000, diagnosticEventsXdr: [allowedAuthChecked()] },
+      {
+        txHash: HASH,
+        ledger: 4_675_000,
+        createdAt: 1_789_400_000,
+        diagnosticEventsXdr: [allowedAuthChecked()],
+      },
       GUARD,
     );
     assert.equal(events[0]!.decision?.result, "allowed");
@@ -237,7 +247,11 @@ describe("guardEventsFromFailedTransaction", () => {
         txHash: HASH,
         ledger: 4_675_000,
         createdAt: 1_789_400_000,
-        diagnosticEventsXdr: [hostNoise(), diagnostic(null, ["core_metrics", "cpu_insn"]), blockedAuthChecked()],
+        diagnosticEventsXdr: [
+          hostNoise(),
+          diagnostic(null, ["core_metrics", "cpu_insn"]),
+          blockedAuthChecked(),
+        ],
       },
       GUARD,
     );
@@ -352,7 +366,11 @@ describe("pollFailedTransactions", () => {
   it("starts at the head when no cursor is given, delivering nothing retroactively", async () => {
     const { listener } = harness({
       txPages: [
-        { transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })], latestLedger: 501, cursor: "tx-cursor-1" },
+        {
+          transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })],
+          latestLedger: 501,
+          cursor: "tx-cursor-1",
+        },
       ],
       latestLedger: 501,
     });
@@ -365,7 +383,13 @@ describe("pollFailedTransactions", () => {
 describe("watch with failedTx (cursor interaction)", () => {
   it("is opt-out by default: the transaction stream is never queried", async () => {
     const { listener, requests } = harness({
-      txPages: [{ transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })], latestLedger: 501, cursor: "tx-cursor-1" }],
+      txPages: [
+        {
+          transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })],
+          latestLedger: 501,
+          cursor: "tx-cursor-1",
+        },
+      ],
       failedTx: false,
     });
     await collectAfterPolls(listener, requests, 3);
@@ -395,14 +419,18 @@ describe("watch with failedTx (cursor interaction)", () => {
     // own cursors (or a startLedger), the transaction stream only its own.
     const eventCursors = requests.getEvents.map((request) => request.cursor);
     assert.equal(
-      eventCursors.filter((cursor) => typeof cursor === "string" && (cursor as string).startsWith("tx-cursor")).length,
+      eventCursors.filter(
+        (cursor) => typeof cursor === "string" && (cursor as string).startsWith("tx-cursor"),
+      ).length,
       0,
     );
     const txCursors = requests.getTransactions.map(
       (request) => (request.pagination as { cursor?: string } | undefined)?.cursor,
     );
     assert.equal(
-      txCursors.filter((cursor) => typeof cursor === "string" && (cursor as string).startsWith("events-cursor")).length,
+      txCursors.filter(
+        (cursor) => typeof cursor === "string" && (cursor as string).startsWith("events-cursor"),
+      ).length,
       0,
     );
     // And the transaction stream really was queried repeatedly with its own
@@ -419,7 +447,9 @@ describe("watch with failedTx (cursor interaction)", () => {
       eventsPages: [{ events: [], cursor: "events-cursor-1", latestLedger: 502 }],
       txPages: [
         {
-          transactions: [failedTx({ ledger: 4_675_000, diagnosticEventsXdr: [blockedAuthChecked()] })],
+          transactions: [
+            failedTx({ ledger: 4_675_000, diagnosticEventsXdr: [blockedAuthChecked()] }),
+          ],
           latestLedger: 502,
           cursor: "tx-cursor-1",
         },
@@ -441,7 +471,12 @@ describe("watch with failedTx (cursor interaction)", () => {
             {
               contractId: GUARD,
               topic: [xdr.ScVal.scvSymbol("event_heartbeat")],
-              value: xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(1_789_393_232n) })]),
+              value: xdr.ScVal.scvMap([
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("at"),
+                  val: xdr.ScVal.scvU64(1_789_393_232n),
+                }),
+              ]),
               ledger: 4_675_001,
               ledgerClosedAt: "2026-09-14T00:00:00Z",
               txHash: HASH,
@@ -573,7 +608,8 @@ describe("durable failed-tx cursor (issue #279)", () => {
     await collectAfterPolls(restarted.listener, restarted.requests, 2);
 
     assert.equal(
-      (restarted.requests.getTransactions[0]?.pagination as { cursor?: string } | undefined)?.cursor,
+      (restarted.requests.getTransactions[0]?.pagination as { cursor?: string } | undefined)
+        ?.cursor,
       "500",
       "no persisted cursor means the scan starts at the current head",
     );

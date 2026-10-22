@@ -418,10 +418,10 @@ describe("MCP adapter (issue #45)", () => {
   });
 
   it("guardMcpCallTool forwards an admissible call untouched", async () => {
-    const callTool = guardMcpCallTool(
-      async () => ({ content: [{ type: "text", text: "sent" }] }),
-      { interceptor: stub(ADMISSIBLE), toContractCall: () => transferCall() },
-    );
+    const callTool = guardMcpCallTool(async () => ({ content: [{ type: "text", text: "sent" }] }), {
+      interceptor: stub(ADMISSIBLE),
+      toContractCall: () => transferCall(),
+    });
 
     const result = await callTool({ name: "transfer_tokens", arguments: {} });
 

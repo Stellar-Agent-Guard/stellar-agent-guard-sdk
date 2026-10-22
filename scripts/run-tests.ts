@@ -108,7 +108,9 @@ function main(): void {
 
   console.log(`running ${plan.label} (${plan.files.length} file(s), node ${process.version})`);
   if (plan.needsEnvFile && coverage) {
-    console.log("coverage includes the live project: .env.phase2 must be present or that part fails");
+    console.log(
+      "coverage includes the live project: .env.phase2 must be present or that part fails",
+    );
   }
 
   // Watch mode resolves the project's files once, at startup, exactly as a
