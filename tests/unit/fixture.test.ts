@@ -63,7 +63,9 @@ describe("fixture instance schema validation", () => {
       phase2EnforcementInstance: {
         guard: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
         token: unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"),
-        tokenIssuer: unsafeAccountAddress("GCE5SDY44O23HRRN4XRTOZ2DJRAKN3WKYMUGIMYCS7RB7OG27MKN5ZPO"),
+        tokenIssuer: unsafeAccountAddress(
+          "GCE5SDY44O23HRRN4XRTOZ2DJRAKN3WKYMUGIMYCS7RB7OG27MKN5ZPO",
+        ),
         wasmHashLedger: "f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63",
         addresses: {
           admin: unsafeAccountAddress("GDCPT4Z3MBH7X6IX6A6BHIENUL7DRZ44O2SL2V72QJVOEJHJROP3PQDG"),
@@ -119,14 +121,16 @@ describe("assertPreconditions live suite preflight checks", () => {
     },
   };
 
-  function createMockPreconditionsServer(overrides: {
-    contractExists?: boolean;
-    hasPolicy?: boolean;
-    adminFrozen?: boolean;
-    heartbeatExpired?: boolean;
-    agentXlmBalance?: string;
-    tokenBalance?: bigint;
-  } = {}) {
+  function createMockPreconditionsServer(
+    overrides: {
+      contractExists?: boolean;
+      hasPolicy?: boolean;
+      adminFrozen?: boolean;
+      heartbeatExpired?: boolean;
+      agentXlmBalance?: string;
+      tokenBalance?: bigint;
+    } = {},
+  ) {
     const {
       contractExists = true,
       hasPolicy = true,
@@ -167,9 +171,18 @@ describe("assertPreconditions live suite preflight checks", () => {
           return {
             result: {
               retval: xdr.ScVal.scvMap([
-                new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("has_policy"), val: xdr.ScVal.scvBool(hasPolicy) }),
-                new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("admin_frozen"), val: xdr.ScVal.scvBool(adminFrozen) }),
-                new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("heartbeat_expired"), val: xdr.ScVal.scvBool(heartbeatExpired) }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("has_policy"),
+                  val: xdr.ScVal.scvBool(hasPolicy),
+                }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("admin_frozen"),
+                  val: xdr.ScVal.scvBool(adminFrozen),
+                }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("heartbeat_expired"),
+                  val: xdr.ScVal.scvBool(heartbeatExpired),
+                }),
               ]),
             },
           };
@@ -180,10 +193,22 @@ describe("assertPreconditions live suite preflight checks", () => {
           return {
             result: {
               retval: xdr.ScVal.scvMap([
-                new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("per_tx_cap"), val: nativeToScVal(1000n, { type: "i128" }) }),
-                new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("window_cap"), val: nativeToScVal(150n, { type: "i128" }) }),
-                new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("window_secs"), val: nativeToScVal(60n, { type: "u64" }) }),
-                new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("paused"), val: xdr.ScVal.scvBool(false) }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("per_tx_cap"),
+                  val: nativeToScVal(1000n, { type: "i128" }),
+                }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("window_cap"),
+                  val: nativeToScVal(150n, { type: "i128" }),
+                }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("window_secs"),
+                  val: nativeToScVal(60n, { type: "u64" }),
+                }),
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("paused"),
+                  val: xdr.ScVal.scvBool(false),
+                }),
               ]),
             },
           };
@@ -222,7 +247,10 @@ describe("assertPreconditions live suite preflight checks", () => {
       async () => assertPreconditions(mockServer, mockConfig),
       (err: unknown) => {
         assert(err instanceof Error);
-        assert.match(err.message, /\[FIXTURE PRECONDITION FAILED\] Guard policy is invalid or frozen/);
+        assert.match(
+          err.message,
+          /\[FIXTURE PRECONDITION FAILED\] Guard policy is invalid or frozen/,
+        );
         assert.match(err.message, new RegExp(REDEPLOY_INSTRUCTION));
         return true;
       },
@@ -233,7 +261,10 @@ describe("assertPreconditions live suite preflight checks", () => {
       async () => assertPreconditions(frozenServer, mockConfig),
       (err: unknown) => {
         assert(err instanceof Error);
-        assert.match(err.message, /\[FIXTURE PRECONDITION FAILED\] Guard policy is invalid or frozen/);
+        assert.match(
+          err.message,
+          /\[FIXTURE PRECONDITION FAILED\] Guard policy is invalid or frozen/,
+        );
         assert.match(err.message, new RegExp(REDEPLOY_INSTRUCTION));
         return true;
       },

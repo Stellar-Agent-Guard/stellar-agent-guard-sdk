@@ -16,12 +16,16 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Account, Address, Keypair, nativeToScVal, rpc, SorobanDataBuilder, xdr } from "@stellar/stellar-sdk";
 import {
-  DEFAULT_INVOKE_RETRY_OPTIONS,
-  invoke,
-  InvokeRetryError,
-} from "../../src/invoke.ts";
+  Account,
+  Address,
+  Keypair,
+  nativeToScVal,
+  rpc,
+  SorobanDataBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
+import { DEFAULT_INVOKE_RETRY_OPTIONS, invoke, InvokeRetryError } from "../../src/invoke.ts";
 import { BroadcastError } from "../../src/tx.ts";
 import { ContractResponseError, SimulationError } from "../../src/errors.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
@@ -277,7 +281,10 @@ describe("invoke() onStep: pipeline order", () => {
       events.map((event) => [event.name, event.status]),
       SUCCESSFUL_ATTEMPT,
     );
-    assert.deepEqual(events.map((event) => event.attempt), [0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(
+      events.map((event) => event.attempt),
+      [0, 0, 0, 0, 0, 0, 0, 0],
+    );
   });
 
   it("emits no broadcast events on a dry run", async () => {
@@ -290,14 +297,17 @@ describe("invoke() onStep: pipeline order", () => {
     // outcome, but the stages it does run are the same instrumented pipeline.
     assert.equal(outcome.kind, "dry_run");
     assert.equal(outcome.admissible, true);
-    assert.deepEqual(events.map((event) => [event.name, event.status]), [
-      ["probe", "start"],
-      ["probe", "ok"],
-      ["sign", "start"],
-      ["sign", "ok"],
-      ["simulate", "start"],
-      ["simulate", "ok"],
-    ]);
+    assert.deepEqual(
+      events.map((event) => [event.name, event.status]),
+      [
+        ["probe", "start"],
+        ["probe", "ok"],
+        ["sign", "start"],
+        ["sign", "ok"],
+        ["simulate", "start"],
+        ["simulate", "ok"],
+      ],
+    );
     assert.equal(server.sendCount, 0);
   });
 
@@ -316,7 +326,10 @@ describe("invoke() onStep: pipeline order", () => {
     // Nothing after the failed enforced simulation: no broadcast was attempted.
     assert.equal(events.at(-1)?.name, "simulate");
     assert.equal(events.at(-1)?.status, "fail");
-    assert.equal(events.some((event) => event.name === "broadcast"), false);
+    assert.equal(
+      events.some((event) => event.name === "broadcast"),
+      false,
+    );
   });
 
   it("reports failures that happen during the probe stage", async () => {
@@ -331,7 +344,10 @@ describe("invoke() onStep: pipeline order", () => {
       probeEvents.map((event) => event.status),
       ["start", "fail"],
     );
-    assert.equal(events.some((event) => event.name === "sign"), false);
+    assert.equal(
+      events.some((event) => event.name === "sign"),
+      false,
+    );
   });
 });
 
@@ -568,9 +584,7 @@ describe("invoke() abortSignal + timeoutMs", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const outcome = await invoke(
-      makeParams(server, { signal: controller.signal }),
-    );
+    const outcome = await invoke(makeParams(server, { signal: controller.signal }));
 
     assert.equal(outcome.kind, "error");
     assert.ok(outcome.error instanceof RpcTimeoutError);
@@ -765,7 +779,10 @@ describe("invoke sequence reservation", () => {
     releaseFirst();
     const outcomes = await Promise.all([first, second]);
 
-    assert.deepEqual(outcomes.map((outcome) => outcome.kind), ["allowed", "allowed"]);
+    assert.deepEqual(
+      outcomes.map((outcome) => outcome.kind),
+      ["allowed", "allowed"],
+    );
     // TransactionBuilder consumes the base account sequence and emits base + 1,
     // so the reservation is what keeps the two broadcast envelopes distinct.
     assert.deepEqual(sent, ["8", "9"]);
@@ -806,7 +823,8 @@ describe("invoke() stale-ledger retry", () => {
     let randomCall = 0;
     const server = createMockServer({
       send: (call) => ({ status: "PENDING", hash: `tx-${call}` }),
-      getTransaction: (hash) => (hash === "tx-3" ? { status: "SUCCESS", ledger: 1002 } : staleRejection()),
+      getTransaction: (hash) =>
+        hash === "tx-3" ? { status: "SUCCESS", ledger: 1002 } : staleRejection(),
     });
 
     const outcome = await invoke(
@@ -917,7 +935,8 @@ describe("invoke() stale-ledger retry", () => {
     const server = createMockServer({
       simulate: (call) => (call >= 3 ? invalidInputSimulation() : probeSuccess()),
       send: (call) => ({ status: "PENDING", hash: `tx-${call}` }),
-      getTransaction: (hash) => (hash === "tx-1" ? staleRejection() : { status: "SUCCESS", ledger: 9 }),
+      getTransaction: (hash) =>
+        hash === "tx-1" ? staleRejection() : { status: "SUCCESS", ledger: 9 },
     });
 
     const outcome = await invoke(
@@ -935,7 +954,6 @@ describe("invoke() stale-ledger retry", () => {
     assert.equal(server.simulationCount, 3);
   });
 });
-
 
 // ── Fee-bump retry on min-fee broadcast failure (Issue #25) ──────────────────
 
@@ -1316,12 +1334,36 @@ describe("invoke() option validation", () => {
       overrides: Partial<Parameters<typeof invoke>[0]>;
       field: RegExp;
     }> = [
-      { label: "retry.maxAttempts zero", overrides: { retry: { maxAttempts: 0 } }, field: /retry\.maxAttempts/ },
-      { label: "retry.maxAttempts fractional", overrides: { retry: { maxAttempts: 1.5 } }, field: /retry\.maxAttempts/ },
-      { label: "retry.maxAttempts NaN", overrides: { retry: { maxAttempts: Number.NaN } }, field: /retry\.maxAttempts/ },
-      { label: "retry.baseDelayMs negative", overrides: { retry: { baseDelayMs: -1 } }, field: /retry\.baseDelayMs/ },
-      { label: "retry.baseDelayMs infinite", overrides: { retry: { baseDelayMs: Number.POSITIVE_INFINITY } }, field: /retry\.baseDelayMs/ },
-      { label: "retry.maxDelayMs negative", overrides: { retry: { maxDelayMs: -1 } }, field: /retry\.maxDelayMs/ },
+      {
+        label: "retry.maxAttempts zero",
+        overrides: { retry: { maxAttempts: 0 } },
+        field: /retry\.maxAttempts/,
+      },
+      {
+        label: "retry.maxAttempts fractional",
+        overrides: { retry: { maxAttempts: 1.5 } },
+        field: /retry\.maxAttempts/,
+      },
+      {
+        label: "retry.maxAttempts NaN",
+        overrides: { retry: { maxAttempts: Number.NaN } },
+        field: /retry\.maxAttempts/,
+      },
+      {
+        label: "retry.baseDelayMs negative",
+        overrides: { retry: { baseDelayMs: -1 } },
+        field: /retry\.baseDelayMs/,
+      },
+      {
+        label: "retry.baseDelayMs infinite",
+        overrides: { retry: { baseDelayMs: Number.POSITIVE_INFINITY } },
+        field: /retry\.baseDelayMs/,
+      },
+      {
+        label: "retry.maxDelayMs negative",
+        overrides: { retry: { maxDelayMs: -1 } },
+        field: /retry\.maxDelayMs/,
+      },
       {
         label: "retry.maxDelayMs below baseDelayMs",
         overrides: { retry: { baseDelayMs: 100, maxDelayMs: 50 } },
@@ -1332,20 +1374,60 @@ describe("invoke() option validation", () => {
         overrides: { retry: { baseDelayMs: 100, initialDelayMs: 50 } },
         field: /retry\.initialDelayMs/,
       },
-      { label: "retry.random not a function", overrides: { retry: { random: 1 as unknown as () => number } }, field: /retry\.random/ },
-      { label: "retry.random and jitter both set", overrides: { retry: { random: () => 0.5, jitter: () => 0.5 } }, field: /retry\.jitter/ },
+      {
+        label: "retry.random not a function",
+        overrides: { retry: { random: 1 as unknown as () => number } },
+        field: /retry\.random/,
+      },
+      {
+        label: "retry.random and jitter both set",
+        overrides: { retry: { random: () => 0.5, jitter: () => 0.5 } },
+        field: /retry\.jitter/,
+      },
       { label: "maxRetries negative", overrides: { maxRetries: -1 }, field: /maxRetries/ },
       { label: "maxRetries fractional", overrides: { maxRetries: 1.5 }, field: /maxRetries/ },
-      { label: "feeBump.maxAttempts zero", overrides: { feeBump: { maxAttempts: 0 } }, field: /feeBump\.maxAttempts/ },
-      { label: "feeBump.feeMultiplier at one", overrides: { feeBump: { feeMultiplier: 1 } }, field: /feeBump\.feeMultiplier/ },
-      { label: "feeBump.feeMultiplier NaN", overrides: { feeBump: { feeMultiplier: Number.NaN } }, field: /feeBump\.feeMultiplier/ },
-      { label: "feeBump.initialInclusionFee zero", overrides: { feeBump: { initialInclusionFee: 0n } }, field: /feeBump\.initialInclusionFee/ },
+      {
+        label: "feeBump.maxAttempts zero",
+        overrides: { feeBump: { maxAttempts: 0 } },
+        field: /feeBump\.maxAttempts/,
+      },
+      {
+        label: "feeBump.feeMultiplier at one",
+        overrides: { feeBump: { feeMultiplier: 1 } },
+        field: /feeBump\.feeMultiplier/,
+      },
+      {
+        label: "feeBump.feeMultiplier NaN",
+        overrides: { feeBump: { feeMultiplier: Number.NaN } },
+        field: /feeBump\.feeMultiplier/,
+      },
+      {
+        label: "feeBump.initialInclusionFee zero",
+        overrides: { feeBump: { initialInclusionFee: 0n } },
+        field: /feeBump\.initialInclusionFee/,
+      },
       { label: "pollAttempts zero", overrides: { pollAttempts: 0 }, field: /pollAttempts/ },
       { label: "pollAttempts fractional", overrides: { pollAttempts: 2.5 }, field: /pollAttempts/ },
-      { label: "pollIntervalMs negative", overrides: { pollIntervalMs: -1 }, field: /pollIntervalMs/ },
-      { label: "pollIntervalMs NaN", overrides: { pollIntervalMs: Number.NaN }, field: /pollIntervalMs/ },
-      { label: "pollOptions.pollAttempts zero", overrides: { pollOptions: { pollAttempts: 0 } }, field: /pollOptions\.pollAttempts/ },
-      { label: "pollOptions.pollIntervalMs negative", overrides: { pollOptions: { pollIntervalMs: -1 } }, field: /pollOptions\.pollIntervalMs/ },
+      {
+        label: "pollIntervalMs negative",
+        overrides: { pollIntervalMs: -1 },
+        field: /pollIntervalMs/,
+      },
+      {
+        label: "pollIntervalMs NaN",
+        overrides: { pollIntervalMs: Number.NaN },
+        field: /pollIntervalMs/,
+      },
+      {
+        label: "pollOptions.pollAttempts zero",
+        overrides: { pollOptions: { pollAttempts: 0 } },
+        field: /pollOptions\.pollAttempts/,
+      },
+      {
+        label: "pollOptions.pollIntervalMs negative",
+        overrides: { pollOptions: { pollIntervalMs: -1 } },
+        field: /pollOptions\.pollIntervalMs/,
+      },
       {
         label: "top-level and nested pollAttempts disagree",
         overrides: { pollAttempts: 1, pollOptions: { pollAttempts: 2 } },
@@ -1358,19 +1440,20 @@ describe("invoke() option validation", () => {
       },
       { label: "timeoutMs negative", overrides: { timeoutMs: -1 }, field: /timeoutMs/ },
       { label: "deadlineMs zero", overrides: { deadlineMs: 0 }, field: /deadlineMs/ },
-      { label: "deadlineMs infinite", overrides: { deadlineMs: Number.POSITIVE_INFINITY }, field: /deadlineMs/ },
+      {
+        label: "deadlineMs infinite",
+        overrides: { deadlineMs: Number.POSITIVE_INFINITY },
+        field: /deadlineMs/,
+      },
     ];
 
     for (const testCase of cases) {
       const { server, calls } = createUntouchableServer();
-      await assert.rejects(
-        invoke(makeParams(server, testCase.overrides)),
-        (error: unknown) => {
-          assert.ok(error instanceof RangeError, testCase.label);
-          assert.match(error.message, testCase.field, testCase.label);
-          return true;
-        },
-      );
+      await assert.rejects(invoke(makeParams(server, testCase.overrides)), (error: unknown) => {
+        assert.ok(error instanceof RangeError, testCase.label);
+        assert.match(error.message, testCase.field, testCase.label);
+        return true;
+      });
       assert.equal(calls, 0, testCase.label);
     }
   });
@@ -1468,7 +1551,12 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 3, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
@@ -1511,7 +1599,12 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 2, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
@@ -1535,16 +1628,22 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 3, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
     assert.equal(outcome.kind, "allowed");
     assert.ok(outcome.retry);
     assert.equal(outcome.retry.retried, true);
-    assert.deepEqual(outcome.retry.retries.map((attempt) => attempt.failure), [
-      "sequence_number_collision",
-    ]);
+    assert.deepEqual(
+      outcome.retry.retries.map((attempt) => attempt.failure),
+      ["sequence_number_collision"],
+    );
     assert.equal(outcome.retry.terminalFailure, null);
   });
 
@@ -1557,7 +1656,12 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 2, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
@@ -1973,7 +2077,11 @@ describe("invoke() malformed simulation resource fee", () => {
       assert.equal(outcome.error.field, "minResourceFee");
       assert.equal(outcome.error.stage, "assemble");
       assert.match(outcome.kind === "error" ? (outcome.detail ?? "") : "", /assembly failed/);
-      assert.equal(server.sendCount, 0, "a malformed fee must stop the pipeline before the broadcast");
+      assert.equal(
+        server.sendCount,
+        0,
+        "a malformed fee must stop the pipeline before the broadcast",
+      );
     }
   });
 

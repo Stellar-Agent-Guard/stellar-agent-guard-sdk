@@ -44,7 +44,14 @@
  * Usage: node --import tsx scripts/bench-preflight-encode.ts
  */
 import { performance } from "node:perf_hooks";
-import { Account, Address, Keypair, nativeToScVal, rpc, SorobanDataBuilder } from "@stellar/stellar-sdk";
+import {
+  Account,
+  Address,
+  Keypair,
+  nativeToScVal,
+  rpc,
+  SorobanDataBuilder,
+} from "@stellar/stellar-sdk";
 import { PreFlightInterceptor } from "../src/preflight.ts";
 import type { ContractCall } from "../src/tx.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../src/policy.ts";
@@ -232,7 +239,9 @@ async function main(): Promise<void> {
 
   console.log(`\nthreshold from issue #93: 5.000%`);
   console.log(`share at a zero-latency mock (misleading): ${mockShare.toFixed(3)}%`);
-  console.log(`share at modelled real RPC latency:        ${worstCaseShare.toFixed(3)}% (worst point)`);
+  console.log(
+    `share at modelled real RPC latency:        ${worstCaseShare.toFixed(3)}% (worst point)`,
+  );
   console.log(
     `caller encode alone, no toXDR: ${encodeOnly.toFixed(4)} ms ` +
       `(${(encodeOnly / (realistic[0]?.total ?? 1)) * 100 < 0.01 ? "<0.01" : ((encodeOnly / (realistic[0]?.total ?? 1)) * 100).toFixed(3)}% of a 5ms-latency check)`,

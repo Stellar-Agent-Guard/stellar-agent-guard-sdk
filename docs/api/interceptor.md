@@ -15,7 +15,7 @@ constructor(options: PreFlightInterceptorOptions)
 - `guard: string` — Custom account contract address (`C...`)
 - `agent: Keypair` — Keypair registered as the agent in the guard
 - `source: Keypair` — Keypair paying for transaction fees
-- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default
+- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default. Accepts `ttlMs`/`ttlLedgers`, an optional `policyRevision`, and an optional `maxEntries` cardinality bound.
 
 ### Optional cache
 
@@ -26,6 +26,13 @@ or an async getter; changing it invalidates the matching entry. Call
 `invalidate(call?)` after policy or account-state changes. A cached verdict can
 be staler than one admitted transfer, so callers must accept that tradeoff
 explicitly.
+
+`maxEntries` bounds how many verdicts the cache retains. When the cache is full,
+storing a new call fingerprint evicts the least-recently-used entry; a hit counts
+as use, so the eviction order is deterministic. Eviction only removes entries —
+lookups still require a current-ledger, unexpired entry — so a bounded cache
+never returns an expired or cross-ledger verdict. Omit `maxEntries` for an
+unbounded cache.
 
 ## Methods
 

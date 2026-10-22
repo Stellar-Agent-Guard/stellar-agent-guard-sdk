@@ -63,10 +63,7 @@ const staleLedgerFailure = {
     {
       body: {
         v0: {
-          topics: [
-            "error",
-            { type: "system", code: 5, value: "scecExceededLimit" },
-          ],
+          topics: ["error", { type: "system", code: 5, value: "scecExceededLimit" }],
           data: ["operation byte-write resources exceeds amount specified", "724", "652"],
         },
       },
@@ -138,7 +135,18 @@ describe("parseSimulationResourceFee", () => {
   });
 
   it("rejects missing, malformed, negative, unsafe, and out-of-range fees", () => {
-    for (const value of [undefined, null, "", "not-a-fee", "1.5", Number.MAX_SAFE_INTEGER + 1, -1, -1n, "-1", 2n ** 64n]) {
+    for (const value of [
+      undefined,
+      null,
+      "",
+      "not-a-fee",
+      "1.5",
+      Number.MAX_SAFE_INTEGER + 1,
+      -1,
+      -1n,
+      "-1",
+      2n ** 64n,
+    ]) {
       assert.throws(
         () => parseSimulationResourceFee(value),
         (error: unknown) => {
@@ -414,7 +422,10 @@ describe("verifyAgentSignature", () => {
 
   it("returns false for empty, truncated, and oversized signatures", () => {
     assert.equal(verifyAgentSignature(agent.publicKey(), payload, new Uint8Array()), false);
-    assert.equal(verifyAgentSignature(agent.publicKey(), payload, signature.subarray(0, 63)), false);
+    assert.equal(
+      verifyAgentSignature(agent.publicKey(), payload, signature.subarray(0, 63)),
+      false,
+    );
     const oversized = Buffer.alloc(65);
     oversized.set(signature);
     assert.equal(verifyAgentSignature(agent.publicKey(), payload, oversized), false);
@@ -481,20 +492,26 @@ describe("agent public-key validation", () => {
 
   it("rejects a StrKey with a bad checksum", () => {
     const invalid = local.publicKey().slice(0, -1) + (local.publicKey().endsWith("A") ? "B" : "A");
-    assert.throws(() => validateAgentPublicKey(invalid), (error: unknown) => {
-      assert.ok(error instanceof SigningError);
-      assert.match(error.message, /signer\.publicKey/);
-      return true;
-    });
+    assert.throws(
+      () => validateAgentPublicKey(invalid),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.match(error.message, /signer\.publicKey/);
+        return true;
+      },
+    );
     assert.equal(isValidAgentPublicKey(invalid), false);
   });
 
   it("rejects secret seeds instead of deriving a public key from them", () => {
-    assert.throws(() => validateAgentPublicKey(local.secret()), (error: unknown) => {
-      assert.ok(error instanceof SigningError);
-      assert.match(error.message, /must not be a secret key/);
-      return true;
-    });
+    assert.throws(
+      () => validateAgentPublicKey(local.secret()),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.match(error.message, /must not be a secret key/);
+        return true;
+      },
+    );
     assert.equal(isValidAgentPublicKey(local.secret()), false);
   });
 
@@ -526,7 +543,10 @@ describe("agent public-key validation", () => {
       publicKey: "GINVALID",
       signDigest: () => new Uint8Array(64),
     };
-    assert.throws(() => toAgentSigner(invalid), (error: unknown) => error instanceof SigningError);
+    assert.throws(
+      () => toAgentSigner(invalid),
+      (error: unknown) => error instanceof SigningError,
+    );
   });
 
   it("accepts a valid remote signer, including a hex-encoded identity", async () => {

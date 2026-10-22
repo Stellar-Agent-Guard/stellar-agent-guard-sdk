@@ -153,7 +153,10 @@ describe("policy schema consumption (issue #133)", () => {
         const matches = id.endsWith("_")
           ? (POLICY_RULE_IDS as readonly string[]).some((candidate) => candidate.startsWith(id))
           : (POLICY_RULE_IDS as readonly string[]).includes(id);
-        assert.ok(matches, `codeEnforced rule "${entry.rule}" has no concrete member in POLICY_RULE_IDS`);
+        assert.ok(
+          matches,
+          `codeEnforced rule "${entry.rule}" has no concrete member in POLICY_RULE_IDS`,
+        );
       }
     });
   });
@@ -179,9 +182,15 @@ describe("policy schema consumption (issue #133)", () => {
       const { schema } = await loadVendoredSchema();
       const failures = validateGuardPolicyAgainstSchema({}, schema);
       const required = failures.filter((f) => f.keyword === "required");
-      assert.ok(required.length >= 11, `expected the 11 PolicyConfig fields, got ${required.length}`);
+      assert.ok(
+        required.length >= 11,
+        `expected the 11 PolicyConfig fields, got ${required.length}`,
+      );
       for (const field of ["per_tx_cap", "window_secs", "window_cap", "paused", "dms_grace_secs"]) {
-        assert.ok(required.some((f) => f.path === field), `missing required report for ${field}`);
+        assert.ok(
+          required.some((f) => f.path === field),
+          `missing required report for ${field}`,
+        );
         assert.equal(required.find((f) => f.path === field)?.rule, "missing_field");
       }
     });
@@ -295,7 +304,10 @@ describe("policy schema consumption (issue #133)", () => {
     it("accepts JSON-number and base-10-string integer forms identically (isIntegerLike parity)", async () => {
       const { schema } = await loadVendoredSchema();
       for (const cap of [1000, 1000n, "1000"]) {
-        const failures = validateGuardPolicyAgainstSchema(samplePolicy({ per_tx_cap: cap }), schema);
+        const failures = validateGuardPolicyAgainstSchema(
+          samplePolicy({ per_tx_cap: cap }),
+          schema,
+        );
         assert.deepEqual(failures, [], `cap form ${String(cap)} should pass`);
       }
     });
@@ -318,7 +330,9 @@ describe("policy schema consumption (issue #133)", () => {
         samplePolicy({ active_from: 100n, active_until: 100n }),
         schema,
       );
-      assert.ok(failures.some((f) => f.path === "active_until" && f.rule === "active_window_inverted"));
+      assert.ok(
+        failures.some((f) => f.path === "active_until" && f.rule === "active_window_inverted"),
+      );
       const equal = validateGuardPolicyAgainstSchema(
         samplePolicy({ active_from: 100n, active_until: 50n }),
         schema,
@@ -343,19 +357,35 @@ describe("policy schema consumption (issue #133)", () => {
         schema,
       );
       assert.ok(failures.some((f) => f.rule === "duplicate_asset" && f.path === "assets[1]"));
-      assert.ok(failures.some((f) => f.rule === "duplicate_recipient" && f.path === "recipients[1]"));
-      assert.ok(failures.some((f) => f.rule === "duplicate_blocked_recipient" && f.path === "blocked_recipients[1]"));
-      assert.ok(failures.some((f) => f.rule === "duplicate_protocol_function" && f.path === "protocols[0].fns[1]"));
+      assert.ok(
+        failures.some((f) => f.rule === "duplicate_recipient" && f.path === "recipients[1]"),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.rule === "duplicate_blocked_recipient" && f.path === "blocked_recipients[1]",
+        ),
+      );
+      assert.ok(
+        failures.some(
+          (f) => f.rule === "duplicate_protocol_function" && f.path === "protocols[0].fns[1]",
+        ),
+      );
     });
 
     it("§8 bullet 8: recipient-list entry caps enforced with the configured max", async () => {
       const { schema } = await loadVendoredSchema();
       const oversized = Array.from({ length: 5 }, () => RECIPIENT);
-      const failures = validateGuardPolicyAgainstSchema(samplePolicy({ recipients: oversized }), schema, {
-        maxRecipientEntries: 4,
-      });
+      const failures = validateGuardPolicyAgainstSchema(
+        samplePolicy({ recipients: oversized }),
+        schema,
+        {
+          maxRecipientEntries: 4,
+        },
+      );
       assert.ok(
-        failures.some((f) => f.rule === "max_recipient_entries_exceeded" && f.path === "recipients"),
+        failures.some(
+          (f) => f.rule === "max_recipient_entries_exceeded" && f.path === "recipients",
+        ),
         JSON.stringify(failures),
       );
     });
@@ -383,9 +413,14 @@ describe("policy schema consumption (issue #133)", () => {
       );
       assert.ok(failures.some((f) => f.rule === "self_as_asset" && f.path === "assets[0]"));
       assert.ok(failures.some((f) => f.rule === "self_as_recipient" && f.path === "recipients[0]"));
-      assert.ok(failures.some((f) => f.rule === "self_as_protocol" && f.path === "protocols[0].contract"));
       assert.ok(
-        failures.some((f) => f.rule === "self_as_recipient_cap" && f.path === "recipient_window_caps[0].recipient"),
+        failures.some((f) => f.rule === "self_as_protocol" && f.path === "protocols[0].contract"),
+      );
+      assert.ok(
+        failures.some(
+          (f) =>
+            f.rule === "self_as_recipient_cap" && f.path === "recipient_window_caps[0].recipient",
+        ),
       );
     });
 
@@ -421,7 +456,9 @@ describe("policy schema consumption (issue #133)", () => {
         paused: false,
         dms_grace_secs: -1n,
       };
-      const failures = validateGuardPolicyAgainstSchema(invalidPolicy, schema, { guardAddress: GUARD });
+      const failures = validateGuardPolicyAgainstSchema(invalidPolicy, schema, {
+        guardAddress: GUARD,
+      });
       assert.ok(failures.length >= 7, `expected >= 7 failures, got ${failures.length}`);
       const ruleIds = new Set<string>(failures.map((f) => f.rule));
       for (const rule of [
@@ -457,7 +494,10 @@ describe("policy schema consumption (issue #133)", () => {
         _provenance: { sourceRepo: string; sourcePath: string };
         presets: Array<{ name: string; policy: Record<string, unknown> }>;
       };
-      assert.equal(presetsDoc._provenance.sourceRepo, "Stellar-Agent-Guard/stellar-agent-guard-contracts");
+      assert.equal(
+        presetsDoc._provenance.sourceRepo,
+        "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+      );
       assert.equal(presetsDoc._provenance.sourcePath, "docs/policy-templates.md");
       assert.ok(presetsDoc.presets.length >= 4, "all four README presets must be present");
 

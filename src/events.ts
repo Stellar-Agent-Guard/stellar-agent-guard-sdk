@@ -59,8 +59,7 @@ export const GUARD_AUTH_RESULTS = {
   blocked: "blocked",
 } as const;
 
-export type GuardAuthResult =
-  (typeof GUARD_AUTH_RESULTS)[keyof typeof GUARD_AUTH_RESULTS];
+export type GuardAuthResult = (typeof GUARD_AUTH_RESULTS)[keyof typeof GUARD_AUTH_RESULTS];
 
 /**
  * A guard decision decoded from one contract event, in the shape a telemetry
@@ -107,7 +106,6 @@ export function decodeAuthDecision(
   const reason = rawReason && rawReason.length > 0 ? (rawReason as GuardReason) : null;
   return { result, reason, source };
 }
-
 
 /**
  * Normalise a numeric value delivered as a string in an event payload.

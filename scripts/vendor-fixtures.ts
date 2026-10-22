@@ -113,10 +113,33 @@ const AUTH_CHECKED_VOCABULARY: VendoredArtifact = {
   updatedAt: "2026-10-20T00:00:00.000Z",
 };
 
+/**
+ * Canonical `policyToScVal` ↔ contract `PolicyConfig` encode-parity vectors
+ * (SDK issue #260, contracts issue #31 / PR #277).
+ *
+ * The contracts repo owns this file: for each policy it pins the exact ScVal
+ * XDR bytes the contract's own encoder produces. The SDK's parity test
+ * consumes this vendored copy as the encode-side source of truth — the file is
+ * not forked into SDK-specific fixtures, so the two repos cannot drift apart
+ * without the digest check failing here first.
+ */
+const POLICY_VECTORS: VendoredArtifact = {
+  sourceRepo: "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+  repoCommit: "ef1d9e1e039afa102f4266298d3a69d82a105cd4",
+  sourcePath: "tests/fixtures/policy-vectors.json",
+  outputPath: "tests/fixtures/vendor/policy-vectors.json",
+  upstreamLanded: true,
+  contentKey: "policyVectors",
+  upstreamIssue: "Stellar-Agent-Guard/stellar-agent-guard-contracts#31",
+  note: "vendored copy of the landed cross-repo encode-parity vectors; the SDK parity test consumes it as the source of truth (SDK issue #260)",
+  updatedAt: "2026-10-21T00:00:00.000Z",
+};
+
 /** Every registered feed. Add new vendored artifacts here. */
 export const VENDORED_ARTIFACTS: readonly VendoredArtifact[] = [
   POLICY_SCHEMA,
   AUTH_CHECKED_VOCABULARY,
+  POLICY_VECTORS,
 ];
 
 export interface VendorReport {
@@ -130,7 +153,10 @@ export interface VendorReport {
 }
 
 /** Stable, byte-exact provenance header for a vendored artifact. */
-export function provenanceHeader(artifact: VendoredArtifact, digest: string): Record<string, unknown> {
+export function provenanceHeader(
+  artifact: VendoredArtifact,
+  digest: string,
+): Record<string, unknown> {
   const contentKey = artifact.contentKey ?? "schema";
   return {
     _provenance: {

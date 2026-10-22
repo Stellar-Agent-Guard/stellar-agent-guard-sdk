@@ -50,11 +50,19 @@ export interface PolicyContext {
    */
   perTxCapOk: boolean | null;
   /**
-   * Estimated remaining budget in the current rolling window.
-   * `null` when the contract does not expose sufficient window state.
+   * Estimated remaining budget in the current rolling window, **after** the
+   * transfer amount of this call, computed from an explicit ledger-tied
+   * window-spend snapshot (issue #311). `null` when no usable snapshot and
+   * transfer amount are both available — including every blocked and
+   * undetermined outcome, which have no priced ledger to tie a snapshot to.
+   *
+   * This is operator context only: it is never consulted by any authorization
+   * path, and it never changes `kind`, `allowed`, or the verdict of the
+   * underlying pre-flight check.
    *
    * NOTE: null means "not available / cannot be determined from current contract state",
-   * NOT "zero remaining budget". The SDK never fabricates a zero budget.
+   * NOT "zero remaining budget". The SDK never fabricates a zero budget; a `0`
+   * here is always a computed result (the window is exactly spent or overspent).
    */
   windowRemainingEstimate: number | null;
   /**
@@ -64,11 +72,40 @@ export interface PolicyContext {
 }
 
 /**
+ * A ledger-tied snapshot of the policy's rolling-window spend (issue #311).
+ *
+ * The cost pre-checker never reads chain state itself — that would be a second
+ * RPC outside the one simulation that prices the call. Instead a caller (or an
+ * operator tooling layer) that already has the guard's window accounting can
+ * hand it in explicitly, declared against the ledger where it was observed, so
+ * the SDK can verify the snapshot actually corresponds to the ledger the policy
+ * check ran at before using it. A snapshot that cannot be tied to the check's
+ * ledger context is treated as missing: `windowRemainingEstimate` stays `null`.
+ *
+ * This is informational state. It is never used as an authorization input.
+ */
+export interface WindowSpendSnapshot {
+  /**
+   * Ledger sequence at which `windowSpentStroops` was observed. Must be a
+   * non-negative safe integer; the estimator refuses a snapshot it cannot tie
+   * to the check's ledger rather than guessing.
+   */
+  ledger: number;
+  /** The policy's rolling-window cap for the transfer asset, in stroops. */
+  windowCapStroops: bigint;
+  /**
+   * Spend already recorded in that window as of `ledger`, in stroops. May
+   * exceed the cap (a lagging snapshot after an overspend); the estimate then
+   * computes to zero rather than going negative.
+   */
+  windowSpentStroops: bigint;
+}
+
+/**
  * Stroops in one XLM. Stellar defines 10^7 stroops per lumen, fixed by the
  * protocol — not a display choice.
  */
 export const STROOPS_PER_XLM = 10_000_000n;
-
 /**
  * Validate a fee ceiling without collapsing "omitted" into "zero".
  *
@@ -204,20 +241,17 @@ function resourceCount(value: unknown): number | undefined {
     return value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : undefined;
   }
   if (typeof value === "string" && value.trim() === "") return undefined;
-  const number = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  const number =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isSafeInteger(number) && number >= 0 ? number : undefined;
 }
 
-function footprintCounts(value: unknown):
-  | { readOnlyEntries: number; readWriteEntries: number; storageEntries: number }
-  | undefined {
+function footprintCounts(
+  value: unknown,
+): { readOnlyEntries: number; readWriteEntries: number; storageEntries: number } | undefined {
   const footprint = recordOf(value);
-  const readOnly = footprint
-    ? firstDefined(footprint, "readOnly", "read_only")
-    : undefined;
-  const readWrite = footprint
-    ? firstDefined(footprint, "readWrite", "read_write")
-    : undefined;
+  const readOnly = footprint ? firstDefined(footprint, "readOnly", "read_only") : undefined;
+  const readWrite = footprint ? firstDefined(footprint, "readWrite", "read_write") : undefined;
   if (!Array.isArray(readOnly) || !Array.isArray(readWrite)) return undefined;
   const readOnlyEntries = readOnly.length;
   const readWriteEntries = readWrite.length;
@@ -236,7 +270,9 @@ function footprintCounts(value: unknown):
  * object used by recorded RPC fixtures. Missing or malformed fields return
  * `undefined` as a whole, never a partially fabricated zero-filled breakdown.
  */
-export function resourceBreakdownFromSimulation(simulation: unknown): ResourceBreakdown | undefined {
+export function resourceBreakdownFromSimulation(
+  simulation: unknown,
+): ResourceBreakdown | undefined {
   const response = recordOf(simulation);
   const transactionData = response?.transactionData ?? simulation;
   let transaction: Record<string, unknown> | undefined;
@@ -265,9 +301,7 @@ export function resourceBreakdownFromSimulation(simulation: unknown): ResourceBr
   if (!builtRecord) return undefined;
   const resources = recordOf(builtRecord.resources) ?? builtRecord;
   const instructions = resourceCount(resources.instructions);
-  const diskReadBytes = resourceCount(
-    firstDefined(resources, "diskReadBytes", "disk_read_bytes"),
-  );
+  const diskReadBytes = resourceCount(firstDefined(resources, "diskReadBytes", "disk_read_bytes"));
   const writeBytes = resourceCount(firstDefined(resources, "writeBytes", "write_bytes"));
   const footprint = footprintCounts(resources.footprint);
   if (
@@ -326,6 +360,23 @@ export interface CostPreCheckConfig {
    * Optional policy or contract address. Alias for `policySource`.
    */
   policy?: string | PolicyConfig | null | undefined;
+  /**
+   * Opt-in ledger-tied window-spend snapshot used to compute
+   * `PolicyContext.windowRemainingEstimate` (issue #311).
+   *
+   * Purely informational: a snapshot — present, absent, or stale — never
+   * changes the cost decision itself. An invalid snapshot (negative ledger, or
+   * cap/spent that is not a non-negative `bigint`) throws a `TypeError` at
+   * construction, mirroring the fee-ceiling validation boundary.
+   */
+  windowSnapshot?: WindowSpendSnapshot | null | undefined;
+  /**
+   * How many ledgers a snapshot may predate the policy check's own ledger and
+   * still be used for the estimate. Default `0`: only a snapshot observed at
+   * the same ledger as the priced check is trusted. Must be a non-negative
+   * safe integer; invalid values throw a `TypeError` at construction.
+   */
+  windowSnapshotMaxAgeLedgers?: number | undefined;
 }
 
 /** The two fee components, kept separate so they are never conflated. */
@@ -426,6 +477,13 @@ export interface CostPreCheckOptions {
    * interceptor is called. `0n` is a real ceiling, distinct from omission.
    */
   maxFeeStroops?: bigint | undefined;
+  /**
+   * Per-call override of the configured window-spend snapshot (issue #311).
+   * An explicit `null` clears a configured snapshot for this check; omitting
+   * the option falls back to `CostPreCheckConfig.windowSnapshot`. Invalid
+   * values throw a `TypeError` before the interceptor is called.
+   */
+  windowSnapshot?: WindowSpendSnapshot | null | undefined;
   /**
    * Caller-owned cancellation for the underlying enforced simulation. An
    * already-aborted signal returns before any RPC call; a mid-flight abort or a
@@ -540,20 +598,116 @@ function extractCallAmount(call: ContractCall): bigint | null {
 }
 
 /**
+ * Validate a window-spend snapshot without ever accepting a guessable value.
+ *
+ * Every field is checked structurally: `ledger` must be a non-negative safe
+ * integer, and the cap/spent pair must be non-negative `bigint`s. A `number`,
+ * numeric string or `null` where a `bigint` belongs is rejected outright — by
+ * the time a value reaches here any precision loss has already happened, and
+ * coercing it would launder that loss into an operator-facing estimate.
+ */
+function validateWindowSnapshot(snapshot: WindowSpendSnapshot): WindowSpendSnapshot {
+  if (typeof snapshot !== "object" || snapshot === null) {
+    throw new TypeError(
+      `windowSnapshot must be an object, received ${snapshot === null ? "null" : typeof snapshot}`,
+    );
+  }
+  if (
+    typeof snapshot.ledger !== "number" ||
+    !Number.isSafeInteger(snapshot.ledger) ||
+    snapshot.ledger < 0
+  ) {
+    throw new TypeError(
+      `windowSnapshot.ledger must be a non-negative safe integer, received ${String(snapshot.ledger)}`,
+    );
+  }
+  for (const key of ["windowCapStroops", "windowSpentStroops"] as const) {
+    const value = snapshot[key];
+    if (typeof value !== "bigint" || value < 0n) {
+      throw new TypeError(
+        `windowSnapshot.${key} must be a non-negative bigint, received ${String(value)}`,
+      );
+    }
+  }
+  return snapshot;
+}
+
+/** Validate the snapshot-age tolerance without allowing an unusable value. */
+function validateSnapshotMaxAge(value: number): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(
+      `windowSnapshotMaxAgeLedgers must be a non-negative safe integer, received ${String(value)}`,
+    );
+  }
+  return value;
+}
+
+/**
+ * Compute the remaining window budget from a ledger-tied snapshot, or `null`
+ * when it cannot be computed (issue #311).
+ *
+ * The estimate is derived only from facts that are all known at once:
+ *
+ * 1. a priced (admissible) verdict — the only outcome that carries the ledger
+ *    the policy check actually ran at;
+ * 2. a snapshot observed at that same ledger (or within an explicitly
+ *    configured tolerance) — a stale or future-dated snapshot describes
+ *    different state and is treated as missing rather than adjusted for;
+ * 3. this call's transfer amount — without it, "remaining after this call"
+ *    is not defined.
+ *
+ * The result is `cap − spent − amount`, clamped at zero: a computed zero means
+ * the window is exactly spent or overspent, which is different from `null`
+ * ("unknown"). A result above `Number.MAX_SAFE_INTEGER` is reported as `null`
+ * rather than rounded — an estimate that silently loses precision is worse than
+ * an absent one.
+ */
+function estimateWindowRemaining(
+  decision: PreFlightDecision,
+  call: ContractCall,
+  snapshot: WindowSpendSnapshot | null,
+  maxAgeLedgers: number,
+): number | null {
+  if (snapshot === null) return null;
+  if (decision.kind !== "admissible") return null;
+  const checkLedger = decision.provenance?.ledger;
+  if (checkLedger === undefined) return null;
+  // The tie: the snapshot must describe the ledger context of this policy
+  // check. A snapshot from the future is an upstream bookkeeping error; one
+  // that is too old may predate spend this check accounted for.
+  if (snapshot.ledger > checkLedger) return null;
+  if (checkLedger - snapshot.ledger > maxAgeLedgers) return null;
+
+  const amount = extractCallAmount(call);
+  if (amount === null || amount < 0n) return null;
+
+  const remaining = snapshot.windowCapStroops - snapshot.windowSpentStroops - amount;
+  if (remaining <= 0n) return 0;
+  if (remaining > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+  return Number(remaining);
+}
+
+/**
  * Derive additive policy-relative context from the live check response.
  *
  * When no policy source is configured, returns null.
  * When a policy source is supplied:
  *  - perTxCapOk: true if admissible or window_cap_exceeded; false if per_tx_cap_exceeded;
  *    or evaluated against policy.per_tx_cap if a static policy is provided.
- *  - windowRemainingEstimate: null when the contract does not expose sufficient window state.
- *    NOTE: null means unknown/unavailable, NEVER zero budget.
+ *  - windowRemainingEstimate: computed from a ledger-tied window-spend
+ *    snapshot when the snapshot, the check's ledger, and the transfer amount
+ *    are all known (issue #311); null otherwise — including every blocked and
+ *    undetermined outcome, which have no priced ledger to tie a snapshot to.
+ *    NOTE: null means unknown/unavailable, NEVER zero budget, and the estimate
+ *    is never consulted by any authorization decision.
  *  - reason: the policy block reason or null if permitted.
  */
 function computePolicyContext(
   policySource: string | PolicyConfig | null | undefined,
   decision: PreFlightDecision,
   call: ContractCall,
+  windowSnapshot: WindowSpendSnapshot | null,
+  snapshotMaxAgeLedgers: number,
 ): PolicyContext | null {
   if (!policySource) {
     return null;
@@ -567,7 +721,12 @@ function computePolicyContext(
   if (decision.kind === "admissible") {
     return {
       perTxCapOk: true,
-      windowRemainingEstimate: null,
+      windowRemainingEstimate: estimateWindowRemaining(
+        decision,
+        call,
+        windowSnapshot,
+        snapshotMaxAgeLedgers,
+      ),
       reason: null,
     };
   }
@@ -613,23 +772,30 @@ export class CostPreChecker {
   private readonly config: CostPreCheckConfig;
   private readonly logger: GuardLogger;
   private readonly maxFeeStroops: bigint | undefined;
+  /** Validated configuration snapshot, or `null` when none was configured. */
+  private readonly windowSnapshot: WindowSpendSnapshot | null;
+  /** How far a snapshot may predate the check's ledger and still be used. */
+  private readonly snapshotMaxAgeLedgers: number;
 
   constructor(config: CostPreCheckConfig) {
     this.config = config;
     // Validate at the configuration boundary: a typo must fail here, not turn
     // every later quote into a fabricated over-budget answer.
     this.maxFeeStroops =
-      config.maxFeeStroops === undefined
-        ? undefined
-        : validateFeeCeiling(config.maxFeeStroops);
+      config.maxFeeStroops === undefined ? undefined : validateFeeCeiling(config.maxFeeStroops);
+    this.windowSnapshot =
+      config.windowSnapshot === undefined || config.windowSnapshot === null
+        ? null
+        : validateWindowSnapshot(config.windowSnapshot);
+    this.snapshotMaxAgeLedgers =
+      config.windowSnapshotMaxAgeLedgers === undefined
+        ? 0
+        : validateSnapshotMaxAge(config.windowSnapshotMaxAgeLedgers);
     this.logger = resolveLogger(config.logger);
   }
 
   /** Price a call. Equivalent to `(await this.checkWithCost(call, options)).cost`. */
-  async check(
-    call: ContractCall,
-    options?: CostPreCheckOptions,
-  ): Promise<CostDecision> {
+  async check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostDecision> {
     return (await this.checkWithCost(call, options)).cost;
   }
 
@@ -661,7 +827,16 @@ export class CostPreChecker {
     const ceiling =
       options?.maxFeeStroops !== undefined
         ? validateFeeCeiling(options.maxFeeStroops)
-        : this.maxFeeStroops ?? null;
+        : (this.maxFeeStroops ?? null);
+    // Same boundary for the window snapshot: an unusable snapshot is a
+    // configuration error, checked before any RPC, and `null` explicitly
+    // clears a configured snapshot for this one check.
+    const windowSnapshot =
+      options?.windowSnapshot !== undefined
+        ? options.windowSnapshot === null
+          ? null
+          : validateWindowSnapshot(options.windowSnapshot)
+        : this.windowSnapshot;
 
     const decision = await this.config.interceptor.check(call, {
       signal: options?.signal,
@@ -669,7 +844,13 @@ export class CostPreChecker {
     });
     const policySource =
       options?.policySource ?? options?.policy ?? this.config.policySource ?? this.config.policy;
-    const policyContext = computePolicyContext(policySource, decision, call);
+    const policyContext = computePolicyContext(
+      policySource,
+      decision,
+      call,
+      windowSnapshot,
+      this.snapshotMaxAgeLedgers,
+    );
     const cost = this.costOf(decision, policyContext, ceiling);
     // The one place a cost decision is produced, so the one place it is logged:
     // `check()` and both one-shot helpers funnel through here, and a second log
@@ -696,7 +877,7 @@ export class CostPreChecker {
     // Provenance travels with the verdict from the same simulation. A block or
     // an undetermined run has no priced snapshot, so it is explicitly null
     // rather than an invented ledger marker.
-    const provenance = decision.kind === "admissible" ? decision.provenance ?? null : null;
+    const provenance = decision.kind === "admissible" ? (decision.provenance ?? null) : null;
     if (decision.kind === "blocked") {
       return {
         kind: "blocked",

@@ -32,6 +32,21 @@ Every fixture's header records: `source`, `method`, `contractId`, `network`,
 `tests/unit/rpc-fixtures.test.ts` asserts the header is present, so a fixture
 cannot be quietly replaced with a hand-written object.
 
+### Consumed shape contract
+
+`tests/unit/rpc-fixtures.test.ts` also pins the **exact top-level fields** this
+repository consumes from each capture, plus the fields whose absence is
+meaningful (for example, a simulation error must not carry `transactionData` or
+`minResourceFee`). The same test contains compile-time assertions against the
+installed `@stellar/stellar-sdk` response types, so a rename, a required →
+optional change, or a new required field fails `npm run typecheck` before any
+live integration does. Everything in that check is offline.
+
+When a recapture adds, removes, or renames a top-level field, update the
+`FIXTURE_SHAPES` inventory in that test and this section in the same commit. The
+failure is intentional: it forces a reviewer to see the wire-shape change
+instead of discovering it after an SDK upgrade.
+
 The guard contract is
 `CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44`, the Phase 2 testnet
 instance recorded in `../phase2-instance.json`.

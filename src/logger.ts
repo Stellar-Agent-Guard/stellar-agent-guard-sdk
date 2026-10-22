@@ -34,7 +34,8 @@
  */
 export type GuardLogMeta = Record<string, unknown>;
 
-const SENSITIVE_META_KEY = /(?:private|secret|signer|signature|raw|diagnostic|payload|argument|args)/i;
+const SENSITIVE_META_KEY =
+  /(?:private|secret|signer|signature|raw|diagnostic|payload|argument|args)/i;
 
 /**
  * Copy logger metadata while removing fields that are unsafe to forward by
@@ -47,7 +48,12 @@ export function redactLogMeta(meta: GuardLogMeta | undefined): GuardLogMeta | un
 }
 
 function sanitizeLogValue(value: unknown, seen: WeakSet<object>, depth: number): unknown {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "boolean"
+  ) {
     return value;
   }
   if (typeof value === "bigint") return value.toString();

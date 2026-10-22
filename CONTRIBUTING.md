@@ -138,6 +138,7 @@ maintainer-only (npm 2FA/automation token, outside this repo).
 ```bash
 npm run typecheck
 npm run lint
+npm run format:check   # Prettier; run `npm run format` to fix
 npm test
 npm run build && npm run test:exports   # packs the tarball and resolves every export
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)

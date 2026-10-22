@@ -72,6 +72,8 @@ describe("package module format and export-map", () => {
       "BroadcastError",
       "ContractResponseError",
       "PolicyDecodeError",
+      "PolicyEncodeError",
+      "validatePolicyForEncoding",
       "decodePolicy",
       "policyFromScVal",
       "InvokeRetryError",
