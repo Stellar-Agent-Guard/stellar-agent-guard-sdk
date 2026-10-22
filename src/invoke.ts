@@ -419,6 +419,30 @@ export interface FeeBumpConfig {
   initialInclusionFee?: bigint | undefined;
 }
 
+/**
+ * Outcome when a transaction was accepted and broadcast by the network,
+ * but ledger inclusion could not be confirmed within the polling budget
+ * (issue #299).
+ *
+ * This represents submitted-but-unconfirmed work: callers MUST NOT assume
+ * failure or automatically rebroadcast without querying the transaction status
+ * (e.g. via `server.getTransaction(hash)`), as doing so risks executing duplicate
+ * actions.
+ */
+export interface InvokePendingOutcome {
+  kind: "pending";
+  /** The transaction hash assigned by the network. */
+  transactionHash: string;
+  /** The last known submission/polling state. */
+  submission: SubmissionResult;
+  /** Summary of the pending status. */
+  detail: string;
+  /** Safe follow-up guidance advising against immediate rebroadcast. */
+  guidance: string;
+  /** Structured retry metadata attached to the outcome. */
+  retry?: InvokeRetryMetadata | undefined;
+}
+
 export type PipelineOutcome =
   | {
       kind: "allowed";
@@ -440,6 +464,7 @@ export type PipelineOutcome =
       /** Structured retry metadata attached to the terminal outcome. */
       retry?: InvokeRetryMetadata | undefined;
     }
+  | InvokePendingOutcome
   | InvokeErrorOutcome
   | InvokeRetryError;
 
@@ -1369,7 +1394,7 @@ function retryMetadata(params: {
   retries: readonly InvokeRetryAttempt[];
   totalDelayMs: number;
   exhausted: boolean;
-  outcome: "allowed" | "blocked" | "error";
+  outcome: "allowed" | "blocked" | "pending" | "error";
   terminalFailure: RetryableInvokeFailure | null;
   terminalCause: InvokeErrorCause | null;
 }): InvokeRetryMetadata {
@@ -1409,7 +1434,7 @@ async function invokeWithQueue(
     let totalDelayMs = 0;
 
     const metadata = (
-      outcome: "allowed" | "blocked" | "error",
+      outcome: "allowed" | "blocked" | "pending" | "error",
       terminalFailure: RetryableInvokeFailure | null,
       terminalCause: InvokeErrorCause | null,
       exhausted: boolean,
@@ -1562,6 +1587,12 @@ function logTerminalOutcome(logger: GuardLogger, outcome: InvokeOutcome): void {
   // Unreachable from `invoke()` — a dry run returns before the retry loop — but
   // the outcome union is shared, and a dry run is not a submission to report.
   if (outcome.kind === "dry_run") return;
+  if (outcome.kind === "pending") {
+    logger.warn(`invoke submitted but unconfirmed: ${outcome.detail}`, {
+      transactionHash: outcome.transactionHash,
+    });
+    return;
+  }
   if (outcome.kind === "blocked") {
     logger.info(`guard refused the call (${outcome.reason ?? "unstated"})`, {
       reason: outcome.reason,
@@ -1870,6 +1901,22 @@ async function invokePipeline(
       deadline: true,
       transactionHash: submission.hash,
     });
+  }
+  if (submission.status === "TIMEOUT" || submission.status === "PENDING") {
+    const detail = `transaction ${submission.hash} submitted but unconfirmed after ${poll.pollAttempts} poll attempt(s)`;
+    const guidance =
+      `Transaction ${submission.hash} was accepted for broadcast by the network but was not confirmed ` +
+      `within the polling budget (${poll.pollAttempts} attempt(s)). Do not rebroadcast without querying ` +
+      `transaction status with getTransaction to avoid duplicate execution.`;
+    return {
+      kind: "pending",
+      transactionHash: submission.hash,
+      submission,
+      detail,
+      guidance,
+      // Retry metadata is attached by `invokeWithQueue` once the outcome
+      // leaves the pipeline — the same path every terminal outcome takes.
+    };
   }
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the

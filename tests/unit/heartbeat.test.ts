@@ -1135,3 +1135,88 @@ describe("startHeartbeat outcome classification (issue #292)", () => {
     await handle.stop();
   });
 });
+
+/**
+ * A submitted-but-unconfirmed heartbeat (issue #299).
+ *
+ * The transaction was broadcast and the guard may well have accepted it — only
+ * the confirmation polling ran out of budget. Counting it as a beat would claim
+ * success for an unconfirmed heartbeat; retrying it would risk beating twice.
+ * It is therefore reported once, as a `BroadcastError` carrying the hash so an
+ * operator can reconcile it out of band, and it is never counted and never
+ * retried within the same beat.
+ */
+describe("startHeartbeat pending outcome (issue #299)", () => {
+  const HASH = "d".repeat(64);
+
+  const pendingOutcome: InvokeOutcome = {
+    kind: "pending",
+    transactionHash: HASH,
+    submission: {
+      hash: HASH,
+      status: "TIMEOUT",
+      ledger: null,
+      failure: null,
+      events: [],
+    },
+    detail: `transaction ${HASH} submitted but unconfirmed after 2 poll attempt(s)`,
+    guidance: "Do not rebroadcast without querying transaction status.",
+  };
+
+  it("reports a pending beat once and does not count it", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    const beats: HeartbeatBeat[] = [];
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => ({ outcome: pendingOutcome }),
+        onBeat: (beat) => beats.push(beat),
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+
+    assert.equal(beats.length, 0, "an unconfirmed heartbeat is not a beat");
+    assert.equal(handle.lastBeatAt, null, "lastBeatAt must not advance");
+    assert.equal(errors.length, 1, "the pending outcome is reported exactly once");
+    // A `BroadcastError` carrying the hash: the operator's handle for
+    // reconciling the transaction that may still land.
+    assert.ok(errors[0] instanceof BroadcastError);
+    assert.equal((errors[0] as BroadcastError).transactionHash, HASH);
+    assert.match((errors[0] as BroadcastError).message, /submitted but unconfirmed/);
+
+    await handle.stop();
+  });
+
+  it("does not retry a pending beat within the same submission", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    let submissions = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => {
+          submissions += 1;
+          return { outcome: pendingOutcome };
+        },
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+
+    assert.equal(submissions, 1, "pending is not retryable: no rebroadcast");
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0] instanceof BroadcastError);
+
+    await handle.stop();
+  });
+});

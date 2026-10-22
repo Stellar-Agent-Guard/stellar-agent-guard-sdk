@@ -681,6 +681,13 @@ function classifyHeartbeatOutcome(outcome: InvokeOutcome): HeartbeatOutcomeClass
         error: new HeartbeatBlockedError({ reason: outcome.reason, detail: outcome.detail }),
         retryable: false,
       };
+    case "pending":
+      // A pending heartbeat was submitted but unconfirmed. Avoid rebroadcast.
+      return {
+        kind: "error",
+        error: new BroadcastError(outcome.detail, { transactionHash: outcome.transactionHash }),
+        retryable: false,
+      };
     case "error":
       // A pipeline failure. The typed error says whether it was a transport
       // problem (retryable) or something the SDK cannot classify.

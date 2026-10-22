@@ -11,7 +11,7 @@ Executes an end-to-end transaction through the guard:
 5. Handles transient `scecExceededLimit` ledger resource errors with bounded retry.
 6. Handles minimum-fee broadcast rejections (`tx_insufficient_fee` / "tx too cheap") with bounded fee-bump retry.
 
-Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
+Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, `{ kind: "pending", transactionHash, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
 
 ### Fee-Bump Configuration (`feeBump`)
 
@@ -78,6 +78,7 @@ string or a log line:
 | --- | --- |
 | `allowed` | `outcome.submission.hash` |
 | `blocked` (post-broadcast refusal) | `outcome.transactionHash` |
+| `pending` (accepted, not confirmed in budget) | `outcome.transactionHash` |
 | `error` (failed poll, rejected transaction) | `outcome.transactionHash` |
 | `error` (deadline spent while polling) | `outcome.transactionHash` |
 | `InvokeRetryError` (retry budget exhausted) | `outcome.transactionHash` |
@@ -85,6 +86,35 @@ string or a log line:
 A `deadline` that fires while the pipeline is waiting for an inclusion does
 not un-send the transaction: it may still land. The hash travels with the
 `RpcTimeoutError` for exactly that reason.
+
+### The pending outcome: accepted, not confirmed
+
+When the network has accepted the submission but the polling budget runs out
+before inclusion is confirmed, `invoke()` returns `kind: "pending"` rather than
+claiming either success or failure (issue #299):
+
+```ts
+const outcome = await invoke({ server, source, call, networkPassphrase });
+if (outcome.kind === "pending") {
+  outcome.transactionHash; // the hash the network assigned — query it, do not resend
+  outcome.submission; // the `SubmissionResult` the broadcast produced
+  outcome.detail; // one-line summary, e.g. "transaction <hash> submitted but unconfirmed after 3 poll attempt(s)"
+  outcome.guidance; // safe follow-up text advising against rebroadcast
+}
+```
+
+The distinction matters for correctness, not just ergonomics: a transaction
+that was never sent and one that was sent but not yet confirmed require
+**opposite** handling. Treating a `pending` outcome as a failure and
+rebroadcasting risks executing the action twice, so the SDK reports the hash and
+asks the caller to reconcile out of band — for example with
+`server.getTransaction(outcome.transactionHash)`. `InvokePendingOutcome` is
+exported by name so an adapter can narrow on it without re-declaring the shape.
+
+`pending` is distinct from a `deadline` expiry: a deadline fires while the
+pipeline still owns the whole invocation and returns the fail-closed `error`
+outcome carrying `RpcTimeoutError`. `pending` means the submission itself
+completed and only the confirmation polling ran out of budget.
 
 ### Malformed simulation data
 
@@ -166,9 +196,9 @@ timeout outcome and must reconcile it out of band.
 
 ### Retry metadata
 
-Terminal outcomes carry additive `retry` metadata: `allowed` and `blocked`
-outcomes, the `error` outcome, `InvokeRetryError`, and a fee-bump-exhausted
-`BroadcastError`.
+Terminal outcomes carry additive `retry` metadata: `allowed`, `blocked` and
+`pending` outcomes, the `error` outcome, `InvokeRetryError`, and a
+fee-bump-exhausted `BroadcastError`.
 
 ```ts
 export interface InvokeRetryMetadata {
@@ -185,7 +215,7 @@ export interface InvokeRetryMetadata {
   }>;
   terminalFailure: RetryableInvokeFailure | null;
   terminalCause: InvokeErrorCause | null;
-  outcome: "allowed" | "blocked" | "error";
+  outcome: "allowed" | "blocked" | "pending" | "error";
 }
 ```
 

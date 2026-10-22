@@ -1166,6 +1166,196 @@ describe("PreFlightInterceptor simulation cache", () => {
 /* -------------------------------------------------------------------------- */
 
 /**
+ * The cached path honours the caller's bound exactly like the uncached one.
+ *
+ * The cache's ledger lookup is an RPC the check makes, so it carries the same
+ * abort/timeout semantics as the enforcement pipeline: an already-aborted
+ * signal issues no RPC at all, a stalled lookup is bounded rather than waited
+ * on, and a cache failure only falls back to the uncached path while that path
+ * is still inside the caller's bound.
+ */
+describe("PreFlightInterceptor cached checks honour the caller's bound", () => {
+  /** A cached check whose ledger lookup can be stalled or made to fail. */
+  function makeCacheHarness(options: { ledger?: "ok" | "stall" | "fail-cache-read" } = {}) {
+    const source = Keypair.random();
+    let simulations = 0;
+    let latestLedgerCalls = 0;
+    const server = {
+      getAccount: async () => new Account(source.publicKey(), "1"),
+      getLatestLedger: async () => {
+        latestLedgerCalls += 1;
+        if (options.ledger === "stall") {
+          // A ledger read that never answers. The check must not wait on it.
+          return new Promise<{ sequence: number }>(() => {});
+        }
+        if (options.ledger === "fail-cache-read" && latestLedgerCalls === 1) {
+          // The cache's own lookup fails. The enforcement run reads the ledger
+          // too (for the signature expiry), and that read still succeeds.
+          throw new Error("ledger read failed");
+        }
+        return { sequence: 100 };
+      },
+      simulateTransaction: async () => {
+        simulations += 1;
+        return {
+          result: { auth: [] },
+          minResourceFee: "17",
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [{}] },
+        };
+      },
+    } as unknown as rpc.Server;
+
+    return {
+      server,
+      source,
+      call: CALL,
+      get simulations() {
+        return simulations;
+      },
+      get latestLedgerCalls() {
+        return latestLedgerCalls;
+      },
+    };
+  }
+
+  function makeCachedInterceptor(
+    harness: ReturnType<typeof makeCacheHarness>,
+    cache: PreFlightCacheOptions = { ttlMs: 5_000 },
+  ): PreFlightInterceptor {
+    return new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache,
+    });
+  }
+
+  /**
+   * Await `work`, but fail the test instead of hanging when it never settles.
+   *
+   * A stalled RPC used to leave the check pending forever; without this guard
+   * that regression would hang the suite instead of failing it.
+   */
+  async function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  it("issues no RPC at all when the caller's signal is already aborted", async () => {
+    const harness = makeCacheHarness();
+    const interceptor = makeCachedInterceptor(harness);
+    const controller = new AbortController();
+    controller.abort();
+
+    const decision = await interceptor.check(harness.call, { signal: controller.signal });
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, true);
+    // Neither the cache's ledger read nor a simulation is issued.
+    assert.equal(harness.latestLedgerCalls, 0);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("returns an undetermined timeout verdict when the ledger lookup stalls", async () => {
+    const harness = makeCacheHarness({ ledger: "stall" });
+    const interceptor = makeCachedInterceptor(harness);
+    const startedAt = Date.now();
+
+    const decision = await settleWithin(
+      interceptor.check(harness.call, { timeoutMs: 25 }),
+      2_000,
+      "the check",
+    );
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, false);
+    assert.equal(decision.error.timeoutMs, 25);
+    assert.equal(decision.error.stage, "pre-flight");
+    // The stalled read is bounded, not awaited: the check resolves promptly
+    // instead of hanging on an RPC that will never answer.
+    assert.ok(Date.now() - startedAt < 2_000, "the check must not wait on a stalled ledger read");
+    // The uncached enforcement path is not entered once the bound has fired.
+    assert.equal(harness.latestLedgerCalls, 1);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("falls back to the uncached path when the ledger read fails", async () => {
+    const harness = makeCacheHarness({ ledger: "fail-cache-read" });
+    const interceptor = makeCachedInterceptor(harness);
+
+    const decision = await interceptor.check(harness.call);
+
+    // A failed cache lookup is not a security decision: the uncached
+    // enforcement path runs and prices the call.
+    assert.equal(decision.kind, "admissible");
+    assert.equal(harness.latestLedgerCalls, 2);
+    assert.equal(harness.simulations, 2);
+  });
+
+  it("does not enter the uncached path once the caller's signal has fired", async () => {
+    const controller = new AbortController();
+    const harness = makeCacheHarness();
+    const interceptor = new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache: {
+        ttlMs: 5_000,
+        // The revision read fails *and* the caller gives up while it is in
+        // flight: the cache cannot be consulted, and the uncached path is no
+        // longer inside the caller's bound.
+        policyRevision: () => {
+          controller.abort();
+          throw new Error("revision unavailable");
+        },
+      },
+    });
+
+    const decision = await interceptor.check(harness.call, { signal: controller.signal });
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, true);
+    // No ledger read and no simulation: a caller that gave up gets no work.
+    assert.equal(harness.latestLedgerCalls, 0);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("still serves a cached verdict from a bounded ledger lookup", async () => {
+    const harness = makeCacheHarness();
+    const interceptor = makeCachedInterceptor(harness);
+
+    const first = await interceptor.check(harness.call, { timeoutMs: 1_000 });
+    const second = await interceptor.check(harness.call, { timeoutMs: 1_000 });
+
+    assert.equal(first.kind, "admissible");
+    assert.equal(second, first);
+    // The second check reused the cached verdict: one ledger read for the
+    // cache context, one inside the enforcement run, and no new simulation.
+    assert.equal(harness.latestLedgerCalls, 3);
+    assert.equal(harness.simulations, 2);
+    assert.equal(interceptor.getCacheStats().hits, 1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
  * In-flight coalescing: concurrent checks for the same call share one
  * discovery/enforcement run, without turning into a durable cache and without
  * letting one caller's bound cancel another caller's result.

@@ -2112,3 +2112,178 @@ describe("invoke() malformed simulation resource fee", () => {
     assert.equal(outcome.fees.totalFeeStroops, 0n);
   });
 });
+
+// ── A transaction accepted but not confirmed is `pending`, not a failure ────
+
+/**
+ * The submitted-but-unconfirmed case (issue #299).
+ *
+ * When the poll budget runs out before inclusion is confirmed, the transaction
+ * has already been broadcast: it may still land. Reporting that as a failure
+ * invites a rebroadcast, and a rebroadcast risks executing the action twice.
+ * `pending` is the third answer — neither success nor failure — and it carries
+ * the hash so the caller reconciles with `getTransaction` instead of resending.
+ *
+ * The mock drives the real transaction-building, signing and broadcast path;
+ * only the poll response is stubbed, and `pollIntervalMs: 0` keeps the loop's
+ * built-in sleep out of the wall clock.
+ */
+describe("invoke() pending outcome (issue #299)", () => {
+  const HASH = "c".repeat(64);
+  const FAST = { pollAttempts: 2, pollIntervalMs: 0 };
+
+  /** Every poll answers "not yet", so the budget runs out with no answer. */
+  const neverConfirmed = (): unknown => ({
+    status: rpc.Api.GetTransactionStatus.NOT_FOUND,
+  });
+
+  it("returns pending rather than error when inclusion is never confirmed", async () => {
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(makeParams(server, FAST));
+
+    assert.equal(outcome.kind, "pending");
+    if (outcome.kind !== "pending") throw new Error("unreachable");
+    // The recovery handle is the whole point: a pending transaction the caller
+    // cannot look up would be indistinguishable from a lost one.
+    assert.equal(outcome.transactionHash, HASH);
+    assert.equal(outcome.submission.hash, HASH);
+    assert.equal(outcome.submission.status, "TIMEOUT");
+    assert.match(outcome.detail, /submitted but unconfirmed after 2 poll attempt\(s\)/);
+    assert.match(outcome.guidance, /Do not rebroadcast/);
+    assert.match(outcome.guidance, new RegExp(HASH));
+  });
+
+  it("does not reclassify the timed-out submission as a post-broadcast rejection", async () => {
+    // A timed-out submission carries a `failure` describing the wait, but that
+    // is not the network rejecting the transaction. Before the `pending` arm a
+    // TIMEOUT fell into the failure branch and surfaced as `error`, which told
+    // a caller to retry a transaction that may already have landed.
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(makeParams(server, FAST));
+
+    assert.equal(outcome.kind, "pending");
+    if (outcome.kind !== "pending") throw new Error("unreachable");
+    // The rejection branch would have produced an `error` arm with a typed
+    // error; `pending` carries neither, because nothing was rejected. The
+    // submission's `failure` describes the *wait* — no result code, no XDR —
+    // which is what used to be misread as a post-broadcast rejection.
+    assert.equal("error" in outcome, false, "pending carries no typed error");
+    assert.equal("retryable" in outcome, false, "pending is not a retryable failure");
+    assert.equal(outcome.submission.failure?.resultCode, null, "no result code was decoded");
+    assert.equal(outcome.submission.failure?.resultXdr, null, "no result XDR was decoded");
+    assert.match(
+      outcome.submission.failure?.message ?? "",
+      /timed out waiting for ledger inclusion/,
+    );
+  });
+
+  it('attaches retry metadata with outcome "pending" and no terminal failure', async () => {
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST,
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
+      }),
+    );
+
+    assert.equal(outcome.kind, "pending");
+    const metadata = outcome.retry;
+    assert.ok(metadata, "a pending outcome still carries retry metadata");
+    assert.equal(metadata.outcome, "pending");
+    assert.equal(metadata.attempts, 1, "a pending outcome is not itself a retry");
+    assert.equal(metadata.retried, false);
+    assert.equal(metadata.exhausted, false);
+    assert.equal(metadata.terminalFailure, null);
+    assert.equal(metadata.terminalCause, null);
+    assert.deepEqual(metadata.retries, []);
+    assert.deepEqual(Object.keys(metadata).sort(), RETRY_METADATA_KEYS);
+    // The metadata must stay safe to log, exactly like every other outcome's.
+    const serialised = JSON.stringify(metadata);
+    assert.doesNotMatch(serialised, /resultXdr|diagnostic|signature|secret|AAAA/i);
+    // The hash lives on the outcome, never in the log-safe metadata record.
+    assert.doesNotMatch(serialised, new RegExp(HASH));
+  });
+
+  it("keeps publishing the hash through onSubmitted before polling ends pending", async () => {
+    const events: SubmissionAcceptedEvent[] = [];
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, { ...FAST, onSubmitted: (event) => events.push(event) }),
+    );
+
+    assert.deepEqual(events, [{ hash: HASH, status: "PENDING" }]);
+    assert.equal(outcome.kind, "pending");
+    if (outcome.kind !== "pending") throw new Error("unreachable");
+    assert.equal(outcome.transactionHash, HASH);
+  });
+
+  it("still reports allowed when a later poll confirms the transaction", async () => {
+    let polls = 0;
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: () => {
+        polls += 1;
+        return polls < 2
+          ? { status: rpc.Api.GetTransactionStatus.NOT_FOUND }
+          : { status: "SUCCESS", ledger: 99 };
+      },
+    });
+
+    const outcome = await invoke(makeParams(server, { pollAttempts: 3, pollIntervalMs: 0 }));
+
+    assert.equal(outcome.kind, "allowed", "confirmation inside the budget is unaffected");
+    assert.equal(polls, 2);
+  });
+
+  it("does not run the pending arm when the deadline expires first", async () => {
+    // A deadline expiry during polling is its own fail-closed outcome
+    // (`RpcTimeoutError`, `deadline: true`), reported before the pending arm is
+    // ever considered. The two must not be conflated.
+    let now = 0;
+    const clock: Clock = {
+      now: () => now,
+      sleep: async (delayMs) => {
+        now += delayMs;
+      },
+    };
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        deadlineMs: VIRTUAL_DEADLINE_MS,
+        clock,
+        pollOptions: { pollAttempts: 5, pollIntervalMs: VIRTUAL_DEADLINE_MS * 2 },
+      }),
+    );
+
+    const error = expectDeadlineError(outcome);
+    assert.equal(error.deadline, true);
+    assert.equal(outcome.kind, "error");
+    if (outcome.kind !== "error") throw new Error("unreachable");
+    assert.equal(outcome.transactionHash, HASH, "the deadline error keeps the hash");
+  });
+});

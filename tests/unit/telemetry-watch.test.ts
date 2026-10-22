@@ -1627,4 +1627,238 @@ describe("bounded look-ahead pump (issue #36)", () => {
       process.off("unhandledRejection", onRejection);
     }
   });
+
+  describe("watch() startup latest-ledger resolution (issue #281)", () => {
+    it("honors a pre-aborted signal before any startup RPC", async () => {
+      let getLatestLedgerCalls = 0;
+      let loadCursorCalls = 0;
+      const server = {
+        async getLatestLedger() {
+          getLatestLedgerCalls += 1;
+          return { sequence: 500 };
+        },
+        async getEvents() {
+          return { events: [], cursor: "cursor-1", latestLedger: 500 };
+        },
+      } as unknown as rpc.Server;
+      const store: CursorStore = {
+        async load() {
+          loadCursorCalls += 1;
+          return null;
+        },
+        async save() {},
+      };
+
+      const controller = new AbortController();
+      controller.abort();
+
+      const listener = new GuardTelemetryListener({
+        server,
+        guard: GUARD,
+        cursorStore: store,
+      });
+
+      const pages: GuardEvent[][] = [];
+      for await (const events of listener.watch({ signal: controller.signal })) {
+        pages.push(events);
+      }
+
+      assert.equal(pages.length, 0, "no pages are yielded on pre-aborted signal");
+      assert.equal(
+        loadCursorCalls,
+        0,
+        "cursorStore.load is not called when signal is already aborted",
+      );
+      assert.equal(
+        getLatestLedgerCalls,
+        0,
+        "getLatestLedger is not called when signal is already aborted",
+      );
+      assert.equal(listener.health().state, "aborted");
+    });
+
+    it("retries startup latest-ledger failure with backoff and recovers without wall-clock sleeps", async () => {
+      let ledgerCalls = 0;
+      const delays: number[] = [];
+      const server = {
+        async getLatestLedger() {
+          ledgerCalls += 1;
+          if (ledgerCalls < 3) {
+            throw new Error(`rpc temporary failure attempt ${ledgerCalls}`);
+          }
+          return { sequence: 500 };
+        },
+        async getEvents() {
+          return {
+            events: [rawLedgerEvent(501)],
+            cursor: "cursor-2",
+            latestLedger: 501,
+          };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      const pages = await takeFrom(
+        listener.watch({
+          pollIntervalMs: 1,
+          sleep: async (ms) => {
+            delays.push(ms);
+          },
+          retry: { maxRetries: 3, baseDelayMs: 100, maxDelayMs: 1_000 },
+        }),
+        1,
+      );
+
+      assert.deepEqual(pages, [[decodedEvent(501)]], "the recovered stream delivers events");
+      assert.equal(ledgerCalls, 3, "2 failed attempts + 1 successful recovery");
+      assert.deepEqual(delays, [100, 200], "startup backoff delays matched exponential schedule");
+      const health = listener.health();
+      assert.equal(health.state, "stopped");
+      assert.equal(health.consecutiveFailures, 0, "recovery resets consecutive failure counter");
+    });
+
+    it("reports terminal error via onStreamError and healthState=failed when startup latest-ledger retries are exhausted", async () => {
+      let ledgerCalls = 0;
+      const delays: number[] = [];
+      let streamErrors = 0;
+      let streamError: unknown = null;
+
+      const server = {
+        async getLatestLedger() {
+          ledgerCalls += 1;
+          throw new Error(`rpc down attempt ${ledgerCalls}`);
+        },
+        async getEvents() {
+          return { events: [], cursor: "cursor-1", latestLedger: 500 };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      for await (const _events of listener.watch({
+        pollIntervalMs: 1,
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+        retry: { maxRetries: 2, baseDelayMs: 50, maxDelayMs: 200 },
+        onStreamError: (err) => {
+          streamErrors += 1;
+          streamError = err;
+        },
+      })) {
+        assert.fail("a terminal stream must not yield");
+      }
+
+      assert.equal(ledgerCalls, 3, "1 initial attempt + 2 retries");
+      assert.deepEqual(delays, [50, 100], "backoff delays taken before exhaustion");
+      assert.equal(streamErrors, 1, "onStreamError fired exactly once at exhaustion");
+      assert.ok(streamError instanceof Error);
+      assert.match((streamError as Error).message, /rpc down attempt 3/);
+      const health = listener.health();
+      assert.equal(health.state, "failed");
+      assert.equal(health.consecutiveFailures, 3);
+    });
+
+    it("an abort during startup retry backoff ends the stream promptly without stream error", async () => {
+      const controller = new AbortController();
+      let streamErrors = 0;
+      const server = {
+        async getLatestLedger() {
+          throw new Error("rpc down");
+        },
+        async getEvents() {
+          return { events: [], cursor: "cursor-1", latestLedger: 500 };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      for await (const _events of listener.watch({
+        pollIntervalMs: 1,
+        signal: controller.signal,
+        sleep: async () => {
+          controller.abort();
+        },
+        retry: { maxRetries: 5, baseDelayMs: 100 },
+        onStreamError: () => {
+          streamErrors += 1;
+        },
+      })) {
+        assert.fail("stream should not yield");
+      }
+
+      assert.equal(streamErrors, 0, "abort during startup backoff does not fire onStreamError");
+      assert.equal(listener.health().state, "aborted");
+    });
+  });
+
+  describe("watch() malformed committed event isolation (issue #284)", () => {
+    it("isolates malformed topic/data XDR between valid events, preserves valid neighbors and advances cursor", async () => {
+      const malformedEvent = {
+        contractId: GUARD,
+        type: "contract" as const,
+        topic: [
+          {
+            type: "scvSymbol",
+            sym: {
+              asStringOrBytes() {
+                throw new Error("corrupted topic XDR");
+              },
+            },
+          } as unknown as xdr.ScVal,
+        ],
+        value: xdr.ScVal.scvMap([]),
+        ledger: 502,
+        ledgerClosedAt: null,
+        txHash: "tx-502-malformed",
+      };
+
+      const server = {
+        async getLatestLedger() {
+          return { sequence: 500 };
+        },
+        async getEvents() {
+          return {
+            events: [rawLedgerEvent(501), malformedEvent, rawLedgerEvent(503)],
+            cursor: "cursor-page-1",
+            latestLedger: 503,
+          };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      const malformedCounts: number[] = [];
+      const malformedDiagnostics: Array<{ ledger: number; transactionHash: string | null }> = [];
+
+      const page = await listener.poll({
+        startLedger: 500,
+        onMalformedEvent: (diag) => malformedDiagnostics.push(diag),
+      });
+
+      assert.equal(page.events.length, 2, "the two valid events are preserved");
+      assert.equal(page.events[0]!.ledger, 501);
+      assert.equal(page.events[1]!.ledger, 503);
+      assert.equal(page.cursor, "cursor-page-1", "cursor advances normally");
+      assert.equal(
+        page.dropped.malformedEvent,
+        1,
+        "malformedEvent is counted in dropped breakdown",
+      );
+      assert.equal(page.malformedEvents, 1, "malformedEvents summary count matches");
+      assert.deepEqual(malformedDiagnostics, [
+        { ledger: 502, transactionHash: "tx-502-malformed" },
+      ]);
+
+      // Also verify through watch() stream
+      const pages = await takeFrom(
+        listener.watch({
+          startLedger: 500,
+          onMalformed: (count) => malformedCounts.push(count),
+        }),
+        1,
+      );
+
+      assert.equal(pages.length, 1);
+      assert.equal(pages[0]!.length, 2);
+      assert.deepEqual(malformedCounts, [1], "onMalformed callback was notified with the count");
+    });
+  });
 });

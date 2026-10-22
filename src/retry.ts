@@ -75,5 +75,5 @@ export interface InvokeRetryMetadata {
   /** Coarse cause on the terminal attempt, or null when it ended cleanly. */
   terminalCause: InvokeErrorCause | null;
   /** How the pipeline ended. */
-  outcome: "allowed" | "blocked" | "error";
+  outcome: "allowed" | "blocked" | "pending" | "error";
 }
