@@ -18,6 +18,7 @@ import {
   ContractResponseError,
   GuardBlockedError,
   GuardError,
+  GuardUndeterminedError,
   HeartbeatBlockedError,
   HeartbeatDryRunError,
   HeartbeatIntervalError,
@@ -134,8 +135,9 @@ if (outcome.kind === "allowed") {
 // ---------------------------------------------------------------------------
 // 3. Error Inheritance and Hierarchy
 // ---------------------------------------------------------------------------
-// PreFlightUndeterminedError extends SimulationError extends GuardError extends Error
-expectTypeOf<PreFlightUndeterminedError>().toExtend<SimulationError>();
+// GuardUndeterminedError (and PreFlightUndeterminedError alias) extends GuardError extends Error
+expectTypeOf<GuardUndeterminedError>().toExtend<GuardError>();
+expectTypeOf<GuardUndeterminedError>().toExtend<Error>();
 expectTypeOf<PreFlightUndeterminedError>().toExtend<GuardError>();
 expectTypeOf<PreFlightUndeterminedError>().toExtend<Error>();
 
