@@ -192,7 +192,7 @@ Both tiers run through one runner configuration, `tests/test.config.ts`, read by
 Both projects share the `tsx` transform, so the same `src/` modules load
 identically in either tier. A project's invariants — its directory has matching
 files, the live project stays serialised — are asserted by
-`tests/unit/test-runner.test.ts` rather than left to convention.
+`tests/unit/test-runner.test.ts` rather than left to convention..
 
 ### Live suite execution modes: ephemeral (default) vs shared
 
