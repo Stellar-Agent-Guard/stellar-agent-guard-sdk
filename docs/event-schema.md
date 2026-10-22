@@ -499,7 +499,7 @@ so it must be converted with `StrKey.encodeContract`.
 
 | Struct                 | Emitted topic[0]       | Data            |
 | ---------------------- | ---------------------- | --------------- |
-| `EventAuthChecked`     | `event_auth_checked`   | none (`{}`)     |
+| `EventAuthChecked`     | `event_auth_checked`   | `{ contract: Option<Address>, fn_name: Option<Symbol>, context_index: u32, revision: u64 }` |
 | `EventHeartbeat`       | `event_heartbeat`      | `{ at: u64 }`   |
 | `EventInitialized`     | `event_initialized`    | `{ by: Address }` |
 | `EventFrozen`          | `event_frozen`         | `{ by: Address }` |
@@ -511,6 +511,20 @@ The decision event's layout is `[event_auth_checked, <allowed|blocked>, <reason>
 (`result` and `reason` are the struct's `#[topic]` fields). The reason vocabulary
 is the same set of symbols `src/reasons.ts` mirrors from the contract's `Error`
 enum.
+
+Both the topic layout and the data payload are defined by the contracts repo's
+own vocabulary fixture,
+`stellar-agent-guard-contracts/tests/fixtures/auth-checked-vocabulary.json`
+(contracts issue #42), which this SDK vendors at
+`tests/fixtures/vendor/auth-checked-vocabulary.json` and asserts against in
+`tests/unit/auth-checked-vocabulary.test.ts` — so the matrix is read from one
+place rather than copied into this repository, and an outcome the contract adds
+fails a test until the SDK's decoder knows about it.
+
+The Phase 2 instance recorded in `tests/fixtures/integration-evidence.md`
+predates that data payload and emits `{}` for the decision event. The SDK
+decodes whatever the host carries, so both shapes are read correctly; the
+table above describes the current contract source.
 
 ## Consequence for the telemetry listener
 
@@ -888,6 +902,11 @@ committed `getEvents` poll:
   `cursorStore`. A restart resumes each stream from its own last confirmed
   page; one stream advancing (or failing) never moves the other's cursor.
   The two stores are never used as fallbacks for each other.
+- **Scoped cursor records (issue #282):** every durable cursor read/write is
+  keyed to a `CursorStoreScope` — the RPC host, the canonical guard id and the
+  stream kind (`"events"` vs `"failed_tx"`) — so a shared backing store can
+  serve several guards and networks without one listener resuming from
+  another stream's position.
 
 #### Retention and replay when no store is present
 

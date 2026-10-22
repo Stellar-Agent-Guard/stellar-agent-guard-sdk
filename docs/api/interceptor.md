@@ -15,7 +15,7 @@ constructor(options: PreFlightInterceptorOptions)
 - `guard: string` — Custom account contract address (`C...`)
 - `agent: Keypair` — Keypair registered as the agent in the guard
 - `source: Keypair` — Keypair paying for transaction fees
-- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default
+- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default. Accepts `ttlMs`/`ttlLedgers`, an optional `policyRevision`, and an optional `maxEntries` cardinality bound.
 
 ### Optional cache
 
@@ -31,6 +31,13 @@ as `estimatedResourceFee`, or a nested `diagnosticEvents` entry — cannot chang
 what a later cache hit receives. Snapshots, not frozen objects: a caller that
 edits what it was handed still gets no error, it simply edits its own copy.
 
+`maxEntries` bounds how many verdicts the cache retains. When the cache is full,
+storing a new call fingerprint evicts the least-recently-used entry; a hit counts
+as use, so the eviction order is deterministic. Eviction only removes entries —
+lookups still require a current-ledger, unexpired entry — so a bounded cache
+never returns an expired or cross-ledger verdict. Omit `maxEntries` for an
+unbounded cache.
+
 ## Methods
 
 ### `check(call: ContractCall): Promise<PreFlightDecision>`
@@ -44,6 +51,37 @@ Clears all cached decisions, or only the entries for the supplied call.
 ### `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>`
 
 Evaluates a call and throws `GuardBlockedError` if blocked or undetermined.
+
+### `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>`
+
+Evaluates a sequence of calls with the guard's all-or-nothing semantics. Every
+call is simulated independently, and positive SAC transfer amounts are staged
+against the rolling `window_cap`. A call that passes alone but would push the
+cumulative staged spend over the cap is reported as `blocked` with reason
+`window_cap_exceeded`; a refusal or undetermined result from any member makes
+the batch inadmissible.
+
+Staging state is fail-closed:
+
+- `options.initialWindowSpent` (including an explicit `0n`) is a trusted caller
+  snapshot and avoids the ledger read.
+- An absent `Window` ledger entry means zero committed spend, not a failed read.
+- A failed policy or window RPC read leaves the state unknown. When a positive
+  transfer needs that state, the affected verdicts are `undetermined` and the
+  batch `kind` is `undetermined`; the SDK never stages against an assumed zero.
+- The returned `staging` field records the snapshot: `source` is
+  `provided | ledger | absent | unavailable`, `windowSpent` is `null` when
+  required state could not be read, and `unavailable` says whether staging was
+  blocked. It is omitted for an empty batch or when no snapshot was resolved.
+
+Non-transfer calls and policies with a zero cap do not require the window
+snapshot and are unaffected by an unavailable read.
+
+### `assertBatchAllowed(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>`
+
+The throw-on-refusal form: throws `GuardBlockedError` for the first blocked
+member, or `PreFlightUndeterminedError` for an undetermined member or an
+unavailable staging state.
 
 ## CheckResult decoding and fallback behavior
 

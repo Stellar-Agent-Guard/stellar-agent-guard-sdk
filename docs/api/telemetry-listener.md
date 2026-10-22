@@ -38,6 +38,30 @@ class instance, so an XDR value inside a `raw` payload still behaves like the
 XDR value it was. With no `buffer` configured there is nothing to copy: the
 call returns `[]` and allocates nothing.
 
+### `recentJsonLines(filter?): string`
+
+The retained window exported as bounded **JSON Lines** (issue #324): one
+`serializeEventRecord()` line per event, oldest first, with `filter` applied
+exactly as `recent()` applies it. At most `buffer.max` lines are produced, so an
+incident handoff is a snapshot of the configured window rather than an
+unbounded dump. With no `buffer` configured the result is `''`.
+
+Every line is a complete, independently parsable record —
+`parseEventRecord(line)` returns `{ version: 1, event }` — and the rendering is
+`serializeEvent()`'s: fixed key order, `undefined` dropped, `null` kept,
+`bigint` as a decimal string (`"9007199254740993"`), bytes as `bytes:<hex>`.
+The result is deterministic, so two calls over the same retained window are
+byte-identical.
+
+**No filesystem access.** The SDK returns a string; where (or whether) to write
+it is the caller's decision, so core keeps its no-`node:fs` discipline.
+
+**Raw-payload redaction.** The projection has a fixed field list and `raw` is
+not on it, so a payload retained by `includeRaw` for debugging is never
+serialized — exporting a window cannot leak the host-shaped payload by
+accident. The full output is a detached snapshot, so mutating what `recent()`
+returns cannot change a later export.
+
 ### `pollFailedTransactions(params?): Promise<FailedTxPollResult>`
 
 Reads one page from the independent `getTransactions` cursor. Pass the returned
@@ -55,17 +79,8 @@ Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, `onFailedTxError`, and `signal`.
-
-**Validated at this boundary (issue #283).** `limit`, `startLedger` and
-`resumeLedger` must be positive integers, `pollIntervalMs` a non-negative
-integer, and `jitter` either `"none"` or `"full"`; passing a `cursor` together
-with `startLedger`, or a `resumeLedger` together with `startLedger`, is a
-contradiction. Every violation throws a field-specific `TypeError` before any
-RPC request is issued or any timer is armed — invalid configuration costs zero
-round trips and names its own field instead of surfacing later as a
-host-dependent RPC error. `poll()` and `pollFailedTransactions()` validate the
-same fields the same way.
+`maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`,
+`onMalformed`, `onMalformedEvent`, and `signal`.
 
 #### Unknown topics
 
@@ -77,6 +92,49 @@ page that contains at least one unrecognised event. Each entry is
 are exposed — never raw XDR or the source payload. The callback is isolated like
 `onGap`, so a throwing sink cannot stop the stream. See
 [`docs/event-schema.md`](../event-schema.md#unknown-event-topics--observability-without-payloads).
+
+#### Malformed events (issue #284)
+
+An event whose topic or data XDR cannot be decoded is **isolated to that
+event**: the listener skips it, counts it, and keeps decoding the rest of the
+page. One corrupt event never fails a page, never discards its valid
+neighbours, and never stops the stream.
+
+`poll()` reports the count in two places — `dropped.malformedEvent` in the
+drop breakdown and `malformedEvents` as a top-level summary on `PollResult` —
+and `watch()`/`watchAll()` accept two opt-in callbacks:
+
+```ts
+watch({
+  // Once per page that contains at least one malformed committed event.
+  onMalformed: (count) => metrics.increment("guard.events.malformed", { count }),
+  // Per malformed event, with safe diagnostics only.
+  onMalformedEvent: ({ ledger, transactionHash }) => {
+    reportSuspiciousLedger(ledger, transactionHash);
+  },
+});
+```
+
+Only the count and the safe metadata (ledger, transaction hash) are exposed —
+never the malformed payload or its raw XDR, so an observability sink cannot
+become an exfiltration path. Both callbacks are isolated like `onGap`: a
+throwing sink is swallowed and cannot stop the stream.
+
+#### Startup: resolving the first ledger (issue #281)
+
+When neither `startLedger` nor `cursor` is supplied, `watch()` must resolve a
+starting point before its first poll. That startup read now follows the same
+contract as every later poll:
+
+- A `signal` that is **already aborted** short-circuits before *any* startup
+  work — no cursor load, no `getLatestLedger` — so teardown issues zero RPCs.
+  Additional abort checks guard each subsequent startup request.
+- A `getLatestLedger` that fails is retried inside the same bounded, abort-aware
+  backoff envelope (`retry`) as a mid-watch poll failure. Recovery resumes
+  normally; exhaustion reports through `onStreamError` exactly once and leaves
+  `health().state === "failed"`.
+- An abort during the backoff wait ends the stream promptly, with no
+  `onStreamError` — an abort is not a failure.
 
 #### One active stream per listener
 
@@ -117,6 +175,25 @@ backoff, then a clean end**: the listener retries up to `maxRetries` (default
 once with the terminal error and completes the iterator normally. The stream
 never dies silently and never leaves an unhandled rejection behind.
 
+The envelope is configurable per stream (issue #285):
+
+```ts
+watch({
+  retry: {
+    maxRetries: 8,      // retry attempts after a failed poll; integer >= 0 (default 5)
+    baseDelayMs: 250,   // first backoff delay, doubled per attempt; >= 0 (default 100)
+    maxDelayMs: 10_000, // cap on any single delay; >= 0 (default: pollIntervalMs)
+  },
+});
+```
+
+Every value is validated **before the first poll**: an unusable policy throws
+a `TypeError` when the stream starts, rather than degrading mid-run into an
+untuned request storm or an accidental no-retry. `maxRetries: 0` makes the
+first failure terminal. Every backoff delay is abort-aware — a `signal` abort
+ends the wait immediately. Defaults are exported as
+`DEFAULT_TELEMETRY_RETRY_OPTIONS` and match the historical behavior exactly.
+
 Failure-mode matrix:
 
 | Failure | Retried? | `onStreamError` | Iterator |
@@ -132,25 +209,58 @@ If the callback itself throws, that throw **propagates** out of the `for await`
 loop — the consumer asked for halt-on-first-error semantics by supplying a
 throwing callback, so it is not swallowed.
 
+#### Bounded look-ahead (backpressure, issue #36)
+
+`watch()` fetches through a bounded look-ahead pump: at most
+`maxBufferedPages` pages (`DEFAULT_MAX_BUFFERED_PAGES`, `2`, by default) are
+prefetched between the pump and the consumer, plus at most one request in
+flight, and the pump pulls sequentially — never more than one `getEvents` at a
+time. A consumer that processes slower than the poll cadence (a dashboard
+render loop, a file logger) therefore **throttles the fetches** once the bound
+is reached, instead of letting the stream race ahead with pages nobody has
+consumed (memory growth, rate-limit burn):
+
+```ts
+watch({
+  maxBufferedPages: 2, // pages buffered ahead of the consumer; integer >= 0
+});
+```
+
+The bound changes pacing, never the delivered sequence: same order, no loss,
+no duplicates — and `maxBufferedPages: 0` disables look-ahead entirely,
+restoring strict consumer-paced polling (one page fetched per pull), exactly
+the stream this option pre-dates.
+
+The stored cursor never leads the consumer's position: each page's cursors
+are saved **at delivery**, before the batch is yielded, so pages that were
+fetched but not delivered when a consumer stops are re-read after a restart
+(at-least-once, never lose-the-tail). A consumer that stops pulling stops the
+fetches once the bound is reached; a `break` after N pages drags no extra
+fetch past its own stop.
+
+The bound is validated **before the first poll**: a non-integer or negative
+value throws a `TypeError` when the stream starts, the same fail-loudly
+contract as `retry`.
+
 #### Aborting (`signal`)
 
 Aborting ends the stream as a normal exit, never a throw:
 
 - an abort before the first pull issues no RPC call at all — not even the
-  `getLatestLedger` probe that resolves a default `startLedger;
--
-  an abort between pages prevents the next poll and does not serve out the
+  `getLatestLedger` probe that resolves a default `startLedger`;
+- an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
-- an abort while a request is in flight lets that request's rejection go 
-  quietly as teardown instead of surfacing an `AbortError` or an unhandled
-  rejection.
+- an abort while a request is in flight ends the iterator without waiting for
+  that request, and the late response is discarded; its rejection goes quietly
+  as teardown instead of surfacing an `AbortError` or an unhandled rejection.
 
 **In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^17 exposes
 `getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
-there is no supported way to cancel a request that has already been sent. The
-worst case between `signal.abort()` and the iterator ending is therefore **one
-request duration**, never a full poll interval. The README's
+there is no supported way to cancel a request that has already been sent. It is
+not awaited either: `signal.abort()` ends the iterator immediately, even with a
+`getEvents` call pending, so a stop never waits out a request duration. The
+README's
 [“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
 section states the same boundary for consumers.
 
@@ -165,14 +275,56 @@ interface CounterSnapshot {
   byReason: Record<string, number>;
   windowStart: number;
   windowEvents?: number;
+  coverage: {
+    observed: number;                                        // cumulative, not windowed
+    streams: { committed: number; diagnostic: number; failed_tx: number };
+    seen: ('committed' | 'diagnostic' | 'failed_tx')[];
+    missing: ('committed' | 'diagnostic')[];
+    status: 'none' | 'incomplete' | 'complete';
+  };
 }
 ```
 
 Counts are maintained over the configured window (`windowEvents` events or
-`windowMs` milliseconds) and updated on every event from the unified stream.
+`windowMs` milliseconds) and updated on every decision the listener delivers:
+committed and failed-transaction events from `poll()`/`watch()`, diagnostic
+events merged by `watchAll()`, and anything a host feeds through `observe()`.
+Each decision is counted once — `watchAll()` records only its diagnostic half,
+because the committed half was already counted by the page loop underneath it.
 The returned object is a deep snapshot: mutating it never affects the listener's
 state. When `counters` is not set, `stats()` returns `null` and no counter
 structures are allocated.
+
+#### Coverage: why `blocked: 0` is not "nothing was refused" (issue #321)
+
+A blocked decision never commits — the guard returns `Err`, so Soroban rolls the
+event back before broadcast. A listener that only watched committed events
+therefore cannot have seen a refusal, and its `blocked` count says nothing about
+whether one occurred. `coverage` makes that distinction explicit:
+
+| `coverage.status` | Meaning |
+| --- | --- |
+| `none` | No decision has reached the counters. Every count is zero for lack of input. |
+| `incomplete` | Some decisions were counted, but at least one decision-bearing stream was never fed. `missing` names it. |
+| `complete` | Both the committed and the diagnostic stream have delivered at least one decision, so the counters cover the tracked decision surface. |
+
+`coverage` is **cumulative since construction or the last `resetStats()`**, while
+`allowed`/`blocked`/`byReason` are windowed — coverage is a fact about what was
+wired up, which eviction must not erase. `failed_tx` counts appear in `streams`
+and `seen`, but do not satisfy the diagnostic half: those events are rolled-back
+decisions from this listener's own retry path, not the simulation diagnostics the
+unified stream carries. A zero `blocked` count is only evidence that nothing was
+refused when `status` is `complete`; when it is `none` or `incomplete`, read the
+`missing` list and wire the stream before drawing a conclusion.
+
+#### Reset semantics
+
+`resetStats()` clears the window, `byReason`, the counts **and** the coverage
+record, and drops the monotonic clock high-water mark so the next observation
+establishes a fresh epoch. Reset is deliberately total: clearing counts while
+keeping `complete` would recreate the misreading coverage exists to prevent.
+The listener's streams, cursors, `recent()` buffer and `health()` state are
+untouched — this resets the counter view, not the stream.
 
 `windowStart` is on the counter's **monotonic** timeline, not a raw wall-clock
 reading. Observations are clamped to a non-decreasing internal time, so a
@@ -228,8 +380,11 @@ interface GuardTelemetryHealthSnapshot {
 `poll()` re-checks the emitting `contractId` before decoding rather than
 trusting the RPC's contract filter. `PollResult.dropped` reports every rejection
 by reason — `unknownTopic`, `foreignContract`, `missingContractId`,
-`malformedContractId` — and the same breakdown is logged with the page summary.
-Events with missing or malformed identity fail closed. See
+`malformedContractId`, `malformedEvent` — and the same breakdown is logged with
+the page summary. `malformedEvent` counts committed events whose XDR failed to
+decode; they are skipped individually rather than failing the page (issue
+#284), and `PollResult.malformedEvents` repeats the count as a top-level
+summary. Events with missing or malformed identity fail closed. See
 [`event-schema.md`](../event-schema.md#emitting-identity-validation-before-decode-issue-322).
 
 ## Event identity
@@ -292,11 +447,30 @@ letting the cursor outlive the process:
 ```ts
 interface CursorStore {
   /** The cursor to resume from, or `null` on first run. Consulted once, at start. */
-  load(): Promise<string | null>;
+  load(scope?: CursorStoreScope): Promise<string | null>;
   /** Persist the cursor advanced by one poll. Called once per poll. */
-  save(cursor: string): Promise<void>;
+  save(cursor: string, scope?: CursorStoreScope): Promise<void>;
+}
+
+/** Stable identity of one durable cursor slot (issue #282). */
+interface CursorStoreScope {
+  /** RPC endpoint host the listener polls. */
+  network: string;
+  /** Canonical guard contract id the cursor belongs to. */
+  guard: string;
+  /** Which stream the cursor resumes: "events" | "failed_tx". */
+  stream: CursorStreamKind;
 }
 ```
+
+- **Scoping (issue #282):** every `load()`/`save()` the listener performs
+  carries a `CursorStoreScope` — the network host, the canonical guard id and
+  the stream kind — so one backing store (a file, a Redis instance, a
+  database) can serve many listeners without one resuming from another
+  stream's cursor. A pre-existing two-method store that ignores the scope
+  argument keeps working exactly as before (it holds one slot, as it always
+  did); the built-in `InMemoryCursorStore` is scope-aware. To key records by
+  scope, use all three fields — for example `"<network>|<guard>|<stream>"`.
 
 - `load()` is consulted once, when `watch()` starts. A stored cursor wins over
   the default head position — resume-after-restart is exactly the case where
@@ -349,6 +523,26 @@ const listener = new GuardTelemetryListener({
 Redis is the same shape (`GET`/`SET` on one key), as is a single-row database
 table. Whatever the backend, the cursor is one opaque string — store it
 verbatim, do not parse it.
+
+A store that should serve **several** listeners from one backend keys by the
+scope it is given:
+
+```ts
+const scopedFileCursorStore: CursorStore = {
+  async load(scope) {
+    const key = scope ? `cursor-${scope.network}-${scope.guard}-${scope.stream}.txt` : "cursor.txt";
+    try {
+      return await readFile(key, "utf8");
+    } catch {
+      return null;
+    }
+  },
+  async save(cursor, scope) {
+    const key = scope ? `cursor-${scope.network}-${scope.guard}-${scope.stream}.txt` : "cursor.txt";
+    await writeFile(key, cursor, "utf8");
+  },
+};
+```
 
 ### Delivery contract: at-least-once
 

@@ -127,7 +127,11 @@ function addressSet(
   setDiff(changes, field, field, before, after);
 }
 
-function protocols(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: ReadonlyPolicyConfig): void {
+function protocols(
+  changes: PolicyChange[],
+  a: ReadonlyPolicyConfig,
+  b: ReadonlyPolicyConfig,
+): void {
   const afterIndex = new Map(b.protocols.map((rule, index) => [rule.contract as string, index]));
   const beforeContracts = new Set(a.protocols.map((rule) => rule.contract as string));
 
@@ -147,7 +151,13 @@ function protocols(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: Readonly
     const path = `protocols[${matched}].fns`;
     if (rule.fns === null || next.fns === null) {
       if (rule.fns !== next.fns) {
-        changes.push({ field: "protocols", path, kind: "changed", before: rule.fns, after: next.fns });
+        changes.push({
+          field: "protocols",
+          path,
+          kind: "changed",
+          before: rule.fns,
+          after: next.fns,
+        });
       }
       return;
     }
@@ -156,12 +166,21 @@ function protocols(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: Readonly
 
   b.protocols.forEach((rule, index) => {
     if (!beforeContracts.has(rule.contract)) {
-      changes.push({ field: "protocols", path: `protocols[${index}]`, kind: "added", after: rule.contract });
+      changes.push({
+        field: "protocols",
+        path: `protocols[${index}]`,
+        kind: "added",
+        after: rule.contract,
+      });
     }
   });
 }
 
-function windowCaps(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: ReadonlyPolicyConfig): void {
+function windowCaps(
+  changes: PolicyChange[],
+  a: ReadonlyPolicyConfig,
+  b: ReadonlyPolicyConfig,
+): void {
   const before = a.recipient_window_caps ?? [];
   const after = b.recipient_window_caps ?? [];
   const afterIndex = new Map(after.map((entry, index) => [entry.recipient as string, index]));

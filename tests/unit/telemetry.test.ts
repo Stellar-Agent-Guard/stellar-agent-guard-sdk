@@ -105,7 +105,10 @@ describe("guardEventsFromDiagnostics", () => {
           ["event_heartbeat"],
           xdr.ScVal.scvMap([
             // XDR uint64 is a native bigint in this SDK, not a constructible class.
-            new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(1789393232n) }),
+            new xdr.ScMapEntry({
+              key: xdr.ScVal.scvSymbol("at"),
+              val: xdr.ScVal.scvU64(1789393232n),
+            }),
           ]),
         ),
       ],
@@ -127,7 +130,9 @@ describe("telemetryFromDecision", () => {
       {
         kind: "blocked",
         reason: "recipient_not_allowed",
-        diagnosticEvents: [diagnosticEvent(["event_auth_checked", "blocked", "recipient_not_allowed"])],
+        diagnosticEvents: [
+          diagnosticEvent(["event_auth_checked", "blocked", "recipient_not_allowed"]),
+        ],
       },
       GUARD,
     );
@@ -242,8 +247,7 @@ describe("describeGuardEvent", () => {
  * distinctness between two different blocks inside one simulation.
  */
 describe("GuardEvent.id", () => {
-  const blocked = (reason: string) =>
-    diagnosticEvent(["event_auth_checked", "blocked", reason]);
+  const blocked = (reason: string) => diagnosticEvent(["event_auth_checked", "blocked", reason]);
 
   it("gives every decoded diagnostic event a non-null synthetic id", () => {
     const events = guardEventsFromDiagnostics([blocked("per_tx_cap_exceeded")], GUARD);
@@ -265,7 +269,10 @@ describe("GuardEvent.id", () => {
   it("keeps two distinct blocks in one simulation distinct, because their positions differ", () => {
     // Same topic list, same data: only the position within the batch separates
     // them, which is exactly the case a txHash-based id could not cover.
-    const events = guardEventsFromDiagnostics([blocked("per_tx_cap_exceeded"), blocked("per_tx_cap_exceeded")], GUARD);
+    const events = guardEventsFromDiagnostics(
+      [blocked("per_tx_cap_exceeded"), blocked("per_tx_cap_exceeded")],
+      GUARD,
+    );
     assert.equal(events.length, 2);
     assert.notEqual(events[0]!.id, events[1]!.id);
   });
@@ -794,8 +801,8 @@ describe("GuardTelemetryListener abort cancellation (issue #95)", () => {
         },
       };
       const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
-      const iterator = listener
-        .watch({ startLedger: 400, signal: controller.signal })[Symbol.asyncIterator]();
+      const watched = listener.watch({ startLedger: 400, signal: controller.signal });
+      const iterator = watched[Symbol.asyncIterator]();
 
       const inFlight = iterator.next();
       assert.equal(getEventsCalls, 1, "the first pull dispatches exactly one request");
@@ -959,7 +966,11 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
 
     assert.ok(diagnostic, "the diagnostic feed must be present");
     assert.equal(diagnostic.source, "diagnostic");
-    assert.equal(diagnostic.observedAt, "2026-09-27T00:00:01.000Z", "diagnostics carry the observation time");
+    assert.equal(
+      diagnostic.observedAt,
+      "2026-09-27T00:00:01.000Z",
+      "diagnostics carry the observation time",
+    );
     assert.equal(diagnostic.decision?.result, "blocked");
   });
 
@@ -970,7 +981,10 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
     ])) {
       seen.push(event);
     }
-    assert.deepEqual(seen.map((event) => event.ledger), [100, 500]);
+    assert.deepEqual(
+      seen.map((event) => event.ledger),
+      [100, 500],
+    );
   });
 
   it("interleaves a diagnostic batch at its point of observation", async () => {
@@ -1043,7 +1057,10 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
     }
     const ids = seen.map((event) => event.id);
     assert.equal(new Set(ids).size, ids.length, "no id may be delivered twice");
-    assert.deepEqual(seen.map((event) => event.stream), ["committed", "diagnostic"]);
+    assert.deepEqual(
+      seen.map((event) => event.stream),
+      ["committed", "diagnostic"],
+    );
   });
 
   it("leaves the default watch() path committed-only, tagging every event", async () => {
@@ -1111,7 +1128,10 @@ describe("GuardEventRingBuffer (issue #68)", () => {
   it("keeps the newest window across many wraps of the ring", () => {
     const buffer = new GuardEventRingBuffer(3);
     for (let i = 1; i <= 100; i += 1) buffer.push(event({ id: `e${i}`, ledger: i }));
-    assert.deepEqual(buffer.recent().map((entry) => entry.id), ["e98", "e99", "e100"]);
+    assert.deepEqual(
+      buffer.recent().map((entry) => entry.id),
+      ["e98", "e99", "e100"],
+    );
   });
 
   it("filters by stream and reason", () => {
@@ -1523,7 +1543,11 @@ describe("opt-in raw event retention (issue #94)", () => {
 });
 
 describe("GuardTelemetryListener counters", () => {
-  const decisionEvent = (result: "allowed" | "blocked", reason: string | null, index: number): GuardEvent => ({
+  const decisionEvent = (
+    result: "allowed" | "blocked",
+    reason: string | null,
+    index: number,
+  ): GuardEvent => ({
     id: `diag:${index.toString(16).padStart(64, "0")}`,
     kind: "auth_checked",
     topic: "event_auth_checked",
@@ -1592,7 +1616,7 @@ describe("GuardTelemetryListener counters", () => {
 
   it("supports a time-window with an injected clock", () => {
     let now = 0;
-    const listener = new GuardTelemetryListener( {
+    const listener = new GuardTelemetryListener({
       counters: { windowMs: 1000 },
       clock: () => now,
     });
@@ -1651,7 +1675,11 @@ describe("GuardDecisionCounters wall-clock resilience (issue #320)", () => {
     let stats = listener.stats();
     assert.ok(stats);
     assert.equal(stats!.allowed + stats!.blocked, 2, "a rollback does not evict early");
-    assert.equal(stats!.windowStart, 1_000, "clamped to the high-water mark, not the rolled-back value");
+    assert.equal(
+      stats!.windowStart,
+      1_000,
+      "clamped to the high-water mark, not the rolled-back value",
+    );
 
     // Still inside the window on the monotonic timeline (cutoff 999).
     now = 1_999;
@@ -1679,6 +1707,119 @@ describe("GuardDecisionCounters wall-clock resilience (issue #320)", () => {
     assert.ok(stats);
     assert.equal(stats!.blocked, 0);
     assert.deepEqual(stats!.byReason, {});
+  });
+});
+
+/**
+ * Counter coverage and reset semantics (#321).
+ *
+ * A zero `blocked` count is only evidence that nothing was refused when both
+ * decision-bearing streams have fed the counters. These tests pin the three
+ * cases the issue calls out — committed-only, unified, and no observation — and
+ * prove that reset clears coverage instead of leaving a stale `complete`.
+ */
+describe("GuardTelemetryListener counter coverage (issue #321)", () => {
+  const decisionEvent = (
+    result: "allowed" | "blocked",
+    reason: string | null,
+    index: number,
+    stream: "committed" | "diagnostic" | "failed_tx",
+  ): GuardEvent => ({
+    id: `${stream}:${index.toString(16).padStart(64, "0")}`,
+    kind: "auth_checked",
+    topic: "event_auth_checked",
+    source: stream === "committed" ? "ledger" : "diagnostic",
+    stream,
+    contractId: GUARD,
+    ledger: stream === "committed" ? index : null,
+    ledgerClosedAt: stream === "committed" ? new Date(index).toISOString() : null,
+    observedAt: stream === "committed" ? null : new Date(index).toISOString(),
+    transactionHash: stream === "committed" ? "ab".repeat(32) : null,
+    decision: {
+      result,
+      reason,
+      source: stream === "committed" ? "ledger" : "diagnostic",
+    } as GuardEvent["decision"],
+    data: {},
+  });
+
+  it("reports no observation rather than a confident zero", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.blocked, 0);
+    assert.equal(stats!.coverage.status, "none");
+    assert.equal(stats!.coverage.observed, 0);
+    assert.deepEqual(stats!.coverage.seen, []);
+    assert.deepEqual(stats!.coverage.missing, ["committed", "diagnostic"]);
+  });
+
+  it("reports incomplete coverage when only committed events were observed", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("allowed", null, 1, "committed"));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.coverage.status, "incomplete");
+    assert.equal(stats!.coverage.observed, 1);
+    assert.deepEqual(stats!.coverage.seen, ["committed"]);
+    assert.deepEqual(stats!.coverage.missing, ["diagnostic"]);
+    assert.deepEqual(stats!.coverage.streams, { committed: 1, diagnostic: 0, failed_tx: 0 });
+  });
+
+  it("reports complete coverage only once both decision streams have fed", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("allowed", null, 1, "committed"));
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 2, "diagnostic"));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.coverage.status, "complete");
+    assert.deepEqual(stats!.coverage.missing, []);
+    assert.deepEqual(stats!.coverage.seen, ["committed", "diagnostic"]);
+    // Counted once each: coverage counts and window counts agree.
+    assert.equal(stats!.coverage.observed, 2);
+    assert.equal(stats!.allowed + stats!.blocked, 2);
+    assert.equal(stats!.blocked, 1);
+  });
+
+  it("does not treat a failed-transaction stream as the diagnostic half", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("allowed", null, 1, "committed"));
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 2, "failed_tx"));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.coverage.status, "incomplete");
+    assert.deepEqual(stats!.coverage.missing, ["diagnostic"]);
+  });
+
+  it("clears counts and coverage together on resetStats(), without double-counting", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 1, "committed"));
+    listener.resetStats();
+    const afterReset = listener.stats();
+    assert.ok(afterReset);
+    assert.equal(afterReset!.blocked, 0);
+    assert.deepEqual(afterReset!.byReason, {});
+    assert.equal(afterReset!.coverage.status, "none");
+    assert.equal(afterReset!.coverage.observed, 0, "coverage is reset, not stale-complete");
+
+    // A reset listener counts only what arrives after it, once.
+    listener.observe(decisionEvent("allowed", null, 2, "committed"));
+    const afterOne = listener.stats();
+    assert.ok(afterOne);
+    assert.equal(afterOne!.allowed, 1);
+    assert.equal(afterOne!.coverage.observed, 1);
+  });
+
+  it("resets a cumulative coverage record while the window evicts independently", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 1 } });
+    listener.observe(decisionEvent("allowed", null, 1, "committed"));
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 2, "diagnostic"));
+    const stats = listener.stats();
+    assert.ok(stats);
+    // The window holds one decision; coverage still records both streams.
+    assert.equal(stats!.allowed + stats!.blocked, 1);
+    assert.equal(stats!.coverage.observed, 2);
+    assert.equal(stats!.coverage.status, "complete");
   });
 });
 
@@ -1729,6 +1870,7 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
       foreignContract: 1,
       missingContractId: 0,
       malformedContractId: 0,
+      malformedEvent: 0,
     });
   });
 
@@ -1750,6 +1892,7 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
       foreignContract: 0,
       missingContractId: 1,
       malformedContractId: 1,
+      malformedEvent: 0,
     });
   });
 

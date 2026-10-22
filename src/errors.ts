@@ -3,9 +3,11 @@
  *
  * Callers should branch on an error class (or on the class attached to a result-
  * oriented `invoke` error outcome), not by matching human-readable messages that
- * may change as the Stellar SDK evolves. Every SDK-owned error extends
- * `GuardError`, so a single `instanceof GuardError` check remains sufficient for
- * integrations that do not need a finer category.
+ * may change as the Stellar SDK evolves. Operational SDK errors extend
+ * `GuardError`, so a single `instanceof GuardError` check covers transport,
+ * signing, policy and simulation failures. Invalid caller input is the deliberate
+ * exception: `InvalidInputError` extends `TypeError` so a malformed argument is
+ * distinguishable from an operational failure.
  */
 import type { InvokeRetryMetadata } from "./retry.ts";
 
@@ -18,6 +20,61 @@ export class GuardError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;
+  }
+}
+
+/**
+ * A caller-supplied value had the wrong shape or type.
+ *
+ * This is an `InputError` in the platform sense: it is thrown before the SDK
+ * does any work with the value, so a caller can distinguish a programmer error
+ * from a policy verdict or a transport failure. Extending `TypeError` keeps the
+ * conventional `instanceof TypeError` check working for invalid inputs.
+ */
+export class InvalidInputError extends TypeError {
+  /** The input field that failed validation. */
+  readonly field: string;
+  /** Stable rule identifier for the failed check. */
+  readonly rule: string;
+  /** Optional human-readable detail with the offending value. */
+  readonly detail?: string | undefined;
+
+  constructor(field: string, rule: string, detail?: string) {
+    const message = detail
+      ? `Invalid input for '${field}': violates rule '${rule}' (${detail})`
+      : `Invalid input for '${field}': violates rule '${rule}'`;
+    super(message);
+    this.name = new.target.name;
+    this.field = field;
+    this.rule = rule;
+    if (detail !== undefined) {
+      this.detail = detail;
+    }
+  }
+}
+
+/**
+ * A fee ceiling was not a non-negative `bigint` in stroops.
+ *
+ * Fee ceilings describe a spend policy, not a signed delta: a negative value
+ * would make every real quote appear over budget, and routing a `number` or a
+ * string through would hide the precision loss the SDK deliberately refuses.
+ * Rejected at the configuration boundary (constructor) and again before a
+ * per-call override is used, so neither path can silently become a policy.
+ */
+export class InvalidFeeCeilingError extends InvalidInputError {
+  /** The rejected value, kept for callers that report the bad input. */
+  readonly value: unknown;
+
+  constructor(field: string, value: unknown) {
+    const received =
+      typeof value === "bigint"
+        ? `${value}n`
+        : typeof value === "string"
+          ? JSON.stringify(value)
+          : String(value);
+    super(field, "non_negative_bigint", `expected a non-negative bigint, got ${received}`);
+    this.value = value;
   }
 }
 
@@ -127,11 +184,23 @@ export class BroadcastError extends GuardError {
 
 /** A contract response did not match the API shape the SDK understands. */
 export class ContractResponseError extends GuardError {
+  /** The exact field of the contract response that did not match. */
   readonly field: string;
+  /**
+   * The pipeline stage that read the field, when the failure has one
+   * (`"probe"`, `"simulate"`, `"preflight"`, `"assemble"`).
+   *
+   * Additive: a malformed value is reported with the same typed error
+   * everywhere, and the stage says *where* the bad value was seen — the
+   * distinction a caller needs to tell a bad simulation apart from a bad
+   * policy payload.
+   */
+  readonly stage?: string | undefined;
 
-  constructor(message: string, options: { field: string; cause?: unknown }) {
+  constructor(message: string, options: { field: string; stage?: string; cause?: unknown }) {
     super(message, causeOptions(options.cause));
     this.field = options.field;
+    if (options.stage !== undefined) this.stage = options.stage;
   }
 }
 
@@ -143,6 +212,117 @@ export class PolicyDecodeError extends GuardError {
   constructor(message: string, options: { path: string; cause?: unknown }) {
     super(message, causeOptions(options.cause));
     this.path = options.path;
+  }
+}
+
+/**
+/**
+ * Stable identifiers for policy *encoding* failures.
+ *
+ * Deliberately separate from `POLICY_RULE_IDS` (SPEC §8 semantics): these rules
+ * describe whether a draft can be represented as the contract's `PolicyConfig`
+ * at all, not whether the resulting policy is sensible. A SPEC rule id would be
+ * misleading for an integer that simply does not fit the wire type.
+ */
+export type PolicyEncodingRuleId =
+  | "invalid_type"
+  | "missing_field"
+  | "invalid_address"
+  | "invalid_symbol"
+  | "integer_out_of_range";
+
+/** One actionable, field-level reason a policy draft cannot be encoded. */
+export interface PolicyEncodingFailure {
+  /** Dotted path into the policy object, e.g. `protocols[1].fns[0]`. */
+  path: string;
+  /** Stable rule identifier for the failed encoding check. */
+  rule: PolicyEncodingRuleId;
+  /** Human-readable detail naming the offending value. */
+  message: string;
+}
+
+/**
+ * A policy draft could not be encoded as contract `ScVal` because one or more
+ * fields violate the wire contract.
+ *
+ * The policy-editor counterpart to `PolicyDecodeError`: both report a dotted
+ * `path`, so the same form can highlight a field whether the bad value came
+ * from a draft before submission or from a policy read back off-chain. Every
+ * failure is collected before the error is thrown, and no partial `ScVal` is
+ * ever produced — `failures` is the complete list a form should render, while
+ * `path`/`rule`/`field` describe the first one.
+ *
+ * This is invalid caller input (it is caught before any RPC or encoding work),
+ * so it extends `InvalidInputError` and remains an `instanceof TypeError`.
+ */
+export class PolicyEncodeError extends InvalidInputError {
+  /** Dotted path of the first failure; equal to `failures[0]?.path`. */
+  readonly path: string;
+  /** Every encoding failure found, in policy field order. */
+  readonly failures: readonly PolicyEncodingFailure[];
+
+  constructor(failures: readonly PolicyEncodingFailure[]) {
+    const [first, ...rest] = failures;
+    if (first === undefined) {
+      throw new TypeError("PolicyEncodeError requires at least one failure");
+    }
+    super(
+      first.path,
+      first.rule,
+      rest.length === 0 ? first.message : `${first.message} (and ${rest.length} more failure(s))`,
+    );
+    this.path = first.path;
+    this.failures = Object.freeze(failures.map((failure) => Object.freeze({ ...failure })));
+  }
+}
+
+/**
+ * A policy file could not be read from disk (issue #105).
+ *
+ * Distinct from `PolicyDecodeError` on purpose: "the file is not there" is an
+ * operational problem with a filesystem path, while "the bytes are not a
+ * policy" is a content problem. `code` preserves the platform errno
+ * (`ENOENT`, `EACCES`, `EISDIR`, ...) so a shell script can branch on the cause
+ * without parsing a message.
+ */
+export class PolicyFileReadError extends GuardError {
+  /** The path the caller asked to load. */
+  readonly path: string;
+  /** The Node errno code, when the runtime reported one. */
+  readonly code: string | null;
+
+  constructor(message: string, options: { path: string; code?: string | null; cause?: unknown }) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.code = options.code ?? null;
+  }
+}
+
+/**
+ * A policy file parsed as JSON but failed SPEC §8 policy validation (issue #105).
+ *
+ * Every failure is carried, not just the first one: a policy file is edited as
+ * a whole, so reporting one violation per run would turn a form fix into a
+ * guessing game. The validator's structured `path`/`rule`/`message` shape is
+ * reused rather than flattened into a string.
+ */
+export class PolicyValidationError extends GuardError {
+  /** The file that failed validation. */
+  readonly path: string;
+  /** Every policy failure, in the validator's order. */
+  readonly failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+
+  constructor(
+    message: string,
+    options: {
+      path: string;
+      failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+      cause?: unknown;
+    },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.failures = [...options.failures];
   }
 }
 

@@ -33,7 +33,13 @@
  */
 import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { GuardError } from "./errors.ts";
-import { GUARD_AUTH_RESULTS, GUARD_EVENT_TOPICS, decodeAuthDecision, normalizeEventData, type GuardAuthDecision } from "./events.ts";
+import {
+  GUARD_AUTH_RESULTS,
+  GUARD_EVENT_TOPICS,
+  decodeAuthDecision,
+  normalizeEventData,
+  type GuardAuthDecision,
+} from "./events.ts";
 import { bytesToHex, sha256Hex, utf8Length } from "./hash.ts";
 import { topicSymbols } from "./invoke.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
@@ -262,9 +268,7 @@ function diagnosticIdMaterial(event: GuardEventIdentityInput): string {
     ...event.topics,
     stableStringify(event.data),
   ];
-  return parts
-    .map((part) => `${utf8Length(part)}:${part}`)
-    .join("");
+  return parts.map((part) => `${utf8Length(part)}:${part}`).join("");
 }
 
 /**
@@ -317,11 +321,7 @@ export type GuardEventContext = Omit<
 };
 
 /** Interpret an already-decoded topic list plus data as a `GuardEvent`. */
-function interpret(
-  topics: string[],
-  data: unknown,
-  context: GuardEventContext,
-): GuardEvent | null {
+function interpret(topics: string[], data: unknown, context: GuardEventContext): GuardEvent | null {
   const topic = topics[0];
   if (!topic || !KNOWN_TOPICS.has(topic)) return null;
   const { simulationIndex, observedAt, rpcEventId, ...streamFacts } = context;
@@ -540,7 +540,10 @@ function matchesRecentFilter(event: GuardEvent, filter: RecentEventFilter): bool
   if (filter.reason !== undefined && event.decision?.reason !== filter.reason) return false;
   // A diagnostic event has no ledger; a ledger bound therefore excludes it,
   // rather than silently treating `null` as "inside the range".
-  if (filter.fromLedger !== undefined && (event.ledger === null || event.ledger < filter.fromLedger)) {
+  if (
+    filter.fromLedger !== undefined &&
+    (event.ledger === null || event.ledger < filter.fromLedger)
+  ) {
     return false;
   }
   if (filter.toLedger !== undefined && (event.ledger === null || event.ledger > filter.toLedger)) {
@@ -757,6 +760,11 @@ export interface GuardTelemetryConfig {
    * listener restarts. Without one, a restart resumes from the head (skipping
    * events emitted while the process was dead) or replays history (if
    * `startLedger` is used).
+   *
+   * Every load/save is scoped to this listener's network, guard and stream
+   * (issue #282), so one backing store can safely serve several listeners
+   * without cursor cross-talk. A pre-#282 two-method store still works — it
+   * simply keeps a single slot, as it always did.
    */
   cursorStore?: CursorStore;
   /**
@@ -791,6 +799,13 @@ export interface GuardEventDropCounts {
   missingContractId: number;
   /** Events whose `contractId` was present but is not a contract address. */
   malformedContractId: number;
+  /**
+   * Events that failed decoding (e.g. malformed topic or data XDR) (issue #284).
+   *
+   * Isolated to the individual event so one broken event does not fail the
+   * whole page.
+   */
+  malformedEvent: number;
 }
 
 /**
@@ -832,6 +847,13 @@ export interface PollResult {
    * event payload. Additive (issue #287).
    */
   unknownTopics: GuardUnknownTopic[];
+  /**
+   * How many committed events on this page failed decoding (issue #284).
+   *
+   * Isolated to the individual event without failing the page or discarding
+   * its valid neighbors.
+   */
+  malformedEvents: number;
 }
 
 /**
@@ -1050,91 +1072,373 @@ function raceAbort(signal: AbortSignal | undefined, wait: () => Promise<void>): 
 }
 
 /**
- * Reject an unusable pagination or timing option at the public boundary
- * (issue #283), naming the offending field.
- *
- * Every value validated here travels straight into an RPC request or a timer,
- * where a non-finite, non-integer or negative number surfaces as a
- * host-dependent error (or a silently wrong delay) instead of a diagnosis.
- * Checking before any request is issued proves the misconfiguration locally at
- * zero round-trips. An omitted option is always fine — each of these has a
- * documented default — and `0` is a legal `pollIntervalMs` (an unjittered
- * loop with no delay, which the test suites lean on), so only `limit` and the
- * ledger positions require a strictly positive value.
+ * The default bound on how far `watch()` may run ahead of its consumer
+ * (issue #36): pages buffered between the pump and the consumer, on top of
+ * at most one request in flight at a time.
  */
-function assertIntegerOption(
-  value: number | undefined,
-  field: string,
-  requirement: "positive" | "non-negative",
-): void {
-  if (value === undefined) return;
-  const floor = requirement === "positive" ? 1 : 0;
-  if (!Number.isInteger(value) || value < floor) {
+export const DEFAULT_MAX_BUFFERED_PAGES = 2;
+
+/**
+ * Validate the `maxBufferedPages` watch option before the stream starts
+ * (issue #36).
+ *
+ * `undefined` resolves to `DEFAULT_MAX_BUFFERED_PAGES`; anything else must be
+ * a non-negative integer (`0` disables look-ahead and restores strict
+ * consumer-paced polling). An unusable value throws a `TypeError` at stream
+ * start, before any RPC is issued — the same fail-loudly contract as
+ * `resolveTelemetryRetry` (issue #285).
+ */
+function resolveMaxBufferedPages(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_BUFFERED_PAGES;
+  if (!Number.isInteger(value) || value < 0) {
     throw new TypeError(
-      `telemetry: ${field} must be a ${requirement} integer (received ${String(value)})`,
+      `telemetry maxBufferedPages must be a non-negative integer, received ${String(value)}`,
     );
+  }
+  return value;
+}
+
+/** One page of the committed stream, as the watch loop yields it internally. */
+interface WatchPage {
+  /** The page's decoded events — committed plus, when configured, failed-tx. */
+  events: GuardEvent[];
+  /** The `getEvents` cursor this page advances to. */
+  cursor: string;
+  /**
+   * The failed-transaction scan's own cursor for this poll, when it should be
+   * persisted — the `!failedTxScanFailed` gate is applied by the watch loop,
+   * exactly as before (issue #279). Present on every delivered page when the
+   * optional failed-tx stream is configured, `undefined` otherwise.
+   */
+  failedTxCursor?: string;
+}
+
+/**
+ * Bounded look-ahead pump in front of `watch()`'s consumer (issue #36).
+ *
+ * The page loop is a plain async generator: it only fetches when the consumer
+ * pulls, so fetching and processing never overlap at all. This wrapper lets a
+ * background pump fetch the next pages while the consumer works on the current
+ * one — strictly bounded, and without changing what the consumer sees:
+ *
+ * - at most `maxBufferedPages` pages sit between pump and consumer, and the
+ *   pump pulls sequentially, so at most one request is ever in flight;
+ * - a consumer that stops pulling stops the fetches: once the buffer is full
+ *   the pump idles, so a slow consumer throttles the poll loop instead of
+ *   growing an unbounded queue of unconsumed pages (memory growth and
+ *   rate-limit burn);
+ * - delivery order is the source's order and each page is delivered exactly
+ *   once — no loss and no duplicates across prefetch boundaries;
+ * - each page's cursors are saved **at delivery**, before the batch is
+ *   yielded, so the stored cursor is always the consumer's confirmed
+ *   position: buffered-but-undelivered pages are re-read after a restart
+ *   (at-least-once, never lose-the-tail), and an empty page — which is never
+ *   delivered as a batch — still advances the cursor when the pump reads it;
+ * - `maxBufferedPages: 0` bypasses the pump entirely, which keeps strict
+ *   consumer-paced polling (one page fetched per pull) bit-for-bit identical
+ *   to the stream this option pre-dates.
+ *
+ * Abort is honoured promptly even under backpressure: a consumer waiting on an
+ * empty buffer races its wait against the signal, so an abort ends the
+ * iterator without waiting for a pending fetch to settle, and a fetch that
+ * settles after teardown is swallowed by the pump rather than surfacing as an
+ * unhandled rejection.
+ */
+async function* boundedPagePump(
+  source: AsyncGenerator<WatchPage, void, undefined>,
+  maxBufferedPages: number,
+  signal: AbortSignal | undefined,
+  saveCursor: (cursor: string) => Promise<void>,
+  saveFailedTxCursor: (cursor: string) => Promise<void>,
+): AsyncGenerator<GuardEvent[], void, undefined> {
+  if (maxBufferedPages === 0) {
+    // Strict consumer pacing: the loop's own per-poll saves are in effect
+    // (the source runs eager), so this is the pre-pump stream, unchanged.
+    for await (const page of source) {
+      if (page.events.length > 0) yield page.events;
+    }
+    return;
+  }
+
+  /** Pages fetched but not yet delivered to the consumer. */
+  const buffer: WatchPage[] = [];
+  /** Pages in `buffer` plus the pump's single in-flight pull. */
+  let outstanding = 0;
+  let finished = false;
+  let stopped = false;
+  /** True while the consumer is parked waiting for a page (buffer empty). */
+  let waiting = false;
+  let failure: { error: unknown } | null = null;
+  let wake: (() => void) | null = null;
+  let pump: Promise<void> | null = null;
+
+  const notify = (): void => {
+    // A page just became available (or the source ended/failed): the parked
+    // consumer is about to run. Clear its demand flag *now*, synchronously
+    // with the notification — the pump re-checks `waiting` after `await null`,
+    // and by then the flag must say whether the consumer has already come back
+    // for more, not whether it happened to be parked when the page landed
+    // (the consumer's own resume takes several microtask hops through the
+    // race, so without this the pump would misclassify its next pull as
+    // demanded and race the loop past the consumer's own stop).
+    waiting = false;
+    const resolve = wake;
+    wake = null;
+    resolve?.();
+  };
+
+  const runPump = async (): Promise<void> => {
+    try {
+      // Sequential pulls: never more than one request in flight, and never
+      // more than `maxBufferedPages` pages (buffered + in flight) outstanding.
+      while (!stopped && !finished && !signal?.aborted && outstanding < maxBufferedPages) {
+        if (!waiting) {
+          // Speculative pull — the consumer is off processing. One macrotask
+          // of grace first: a consumer that stops pulling after this page (a
+          // `break` after N pages) runs its `return()` inside that turn, so a
+          // consumer-paced stop cannot drag an extra fetch past its own stop,
+          // while a consumer that is merely slow lets the turn pass and the
+          // pump fills its bounded look-ahead. A pull the waiting consumer
+          // asked for skips the grace and issues immediately.
+          await new Promise<void>((resolve) => setImmediate(resolve));
+          if (stopped || finished || signal?.aborted || outstanding >= maxBufferedPages) break;
+        }
+        outstanding += 1;
+        let result: IteratorResult<WatchPage>;
+        try {
+          result = await source.next();
+        } catch (error) {
+          // The source threw (a consumer callback that propagates, a cursor
+          // store failure on the eager path). Deliver the failure unless
+          // teardown already ended the stream — a rejection that lands after
+          // the consumer left is teardown, swallowed, never an unhandled
+          // rejection.
+          outstanding -= 1;
+          if (!stopped) {
+            failure = { error };
+            finished = true;
+            notify();
+          }
+          return;
+        }
+        if (result.done) {
+          outstanding -= 1;
+          finished = true;
+          notify();
+          return;
+        }
+        if (stopped) {
+          // Teardown landed while this fetch was in flight: drop the page.
+          // Its cursors were not saved, so a restart re-reads it — the
+          // at-least-once contract, from the consumer's real position.
+          outstanding -= 1;
+          return;
+        }
+        buffer.push(result.value);
+        notify();
+        // Hand the microtask queue back: the consumer woken by `notify` must
+        // get its say — take the page, stop, or come back for more — before
+        // the pump classifies the next pull as demanded or speculative.
+        await null;
+      }
+    } finally {
+      pump = null;
+    }
+  };
+
+  const ensurePump = (): void => {
+    if (pump === null && !stopped && !finished) pump = runPump();
+  };
+
+  try {
+    while (true) {
+      // Deliver buffered pages before honouring an abort: they were fetched
+      // before it, and the pre-pump stream delivered every fetched page — the
+      // abort was only ever observed *after* the delivery, at the next loop
+      // boundary. Draining first keeps that contract (and the cursor keeps
+      // advancing to the consumer's real position); pages still in the buffer
+      // when the *consumer* stops — a `break` — remain unsaved and are re-read
+      // after a restart.
+      if (buffer.length > 0) {
+        const page = buffer.shift()!;
+        outstanding -= 1;
+        // Refill while the consumer works on this page.
+        ensurePump();
+        // Persist before delivery, mirroring the loop's own save-before-yield
+        // (#37): a consumer that stops after this page resumes from it, while
+        // the pages still buffered stay unsaved and are re-read on restart.
+        await saveCursor(page.cursor);
+        if (page.failedTxCursor !== undefined) await saveFailedTxCursor(page.failedTxCursor);
+        if (page.events.length > 0) yield page.events;
+        continue;
+      }
+      if (failure !== null) {
+        const { error } = failure;
+        failure = null;
+        throw error;
+      }
+      if (finished) return;
+      if (signal?.aborted) return;
+      // Flag demand before waking/starting the pump: a pull that answers a
+      // parked consumer issues immediately; a pull the pump dreams up while
+      // the consumer processes waits out the grace turn above.
+      waiting = true;
+      ensurePump();
+      // Wait for the pump to deliver, end, or fail — raced against the signal
+      // so an abort ends the iterator promptly even with a fetch pending.
+      await raceAbort(
+        signal,
+        () =>
+          new Promise<void>((resolve) => {
+            wake = resolve;
+          }),
+      );
+      waiting = false;
+    }
+  } finally {
+    // Teardown: stop the pump, drop buffered pages, and close the source. An
+    // in-flight fetch is not cancelled (`getEvents` takes no `AbortSignal`),
+    // but the pump swallows its outcome — no unhandled rejection, no
+    // post-teardown delivery — and closing the source makes its loop observe
+    // the abort at the next boundary instead of polling again.
+    //
+    // The close is *not awaited*: an async generator queues `return()` behind
+    // an in-flight `next()`, so awaiting it would make an abort wait for the
+    // very request it cannot cancel — the opposite of a prompt stop. The
+    // generator still finishes as soon as that request settles, because the
+    // queued `return()` runs before its loop can poll again, while the
+    // consumer is already released here. Errors from that close are teardown,
+    // not stream failures, so they are swallowed.
+    stopped = true;
+    buffer.length = 0;
+    void source.return().catch(() => {});
   }
 }
 
 /**
- * Validate one page-read's options before any RPC is issued (issue #283).
- *
- * Shared by `poll()` and `pollFailedTransactions()`, which take the same
- * pagination fields, and by `watch()` before it builds its first page read.
- * The cursor/range contradiction is rejected rather than
- * silently resolved: the RPC refuses a request that mixes the two modes, so a
- * host that wins the silent branch is told nothing about why its second field
- * never took effect.
+ * Strip the watch loop's internal page envelope down to the committed event
+ * batches `mergeGuardEventStreams` consumes. Used by `watchAll()`, which
+ * keeps its consumer-paced per-poll saves: the bounded pump (issue #36)
+ * fronts `watch()` only.
  */
-function validatePollParams(
-  params: {
-    startLedger?: number;
-    cursor?: string;
-    limit?: number;
-  },
-  /** The public entry point, so the contradiction is reported where it was made. */
-  entry: "poll()" | "watch()" | "pollFailedTransactions()",
-): void {
-  assertIntegerOption(params.limit, "limit", "positive");
-  assertIntegerOption(params.startLedger, "startLedger", "positive");
-  if (params.cursor !== undefined && params.startLedger !== undefined) {
-    throw new TypeError(
-      `telemetry: ${entry} accepts either cursor or startLedger, not both — the RPC rejects a request that mixes the two modes`,
-    );
+async function* committedPages(
+  pages: AsyncGenerator<WatchPage, void, undefined>,
+): AsyncGenerator<GuardEvent[], void, undefined> {
+  for await (const page of pages) {
+    yield page.events;
   }
 }
 
 /**
- * Validate one `watch()`/`watchAll()` call's options before any RPC is issued
- * or any timer is armed (issue #283).
+ * Bounded retry policy for a failed committed poll (issue #285).
  *
- * Beyond the fields `poll()` takes, this covers the stream's own controls:
- * `resumeLedger` (meaningless once `startLedger` pins the range — the resume
- * point would be silently ignored), `pollIntervalMs` (non-negative, because a
- * zero-delay loop is a legitimate way to drive the stream from injected
- * `sleep`), and `jitter` (a closed two-value vocabulary — an unknown mode
- * would otherwise fall through to `computePollDelay` and be read as anything).
+ * Every field is optional and additive: with no `retry` option the watch loop
+ * behaves exactly as before — five retries, exponential backoff starting at
+ * 100 ms and capped at the poll interval (see
+ * `DEFAULT_TELEMETRY_RETRY_OPTIONS`). Operators running against RPCs with
+ * different rate limits can now tune recovery latency and request pressure
+ * without forking the loop.
+ *
+ * The policy is **bounded by construction**: retries never continue past
+ * `maxAttempts`, every delay is capped by `maxDelayMs`, and every delay is
+ * abort-aware — a `signal` abort ends the wait immediately and the stream ends
+ * quietly, exactly as in the unconfigured default path.
  */
-function validateWatchParams(params: GuardTelemetryWatchParams): void {
-  validatePollParams(params, "watch()");
-  assertIntegerOption(params.resumeLedger, "resumeLedger", "positive");
-  assertIntegerOption(params.pollIntervalMs, "pollIntervalMs", "non-negative");
-  if (params.jitter !== undefined && params.jitter !== "none" && params.jitter !== "full") {
+export interface TelemetryRetryOptions {
+  /**
+   * Retry attempts allowed after a failed poll. Must be an integer >= 0;
+   * default 5 — the envelope the loop always applied. `0` disables retrying
+   * (the first failure is terminal), preserving the fail-visible
+   * `onStreamError` path.
+   */
+  maxRetries?: number;
+  /**
+   * Base backoff delay in milliseconds, doubled before each subsequent
+   * attempt. Must be finite and >= 0; default 100. `0` retries immediately.
+   */
+  baseDelayMs?: number;
+  /**
+   * Cap on any single backoff delay, in milliseconds. Must be finite and
+   * >= 0; default: the stream's poll interval (`pollIntervalMs`), which is
+   * the cap the loop always applied implicitly.
+   */
+  maxDelayMs?: number;
+}
+
+/** The defaults behind `TelemetryRetryOptions` (issue #285). */
+export const DEFAULT_TELEMETRY_RETRY_OPTIONS = {
+  maxRetries: 5,
+  baseDelayMs: 100,
+} as const;
+
+/** The retry policy with every default filled in. */
+interface ResolvedTelemetryRetry {
+  maxRetries: number;
+  baseDelayMs: number;
+  maxDelayMs: number;
+}
+
+/**
+ * Fill in the retry defaults and reject an unusable policy (issue #285).
+ *
+ * The bounds are checked **before the first poll**, so a typo in the retry
+ * configuration fails loudly at the start of the stream instead of silently
+ * becoming an untuned request storm (or an accidental no-retry) mid-run.
+ */
+function resolveTelemetryRetry(
+  options: TelemetryRetryOptions | undefined,
+  intervalMs: number,
+): ResolvedTelemetryRetry {
+  if (options !== undefined && (typeof options !== "object" || options === null)) {
     throw new TypeError(
-      `telemetry: jitter must be "none" or "full" (received ${JSON.stringify(params.jitter)})`,
+      `telemetry retry must be an object, received ${options === null ? "null" : typeof options}`,
     );
   }
-  if (params.resumeLedger !== undefined && params.startLedger !== undefined) {
+  const maxRetries = options?.maxRetries ?? DEFAULT_TELEMETRY_RETRY_OPTIONS.maxRetries;
+  const baseDelayMs = options?.baseDelayMs ?? DEFAULT_TELEMETRY_RETRY_OPTIONS.baseDelayMs;
+  const maxDelayMs = options?.maxDelayMs ?? intervalMs;
+  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
     throw new TypeError(
-      "telemetry: watch() accepts either resumeLedger or startLedger, not both — an explicit startLedger pins the range, so a resume point could never apply",
+      `telemetry retry.maxRetries must be an integer >= 0, received ${String(maxRetries)}`,
     );
   }
+  if (typeof baseDelayMs !== "number" || !Number.isFinite(baseDelayMs) || baseDelayMs < 0) {
+    throw new TypeError(
+      `telemetry retry.baseDelayMs must be finite and >= 0, received ${String(baseDelayMs)}`,
+    );
+  }
+  if (typeof maxDelayMs !== "number" || !Number.isFinite(maxDelayMs) || maxDelayMs < 0) {
+    throw new TypeError(
+      `telemetry retry.maxDelayMs must be finite and >= 0, received ${String(maxDelayMs)}`,
+    );
+  }
+  return { maxRetries, baseDelayMs, maxDelayMs };
 }
 
 export interface GuardTelemetryWatchParams {
   startLedger?: number;
   pollIntervalMs?: number;
   limit?: number;
+  /**
+   * Bounded look-ahead for the page pump (issue #36).
+   *
+   * At most this many pages are prefetched between the listener and the
+   * consumer, plus at most one request in flight, so a consumer that
+   * processes slower than the poll cadence (a dashboard render loop, a file
+   * logger) throttles the fetches instead of letting the stream race ahead
+   * with pages nobody has consumed (memory growth, rate-limit burn).
+   *
+   * Defaults to `DEFAULT_MAX_BUFFERED_PAGES` (2). `0` disables look-ahead
+   * entirely and restores strict consumer-paced polling: one page fetched per
+   * pull, exactly the stream this option pre-dates. The delivered sequence is
+   * identical either way — same order, no loss, no duplicates — and the
+   * stored cursor never leads the consumer's position: a page's cursor is
+   * saved when — and only when — that page is delivered.
+   *
+   * Must be a non-negative integer; an invalid value throws a `TypeError`
+   * when the stream starts, before any RPC is issued.
+   */
+  maxBufferedPages?: number;
   /**
    * Stop the stream. Abort is honoured at **loop boundaries**: before the first
    * request, before each poll, and during the delay between polls (the default
@@ -1153,6 +1457,16 @@ export interface GuardTelemetryWatchParams {
   jitter?: TelemetryJitter;
   /** Optional RNG injector for deterministic unit testing (defaults to Math.random). */
   rng?: () => number;
+  /**
+   * Bounded retry policy for a failed committed poll (issue #285).
+   *
+   * Omitted — the default — the loop retries a failed poll five times with
+   * exponential backoff from 100 ms, capped at the poll interval, exactly as
+   * before. Every configured value is validated before the first poll; an
+   * invalid policy throws a `TypeError` when the stream starts, before any RPC
+   * is issued.
+   */
+  retry?: TelemetryRetryOptions;
   /**
    * Optional sleep handler, for testing without wall-clock delays.
    *
@@ -1193,23 +1507,20 @@ export interface GuardTelemetryWatchParams {
    */
   onUnknownTopics?: (unknownTopics: readonly GuardUnknownTopic[]) => void;
   /**
-   * Called once per failed-transaction scan failure, while the committed
-   * stream keeps its own delivery untouched (issue #280).
+   * Called once for each successful page that contains at least one committed event
+   * that failed decoding (e.g. malformed XDR) (issue #284).
    *
-   * The opt-in `failedTx` stream can stop delivering — a rejected
-   * `getTransactions` page, or the head probe that seeds its cursor — without
-   * that being visible anywhere: committed events arrive as if nothing were
-   * missing. This callback is that visibility: it receives the failure that
-   * skipped a scan, and coverage resumes from the *unchanged* failed-tx cursor
-   * on the next loop, so no unread failed transaction is passed over.
-   *
-   * Failures stay isolated: the callback runs after the scan has already been
-   * abandoned, and a callback that throws is swallowed — an observability sink
-   * cannot stop telemetry, the same contract as `onGap` and
-   * `onUnknownTopics`. Omitting it changes nothing except who is told; the
-   * failure is still logged when a logger is configured.
+   * The callback receives the count of malformed events on that page — never
+   * raw XDR or the source event payload. A throwing callback is isolated so an
+   * observability sink cannot stop the stream.
    */
-  onFailedTxError?: (error: unknown) => void;
+  onMalformed?: (count: number) => void;
+  /**
+   * Diagnostic callback invoked per malformed event with safe metadata
+   * (ledger and transaction hash) — never the malformed payload itself (issue #284).
+   * A throwing callback is isolated so an observability sink cannot stop the stream.
+   */
+  onMalformedEvent?: (diagnostic: { ledger: number; transactionHash: string | null }) => void;
   /**
    * Called once when the committed stream ends because of a terminal RPC
    * failure — after the bounded retry envelope is exhausted. Fail-visible
@@ -1251,6 +1562,55 @@ export interface GuardTelemetryCountersOptions {
   clock?: () => number;
 }
 
+/**
+ * How complete the counters' view of the guard's decisions is (#321).
+ *
+ * - `none` — no decision has reached the counters, so every count is zero for
+ *   lack of input rather than because the guard decided nothing.
+ * - `incomplete` — decisions were counted, but at least one decision-bearing
+ *   stream has never been fed. A zero `blocked` count on this status means
+ *   "no refusal was observed on the stream(s) in `seen`", not "nothing was
+ *   refused".
+ * - `complete` — both the committed stream and the diagnostic stream have fed
+ *   at least one decision, so the counters cover the whole decision surface a
+ *   `watchAll()` consumer sees.
+ */
+export type GuardTelemetryCoverageStatus = "none" | "incomplete" | "complete";
+
+/**
+ * What the counters have actually observed, as opposed to what they counted.
+ *
+ * `stats()` alone cannot answer "was nothing blocked?" — a listener that only
+ * tailed committed ledger events never sees a blocked decision at all, because
+ * the guard's `Err` rolls that event back before broadcast. This metadata makes
+ * the difference explicit instead of leaving a zero to be misread.
+ *
+ * Counts here are **cumulative since construction or the last
+ * `resetStats()`**, not windowed: coverage is a fact about what was wired up,
+ * which eviction must not erase.
+ */
+export interface GuardTelemetryCoverage {
+  /** Decisions fed to the counters since construction or the last reset. */
+  observed: number;
+  /** Per-stream decision counts since construction or the last reset. */
+  streams: Record<GuardEventStream, number>;
+  /**
+   * Streams that have fed at least one decision, in stable order
+   * (`committed`, `diagnostic`, `failed_tx`).
+   */
+  seen: GuardEventStream[];
+  /**
+   * Streams still required for `complete`, in stable order. Empty when the
+   * status is `complete`; both decision-bearing streams when it is `none`.
+   *
+   * `failed_tx` is *not* required: it carries the same blocked decisions the
+   * diagnostic stream does, so observing it alone cannot make the counters
+   * claim complete coverage of the committed side.
+   */
+  missing: GuardEventStream[];
+  status: GuardTelemetryCoverageStatus;
+}
+
 /** A snapshot of the sliding-window counters. Never mutated by callers. */
 export interface GuardTelemetryStats {
   /** Decisions observed in the window whose verdict was `allowed`. */
@@ -1268,6 +1628,12 @@ export interface GuardTelemetryStats {
    * `Date.now()`; treat it as the start of the retained interval.
    */
   windowStart: number;
+  /**
+   * Which streams fed these counters (#321). Additive; a consumer that only
+   * reads the counts above is unaffected. Read `coverage.status` before
+   * treating a zero `blocked` count as evidence that nothing was refused.
+   */
+  coverage: GuardTelemetryCoverage;
 }
 
 /** One decision recorded in the window, retained for eviction. */
@@ -1291,6 +1657,20 @@ export class GuardDecisionCounters {
   private allowed = 0;
   private blocked = 0;
   private readonly byReason = new Map<string, number>();
+  /** Decisions fed to the counters since construction or the last reset. */
+  private observations = 0;
+
+  /**
+   * Per-stream decision counts since construction or the last reset (#321).
+   * Not windowed: coverage records which streams were ever wired up, a fact
+   * eviction must not erase.
+   */
+  private readonly streamCounts: Record<GuardEventStream, number> = {
+    committed: 0,
+    diagnostic: 0,
+    failed_tx: 0,
+  };
+
   /**
    * High-water mark of the injected clock (#320).
    *
@@ -1328,6 +1708,8 @@ export class GuardDecisionCounters {
     const verdict = isAllowedDecision(event.decision) ? "allowed" : "blocked";
     const reason = event.decision.reason ?? null;
     const at = this.monotonicNow();
+    this.observations += 1;
+    this.streamCounts[event.stream] += 1;
     this.entries.push({ verdict, reason, at });
     if (verdict === "allowed") this.allowed += 1;
     else {
@@ -1380,6 +1762,52 @@ export class GuardDecisionCounters {
     }
   }
 
+  /**
+   * Which decision streams have fed these counters (#321), as a fresh copy.
+   *
+   * Status is `none` until a decision arrives, `complete` only when both the
+   * committed and the diagnostic streams have delivered one, and `incomplete`
+   * in between. A listener fed only by `watch()` — or only by simulation
+   * diagnostics — therefore reports `incomplete` and names the missing stream,
+   * instead of presenting a one-sided count as the whole picture.
+   */
+  coverage(): GuardTelemetryCoverage {
+    const order: readonly GuardEventStream[] = ["committed", "diagnostic", "failed_tx"];
+    const seen = order.filter((stream) => this.streamCounts[stream] > 0);
+    const required: readonly GuardEventStream[] = ["committed", "diagnostic"];
+    const missing = required.filter((stream) => this.streamCounts[stream] === 0);
+    const status: GuardTelemetryCoverageStatus =
+      this.observations === 0 ? "none" : missing.length === 0 ? "complete" : "incomplete";
+    return {
+      observed: this.observations,
+      streams: { ...this.streamCounts },
+      seen,
+      missing: [...missing],
+      status,
+    };
+  }
+
+  /**
+   * Clear the window, the counts, and the coverage record (#321).
+   *
+   * Reset is total on purpose: leaving coverage behind would let a caller
+   * clear the counts and then read `complete` over an empty window, which is
+   * exactly the confusion the coverage metadata exists to prevent. The
+   * monotonic clock high-water mark is dropped too, so the next observation
+   * establishes a fresh epoch rather than inheriting the old one.
+   */
+  reset(): void {
+    this.entries.length = 0;
+    this.allowed = 0;
+    this.blocked = 0;
+    this.byReason.clear();
+    this.observations = 0;
+    this.streamCounts.committed = 0;
+    this.streamCounts.diagnostic = 0;
+    this.streamCounts.failed_tx = 0;
+    this.lastObservedAt = null;
+  }
+
   /** A fresh snapshot; callers may mutate it freely. */
   stats(): GuardTelemetryStats {
     this.evict();
@@ -1388,6 +1816,7 @@ export class GuardDecisionCounters {
       blocked: this.blocked,
       byReason: Object.fromEntries(this.byReason),
       windowStart: this.entries.length > 0 ? this.entries[0]!.at : this.monotonicNow(),
+      coverage: this.coverage(),
     };
   }
 }
@@ -1568,8 +1997,7 @@ export async function* mergeGuardEventStreams(
         );
         let nextCommitted = 0;
         for (const event of page) {
-          const ordered =
-            event.stream === "committed" ? orderedCommitted[nextCommitted++]! : event;
+          const ordered = event.stream === "committed" ? orderedCommitted[nextCommitted++]! : event;
           if (emitted.has(ordered.id)) continue;
           emitted.add(ordered.id);
           yield ordered;
@@ -1599,19 +2027,104 @@ export async function* mergeGuardEventStreams(
   }
 }
 
-export interface CursorStore {
-  save(cursor: string): Promise<void>;
-  load(): Promise<string | null>;
+/**
+ * Which of a listener's two durable streams a cursor belongs to (issue #282).
+ *
+ * The two streams' cursors are opaque and **not interchangeable**: resuming
+ * the committed `getEvents` stream from a failed-transaction scan cursor (or
+ * the reverse) would replay or skip events. The kind is part of the cursor's
+ * durable identity so a shared backing store cannot mix them.
+ */
+export type CursorStreamKind = "events" | "failed_tx";
+
+/**
+ * The stable identity of one durable cursor slot (issue #282).
+ *
+ * A cursor is only meaningful relative to **one** stream of one guard on one
+ * network: the same guard address on testnet and mainnet are different chains,
+ * and two guards on one chain are different event streams. Scoping every
+ * record to this triple is what lets one backing store (a file, a Redis
+ * instance, a database) safely serve many listeners without one resuming from
+ * another's position.
+ */
+export interface CursorStoreScope {
+  /** Stable network identity — the RPC endpoint host the listener polls. */
+  network: string;
+  /** Canonical guard contract id (`C...`) the cursor belongs to. */
+  guard: string;
+  /** Which of the listener's two streams the cursor resumes. */
+  stream: CursorStreamKind;
 }
 
+/**
+ * Persistence adapter for a watch cursor.
+ *
+ * The scope argument is **additive and optional**: an existing two-method
+ * implementation (`save(cursor)` / `load()`) still satisfies this interface
+ * and behaves exactly as before (issue #282 keeps the contract source
+ * compatible). A store that wants to serve several listeners from one backing
+ * resource accepts the scope and keys its records by it — the SDK's
+ * `InMemoryCursorStore` does, and the listener always passes a concrete
+ * scope.
+ */
+export interface CursorStore {
+  save(cursor: string, scope?: CursorStoreScope): Promise<void>;
+  load(scope?: CursorStoreScope): Promise<string | null>;
+}
+
+/**
+ * The default in-memory store, keyed by full cursor scope (issue #282).
+ *
+ * One instance can therefore serve listeners for different guards, networks
+ * and streams without their cursors colliding, while unscoped `save()` /
+ * `load()` calls (a direct user, or a caller that predates scoping) share one
+ * default slot exactly as the previous single-slot implementation did.
+ */
 export class InMemoryCursorStore implements CursorStore {
-  private cursor: string | null = null;
-  async save(cursor: string): Promise<void> {
-    this.cursor = cursor;
+  private readonly cursors = new Map<string, string>();
+
+  /** Key for direct, unscoped use — the pre-#282 single-slot behavior. */
+  private static readonly UNSCOPED_KEY = "\u0000unscoped\u0000";
+
+  /** Stable map key for a scope; unscoped calls share one slot. */
+  private static key(scope?: CursorStoreScope): string {
+    return scope === undefined
+      ? InMemoryCursorStore.UNSCOPED_KEY
+      : `${scope.network}\u0000${scope.guard}\u0000${scope.stream}`;
   }
-  async load(): Promise<string | null> {
-    return this.cursor;
+
+  async save(cursor: string, scope?: CursorStoreScope): Promise<void> {
+    this.cursors.set(InMemoryCursorStore.key(scope), cursor);
   }
+  async load(scope?: CursorStoreScope): Promise<string | null> {
+    return this.cursors.get(InMemoryCursorStore.key(scope)) ?? null;
+  }
+}
+
+/**
+ * Derive the stable network identity used in cursor scopes (issue #282).
+ *
+ * The RPC endpoint's host is the identity: the same guard address on two hosts
+ * of the same network resumes the same stream, while two networks never share
+ * one — even behind a failover URL, which is precisely the mis-resume the
+ * scope exists to prevent. Falls back to `"unknown-network"` when no URL is
+ * available (a purely local listener), rather than fabricating one.
+ */
+function cursorNetworkIdentity(config: GuardTelemetryConfig): string {
+  // `serverUrl` is the stellar-sdk server's own URL; a purely local listener
+  // (no transport) has no server at all, hence the defensive read.
+  const serverUrl = (config.server as unknown as { serverUrl?: unknown } | undefined)?.serverUrl;
+  const candidates: Array<unknown> = [config.rpcUrl, serverUrl];
+  for (const candidate of candidates) {
+    if (candidate instanceof URL) return candidate.host || "unknown-network";
+    if (typeof candidate !== "string" || candidate === "") continue;
+    try {
+      return new URL(candidate).host || "unknown-network";
+    } catch {
+      // Not a URL — try the next candidate rather than trusting a raw string.
+    }
+  }
+  return "unknown-network";
 }
 
 /**
@@ -1669,6 +2182,12 @@ export class GuardTelemetryListener {
    * deliberately separate from `activeCursorStore` (issue #279).
    */
   readonly activeFailedTxCursorStore: CursorStore;
+
+  /**
+   * Stable network identity for this listener's cursor scopes (issue #282):
+   * the RPC endpoint host, shared by every cursor slot this listener writes.
+   */
+  private readonly cursorNetwork: string;
 
   /**
    * Null unless `config.buffer` is set: with no buffer requested, there is no
@@ -1804,6 +2323,7 @@ export class GuardTelemetryListener {
     const resolved = config as GuardTelemetryConfig;
     this.config = resolved;
     this.guardContractId = canonicalContractId(resolved.guard) ?? resolved.guard ?? "";
+    this.cursorNetwork = cursorNetworkIdentity(resolved);
     this.logger = resolveLogger(resolved.logger);
     this.buffer = resolved.buffer ? new GuardEventRingBuffer(resolved.buffer.max) : null;
     this.activeCursorStore = resolved.cursorStore ?? new InMemoryCursorStore();
@@ -1829,12 +2349,37 @@ export class GuardTelemetryListener {
   }
 
   /**
+   * The durable scope for one of this listener's cursor slots (issue #282).
+   *
+   * Every `load`/`save` on a cursor store carries this identity, so two
+   * listeners that share one backing store — different guards, different
+   * networks, or the committed stream vs the failed-transaction scan — can
+   * never overwrite or resume from each other's cursor.
+   */
+  private cursorScope(stream: CursorStreamKind): CursorStoreScope {
+    return { network: this.cursorNetwork, guard: this.guardContractId, stream };
+  }
+
+  /**
    * Snapshot of the sliding-window decision counters, or `null` when counters
    * were not opted into. The returned object is a copy: mutating it does not
    * affect the listener.
    */
   stats(): GuardTelemetryStats | null {
     return this.counters ? this.counters.stats() : null;
+  }
+
+  /**
+   * Clear the sliding-window counters, including their coverage record
+   * (#321). A no-op when counters were not opted into.
+   *
+   * The listener's own state — cursors, buffer, health — is untouched: this
+   * resets the counter view, not the stream. Events already retained by
+   * `recent()` are not re-counted after a reset, so a subsequent `watchAll()`
+   * counts only decisions observed from that point on.
+   */
+  resetStats(): void {
+    this.counters?.reset();
   }
 
   /**
@@ -1857,6 +2402,27 @@ export class GuardTelemetryListener {
    */
   recent(filter?: RecentEventFilter): GuardEvent[] {
     return this.buffer ? this.buffer.recent(filter) : [];
+  }
+
+  /**
+   * The retained window as bounded JSON Lines (#324): one
+   * `serializeEventRecord()` line per event, oldest first, `filter` applied
+   * exactly as `recent()` applies it.
+   *
+   * The export is a string, never a file: where (or whether) to persist it is
+   * the caller's decision, so the SDK keeps its no-filesystem-access
+   * discipline. With no `buffer` configured the result is `''`.
+   *
+   * The boundedness is the buffer's: this returns at most `buffer.max` lines,
+   * so an incident handoff is a snapshot of the configured window, not an
+   * unbounded dump. Each line is JSON-safe (a `bigint` is a decimal string, a
+   * byte array is `bytes:<hex>`), and the opt-in `raw` payload is **never**
+   * serialized — the projection has a fixed field list that does not include
+   * it, so exporting cannot leak a host payload that `includeRaw` retained for
+   * debugging.
+   */
+  recentJsonLines(filter?: RecentEventFilter): string {
+    return serializeEventLines(this.recent(filter));
   }
 
   /** Record decoded events into the opt-in buffer, if one is configured. */
@@ -1943,17 +2509,18 @@ export class GuardTelemetryListener {
       return { events: [], cursor };
     }
 
-    const request: rpc.Api.GetTransactionsRequest = params.cursor !== undefined
-      ? {
-          pagination: {
-            cursor: params.cursor,
-            ...(params.limit !== undefined ? { limit: params.limit } : {}),
-          },
-        }
-      : {
-          startLedger: params.startLedger!,
-          ...(params.limit !== undefined ? { pagination: { limit: params.limit } } : {}),
-        };
+    const request: rpc.Api.GetTransactionsRequest =
+      params.cursor !== undefined
+        ? {
+            pagination: {
+              cursor: params.cursor,
+              ...(params.limit !== undefined ? { limit: params.limit } : {}),
+            },
+          }
+        : {
+            startLedger: params.startLedger!,
+            ...(params.limit !== undefined ? { pagination: { limit: params.limit } } : {}),
+          };
 
     try {
       const response = await this.config.server.getTransactions(request);
@@ -1991,13 +2558,23 @@ export class GuardTelemetryListener {
    * than silent. The topic vocabulary then narrows further, and an
    * unrecognised topic is dropped rather than guessed at.
    */
-  async poll(params: { startLedger?: number; cursor?: string; limit?: number } = {}): Promise<PollResult> {
-    // Rejected before the request object exists, let alone a request (#283):
-    // bad pagination must cost zero round trips and name its own field.
-    validatePollParams(params, "poll()");
+  async poll(
+    params: {
+      startLedger?: number;
+      cursor?: string;
+      limit?: number;
+      onMalformedEvent?:
+        | ((diagnostic: { ledger: number; transactionHash: string | null }) => void)
+        | undefined;
+    } = {},
+  ): Promise<PollResult> {
     const request = (
       params.cursor
-        ? { filters: [{ type: "contract" as const, contractIds: [this.config.guard] }], cursor: params.cursor, limit: params.limit }
+        ? {
+            filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
+            cursor: params.cursor,
+            limit: params.limit,
+          }
         : {
             filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
             startLedger: params.startLedger,
@@ -2024,6 +2601,7 @@ export class GuardTelemetryListener {
       foreignContract: 0,
       missingContractId: 0,
       malformedContractId: 0,
+      malformedEvent: 0,
     };
     const unknownTopicCounts = new Map<string, number>();
     for (const event of response.events) {
@@ -2043,11 +2621,14 @@ export class GuardTelemetryListener {
         dropped.foreignContract += 1;
         continue;
       }
-      const topics = event.topic.map((topic) => String(scValToNative(topic)));
-      const decoded = interpret(
-        topics,
-        decodeData(event.value),
-        {
+
+      let topics: string[];
+      // Declared without an initializer: the try assigns it, and the catch
+      // `continue`s — control only reaches the checks below with a value.
+      let decoded: GuardEvent | null;
+      try {
+        topics = event.topic.map((topic) => String(scValToNative(topic)));
+        decoded = interpret(topics, decodeData(event.value), {
           source: "ledger",
           stream: "committed",
           contractId,
@@ -2065,8 +2646,29 @@ export class GuardTelemetryListener {
           // `includeRaw` is off unless the listener was constructed with it, so
           // the default path keeps discarding the RPC object (issue #94).
           ...(this.config.includeRaw ? { raw: event } : {}),
-        },
-      );
+        });
+      } catch {
+        // Isolate decoding failures to the individual committed event and
+        // continue decoding the rest of the page (issue #284).
+        // Log safely without logging raw payload contents by default.
+        dropped.malformedEvent += 1;
+        this.logger.debug("skipped malformed committed event", {
+          guard: this.config.guard,
+          ledger: event.ledger,
+        });
+        if (params.onMalformedEvent) {
+          try {
+            params.onMalformedEvent({
+              ledger: event.ledger,
+              transactionHash: event.txHash ?? null,
+            });
+          } catch {
+            // Observer isolation: an observer callback cannot fail the poll.
+          }
+        }
+        continue;
+      }
+
       if (decoded) {
         events.push(decoded);
       } else {
@@ -2082,7 +2684,8 @@ export class GuardTelemetryListener {
       dropped.unknownTopic +
       dropped.foreignContract +
       dropped.missingContractId +
-      dropped.malformedContractId;
+      dropped.malformedContractId +
+      dropped.malformedEvent;
     this.logger.debug("telemetry page received", {
       guard: this.config.guard,
       events: events.length,
@@ -2098,6 +2701,7 @@ export class GuardTelemetryListener {
       cursor: response.cursor,
       latestLedger: response.latestLedger,
       dropped,
+      malformedEvents: dropped.malformedEvent,
       // Best-effort: a host that omits the retention boundary gets no gap
       // detection, rather than a boundary invented from `latestLedger`.
       oldestLedger,
@@ -2164,6 +2768,19 @@ export class GuardTelemetryListener {
    * no `AbortSignal` (see the README's cancellation note), so the listener can
    * stop *issuing* requests immediately but cannot cancel one already sent.
    *
+   * ## Backpressure
+   *
+   * A bounded page pump fronts the consumer (issue #36): at most
+   * `maxBufferedPages` pages (`DEFAULT_MAX_BUFFERED_PAGES`, 2, by default)
+   * are prefetched ahead of the consumer plus at most one request in flight,
+   * and a consumer that stops pulling stops the fetches once that bound is
+   * reached — a slow consumer throttles the poll loop instead of letting
+   * pages pile up unconsumed. `maxBufferedPages: 0` restores strict
+   * consumer-paced polling. The delivered sequence is identical either way —
+   * same order, no loss, no duplicates — and each page's cursors are saved
+   * when the page is delivered, so the stored cursor never leads the
+   * consumer's position.
+   *
    * ## Concurrency
    *
    * One listener supports one active stream. Starting a second `watch()` or
@@ -2175,10 +2792,20 @@ export class GuardTelemetryListener {
   async *watch(
     params: GuardTelemetryWatchParams = {},
   ): AsyncGenerator<GuardEvent[], void, undefined> {
+    // Validate the look-ahead bound before the lease is taken and before any
+    // RPC is issued (issue #36): an unusable value must fail loudly at stream
+    // start, not degrade into an unbounded queue of unconsumed pages.
+    const maxBufferedPages = resolveMaxBufferedPages(params.maxBufferedPages);
     const lease = this.acquireStreamLease("watch");
     this.healthStream = "watch";
     try {
-      yield* this.watchStream(params);
+      yield* boundedPagePump(
+        this.watchStream(params, { deferCursorSave: maxBufferedPages > 0 }),
+        maxBufferedPages,
+        params.signal,
+        (cursor) => this.activeCursorStore.save(cursor, this.cursorScope("events")),
+        (cursor) => this.activeFailedTxCursorStore.save(cursor, this.cursorScope("failed_tx")),
+      );
     } finally {
       this.finishHealthStream(params.signal);
       this.healthStream = null;
@@ -2198,18 +2825,27 @@ export class GuardTelemetryListener {
     }
   }
 
-  /** The implementation behind `watch()`, also used by `watchAll()`. */
+  /**
+   * The implementation behind `watch()`, also used by `watchAll()`.
+   *
+   * With `deferCursorSave` (issue #36's bounded page pump), every page —
+   * empty ones included — is yielded with the cursors it advances, and the
+   * caller persists them at delivery; without it, this loop persists each
+   * poll's cursors itself, exactly as before.
+   */
   private async *watchStream(
     params: GuardTelemetryWatchParams = {},
-  ): AsyncGenerator<GuardEvent[], void, undefined> {
-    // The public boundary: a misconfiguration is reported with its field name
-    // before the first RPC probe, the cursor-store load, or the timer (#283).
-    validateWatchParams(params);
+    options: { deferCursorSave?: boolean } = {},
+  ): AsyncGenerator<WatchPage, void, undefined> {
     const interval = params.pollIntervalMs ?? 5_000;
     const jitter = params.jitter ?? "full";
     const rng = params.rng ?? Math.random;
     const signal = params.signal;
     const sleep: PollSleep = params.sleep ?? defaultPollSleep;
+    // Validate the retry policy before the first poll (issue #285): an
+    // unusable configuration must fail loudly here, not degrade into an
+    // untuned request storm or an accidental no-retry mid-stream.
+    const retry = resolveTelemetryRetry(params.retry, interval);
     let cursor = params.cursor;
     let startLedger = params.startLedger;
     let failedTxCursor: string | undefined;
@@ -2217,22 +2853,25 @@ export class GuardTelemetryListener {
     this.consecutiveFailures = 0;
     this.lastErrorAt = null;
 
-    // An abort that landed before the iterator was first pulled must not probe
-    // the RPC — not even the `getLatestLedger` call that resolves the default
-    // start ledger. Teardown gets no requests at all, not one.
+    // Honor a pre-aborted signal before every startup request (issue #281).
     if (signal?.aborted) return;
 
     this.healthState = "running";
     this.healthStartedAt = this.nowIso();
 
     if (cursor === undefined && startLedger === undefined) {
-      cursor = (await this.activeCursorStore.load()) ?? undefined;
+      if (signal?.aborted) return;
+      cursor = (await this.activeCursorStore.load(this.cursorScope("events"))) ?? undefined;
     }
 
     if (this.config.failedTx) {
+      if (signal?.aborted) return;
       // The failed-transaction stream resumes from its own store, never from
-      // `cursorStore` (issue #279): the cursors are not interchangeable.
-      failedTxCursor = (await this.activeFailedTxCursorStore.load()) ?? undefined;
+      // `cursorStore` (issue #279): the cursors are not interchangeable. The
+      // scope makes that separation durable even if a caller hands both
+      // streams the same backing store (issue #282).
+      failedTxCursor =
+        (await this.activeFailedTxCursorStore.load(this.cursorScope("failed_tx"))) ?? undefined;
       this.failedTxCursorState = failedTxCursor ?? null;
     }
 
@@ -2245,10 +2884,55 @@ export class GuardTelemetryListener {
       expectedFrom = params.resumeLedger === undefined ? null : params.resumeLedger + 1;
     } else {
       if (startLedger === undefined) {
-        const latest = await this.config.server.getLatestLedger();
-        startLedger = Math.max(1, latest.sequence - 1);
+        if (signal?.aborted) return;
+        try {
+          const latest = await this.config.server.getLatestLedger();
+          startLedger = Math.max(1, latest.sequence - 1);
+        } catch (error) {
+          if (signal?.aborted) {
+            this.logger.debug("telemetry watch aborted with a request in flight", {
+              guard: this.config.guard,
+            });
+            return;
+          }
+          this.recordFailedPoll();
+          let terminal: unknown = error;
+          let attempts = 0;
+          let recovered = false;
+          while (attempts < retry.maxRetries) {
+            attempts += 1;
+            const backoff = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempts - 1));
+            await raceAbort(signal, () => sleep(backoff, signal));
+            if (signal?.aborted) return;
+            try {
+              const latest = await this.config.server.getLatestLedger();
+              startLedger = Math.max(1, latest.sequence - 1);
+              recovered = true;
+              break;
+            } catch (retryError) {
+              if (signal?.aborted) return;
+              terminal = retryError;
+              this.recordFailedPoll();
+            }
+          }
+          if (!recovered) {
+            this.logger.warn(
+              `telemetry startup latest ledger resolution failed: ${terminal instanceof Error ? terminal.message : String(terminal)}`,
+              { guard: this.config.guard },
+            );
+            this.lastError = terminal;
+            this.lastErrorAt = this.nowIso();
+            this.healthState = "failed";
+            if (params.onStreamError) params.onStreamError(terminal);
+            return;
+          }
+        }
       }
-      expectedFrom = startLedger;
+      // Every path that leaves `startLedger` undefined has already returned,
+      // but the compiler cannot see that through the try/catch — and `null`
+      // means the same thing here anyway: gap detection is skipped rather
+      // than guessed at.
+      expectedFrom = startLedger ?? null;
     }
 
     while (!signal?.aborted) {
@@ -2259,6 +2943,7 @@ export class GuardTelemetryListener {
           ...(startLedger !== undefined ? { startLedger } : {}),
           ...(cursor !== undefined ? { cursor } : {}),
           ...(params.limit !== undefined ? { limit: params.limit } : {}),
+          ...(params.onMalformedEvent ? { onMalformedEvent: params.onMalformedEvent } : {}),
         });
         this.recordHealthyPoll(page);
       } catch (error) {
@@ -2279,13 +2964,18 @@ export class GuardTelemetryListener {
         // `onStreamError` once with the terminal error and complete the
         // iterator normally. A callback that throws propagates (the consumer
         // asked for it); without a callback the error is retrievable via
-        // `getLastError()`.
-        const maxAttempts = 5;
+        // `getLastError()`. The envelope is the resolved retry policy
+        // (issue #285); its defaults are the historical five retries.
         let terminal: unknown = error;
         let recovered: PollResult | null = null;
-        while (attempts < maxAttempts) {
+        while (attempts < retry.maxRetries) {
           attempts += 1;
-          const backoff = Math.min(interval, 100 * 2 ** (attempts - 1));
+          // Exponential backoff, capped: the base doubles per attempt and can
+          // never exceed the cap (the poll interval by default). `Math.min`
+          // also absorbs the float overflow of `2 ** n` for a large budget.
+          const backoff = Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** (attempts - 1));
+          // Abort-aware: an abort during the backoff ends the stream promptly
+          // instead of waiting out the delay.
           await raceAbort(signal, () => sleep(backoff, signal));
           if (signal?.aborted) return;
           try {
@@ -2293,6 +2983,7 @@ export class GuardTelemetryListener {
               ...(startLedger !== undefined ? { startLedger } : {}),
               ...(cursor !== undefined ? { cursor } : {}),
               ...(params.limit !== undefined ? { limit: params.limit } : {}),
+              ...(params.onMalformedEvent ? { onMalformedEvent: params.onMalformedEvent } : {}),
             });
             break;
           } catch (retryError) {
@@ -2321,6 +3012,7 @@ export class GuardTelemetryListener {
       startLedger = undefined;
 
       let failedTxEvents: GuardEvent[] = [];
+      let scannedFailedTxCursor: string | undefined;
       if (this.config.failedTx) {
         try {
           const failedTxPage = await this.pollFailedTransactions({
@@ -2329,16 +3021,14 @@ export class GuardTelemetryListener {
           });
           failedTxCursor = failedTxPage.cursor;
           failedTxEvents = failedTxPage.events;
-          // A page that failed inside the scanner reports it on its result,
-          // with the cursor left exactly where it was — surfaced, not swallowed.
-          if (failedTxPage.error !== undefined) {
-            this.reportFailedTxError(params, failedTxPage.error);
-          }
-          // Persist the failed-tx stream's own cursor, independently of the
-          // getEvents cursor (issue #279). A failed scan leaves the stored
-          // cursor untouched so the page is retried after a restart.
+          // A failed scan leaves the stored cursor untouched so the page is
+          // retried after a restart (issue #279). Persisting the failed-tx
+          // stream's own cursor — independently of the getEvents cursor — is
+          // deferred to the yield site below, alongside the events cursor, so
+          // the whole poll's cursors move together (issue #36: at delivery in
+          // deferred mode, per poll in eager mode).
           if (!this.failedTxScanFailed) {
-            await this.activeFailedTxCursorStore.save(failedTxPage.cursor);
+            scannedFailedTxCursor = failedTxPage.cursor;
           }
         } catch (error) {
           // This optional stream must not interrupt committed event polling.
@@ -2397,11 +3087,49 @@ export class GuardTelemetryListener {
         }
       }
 
+      if (params.onMalformed && page.dropped.malformedEvent > 0) {
+        try {
+          params.onMalformed(page.dropped.malformedEvent);
+        } catch {
+          // Observability must not be able to stop telemetry: the same isolation
+          // contract as `onGap`.
+        }
+      }
+
       const events = [...page.events, ...failedTxEvents];
 
-      await this.activeCursorStore.save(page.cursor);
-      
-      if (events.length > 0) yield events;
+      // Counters are fed here, at the one place a page's events become the
+      // caller's, so every entry point counts each committed/failed-tx
+      // decision exactly once (#321). `watchAll()` records only the
+      // diagnostic half of its merged stream for the same reason.
+      for (const event of events) this.counters?.record(event);
+
+      // Persist this poll's cursors before the page reaches the consumer
+      // (#37): a consumer that stops after this page resumes from it
+      // (at-least-once, never lose-the-tail). Deferred mode (issue #36's
+      // bounded page pump) hands that responsibility to the pump, which
+      // saves at delivery — the one place a page's events become the real
+      // consumer's — so the stored cursor never leads the consumer's
+      // position by a buffered page.
+      if (!options.deferCursorSave) {
+        await this.activeCursorStore.save(page.cursor, this.cursorScope("events"));
+        if (scannedFailedTxCursor !== undefined) {
+          await this.activeFailedTxCursorStore.save(
+            scannedFailedTxCursor,
+            this.cursorScope("failed_tx"),
+          );
+        }
+      }
+
+      // In deferred mode every page is yielded — an empty one included — so
+      // the pump still advances the cursors of polls that produced no batch.
+      if (events.length > 0 || options.deferCursorSave) {
+        yield {
+          events,
+          cursor: page.cursor,
+          ...(scannedFailedTxCursor !== undefined ? { failedTxCursor: scannedFailedTxCursor } : {}),
+        };
+      }
 
       // Advance confirmed coverage. A page that reached the RPC's head confirms
       // everything up to `latestLedger`; a full page (a partial window, more to
@@ -2412,9 +3140,7 @@ export class GuardTelemetryListener {
         .filter((ledger): ledger is number => ledger !== null);
       const fullPage = params.limit !== undefined && page.events.length >= params.limit;
       expectedFrom =
-        fullPage && ledgers.length > 0
-          ? Math.max(...ledgers) + 1
-          : page.latestLedger + 1;
+        fullPage && ledgers.length > 0 ? Math.max(...ledgers) + 1 : page.latestLedger + 1;
 
       if (signal?.aborted) return;
       const delay = computePollDelay(interval, jitter, rng);
@@ -2449,15 +3175,18 @@ export class GuardTelemetryListener {
     try {
       if (params.signal?.aborted) return;
       for await (const event of mergeGuardEventStreams(
-        this.watchStream(params),
+        committedPages(this.watchStream(params)),
         params.diagnostics,
         params.signal,
       )) {
-        this.counters?.record(event);
-        // Committed events were already recorded when their page was decoded in
-        // `poll()`, so only the diagnostic half is recorded here — recording the
-        // merged stream wholesale would double every committed event.
-        if (event.stream === "diagnostic") this.record([event]);
+        // Committed and failed-tx events were already counted by the page loop
+        // in `watchStream()`, so only the diagnostic half is counted here —
+        // counting the merged stream wholesale would double every event the
+        // committed side contributed.
+        if (event.stream === "diagnostic") {
+          this.counters?.record(event);
+          this.record([event]);
+        }
         yield event;
       }
     } finally {
@@ -2544,11 +3273,7 @@ function toJsonSafe(value: unknown): unknown {
   if (value === undefined) return undefined;
   if (value === null) return null;
   if (typeof value === "bigint") return value.toString();
-  if (
-    typeof value === "boolean" ||
-    typeof value === "number" ||
-    typeof value === "string"
-  ) {
+  if (typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
     return value;
   }
   if (value instanceof Uint8Array) return `bytes:${bytesToHex(value)}`;
@@ -2653,6 +3378,27 @@ export function serializeEventRecord(event: GuardEvent): string {
     event: projectEvent(event),
   };
   return JSON.stringify(toJsonSafe(record));
+}
+
+/**
+ * Render an event sequence as bounded JSON Lines (#324): one
+ * `serializeEventRecord()` per event, newline-terminated, in iteration order.
+ *
+ * Deliberately synchronous and allocation-only: no file handle, no stream, no
+ * buffer copy beyond the output string. A caller exporting the listener's
+ * `recent()` window gets exactly the bounded snapshot it asked for, and a
+ * caller with its own store can render any iterable with the same rules.
+ *
+ * Every line is a complete, independently parsable record
+ * (`parseEventRecord()`), so a partially written export is still a valid prefix
+ * of complete records — there is no trailing half-line to special-case.
+ * `raw` is never emitted: the projection is a fixed field list, so a retained
+ * debug payload cannot ride along into a shared incident bundle.
+ */
+export function serializeEventLines(events: Iterable<GuardEvent>): string {
+  let out = "";
+  for (const event of events) out += `${serializeEventRecord(event)}\n`;
+  return out;
 }
 
 /** The result of reading one stored telemetry line. */

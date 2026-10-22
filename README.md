@@ -17,6 +17,8 @@
 
 # Stellar Agent Guard — SDK
 
+**New here?** The [glossary of guard terms](docs/glossary.md) is the quickest way to learn the shared vocabulary (admissible, blocked, undetermined, DMS, SAC, auth entry) with links to the authoritative contract and SDK sections.
+
 <!-- 📚 **[Documentation](...)** (added in P2 once GitBook URL is confirmed live) -->
 
 **Non-custodial TypeScript SDK and pre-flight policy interception firewall for AI agents on Stellar.**
@@ -63,6 +65,109 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 > pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
 > known gaps in simulation fidelity, and what the SDK does about each.
 
+New to the vocabulary (allowlist, DMS, admissible, pre-flight)? Start with the
+[glossary](docs/glossary.md).
+
+### 60-second quickstart: see the guard say no
+
+One contiguous path: install, point at the Phase-2 testnet fixture, simulate a
+transfer that violates its per-transaction cap, and print the verdict. Pre-flight
+is read-only — it broadcasts nothing and pays no network fee.
+
+```bash
+npm install stellar-agent-guard-sdk
+set -a; . ./.env.phase2; set +a   # agent + funded source secrets
+npx tsx quickstart.ts
+```
+
+```ts
+/**
+ * 60-second quickstart (issue #127): see the guard say no.
+ *
+ * Mirrored verbatim in README.md (except the package import specifier, which the
+ * unit test rewrites to this file's relative import). `npm run typecheck`
+ * typechecks this file, so the README block cannot drift from code that
+ * compiles.
+ *
+ * Pre-flight is read-only: this runs the guard's `__check_auth` in simulation,
+ * prints the verdict and never broadcasts. The enforced simulation does sign the
+ * agent auth entry and reads a funded source account, so two testnet secrets are
+ * required — the verdict itself costs no fee and no funds move.
+ */
+import { Keypair, nativeToScVal, rpc } from "@stellar/stellar-sdk";
+import { PreFlightInterceptor, isContractAddress } from "stellar-agent-guard-sdk";
+
+const RPC_URL = "https://soroban-testnet.stellar.org";
+const NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+
+// Phase-2 testnet fixture (tests/fixtures/phase2-instance.json). Override these
+// three with your own instance's addresses if you deployed one.
+const GUARD =
+  process.env.STELLAR_GUARD ?? "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+const TOKEN =
+  process.env.STELLAR_TOKEN ?? "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+const RECIPIENT =
+  process.env.STELLAR_RECIPIENT ?? "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH";
+
+async function runQuickstart(): Promise<void> {
+  // The fixture's agent secret and a funded testnet source account. The
+  // fixture's secrets are deliberately not committed; see README "Live testnet
+  // suite" for provisioning your own instance.
+  const agentSecret = process.env.PHASE2_AGENT_SECRET;
+  const sourceSecret = process.env.PHASE2_ADMIN_SECRET;
+  if (!agentSecret || !sourceSecret) {
+    throw new Error("set PHASE2_AGENT_SECRET and PHASE2_ADMIN_SECRET (see .env.phase2.example)");
+  }
+  if (!isContractAddress(GUARD) || !isContractAddress(TOKEN)) {
+    throw new Error("STELLAR_GUARD and STELLAR_TOKEN must be contract (C...) addresses");
+  }
+
+  const interceptor = new PreFlightInterceptor({
+    server: new rpc.Server(RPC_URL),
+    networkPassphrase: NETWORK_PASSPHRASE,
+    guard: GUARD,
+    agent: Keypair.fromSecret(agentSecret),
+    source: Keypair.fromSecret(sourceSecret),
+  });
+
+  // 1001 is above the fixture policy's per_tx_cap of 1000, so this transfer is
+  // refused before anything is signed for broadcast (the same refusal is
+  // recorded in tests/fixtures/integration-evidence.md).
+  const decision = await interceptor.check({
+    contract: TOKEN,
+    fn: "transfer",
+    args: [
+      nativeToScVal(GUARD, { type: "address" }),
+      nativeToScVal(RECIPIENT, { type: "address" }),
+      nativeToScVal(1_001n, { type: "i128" }),
+    ],
+  });
+
+  console.log(decision.kind === "blocked" ? `blocked: ${decision.reason}` : decision.kind);
+}
+
+await runQuickstart();
+```
+
+Expected output — 1001 exceeds the fixture policy's `per_tx_cap` of 1000; the
+same refusal is recorded in
+[`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md):
+
+```text
+blocked: per_tx_cap_exceeded
+```
+
+The enforced simulation signs the agent auth entry and reads a funded source
+account, so two testnet secrets are required; the verdict itself spends nothing.
+The fixture's secrets are not published — [`npm run deploy:phase2`](docs/installation.md)
+provisions your own instance, or use the keys for the instance you are
+integrating.
+
+**Next steps:** [signing and submission](docs/concepts/custom-account-signing.md) ·
+[heartbeat](#keep-the-dead-man-switch-alive-startheartbeat) ·
+[framework adapters](#framework-middleware-langchain--elizaos) ·
+[agent runtime support](docs/runtime-support.md).
+
 ### Installation
 
 ```bash
@@ -81,6 +186,11 @@ npm install stellar-agent-guard-sdk
 >   // use interceptor, cost pre-checker, etc.
 > }
 > ```
+>
+
+The full tested matrix — Node version, ESM/CJS behaviour, browser and bundler
+targets, plus the environments that are explicitly unsupported — is in
+[`docs/runtime-support.md`](docs/runtime-support.md).
 
 *(Or build locally from source with Node 24+)*
 
@@ -270,6 +380,7 @@ const interceptor = new PreFlightInterceptor({
   source,
   cache: {
     ttlLedgers: 1, // maximum one approximate five-second ledger window
+    maxEntries: 256, // bound distinct call fingerprints held at once
     policyRevision: () => readPolicyRevision(),
   },
 });
@@ -290,6 +401,14 @@ approximate ledger-close interval; if both are supplied, `ttlMs` takes
 precedence. A cache hit is served as an **independent snapshot**: mutating the
 returned decision — its `allowed`/`kind` discriminant, a scalar field, or a
 nested `diagnosticEvents` entry — cannot change what a later cache hit returns.
+
+`maxEntries` bounds the cache's cardinality. When it is full, storing a new
+call fingerprint evicts the **least-recently-used** entry (a cache hit refreshes
+recency), so an agent making many distinct calls cannot grow the cache without
+limit. Eviction only removes entries; a lookup still requires a current-ledger,
+unexpired entry, so a bounded cache can never serve an expired or cross-ledger
+verdict — the worst it does is force a fresh simulation for a recently cached
+fingerprint. Omit `maxEntries` for the previous unbounded behaviour.
 
 A **cached verdict can be staler than one admitted transfer**. The rolling spend
 window can change after a simulation while a cached result is still being
@@ -480,6 +599,33 @@ for await (const events of listener.watch({
 }
 ```
 
+### Backpressure in `watch()` (bounded look-ahead)
+
+`watch()` never runs ahead of its consumer without a bound. At most
+`maxBufferedPages` pages (`DEFAULT_MAX_BUFFERED_PAGES`, `2`, by default) are
+prefetched between the poll loop and your `for await` body, plus at most one
+request in flight, and the pump pulls sequentially — never more than one
+`getEvents` at a time. A consumer that processes slower than the poll cadence
+(a dashboard render loop, a file logger) therefore **throttles the fetches**
+instead of letting the stream race ahead with pages nobody has consumed — no
+unbounded memory growth, no unconsumed rate-limit burn. A consumer that stops
+pulling stops the fetches once the bound is reached.
+
+```ts
+for await (const events of listener.watch({
+  maxBufferedPages: 0, // strict consumer-paced polling: one page fetched per pull
+})) {
+  await slowRender(events); // the next fetch waits for you
+}
+```
+
+The bound changes pacing, never what you receive: same order, no loss, no
+duplicates. Cursors are saved **when a page is delivered**, so the stored cursor
+never leads your position — pages fetched but not yet delivered when you stop
+are re-read after a restart (at-least-once, never lose-the-tail). An invalid
+bound (non-integer or negative) throws a `TypeError` when the stream starts,
+before any RPC is issued.
+
 ### Aborting a watch: what cancellation does and does not cover
 
 `watch({ signal })` ends the stream — aborting is a normal exit, never a throw.
@@ -506,8 +652,9 @@ depends on, `dependencies` in `package.json`) declares
 its internal JSON-RPC `postObject` helper takes no per-request config, so there
 is no supported way to plumb a signal through to the socket. The listener
 consequently stops *issuing* requests immediately but cannot cancel one already
-sent: the worst case between `signal.abort()` and the iterator ending is **one
-request duration** — never a whole poll interval. The rejection of that
+sent — and it does not wait for it either: aborting ends the iterator right
+away, even while a `getEvents` call is pending, and a response that arrives
+after teardown is discarded rather than delivered. The rejection of that
 in-flight request (or of an abort-aware `sleep`) is swallowed as teardown, so an
 aborted watch ends quietly in a `for await` loop instead of surfacing an
 `AbortError` or an unhandled rejection.
@@ -517,21 +664,34 @@ read `signal` as *stop soon and stop asking*, not *cancel the socket*.
 
 ### Bounding a check or an invoke (`signal` and `timeoutMs`)
 
-`check()`, `CostPreChecker.check()` and `invoke()` each accept two optional
-caller-owned bounds on the RPC calls they make:
+`check()`, `checkBatch()`, `CostPreChecker.check()` and `invoke()` each accept
+two optional caller-owned bounds on the RPC calls they make:
 
 - `signal?: AbortSignal` — your runtime's cancellation (a tool-loop deadline, a
   shutdown hook, a user's "stop"). An **already-aborted** signal returns before
-  any RPC call is issued.
+  any RPC call is issued. On a batch it stops the batch: no further call is
+  started, and every unfinished call is reported as fail-closed `undetermined`.
 - `timeoutMs?: number` — a per-RPC-call budget in milliseconds. It defaults to
   `DEFAULT_RPC_TIMEOUT_MS` (**30s**), because a network partition that leaves a
   guardrail call pending forever is a hang, not a fail-closed decision. Pass
   `timeoutMs: 0` to opt out and rely on `signal` alone.
-- `deadlineMs?: number` — **`invoke()` only**: one overall budget for the whole
-  action (discovery, signing, retries, broadcast and polling). Expiry is
-  fail-closed and reported as an `RpcTimeoutError` with `deadline: true`; it can
-  never become an `allowed` outcome. Pass `clock` to make the accounting
+- `deadlineMs?: number` — **`invoke()` and `checkBatch()`**: one overall budget
+  for the whole action (for a batch: policy read plus every staged call). Expiry
+  is fail-closed and reported as an `RpcTimeoutError` with `deadline: true`; it
+  can never become an `allowed` outcome. On a batch, calls that never started are
+  `undetermined` rather than skipped. Pass `clock` to make the accounting
   deterministic in tests. See `docs/api/invoke-pipeline.md`.
+
+**Concurrent identical checks are coalesced.** `PreFlightInterceptor` shares one
+in-flight discovery/enforcement run when the same call and config are checked at
+the same time, so an agent framework issuing duplicate tool checks in one
+planning turn does not pay for duplicate RPCs. This is not a cache: the entry is
+removed as soon as the run settles, including on failure or `undetermined`. Each
+waiter still applies its own `signal`/`timeoutMs` — one caller giving up never
+cancels a result another waiter is entitled to — while the shared run itself
+keeps the pipeline's default `DEFAULT_RPC_TIMEOUT_MS` bound. Checks that supply
+`onStep` keep their own run so each trace sees every event, and
+`coalesceInFlight: false` disables coalescing entirely.
 
 **The typed error is the same; where it surfaces is deliberately not.** A bound
 that fires raises one class, `RpcTimeoutError` (carrying `stage` and whether it
@@ -541,6 +701,7 @@ questions:
 | Call | Fired bound |
 | --- | --- |
 | `check()` / `CostPreChecker.check()` | the fail-closed `undetermined` **verdict** (`decision.error instanceof RpcTimeoutError`) — the guard reached no decision, which is what `undetermined` already means |
+| `checkBatch()` | `undetermined` verdicts for the call in flight and for every call that never started; the completed verdicts keep their own kind |
 | `invoke()` | `invoke`'s `error` **outcome** (`outcome.error instanceof RpcTimeoutError`) — the pipeline never reached broadcast |
 
 ```ts
@@ -643,6 +804,32 @@ if (failures.length > 0) {
   // Safe-exit before encode or broadcast
 } else {
   // Proceed with policyToScVal(draftPolicy) and broadcast
+}
+```
+
+#### Loading a policy from a JSON file (Node only)
+
+Script and cron integrations keep policy as JSON, so `stellar-agent-guard-sdk/fs`
+reads, parses and validates a file in one call. The subpath is the only place the
+SDK touches `node:fs`; the root import stays browser-safe. Each failure mode is a
+distinct typed error, so a shell script can branch on the cause:
+
+```ts
+import { PolicyFileReadError, PolicyValidationError } from "stellar-agent-guard-sdk";
+import { loadPolicyFromFile } from "stellar-agent-guard-sdk/fs";
+
+try {
+  const policy = await loadPolicyFromFile("policy.json");
+  // `policy` is a validated GuardPolicy ready for policyToScVal()/broadcast.
+} catch (error) {
+  if (error instanceof PolicyFileReadError) {
+    console.error(`cannot read ${error.path} (${error.code})`);
+  } else if (error instanceof PolicyValidationError) {
+    // Every SPEC §8 failure, not just the first.
+    for (const failure of error.failures) console.error(failure.rule, failure.path);
+  } else {
+    throw error; // PolicyDecodeError: invalid JSON or policy shape
+  }
 }
 ```
 
@@ -759,8 +946,11 @@ network ID, invocation, nonce, expiration ledger, or transaction freshness.
 
 ### Typed errors and 0.1.x migration
 
-All SDK-owned errors now share a `GuardError` base. `invoke()` remains result-oriented:
-inspect `outcome.error` with `instanceof` when `outcome.kind === "error"`.
+All operational SDK errors share a `GuardError` base. Invalid caller input is the
+deliberate exception: `InvalidInputError` (and `InvalidFeeCeilingError`) extend
+`TypeError`, keeping programmer errors distinct from transport, signing and policy
+failures. `invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
+when `outcome.kind === "error"`.
 
 ```ts
 import {
@@ -818,17 +1008,18 @@ const hb = await startHeartbeat({
   graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
 });
 
-// on shutdown:
-await hb.stop();
+// on shutdown: request cancellation, wait up to 5s for the in-flight beat
+const stop = await hb.stop({ timeoutMs: 5_000 });
+if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 ```
 
-- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
-- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule. A submission that outlives several slots skips the stale ones instead of firing a catch-up burst.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; each cadence slot skipped while a submission was in flight is counted too. Alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
 - Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
-- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and by default it resolves once an in-flight beat has settled. `stop()` first aborts the submission context's `signal`; pass `stop({ timeoutMs })` or set `stopTimeoutMs` when a custom transport might not settle, and inspect `{ reason, settled }` on the result.
 - When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
 - A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
-- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
+- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a negative or non-finite `stopTimeoutMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
 
 #### Bounded retry for a transient outage
 
@@ -850,6 +1041,10 @@ const hb = await startHeartbeat({
 - The delay before the next attempt is a full-jitter sample of a bounded window, so agents that hit the same outage do not retry in a synchronized herd.
 - The attempt that failed and the delay before the next one are announced through `onWarning`; the failure that ends the beat is reported once through `onError`, with the original error. A successful beat reports how many attempts it took in `onBeat`'s `attempt`.
 
+#### Stopping with an in-flight submission
+
+A custom `submit(beat, { signal })` receives an `AbortSignal` that `stop()` aborts before waiting. The default is still graceful: `stop()` waits for the submission promise to settle, so a transport that honours the signal shuts down promptly. If the transport may never settle, bound the wait with `stop({ timeoutMs })` (or `stopTimeoutMs` on `startHeartbeat`); a fired bound returns `{ reason: "timeout", settled: false }`, while a graceful settle returns the in-flight submission's value or terminal error. No deadline is applied unless you ask for one.
+
 The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
 ## API Reference
@@ -859,9 +1054,11 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
 ### Interception & Execution
 
 - `PreFlightInterceptor`
-  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations.
+  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Concurrent identical `check()` calls share one in-flight run by default; pass `coalesceInFlight: false` to disable that.
   - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
+  - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Returns one verdict per call with all-or-nothing `admissible` semantics. `options.signal` bounds the whole batch, `options.deadlineMs` sets one overall budget, and `options.timeoutMs` stays per-call. A cancelled or over-budget batch stops before the next call and reports every unfinished call as `undetermined`.
   - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
+  - `checkBatch(calls, options?): Promise<PreFlightBatchDecision>` — Stages SAC transfer amounts against the rolling window and returns an `undetermined` batch verdict when a required policy/window read fails instead of assuming zero spend. `assertBatchAllowed()` is the throw-on-refusal form.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
   - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
@@ -894,17 +1091,18 @@ const hb = await startHeartbeat({
   graceSecs: 150,              // optional pre-read: validated as interval <= grace/3
 });
 
-// on shutdown:
-await hb.stop();
+// on shutdown: request cancellation, wait up to 5s for the in-flight beat
+const stop = await hb.stop({ timeoutMs: 5_000 });
+if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 ```
 
-- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule.
-- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
+- The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule. A submission that outlives several slots skips the stale ones instead of firing a catch-up burst.
+- A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; each cadence slot skipped while a submission was in flight is counted too. Alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
 - Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
-- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and it resolves once an in-flight beat has settled.
+- `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and by default it resolves once an in-flight beat has settled. `stop()` first aborts the submission context's `signal`; pass `stop({ timeoutMs })` or set `stopTimeoutMs` when a custom transport might not settle, and inspect `{ reason, settled }` on the result.
 - When the grace window is readable (`graceSecs`, or a `readPolicy` read), an interval longer than `grace / 3` throws `HeartbeatIntervalError` **before** the first beat; an unreadable policy warns via `onWarning` and starts anyway.
 - A beat that would fall in the same wall-clock second as the previous accepted one is skipped client-side; the contract deduplicates independently.
-- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
+- Every input is validated **before** the scheduler starts: a negative or non-finite `maxSkewMs`, a negative or non-finite `stopTimeoutMs`, a grace window that is not a non-negative safe integer or bigint, a callback that is not callable, or an unusable retry budget is rejected with an error naming the field — before the first beat, and before the grace window is even read from the chain.
 
 #### Bounded retry for a transient outage
 
@@ -926,6 +1124,10 @@ const hb = await startHeartbeat({
 - The delay before the next attempt is a full-jitter sample of a bounded window, so agents that hit the same outage do not retry in a synchronized herd.
 - The attempt that failed and the delay before the next one are announced through `onWarning`; the failure that ends the beat is reported once through `onError`, with the original error. A successful beat reports how many attempts it took in `onBeat`'s `attempt`.
 
+#### Stopping with an in-flight submission
+
+A custom `submit(beat, { signal })` receives an `AbortSignal` that `stop()` aborts before waiting. The default is still graceful: `stop()` waits for the submission promise to settle, so a transport that honours the signal shuts down promptly. If the transport may never settle, bound the wait with `stop({ timeoutMs })` (or `stopTimeoutMs` on `startHeartbeat`); a fired bound returns `{ reason: "timeout", settled: false }`, while a graceful settle returns the in-flight submission's value or terminal error. No deadline is applied unless you ask for one.
+
 The combined heartbeat-loop + pre-flight pattern is tracked as an integration guide in [#74](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-sdk/issues/74).
 
 ## API Reference
@@ -942,7 +1144,7 @@ one-shot form.
 - [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
   - `constructor(options: GuardTelemetryListenerOptions)`
-  - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover).
+  - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover). `params.maxBufferedPages?: number` bounds the look-ahead in front of the consumer (default `DEFAULT_MAX_BUFFERED_PAGES` = 2, `0` = strict consumer pacing); cursors are saved at delivery, so the stored cursor never leads the consumer (issue #36).
   - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
   - `health(): GuardTelemetryHealthSnapshot` — Read-only operational snapshot: stream state (`idle`/`running`/`recovering`/`stopped`/`aborted`/`failed`), last successful poll, consecutive failures, per-stream cursors, failed-tx degradation, and known coverage gaps. Every field is a copy. Contract: [`docs/api/telemetry-listener.md`](docs/api/telemetry-listener.md#health-guardtelemetryhealthsnapshot).
   - `serializeEvent(event: GuardEvent): string` — Canonical single-line JSON for deterministic JSON-lines log shipping. Fixed key order, drops `undefined`, keeps `null`, renders `bigint` as a decimal string. Contract: [`docs/event-schema.md`](docs/event-schema.md#canonical-json-serialization--serializeevent).
@@ -988,6 +1190,8 @@ const recentWindow = listener.recent({ fromLedger: 4_700_000 });
 `recent(filter?)` returns the retained events oldest-first, filtered by any of `stream`, `reason`, `fromLedger`, `toLedger`. The buffer is FIFO and non-durable: it holds only what this listener decoded in this process, and a restart empties it. Persistence across restarts is a cursor store (tracked separately), not something this buffer pretends to provide.
 
 What it returns is a **detached snapshot**: the array, the events in it, their decoded `data`/`decision` and the opt-in `raw` payload are all copies, so editing a returned event cannot change what the listener still retains. A listener with no `buffer` configured copies nothing — `recent()` returns `[]`.
+
+`recentJsonLines(filter?)` returns the same bounded window as **JSON Lines** (issue #324) — one `serializeEventRecord()` line per event, oldest first, `filter` applied identically. It returns a string and never touches the filesystem; `bigint` values are decimal strings and byte arrays are `bytes:<hex>`, so the export parses without the SDK. The opt-in `raw` payload is never included: the projection is a fixed field list, so an incident bundle cannot leak a retained debug payload.
 
 #### Raw events for bug reports (issue #94)
 
@@ -1147,7 +1351,9 @@ This boundary is an inherent property of the platform (the auth context does not
 
 - GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
+- Funding: This project has no funding channel — that's deliberate.
 - Security disclosures: see the local [SECURITY.md](SECURITY.md) for SDK issues; contract/protocol issues and deployed-instance incidents go to the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md)
+- Security review: [`docs/attack-surface.md`](docs/attack-surface.md) maps where untrusted data enters and leaves the SDK, and [`docs/threat-model.md`](docs/threat-model.md) states what can go wrong
 
 ## License
 
