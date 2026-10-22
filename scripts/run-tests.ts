@@ -20,7 +20,7 @@
  * 1 for that run because the integration files share live on-chain state.
  */
 import { spawn, spawnSync } from "node:child_process";
-import { readdirSync } from "node:fs";
+import { readdirSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -30,7 +30,14 @@ import {
   TEST_PROJECTS,
   type TestProject,
 } from "../tests/test.config.ts";
-import { validatePhase2Env } from "../tests/integration/harness.ts";
+import {
+  EPHEMERAL_ENV_FILE,
+  EPHEMERAL_FIXTURE_PATH,
+  isSharedFixtureMode,
+  validatePhase2Env,
+  warnIfSharedFixture,
+} from "../tests/integration/harness.ts";
+import { deployPhase2Instance } from "./deploy-phase2-instance.ts";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -85,7 +92,7 @@ function nodeArgs(plan: RunPlan, coverage: boolean, watch: boolean): string[] {
   return args;
 }
 
-function main(): void {
+async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const coverage = argv.includes("--coverage");
   const watch = argv.includes("--watch");
@@ -99,10 +106,25 @@ function main(): void {
   }
 
   if (plan.needsEnvFile) {
-    const envValidation = validatePhase2Env();
-    if (!envValidation.ok) {
-      console.error(envValidation.message);
-      process.exit(1);
+    if (isSharedFixtureMode()) {
+      warnIfSharedFixture();
+      const envValidation = validatePhase2Env();
+      if (!envValidation.ok) {
+        console.error(envValidation.message);
+        process.exit(1);
+      }
+    } else {
+      console.log(
+        "[live] ephemeral mode (default): deploying isolated testnet fixture instance...",
+      );
+      const ephemeral = await deployPhase2Instance({
+        ephemeral: true,
+        envPath: EPHEMERAL_ENV_FILE,
+        fixturesPath: EPHEMERAL_FIXTURE_PATH,
+        quiet: false,
+      });
+      process.env["GUARD_EPHEMERAL_ENV_FILE"] = ephemeral.envPath;
+      process.env["GUARD_EPHEMERAL_FIXTURE"] = ephemeral.fixturesPath;
     }
   }
 
@@ -113,6 +135,21 @@ function main(): void {
     );
   }
 
+  const cleanupEphemeral = () => {
+    if (!isSharedFixtureMode() && process.env["GUARD_KEEP_EPHEMERAL"] !== "1") {
+      try {
+        if (process.env["GUARD_EPHEMERAL_ENV_FILE"]) {
+          rmSync(process.env["GUARD_EPHEMERAL_ENV_FILE"], { force: true });
+        }
+        if (process.env["GUARD_EPHEMERAL_FIXTURE"]) {
+          rmSync(process.env["GUARD_EPHEMERAL_FIXTURE"], { force: true });
+        }
+      } catch {
+        // Ignored
+      }
+    }
+  };
+
   // Watch mode resolves the project's files once, at startup, exactly as a
   // one-shot run does, and then hands the terminal to the runner. A file added
   // to the project after startup is therefore not watched until the run is
@@ -122,12 +159,15 @@ function main(): void {
     const child = spawn(process.execPath, nodeArgs(plan, coverage, watch), {
       cwd: ROOT,
       stdio: "inherit",
+      env: process.env,
     });
     child.on("error", (error: Error) => {
+      cleanupEphemeral();
       console.error(`failed to start the test runner: ${error.message}`);
       process.exit(1);
     });
     child.on("exit", (code, signal) => {
+      cleanupEphemeral();
       // A signal-terminated runner is the normal Ctrl+C path, not a failure.
       process.exit(signal ? 0 : (code ?? 1));
     });
@@ -137,7 +177,10 @@ function main(): void {
   const result = spawnSync(process.execPath, nodeArgs(plan, coverage, watch), {
     cwd: ROOT,
     stdio: "inherit",
+    env: process.env,
   });
+
+  cleanupEphemeral();
 
   if (result.error) {
     console.error(`failed to start the test runner: ${result.error.message}`);
@@ -146,4 +189,7 @@ function main(): void {
   process.exit(result.status ?? 1);
 }
 
-main();
+main().catch((error: unknown) => {
+  console.error(error instanceof Error ? error.message : error);
+  process.exit(1);
+});
