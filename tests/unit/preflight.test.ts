@@ -17,7 +17,7 @@ import {
   type PreFlightDecision,
 } from "../../src/preflight.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
-import { ContractResponseError } from "../../src/errors.ts";
+import { ContractResponseError, GuardError, GuardUndeterminedError } from "../../src/errors.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
@@ -67,6 +67,10 @@ function createMockServer(options?: {
     async getLatestLedger() {
       requestCount++;
       return { sequence: 1000 };
+    },
+    async getLedgerEntries() {
+      requestCount++;
+      return { entries: [] };
     },
     async simulateTransaction() {
       requestCount++;
@@ -722,6 +726,235 @@ describe("throw vs verdict contract asymmetry", () => {
           fn: call.fn,
           argsCount: 3,
         });
+        return true;
+      },
+    );
+  });
+});
+
+describe("assertAllowed and assertBatchAllowed behavior matrix & transport wrapping (issue #90)", () => {
+  const call = validTransferCall(100n);
+
+  it("assertAllowed: admissible verdict returns decision and does not throw", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const decision = await interceptor.assertAllowed(call);
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.kind, "admissible");
+  });
+
+  it("assertAllowed: blocked verdict throws GuardBlockedError and extends GuardError", async () => {
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const interceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardBlockedError, "must be GuardBlockedError");
+        assert.equal(err.reason, "per_tx_cap_exceeded");
+        assert.equal(err.stage, "preflight");
+        assert.deepEqual(err.call, call);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: undetermined verdict throws GuardUndeterminedError and preserves underlying cause", async () => {
+    const server = createMockServer({
+      enforcedSimulateResponse: {
+        minResourceFee: "not-a-fee",
+        result: { auth: [] },
+        transactionData: {
+          getReadOnly: () => [],
+          getReadWrite: () => [],
+        },
+      },
+    });
+    const interceptor = createTestInterceptor(server);
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.ok(err instanceof PreFlightUndeterminedError, "must be backwards compatible alias");
+        assert.equal(err.stage, "preflight");
+        assert.ok(err.cause instanceof ContractResponseError, "must preserve cause");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps generic transport Error in GuardUndeterminedError preserving cause", async () => {
+    const transportError = new Error("fetch failed: connection reset by peer");
+    const server = {
+      ...createMockServer(),
+      async simulateTransaction() {
+        throw transportError;
+      },
+    } as unknown as rpc.Server;
+    const interceptor = createTestInterceptor(server);
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        // Transport error preserved either directly or via simulation error cause
+        const underlying =
+          err.cause === transportError ||
+          (err.cause as { cause?: unknown })?.cause === transportError;
+        assert.ok(underlying, "original Error must be preserved on cause");
+        assert.match(err.message, /fetch failed: connection reset by peer/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps raw uncaught Error from check in GuardUndeterminedError with direct cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const rawError = new Error("raw transport socket exploded");
+    interceptor.check = async () => {
+      throw rawError;
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError);
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, rawError);
+        assert.match(err.message, /raw transport socket exploded/);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps non-Error throws in GuardUndeterminedError preserving cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    interceptor.check = async () => {
+      throw "raw socket error";
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.strictEqual(
+          err.cause,
+          "raw socket error",
+          "primitive throw must be preserved on cause",
+        );
+        assert.match(err.message, /raw socket error/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: rethrows InvalidInputError programmer validation errors directly", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const invalidCall = { contract: "", fn: "", args: [] } as unknown as ContractCall;
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(invalidCall),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidInputError, "programmer error must not be wrapped");
+        return true;
+      },
+    );
+  });
+
+  it("assertBatchAllowed: behavior matrix for admissible, blocked, undetermined, and transport failure", async () => {
+    // 1. All admissible
+    const interceptor = createTestInterceptor(createMockServer());
+    const batchRes = await interceptor.assertBatchAllowed([call]);
+    assert.equal(batchRes.overallAdmissible, true);
+
+    // 2. Blocked in batch throws GuardBlockedError
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("recipient_not_allowed"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const blockedInterceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => blockedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardBlockedError);
+        assert.equal(err.reason, "recipient_not_allowed");
+        return true;
+      },
+    );
+
+    // 3. Undetermined in batch throws GuardUndeterminedError
+    const undeterminedInterceptor = createTestInterceptor(
+      createMockServer({
+        enforcedSimulateResponse: {
+          minResourceFee: "invalid-fee",
+          result: { auth: [] },
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+        },
+      }),
+    );
+    await assert.rejects(
+      async () => undeterminedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.ok(err.cause instanceof ContractResponseError);
+        return true;
+      },
+    );
+
+    // 4. Raw transport error during batch throws wrapped GuardUndeterminedError
+    const transportErr = new Error("batch network down");
+    const failingInterceptor = createTestInterceptor(createMockServer());
+    failingInterceptor.checkBatch = async () => {
+      throw transportErr;
+    };
+    await assert.rejects(
+      async () => failingInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, transportErr);
         return true;
       },
     );

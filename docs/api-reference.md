@@ -10,8 +10,8 @@ The Stellar Agent Guard SDK exposes the following public surface. For the narrat
   - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Add `maxEntries` to bound the cache's cardinality with least-recently-used eviction.
   - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
   - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Stages SAC transfer amounts against the committed window, with an `undetermined` batch verdict when a required policy/window read fails. An explicit `initialWindowSpent: 0n` is a trusted snapshot; a failed read is not treated as zero. `staging.source` reports `provided | ledger | absent | unavailable`.
-  - `assertBatchAllowed(calls, options?): Promise<PreFlightBatchDecision>` — Throws `GuardBlockedError` for a blocked member or `PreFlightUndeterminedError` for an undetermined member or unavailable staging state.
-  - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
+  - `assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }>` — Evaluates a call and returns the decision, or throws `GuardBlockedError` on policy block or `GuardUndeterminedError` on undetermined/transport failures. Never lets raw transport errors escape.
+  - `assertBatchAllowed(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision & { admissible: true }>` — Batch throw-on-refusal form. Returns the batch decision if all calls are admissible, or throws `GuardBlockedError` on the first blocked call or `GuardUndeterminedError` on an undetermined call or transport failure.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
   - `constructor(options: CostPreCheckerOptions)`

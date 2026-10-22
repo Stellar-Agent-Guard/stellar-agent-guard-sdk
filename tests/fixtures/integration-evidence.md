@@ -24,6 +24,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Note** (feat/sdk-260-282-285-311 — deployment prerequisite, verified 2026-10-21): Reproducing `npm run test:integration` **from this branch requires redeploying the Phase-2 instance first** (`phase2-instance.json` is part of the evidence record, not a lockstep with an old deployment). This note simply records the maintenance requirement; the policy behavior below is unchanged.
 
+**Note** (feat(preflight)/preflight-verify-assertallowed-throws-guardblockederror-only-never-transport-errors, PR for #90): Formalizes and pins the `assertAllowed` and `assertBatchAllowed` throw-on-refusal contract, ensuring policy blocks throw `GuardBlockedError` and undetermined / transport errors throw `GuardUndeterminedError` with root cause preserved. The underlying on-chain simulation and policy enforcement evaluation remain unchanged; live Phase 2 integration evidence remains valid.
+
 ## Instance under test
 
 | | |

@@ -339,8 +339,17 @@ The same doctrine extends to adapter construction: **misconfiguration throws at 
 Pre-flight policy interception makes an intentional asymmetric distinction between programmer errors and policy outcomes:
 
 - **Input validation throws `InvalidInputError` (synchronous)**: If a `ContractCall` is malformed (invalid StrKey contract ID, missing or non-symbol-shaped function name, invalid arguments array, or non-`i128` amount), `interceptor.check()` throws `InvalidInputError` synchronously without dispatching any network RPC request.
-- **Policy refusals return a verdict (`kind: "blocked"`)**: When input is valid but policy disallows the action (spend cap exceeded, recipient not allowlisted, account paused), this represents expected guardrail operation. `check()` returns `{ allowed: false, kind: "blocked", reason, explanation, ... }` instead of throwing.
-- Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)`, which throws `GuardBlockedError` on `blocked` and `PreFlightUndeterminedError` on `undetermined`.
+- Callers requiring a throw-on-refusal flow can use `interceptor.assertAllowed(call)` (or `assertBatchAllowed(calls)`), which throws `GuardBlockedError` on `blocked` and `GuardUndeterminedError` on `undetermined` or transport failures.
+
+##### Verdict × Outcome Matrix
+
+| Pre-flight verdict / condition | `check(call)` outcome | `assertAllowed(call)` outcome | Notes |
+| :--- | :--- | :--- | :--- |
+| **Admissible** | Returns `{ allowed: true, kind: "admissible", ... }` | Returns `PreFlightDecision & { allowed: true }` | Green light; tool/call permitted. |
+| **Blocked** (`reason`) | Returns `{ allowed: false, kind: "blocked", reason, ... }` | Throws `GuardBlockedError` | Policy refusal (cap, recipient, pause, etc.); inspect `.reason`, `.code`, `.call`. |
+| **Undetermined** | Returns `{ allowed: false, kind: "undetermined", detail, error? }` | Throws `GuardUndeterminedError` | Fail-closed: guard could not evaluate (e.g. unpriceable fee); underlying `.cause` preserved. |
+| **Transport / Network Error** (generic `Error`) | Returns `{ allowed: false, kind: "undetermined", ... }` | Throws `GuardUndeterminedError` | Raw transport error never escapes; wrapped with original error preserved on `.cause`. |
+| **Invalid Input** (malformed call) | Throws `InvalidInputError` | Throws `InvalidInputError` | Programmer error: synchronous validation failure, zero RPC round-trips. |
 
 ### Adapter options validation (fail-fast at construction)
 
@@ -1057,8 +1066,8 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
   - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Concurrent identical `check()` calls share one in-flight run by default; pass `coalesceInFlight: false` to disable that.
   - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
   - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Returns one verdict per call with all-or-nothing `admissible` semantics. `options.signal` bounds the whole batch, `options.deadlineMs` sets one overall budget, and `options.timeoutMs` stays per-call. A cancelled or over-budget batch stops before the next call and reports every unfinished call as `undetermined`.
-  - `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>` — Asserts allowed or throws `GuardBlockedError`.
-  - `checkBatch(calls, options?): Promise<PreFlightBatchDecision>` — Stages SAC transfer amounts against the rolling window and returns an `undetermined` batch verdict when a required policy/window read fails instead of assuming zero spend. `assertBatchAllowed()` is the throw-on-refusal form.
+  - `assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }>` — Evaluates a call and returns the admissible decision, or throws `GuardBlockedError` (on policy block) or `GuardUndeterminedError` (on undetermined/transport failure). Never lets a raw transport error escape.
+  - `assertBatchAllowed(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision & { admissible: true }>` — Batch throw-on-refusal form. Returns the batch decision if all calls are admissible, or throws `GuardBlockedError` on the first blocked call or `GuardUndeterminedError` on an undetermined call or transport failure.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
   - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).

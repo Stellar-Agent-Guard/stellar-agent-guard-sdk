@@ -26,6 +26,7 @@ export {
   BroadcastError,
   ContractResponseError,
   GuardError,
+  GuardUndeterminedError,
   InvalidFeeCeilingError,
   InvalidInputError,
   PolicyDecodeError,
@@ -198,8 +199,8 @@ export { TRACE_STEP_NAMES } from "./trace.ts";
 export type { TraceStepName, TraceStepStatus } from "./trace.ts";
 
 export {
+  GuardUndeterminedError as PreFlightUndeterminedError,
   PreFlightInterceptor,
-  PreFlightUndeterminedError,
   preflight,
   preflightBatch,
   validateContractCall,
