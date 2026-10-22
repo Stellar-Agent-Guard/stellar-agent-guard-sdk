@@ -287,6 +287,7 @@ export {
   type GuardTelemetryHealthSnapshot,
   type GuardTelemetryStreamState,
   type GuardTelemetryUnifiedParams,
+  type GuardTelemetryWatchPage,
   type GuardTelemetryWatchParams,
   type GuardUnknownTopic,
   type ParsedGuardEventRecord,

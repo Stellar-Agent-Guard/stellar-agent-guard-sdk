@@ -828,6 +828,12 @@ export interface PollResult {
   malformedEvents: number;
 }
 
+/** A watched page, including the metadata needed to checkpoint its cursor. */
+export interface GuardTelemetryWatchPage extends PollResult {
+  /** Provable retention gaps detected while processing this page. */
+  gaps: GuardTelemetryGap[];
+}
+
 /**
  * Why event coverage is known to have broken.
  *
@@ -861,7 +867,7 @@ export interface GuardTelemetryGap {
  * The state of the listener's committed-event stream, as reported by
  * `health()` (issue #286).
  *
- * - `idle` — no `watch()`/`watchAll()` has run yet.
+ * - `idle` — no `watch()`/`watchPages()`/`watchAll()` has run yet.
  * - `running` — the last poll succeeded and the stream is advancing.
  * - `recovering` — a poll failed and the bounded retry envelope is in progress.
  * - `stopped` — the stream completed without an abort or a terminal failure.
@@ -1065,6 +1071,18 @@ interface WatchPage {
   events: GuardEvent[];
   /** The `getEvents` cursor this page advances to. */
   cursor: string;
+  /** Latest ledger the RPC reported for this page. */
+  latestLedger: number;
+  /** Oldest ledger the RPC still retains, or `null` when unreported. */
+  oldestLedger: number | null;
+  /** Why this page's events were dropped, by reason. */
+  dropped: GuardEventDropCounts;
+  /** Unknown name topics on this page. */
+  unknownTopics: GuardUnknownTopic[];
+  /** How many committed events on this page failed decoding. */
+  malformedEvents: number;
+  /** Provable retention gaps detected while processing this page. */
+  gaps: GuardTelemetryGap[];
   /**
    * The failed-transaction scan's own cursor for this poll, when it should be
    * persisted — the `!failedTxScanFailed` gate is applied by the watch loop,
@@ -2103,7 +2121,7 @@ export interface GuardTelemetryLocalConfig {
 }
 
 /**
- * Thrown when a second `watch()`/`watchAll()` stream is started on a listener
+ * Thrown when a second `watch()`/`watchPages()`/`watchAll()` stream is started on a listener
  * that already has one active.
  *
  * A listener owns shared cursor, failed-transaction de-duplication, counter,
@@ -2116,11 +2134,11 @@ export class ConcurrentTelemetryStreamError extends GuardError {
   /** Stable code for consumers that branch on the failure. */
   readonly code = "telemetry.concurrent_stream";
   /** The stream kind that was rejected. */
-  readonly requested: "watch" | "watchAll";
+  readonly requested: "watch" | "watchPages" | "watchAll";
 
-  constructor(requested: "watch" | "watchAll") {
+  constructor(requested: "watch" | "watchPages" | "watchAll") {
     super(
-      `GuardTelemetryListener already has an active watch()/watchAll() stream; ${requested}() cannot start concurrently. Use one listener per stream.`,
+      `GuardTelemetryListener already has an active watch()/watchPages()/watchAll() stream; ${requested}() cannot start concurrently. Use one listener per stream.`,
     );
     this.requested = requested;
   }
@@ -2660,7 +2678,7 @@ export class GuardTelemetryListener {
   }
 
   /** Claim the single active-stream lease, or reject concurrent use. */
-  private acquireStreamLease(kind: "watch" | "watchAll"): symbol {
+  private acquireStreamLease(kind: "watch" | "watchPages" | "watchAll"): symbol {
     if (this.activeStreamLease !== null) {
       throw new ConcurrentTelemetryStreamError(kind);
     }
@@ -2712,8 +2730,8 @@ export class GuardTelemetryListener {
    *
    * ## Concurrency
    *
-   * One listener supports one active stream. Starting a second `watch()` or
-   * `watchAll()` while the first is still being pulled throws
+   * One listener supports one active stream. Starting a second `watch()`,
+   * `watchPages()`, or `watchAll()` while the first is still being pulled throws
    * `ConcurrentTelemetryStreamError`; it never issues an RPC request, saves a
    * cursor, or records an event. Use a separate listener for an independent
    * stream.
@@ -2743,6 +2761,45 @@ export class GuardTelemetryListener {
   }
 
   /**
+   * Follow the committed stream like `watch()`, but yield every page with its
+   * cursor, ledger/retention boundaries, drop summaries, and detected gaps.
+   *
+   * Unlike `watch()`, empty pages are yielded so consumers can checkpoint
+   * cursor progress even when no events were returned. Cursors are persisted
+   * per poll, before the page is yielded, matching `watch()`'s
+   * at-least-once contract.
+   */
+  async *watchPages(
+    params: GuardTelemetryWatchParams = {},
+  ): AsyncGenerator<GuardTelemetryWatchPage, void, undefined> {
+    const lease = this.acquireStreamLease("watchPages");
+    this.healthStream = "watch";
+    try {
+      for await (const page of this.watchStream(params, { includeEmptyPages: true })) {
+        yield this.toWatchPage(page);
+      }
+    } finally {
+      this.finishHealthStream(params.signal);
+      this.healthStream = null;
+      this.releaseStreamLease(lease);
+    }
+  }
+
+  /** Project the internal page envelope onto the public watch-page shape. */
+  private toWatchPage(page: WatchPage): GuardTelemetryWatchPage {
+    return {
+      events: page.events,
+      cursor: page.cursor,
+      latestLedger: page.latestLedger,
+      oldestLedger: page.oldestLedger,
+      dropped: page.dropped,
+      unknownTopics: page.unknownTopics,
+      malformedEvents: page.malformedEvents,
+      gaps: page.gaps,
+    };
+  }
+
+  /**
    * Settle the state of a stream that has just ended (#286): an abort wins,
    * while a stream that ended on its own is `stopped`; `failed` is preserved.
    */
@@ -2764,7 +2821,7 @@ export class GuardTelemetryListener {
    */
   private async *watchStream(
     params: GuardTelemetryWatchParams = {},
-    options: { deferCursorSave?: boolean } = {},
+    options: { deferCursorSave?: boolean; includeEmptyPages?: boolean } = {},
   ): AsyncGenerator<WatchPage, void, undefined> {
     const interval = params.pollIntervalMs ?? 5_000;
     const jitter = params.jitter ?? "full";
@@ -2971,12 +3028,8 @@ export class GuardTelemetryListener {
       // the RPC retains. Event *density* plays no part — an empty page inside the
       // window is silence, not loss — so a sparse but fully-retained history
       // cannot raise a false notice. No events are fabricated for the hole.
-      if (
-        params.onGap &&
-        expectedFrom !== null &&
-        page.oldestLedger !== null &&
-        expectedFrom < page.oldestLedger
-      ) {
+      const gaps: GuardTelemetryGap[] = [];
+      if (expectedFrom !== null && page.oldestLedger !== null && expectedFrom < page.oldestLedger) {
         const gap: GuardTelemetryGap = {
           fromLedger: expectedFrom,
           toLedger: page.oldestLedger - 1,
@@ -2984,20 +3037,20 @@ export class GuardTelemetryListener {
           retainedFromLedger: page.oldestLedger,
           retainedToLedger: page.latestLedger,
         };
-        // Also reported through the logger, because `onGap` is only wired when a
-        // caller supplies it and a pruned range is worth seeing in a log even
-        // for a listener that did not ask for a callback.
-        this.logger.warn(
-          `telemetry coverage gap: ledgers ${gap.fromLedger}-${gap.toLedger} are no longer retained by the RPC`,
-          { ...gap, guard: this.config.guard },
-        );
-        this.recordedGaps.push({ ...gap });
-        if (this.recordedGaps.length > MAX_RECORDED_GAPS) this.recordedGaps.shift();
-        try {
-          params.onGap(gap);
-        } catch {
-          // A consumer's alerting failure must not stop the stream: the notice
-          // is advisory, and swallowing it mirrors `onStep`'s isolation.
+        gaps.push(gap);
+        if (params.onGap) {
+          this.logger.warn(
+            `telemetry coverage gap: ledgers ${gap.fromLedger}-${gap.toLedger} are no longer retained by the RPC`,
+            { ...gap, guard: this.config.guard },
+          );
+          this.recordedGaps.push({ ...gap });
+          if (this.recordedGaps.length > MAX_RECORDED_GAPS) this.recordedGaps.shift();
+          try {
+            params.onGap(gap);
+          } catch {
+            // A consumer's alerting failure must not stop the stream: the notice
+            // is advisory, and swallowing it mirrors `onStep`'s isolation.
+          }
         }
       }
 
@@ -3046,10 +3099,18 @@ export class GuardTelemetryListener {
 
       // In deferred mode every page is yielded — an empty one included — so
       // the pump still advances the cursors of polls that produced no batch.
-      if (events.length > 0 || options.deferCursorSave) {
+      // `watchPages()` also opts into empty pages so a consumer can observe
+      // cursor/ledger progress on a quiet poll.
+      if (events.length > 0 || options.deferCursorSave || options.includeEmptyPages) {
         yield {
           events,
           cursor: page.cursor,
+          latestLedger: page.latestLedger,
+          oldestLedger: page.oldestLedger,
+          dropped: page.dropped,
+          unknownTopics: page.unknownTopics,
+          malformedEvents: page.malformedEvents,
+          gaps,
           ...(scannedFailedTxCursor !== undefined ? { failedTxCursor: scannedFailedTxCursor } : {}),
         };
       }
