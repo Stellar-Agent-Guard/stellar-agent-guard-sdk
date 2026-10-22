@@ -286,3 +286,53 @@ node scripts/check-enforcement-evidence.ts --check-structure
 As above, these are valuable but are not a substitute for the Phase-2 live
 suite. A maintainer with `.env.phase2` should run `npm run test:integration`
 against this branch before merge.
+
+## Addendum — 2026-10-22 (PR: reject malformed agent signer signatures on `src/tx.ts`)
+
+Recorded because this PR touches the enforcement path (`src/tx.ts`) and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this contributor checkout, so `npm run test:integration` cannot execute here.
+No fresh Phase-2 transcript is claimed below. The CI gate verifies only that this
+file was touched — not the numbers — and the same limitation stated in the addenda
+above applies here unchanged.
+
+### What the PR changes on the enforcement path
+
+- `src/tx.ts`: `buildGuardAuthEntry()` now validates the value returned by
+  `AgentSigner.signDigest()` before constructing `SorobanAddressCredentials`.
+  A result that is not a `Uint8Array`, or whose length is not exactly 64 bytes,
+  raises `SigningError` carrying the guard address.
+- The digest bytes themselves are never included in the error message, so a
+  malformed/oversized signer result cannot leak secret material into logs.
+- The check runs after the existing `signDigest()` failure wrapping, preserving
+  the same error shape and address metadata for genuine signing failures.
+
+### What did not change
+
+- No guard-policy decision, authorization-entry structure for a valid Ed25519
+  signature, pre-flight pipeline, or `__check_auth` classification was modified.
+  A valid 64-byte signature follows the exact path it did before.
+- The new validation only refuses an input the contract could never accept:
+  Ed25519 signatures are fixed at 64 bytes, so a length mismatch previously
+  produced a malformed auth entry instead of a clear, typed failure.
+- `src/invoke.ts`, `src/policy.ts` and `src/preflight.ts` are unchanged by this
+  PR.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run check:strict-ratchet
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+As above, these are valuable but are not a substitute for the Phase-2 live
+suite. A maintainer with `.env.phase2` should run `npm run test:integration`
+against this branch before merge.
