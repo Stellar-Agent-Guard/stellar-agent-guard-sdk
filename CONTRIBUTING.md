@@ -137,6 +137,7 @@ maintainer-only (npm 2FA/automation token, outside this repo).
 
 ```bash
 npm run typecheck
+npm run test:types   # type-level regression tests (expect-type on exported public types)
 npm run lint
 npm run format:check   # Prettier; run `npm run format` to fix
 npm test
@@ -173,6 +174,7 @@ Contributors use diverse operating systems and editors. To prevent cross-platfor
 ## Test tiers and fixtures
 
 - **Unit** (`npm test`) — no network, no secrets, deterministic.
+- **Type-level** (`npm run test:types`) — offline; type-level compile-time tests (`expect-type` against `tsconfig.test-d.json`).
 - **Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
   (template: `.env.phase2.example`). Not run on pull requests; see
   "The live testnet suite is not run on every PR" above.
@@ -183,8 +185,9 @@ Both tiers run through one runner configuration, `tests/test.config.ts`, read by
 | Script | Project(s) | Notes |
 | --- | --- | --- |
 | `npm test` / `npm run test:unit` | `unit` (`tests/unit`) | Offline; Node test-runner default concurrency. |
+| `npm run test:types` | `types` (`tests/types`) | Offline; type-level regression tests asserting discriminant narrowing, error hierarchy, and options interfaces via `expect-type`. |
 | `npm run test:watch` | `unit` (`tests/unit`) | Development loop: Node's test-runner watch mode, re-running the unit suite on every change to a watched file, so you can edit → read the failure → fix → repeat without re-issuing `npm test`. Same project, same `tsx` transform, same files as `npm test`. |
-| `npm run test:integration` | `integration` (`tests/integration`) | Live; concurrency pinned to `1`, because the files share on-chain state. Validates `.env.phase2` up front on entry, failing fast with a single actionable message before launching test files if missing or incomplete. |
+| `npm run test:integration` | `integration` (`tests/integration`) | Live; concurrency pinned to `1`. Supports two execution modes: (1) **Default ephemeral mode**: automatically deploys an isolated on-chain instance per run, eliminating sequence collisions and rolling window pollution from concurrent suites; (2) **Shared-instance mode**: opt in via `GUARD_FIXTURE=tests/fixtures/phase2-instance.json` (or `GUARD_FIXTURE=shared`) to run against `.env.phase2`, emitting an explicit warning about concurrent run hazards. Serialized in CI via `concurrency: live-suite`. |
 | `npm run test:all` | every project, one run | Both suites in a single invocation. |
 | `npm run test:coverage` | every project, one run, coverage | Node's `--experimental-test-coverage`; needs `.env.phase2`, because the integration project is included. |
 | `npm run test:coverage:floor` | `unit` (`tests/unit`) | Offline, no secret: `c8` with a **per-file** floor on the verdict-critical path (`src/preflight.ts`, `src/policy.ts`, `src/invoke.ts`), thresholds in [`.c8rc.json`](.c8rc.json). This is the coverage gate `ci` runs. |
@@ -192,7 +195,30 @@ Both tiers run through one runner configuration, `tests/test.config.ts`, read by
 Both projects share the `tsx` transform, so the same `src/` modules load
 identically in either tier. A project's invariants — its directory has matching
 files, the live project stays serialised — are asserted by
-`tests/unit/test-runner.test.ts` rather than left to convention.
+`tests/unit/test-runner.test.ts` rather than left to convention..
+
+### Live suite execution modes: ephemeral (default) vs shared
+
+When running integration tests against the live Stellar testnet (`npm run test:integration`), concurrent test runs sharing the same on-chain fixture can interleave heartbeat transactions and transfers. This leads to sequence-number collisions and polluted rolling-window spend totals, resulting in flaky "expected block" failures.
+
+To make live execution parallel-safe:
+
+1. **Default Mode (Ephemeral / Isolated Instance):**
+   - Provisioned automatically without manual setup when `GUARD_FIXTURE` is unset.
+   - Deploys a dedicated guard contract and SAC token on testnet via `scripts/deploy-phase2-instance.ts --ephemeral`, writing isolated secrets to `.env.phase2.ephemeral` and public fixtures to `.env.phase2.ephemeral.json`.
+   - Temporary artifacts are cleaned up after the run unless `GUARD_KEEP_EPHEMERAL=1` is set.
+   - Ideal for local test runs and local CI to avoid racing against weekly scheduled runs or other developers.
+
+2. **Shared-Instance Mode (`GUARD_FIXTURE=`):**
+   - Opted into explicitly by setting the `GUARD_FIXTURE` environment variable:
+     ```bash
+     GUARD_FIXTURE=shared npm run test:integration
+     # or pointing directly to the fixture file:
+     GUARD_FIXTURE=tests/fixtures/phase2-instance.json npm run test:integration
+     ```
+   - Reuses `.env.phase2` and `tests/fixtures/phase2-instance.json` for fast local iterations without the ~30s deployment overhead.
+   - Emits a warning informing the user that concurrent runs may interleave transactions and alter state unexpectedly.
+   - Used by the scheduled CI workflow (`.github/workflows/live-suite.yml`), which sets `concurrency: live-suite` to serialize GitHub Actions runs.
 
 When `.env.phase2` is absent or incomplete, the test runner fails immediately at entry with a single actionable message pointing to `.env.phase2.example` and the provision command (`npm run deploy:phase2`) without cascading test cancellations:
 

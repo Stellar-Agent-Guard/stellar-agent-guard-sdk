@@ -17,7 +17,7 @@ import {
   type PreFlightDecision,
 } from "../../src/preflight.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
-import { ContractResponseError } from "../../src/errors.ts";
+import { ContractResponseError, GuardError, GuardUndeterminedError } from "../../src/errors.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
@@ -67,6 +67,10 @@ function createMockServer(options?: {
     async getLatestLedger() {
       requestCount++;
       return { sequence: 1000 };
+    },
+    async getLedgerEntries() {
+      requestCount++;
+      return { entries: [] };
     },
     async simulateTransaction() {
       requestCount++;
@@ -728,6 +732,235 @@ describe("throw vs verdict contract asymmetry", () => {
   });
 });
 
+describe("assertAllowed and assertBatchAllowed behavior matrix & transport wrapping (issue #90)", () => {
+  const call = validTransferCall(100n);
+
+  it("assertAllowed: admissible verdict returns decision and does not throw", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const decision = await interceptor.assertAllowed(call);
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.kind, "admissible");
+  });
+
+  it("assertAllowed: blocked verdict throws GuardBlockedError and extends GuardError", async () => {
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const interceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardBlockedError, "must be GuardBlockedError");
+        assert.equal(err.reason, "per_tx_cap_exceeded");
+        assert.equal(err.stage, "preflight");
+        assert.deepEqual(err.call, call);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: undetermined verdict throws GuardUndeterminedError and preserves underlying cause", async () => {
+    const server = createMockServer({
+      enforcedSimulateResponse: {
+        minResourceFee: "not-a-fee",
+        result: { auth: [] },
+        transactionData: {
+          getReadOnly: () => [],
+          getReadWrite: () => [],
+        },
+      },
+    });
+    const interceptor = createTestInterceptor(server);
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.ok(err instanceof PreFlightUndeterminedError, "must be backwards compatible alias");
+        assert.equal(err.stage, "preflight");
+        assert.ok(err.cause instanceof ContractResponseError, "must preserve cause");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps generic transport Error in GuardUndeterminedError preserving cause", async () => {
+    const transportError = new Error("fetch failed: connection reset by peer");
+    const server = {
+      ...createMockServer(),
+      async simulateTransaction() {
+        throw transportError;
+      },
+    } as unknown as rpc.Server;
+    const interceptor = createTestInterceptor(server);
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        // Transport error preserved either directly or via simulation error cause
+        const underlying =
+          err.cause === transportError ||
+          (err.cause as { cause?: unknown })?.cause === transportError;
+        assert.ok(underlying, "original Error must be preserved on cause");
+        assert.match(err.message, /fetch failed: connection reset by peer/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps raw uncaught Error from check in GuardUndeterminedError with direct cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const rawError = new Error("raw transport socket exploded");
+    interceptor.check = async () => {
+      throw rawError;
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError);
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, rawError);
+        assert.match(err.message, /raw transport socket exploded/);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps non-Error throws in GuardUndeterminedError preserving cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    interceptor.check = async () => {
+      throw "raw socket error";
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.strictEqual(
+          err.cause,
+          "raw socket error",
+          "primitive throw must be preserved on cause",
+        );
+        assert.match(err.message, /raw socket error/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: rethrows InvalidInputError programmer validation errors directly", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const invalidCall = { contract: "", fn: "", args: [] } as unknown as ContractCall;
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(invalidCall),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidInputError, "programmer error must not be wrapped");
+        return true;
+      },
+    );
+  });
+
+  it("assertBatchAllowed: behavior matrix for admissible, blocked, undetermined, and transport failure", async () => {
+    // 1. All admissible
+    const interceptor = createTestInterceptor(createMockServer());
+    const batchRes = await interceptor.assertBatchAllowed([call]);
+    assert.equal(batchRes.overallAdmissible, true);
+
+    // 2. Blocked in batch throws GuardBlockedError
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("recipient_not_allowed"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const blockedInterceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => blockedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardBlockedError);
+        assert.equal(err.reason, "recipient_not_allowed");
+        return true;
+      },
+    );
+
+    // 3. Undetermined in batch throws GuardUndeterminedError
+    const undeterminedInterceptor = createTestInterceptor(
+      createMockServer({
+        enforcedSimulateResponse: {
+          minResourceFee: "invalid-fee",
+          result: { auth: [] },
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+        },
+      }),
+    );
+    await assert.rejects(
+      async () => undeterminedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.ok(err.cause instanceof ContractResponseError);
+        return true;
+      },
+    );
+
+    // 4. Raw transport error during batch throws wrapped GuardUndeterminedError
+    const transportErr = new Error("batch network down");
+    const failingInterceptor = createTestInterceptor(createMockServer());
+    failingInterceptor.checkBatch = async () => {
+      throw transportErr;
+    };
+    await assert.rejects(
+      async () => failingInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, transportErr);
+        return true;
+      },
+    );
+  });
+});
+
 /* -------------------------------------------------------------------------- */
 /*             Pre-flight resource-fee handling (fail closed)                 */
 /* -------------------------------------------------------------------------- */
@@ -1160,6 +1393,196 @@ describe("PreFlightInterceptor simulation cache", () => {
         /maxEntries must be a positive integer/,
       );
     }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The cached path honours the caller's bound exactly like the uncached one.
+ *
+ * The cache's ledger lookup is an RPC the check makes, so it carries the same
+ * abort/timeout semantics as the enforcement pipeline: an already-aborted
+ * signal issues no RPC at all, a stalled lookup is bounded rather than waited
+ * on, and a cache failure only falls back to the uncached path while that path
+ * is still inside the caller's bound.
+ */
+describe("PreFlightInterceptor cached checks honour the caller's bound", () => {
+  /** A cached check whose ledger lookup can be stalled or made to fail. */
+  function makeCacheHarness(options: { ledger?: "ok" | "stall" | "fail-cache-read" } = {}) {
+    const source = Keypair.random();
+    let simulations = 0;
+    let latestLedgerCalls = 0;
+    const server = {
+      getAccount: async () => new Account(source.publicKey(), "1"),
+      getLatestLedger: async () => {
+        latestLedgerCalls += 1;
+        if (options.ledger === "stall") {
+          // A ledger read that never answers. The check must not wait on it.
+          return new Promise<{ sequence: number }>(() => {});
+        }
+        if (options.ledger === "fail-cache-read" && latestLedgerCalls === 1) {
+          // The cache's own lookup fails. The enforcement run reads the ledger
+          // too (for the signature expiry), and that read still succeeds.
+          throw new Error("ledger read failed");
+        }
+        return { sequence: 100 };
+      },
+      simulateTransaction: async () => {
+        simulations += 1;
+        return {
+          result: { auth: [] },
+          minResourceFee: "17",
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [{}] },
+        };
+      },
+    } as unknown as rpc.Server;
+
+    return {
+      server,
+      source,
+      call: CALL,
+      get simulations() {
+        return simulations;
+      },
+      get latestLedgerCalls() {
+        return latestLedgerCalls;
+      },
+    };
+  }
+
+  function makeCachedInterceptor(
+    harness: ReturnType<typeof makeCacheHarness>,
+    cache: PreFlightCacheOptions = { ttlMs: 5_000 },
+  ): PreFlightInterceptor {
+    return new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache,
+    });
+  }
+
+  /**
+   * Await `work`, but fail the test instead of hanging when it never settles.
+   *
+   * A stalled RPC used to leave the check pending forever; without this guard
+   * that regression would hang the suite instead of failing it.
+   */
+  async function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  it("issues no RPC at all when the caller's signal is already aborted", async () => {
+    const harness = makeCacheHarness();
+    const interceptor = makeCachedInterceptor(harness);
+    const controller = new AbortController();
+    controller.abort();
+
+    const decision = await interceptor.check(harness.call, { signal: controller.signal });
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, true);
+    // Neither the cache's ledger read nor a simulation is issued.
+    assert.equal(harness.latestLedgerCalls, 0);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("returns an undetermined timeout verdict when the ledger lookup stalls", async () => {
+    const harness = makeCacheHarness({ ledger: "stall" });
+    const interceptor = makeCachedInterceptor(harness);
+    const startedAt = Date.now();
+
+    const decision = await settleWithin(
+      interceptor.check(harness.call, { timeoutMs: 25 }),
+      2_000,
+      "the check",
+    );
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, false);
+    assert.equal(decision.error.timeoutMs, 25);
+    assert.equal(decision.error.stage, "pre-flight");
+    // The stalled read is bounded, not awaited: the check resolves promptly
+    // instead of hanging on an RPC that will never answer.
+    assert.ok(Date.now() - startedAt < 2_000, "the check must not wait on a stalled ledger read");
+    // The uncached enforcement path is not entered once the bound has fired.
+    assert.equal(harness.latestLedgerCalls, 1);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("falls back to the uncached path when the ledger read fails", async () => {
+    const harness = makeCacheHarness({ ledger: "fail-cache-read" });
+    const interceptor = makeCachedInterceptor(harness);
+
+    const decision = await interceptor.check(harness.call);
+
+    // A failed cache lookup is not a security decision: the uncached
+    // enforcement path runs and prices the call.
+    assert.equal(decision.kind, "admissible");
+    assert.equal(harness.latestLedgerCalls, 2);
+    assert.equal(harness.simulations, 2);
+  });
+
+  it("does not enter the uncached path once the caller's signal has fired", async () => {
+    const controller = new AbortController();
+    const harness = makeCacheHarness();
+    const interceptor = new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache: {
+        ttlMs: 5_000,
+        // The revision read fails *and* the caller gives up while it is in
+        // flight: the cache cannot be consulted, and the uncached path is no
+        // longer inside the caller's bound.
+        policyRevision: () => {
+          controller.abort();
+          throw new Error("revision unavailable");
+        },
+      },
+    });
+
+    const decision = await interceptor.check(harness.call, { signal: controller.signal });
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, true);
+    // No ledger read and no simulation: a caller that gave up gets no work.
+    assert.equal(harness.latestLedgerCalls, 0);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("still serves a cached verdict from a bounded ledger lookup", async () => {
+    const harness = makeCacheHarness();
+    const interceptor = makeCachedInterceptor(harness);
+
+    const first = await interceptor.check(harness.call, { timeoutMs: 1_000 });
+    const second = await interceptor.check(harness.call, { timeoutMs: 1_000 });
+
+    assert.equal(first.kind, "admissible");
+    assert.equal(second, first);
+    // The second check reused the cached verdict: one ledger read for the
+    // cache context, one inside the enforcement run, and no new simulation.
+    assert.equal(harness.latestLedgerCalls, 3);
+    assert.equal(harness.simulations, 2);
+    assert.equal(interceptor.getCacheStats().hits, 1);
   });
 });
 

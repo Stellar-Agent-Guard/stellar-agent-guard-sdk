@@ -26,6 +26,7 @@ export {
   BroadcastError,
   ContractResponseError,
   GuardError,
+  GuardUndeterminedError,
   InvalidFeeCeilingError,
   InvalidInputError,
   PolicyDecodeError,
@@ -183,8 +184,9 @@ export {
   type InvokeErrorOutcome,
   type InvokeOptions,
   type InvokeOutcome,
-  type InvokePipelineStep,
   type InvokeParams,
+  type InvokePendingOutcome,
+  type InvokePipelineStep,
   type InvokeRetryAttempt,
   type InvokeRetryMetadata,
   type InvokeStepEvent,
@@ -197,8 +199,8 @@ export { TRACE_STEP_NAMES } from "./trace.ts";
 export type { TraceStepName, TraceStepStatus } from "./trace.ts";
 
 export {
+  GuardUndeterminedError as PreFlightUndeterminedError,
   PreFlightInterceptor,
-  PreFlightUndeterminedError,
   preflight,
   preflightBatch,
   validateContractCall,
@@ -245,6 +247,7 @@ export type {
 export {
   ConcurrentTelemetryStreamError,
   DEFAULT_JITTER_FRACTION,
+  DEFAULT_MAX_BUFFERED_PAGES,
   DEFAULT_TELEMETRY_RETRY_OPTIONS,
   GuardEventRingBuffer,
   GuardTelemetryListener,

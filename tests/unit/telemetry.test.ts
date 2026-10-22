@@ -1839,6 +1839,7 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
       foreignContract: 1,
       missingContractId: 0,
       malformedContractId: 0,
+      malformedEvent: 0,
     });
   });
 
@@ -1860,6 +1861,7 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
       foreignContract: 0,
       missingContractId: 1,
       malformedContractId: 1,
+      malformedEvent: 0,
     });
   });
 

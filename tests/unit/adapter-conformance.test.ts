@@ -27,7 +27,7 @@ import { mapContractCalls } from "../../src/adapters/shared.ts";
 import { createGuardValidator } from "../../src/adapters/elizaos.ts";
 import { guardMcpToolHandler } from "../../src/adapters/mcp.ts";
 import { wrapToolWithGuard } from "../../src/adapters/vercelai.ts";
-import { AdapterMappingError } from "../../src/errors.ts";
+import { AdapterMappingError, GuardUndeterminedError } from "../../src/errors.ts";
 import { GuardBlockedError, explainReason } from "../../src/reasons.ts";
 import { PreFlightUndeterminedError } from "../../src/preflight.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
@@ -69,11 +69,13 @@ const UNDETERMINED: PreFlightDecision = {
   detail: "rpc unreachable",
 };
 
-/** The five fixtures every adapter must agree on. */
+/** The fixtures every adapter must agree on. */
 interface Scenario {
   name: string;
   /** Verdict the stub interceptor returns; never consulted for mapper failures. */
   decision: PreFlightDecision;
+  /** Optional error the stub interceptor throws instead of returning a decision. */
+  throwsError?: Error;
   /** `maps` = one valid call, `null` = not fund-moving, failures halt. */
   mapping: "maps" | "null" | "throws" | "malformed";
   /** Whether the handler must be kept from running. */
@@ -133,6 +135,34 @@ const SCENARIOS: Scenario[] = [
     decisions: 0,
     blockedHooks: 0,
   },
+  {
+    name: "interceptor throws GuardBlockedError",
+    decision: BLOCKED,
+    throwsError: new GuardBlockedError({
+      stage: "preflight",
+      reason: "per_tx_cap_exceeded",
+      detail: "enforced simulation refused the transfer",
+      diagnosticEvents: [],
+      rawEvent: null,
+      call: CALL,
+    } as unknown as import("../../src/reasons.ts").GuardBlockedErrorParams),
+    mapping: "maps",
+    halts: true,
+    decisions: 1,
+    blockedHooks: 1,
+  },
+  {
+    name: "interceptor throws GuardUndeterminedError",
+    decision: UNDETERMINED,
+    throwsError: new GuardUndeterminedError("simulation failed: rpc unreachable", {
+      stage: "preflight",
+      cause: new Error("rpc unreachable"),
+    }),
+    mapping: "maps",
+    halts: true,
+    decisions: 1,
+    blockedHooks: 1,
+  },
 ];
 
 function mapperFor(scenario: Scenario): () => ContractCall | null {
@@ -151,16 +181,22 @@ function mapperFor(scenario: Scenario): () => ContractCall | null {
   }
 }
 
-function stub(decision: PreFlightDecision): PreFlightInterceptor {
+function stub(decision: PreFlightDecision, throwsError?: Error): PreFlightInterceptor {
   return {
-    check: async () => decision,
-    checkBatch: async (calls: readonly ContractCall[]) => ({
-      admissible: decision.allowed,
-      overallAdmissible: decision.allowed,
-      verdicts: calls.map(() => decision),
-      calls: calls.map(() => decision),
-      totalEstimatedResourceFee: 0n,
-    }),
+    check: async () => {
+      if (throwsError) throw throwsError;
+      return decision;
+    },
+    checkBatch: async (calls: readonly ContractCall[]) => {
+      if (throwsError) throw throwsError;
+      return {
+        admissible: decision.allowed,
+        overallAdmissible: decision.allowed,
+        verdicts: calls.map(() => decision),
+        calls: calls.map(() => decision),
+        totalEstimatedResourceFee: 0n,
+      };
+    },
   } as unknown as PreFlightInterceptor;
 }
 
@@ -194,7 +230,7 @@ interface AdapterHarness {
 }
 
 function interceptorFor(scenario: Scenario, controls?: Controls): PreFlightInterceptor {
-  return controls?.interceptor ?? stub(scenario.decision);
+  return controls?.interceptor ?? stub(scenario.decision, scenario.throwsError);
 }
 
 /** Options every adapter shares; `onBlocked` is added only where the API has it. */
@@ -744,7 +780,8 @@ describe("framework-specific refusal shapes stay distinct (issue #317)", () => {
         );
         await tool.execute!();
       },
-      (error: unknown) => error instanceof PreFlightUndeterminedError,
+      (error: unknown) =>
+        error instanceof GuardUndeterminedError && error instanceof PreFlightUndeterminedError,
     );
   });
 });

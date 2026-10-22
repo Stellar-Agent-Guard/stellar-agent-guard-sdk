@@ -24,6 +24,31 @@ export class GuardError extends Error {
 }
 
 /**
+ * Thrown by `assertAllowed` (or an adapter's pre-execution interceptor) when the guard
+ * could not reach a decision (e.g. transport failure, simulation error, missing state).
+ *
+ * Distinct from `GuardBlockedError`: an action that is undetermined was never ruled on
+ * by policy, but must fail closed so an agent is not given an unverified green light.
+ */
+export class GuardUndeterminedError extends GuardError {
+  readonly stage: "preflight" | "submission";
+  readonly detail: string;
+
+  constructor(
+    detailOrMessage: string,
+    options: { stage?: "preflight" | "submission"; detail?: string; cause?: unknown } = {},
+  ) {
+    const message = detailOrMessage.startsWith("stellar-agent-guard could not determine")
+      ? detailOrMessage
+      : `stellar-agent-guard could not determine this action's status\n${detailOrMessage}`;
+    super(message, causeOptions(options.cause));
+    this.name = "GuardUndeterminedError";
+    this.stage = options.stage ?? "preflight";
+    this.detail = options.detail ?? detailOrMessage;
+  }
+}
+
+/**
  * A caller-supplied value had the wrong shape or type.
  *
  * This is an `InputError` in the platform sense: it is thrown before the SDK

@@ -16,6 +16,9 @@
 # record the run's output in the evidence file instead.
 name: live-suite
 
+# Issue #98: Serialise live-suite runs on GitHub Actions to prevent race conditions on the shared fixture
+concurrency: live-suite
+
 on:
   schedule:
     # Weekly, Monday 06:17 UTC. Off the hour so it does not stack with the
@@ -60,9 +63,13 @@ jobs:
       # Assert on-chain fixture preconditions (code exists, policy active, agent/token balances)
       # Fails fast with clear redeployment instructions if the testnet fixture has expired or been drained.
       - name: verify fixture preconditions
+        env:
+          GUARD_FIXTURE: tests/fixtures/phase2-instance.json
         run: node scripts/check-fixture-preconditions.ts
 
       - name: run the live testnet suite
+        env:
+          GUARD_FIXTURE: tests/fixtures/phase2-instance.json
         run: npm run test:integration
 
       # ── Failure visibility beyond the workflow page (issue #143) ──────────
