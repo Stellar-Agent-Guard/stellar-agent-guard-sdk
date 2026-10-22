@@ -74,6 +74,24 @@ const ENV_KEYS = {
   outsider: "PHASE2_OUTSIDER_SECRET",
 } as const;
 
+export interface DeployOptions {
+  rpcUrl?: string | undefined;
+  envPath?: string | undefined;
+  fixturesPath?: string | undefined;
+  ephemeral?: boolean | undefined;
+  quiet?: boolean | undefined;
+}
+
+export interface DeployResult {
+  guard: string;
+  token: string;
+  rpcUrl: string;
+  keys: Keys;
+  fixtures: Record<string, unknown>;
+  envPath: string;
+  fixturesPath: string;
+}
+
 /** Policy installed on the Phase 2 enforcement instance. */
 function enforcementPolicy(token: string, recipient: string): PolicyConfig {
   return {
@@ -104,9 +122,10 @@ interface Keys {
 
 // ── environment persistence ──────────────────────────────────────────────
 
-async function readEnv(): Promise<Record<string, string>> {
+async function readEnv(path: string, ephemeral = false): Promise<Record<string, string>> {
+  if (ephemeral) return {};
   try {
-    const raw = await readFile(ENV_PATH, "utf8");
+    const raw = await readFile(path, "utf8");
     const out: Record<string, string> = {};
     for (const line of raw.split("\n")) {
       const trimmed = line.trim();
@@ -124,12 +143,23 @@ async function writeEnv(
   keys: Keys,
   deployment: { guard: string; token: string },
   rpcUrl: string,
+  path: string,
+  ephemeral = false,
 ): Promise<void> {
+  const header = ephemeral
+    ? [
+        "# Ephemeral Phase 2 testnet secrets — isolated per test run",
+        "# Written by scripts/deploy-phase2-instance.ts",
+      ]
+    : [
+        "# Phase 2 testnet secrets — written by scripts/deploy-phase2-instance.ts",
+        "# Testnet only. Never reuse these keys on any other network.",
+      ];
+
   await writeFile(
-    ENV_PATH,
+    path,
     [
-      "# Phase 2 testnet secrets — written by scripts/deploy-phase2-instance.ts",
-      "# Testnet only. Never reuse these keys on any other network.",
+      ...header,
       `${ENV_KEYS.guard}=${deployment.guard}`,
       `${ENV_KEYS.token}=${deployment.token}`,
       `${ENV_KEYS.rpcUrl}=${rpcUrl}`,
@@ -143,13 +173,10 @@ async function writeEnv(
   );
 }
 
-/**
- * Read the fixture file if it exists, so a re-run extends the record instead of
- * replacing it.
- */
-async function readFixture(): Promise<FixtureFile | null> {
+async function readFixture(path = FIXTURES_PATH, ephemeral = false): Promise<FixtureFile | null> {
+  if (ephemeral) return null;
   try {
-    return JSON.parse(await readFile(FIXTURES_PATH, "utf8")) as FixtureFile;
+    return JSON.parse(await readFile(path, "utf8")) as FixtureFile;
   } catch {
     return null;
   }
@@ -476,14 +503,19 @@ async function submitSimple(
   throw new Error(`timed out waiting for ${sent.hash}`);
 }
 
-// ── main ─────────────────────────────────────────────────────────────────
+// ── deployPhase2Instance ─────────────────────────────────────────────────
 
-async function main(): Promise<void> {
-  const { flags } = parseArgs(process.argv.slice(2));
-  const rpcUrl = (flags.get("rpc") as string) ?? TESTNET_RPC;
+export async function deployPhase2Instance(options: DeployOptions = {}): Promise<DeployResult> {
+  const ephemeral = Boolean(options.ephemeral);
+  const rpcUrl = options.rpcUrl ?? TESTNET_RPC;
+  const envPath = options.envPath ?? (ephemeral ? ".env.phase2.ephemeral" : ENV_PATH);
+  const fixturesPath =
+    options.fixturesPath ?? (ephemeral ? ".env.phase2.ephemeral.json" : FIXTURES_PATH);
+  const quiet = Boolean(options.quiet);
+
   const server = new rpc.Server(rpcUrl);
-  const env = await readEnv();
-  const existing = await readFixture();
+  const env = await readEnv(envPath, ephemeral);
+  const existing = await readFixture(fixturesPath, ephemeral);
   const deployLog: string[] = [];
   /** Transactions created by *this* run; merged into the preserved record. */
   const createdTransactions: TransactionRecords = {};
@@ -498,7 +530,7 @@ async function main(): Promise<void> {
     };
   };
   const step = (message: string) => {
-    console.log(message);
+    if (!quiet) console.log(message);
     deployLog.push(message);
   };
 
@@ -514,8 +546,9 @@ async function main(): Promise<void> {
     throw new Error("Phase 1 WASM hash mismatch — refusing to deploy");
   }
 
-  // ── Keys: reuse what .env.phase2 already holds, fund only new keys ─────
+  // ── Keys: reuse what env file already holds (unless ephemeral), fund only new keys ─────
   const fromEnv = (name: string): Keypair | null => {
+    if (ephemeral) return null;
     const secret = env[name];
     return secret ? Keypair.fromSecret(secret) : null;
   };
@@ -529,7 +562,7 @@ async function main(): Promise<void> {
   };
   const agentRawPubkey = Buffer.from(StrKey.decodeEd25519PublicKey(keys.agent.publicKey()));
   step(
-    `[1] keys: ${created.length === 0 ? "reused from .env.phase2" : `generated ${created.join(", ")}`}`,
+    `[1] keys: ${created.length === 0 ? `reused from ${envPath}` : `generated ${created.join(", ")}`}`,
   );
   for (const name of created) {
     await fund(server, keys[name as keyof Keys].publicKey());
@@ -542,10 +575,10 @@ async function main(): Promise<void> {
   // ── Test token (SAC) ──────────────────────────────────────────────────
   const asset = new Asset(ASSET_CODE, keys.issuer.publicKey());
   // A SAC's address is derived from the asset, so it is known before deploy.
-  let token = env[ENV_KEYS.token] ?? asset.contractId(TESTNET_PASSPHRASE);
+  let token = (ephemeral ? null : env[ENV_KEYS.token]) ?? asset.contractId(TESTNET_PASSPHRASE);
   let decimals = await readContract(server, token, "decimals", [], keys.issuer.publicKey());
   if (decimals.error) {
-    const existingGuard = env[ENV_KEYS.guard];
+    const existingGuard = ephemeral ? null : env[ENV_KEYS.guard];
     if (existingGuard) {
       throw new Error(
         `configured token ${token} is not readable and keys are already deployed; ` +
@@ -574,7 +607,7 @@ async function main(): Promise<void> {
     salt: GUARD_SALT,
     networkPassphrase: TESTNET_PASSPHRASE,
   });
-  let guard = env[ENV_KEYS.guard] ?? predicted;
+  let guard = (ephemeral ? null : env[ENV_KEYS.guard]) ?? predicted;
   let identity = await verifyWasmIdentity(server, guard).catch(() => null);
   if (!identity) {
     step(`[3] deploying guard instance from WASM ${PHASE1_WASM_HASH}`);
@@ -607,7 +640,7 @@ async function main(): Promise<void> {
 
   // Persist as soon as an instance exists, so a later failure resumes against
   // this same deployment instead of orphan-deploying a new one on each attempt.
-  await writeEnv(keys, { guard, token }, rpcUrl);
+  await writeEnv(keys, { guard, token }, rpcUrl, envPath, ephemeral);
 
   // ── initialize ─────────────────────────────────────────────────────────
   if (!(await isInitialized(server, guard))) {
@@ -756,14 +789,12 @@ async function main(): Promise<void> {
   const previous = existing?.phase2EnforcementInstance;
   const mints = mergeMints(previousMints(existing), createdMints);
   const transactions = mergeTransactionRecords(previous?.transactions, createdTransactions);
-  // The legacy single-mint slot now lives in `mints`; carrying it forward would
-  // restore exactly the fixed shape that could silently lose a hash.
   delete transactions.mint;
   const verification = await verifyTransactionRecords(server, transactions);
   const mintVerification = await verifyMints(server, mints);
   const allSuccess = verification.allSuccess && mintVerification.allSuccess;
   const runs = [...(existing?.runs ?? []), { at: nowIso(), actions: deployLog }];
-  if (!allSuccess) {
+  if (!allSuccess && !quiet) {
     console.warn("WARNING: at least one recorded transaction did not verify as SUCCESS");
   }
   step(
@@ -832,14 +863,42 @@ async function main(): Promise<void> {
   };
 
   assertFixtureSchema(fixtures);
-  await mkdir(dirname(FIXTURES_PATH), { recursive: true });
-  await writeFile(FIXTURES_PATH, `${json(fixtures)}\n`);
-  await writeEnv(keys, { guard, token }, rpcUrl);
+  await mkdir(dirname(fixturesPath), { recursive: true });
+  await writeFile(fixturesPath, `${json(fixtures)}\n`);
+  await writeEnv(keys, { guard, token }, rpcUrl, envPath, ephemeral);
 
   step(`\nPhase 2 enforcement instance ready: ${guard}`);
   step(`token ${token}`);
-  step(`secrets in ${ENV_PATH} (gitignored); public fixtures in ${FIXTURES_PATH}`);
-  console.log(json(fixtures.phase2EnforcementInstance));
+  step(`secrets in ${envPath} (gitignored); public fixtures in ${fixturesPath}`);
+
+  return {
+    guard,
+    token,
+    rpcUrl,
+    keys,
+    fixtures: fixtures as unknown as Record<string, unknown>,
+    envPath,
+    fixturesPath,
+  };
+}
+
+async function main(): Promise<void> {
+  const { flags } = parseArgs(process.argv.slice(2));
+  const rpcUrl = (flags.get("rpc") as string) ?? TESTNET_RPC;
+  const ephemeral = Boolean(flags.get("ephemeral"));
+  const envPath = (flags.get("env") as string) || undefined;
+  const fixturesPath = (flags.get("fixtures") as string) || undefined;
+  const result = await deployPhase2Instance({ rpcUrl, ephemeral, envPath, fixturesPath });
+  if (flags.get("json")) {
+    console.log(json(result.fixtures));
+  } else {
+    console.log(
+      json(
+        (result.fixtures as { phase2EnforcementInstance?: unknown }).phase2EnforcementInstance ??
+          result.fixtures,
+      ),
+    );
+  }
 }
 
 /**

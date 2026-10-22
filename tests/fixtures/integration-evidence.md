@@ -227,3 +227,62 @@ output if desired.
 
 No credentials, deployment, or policy change are needed beyond what the suite
 already does.
+
+## Addendum — 2026-10-22 (PR: pending invoke outcome + telemetry observability on `src/invoke.ts`)
+
+Recorded because this PR touches the enforcement path (`src/invoke.ts`) and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this contributor checkout, so `npm run test:integration` cannot execute here.
+No fresh Phase-2 transcript is claimed below. The CI gate verifies only that this
+file was touched — not the numbers — and the same limitation stated in the addenda
+above applies here unchanged.
+
+### What the PR changes on the enforcement path
+
+- `src/invoke.ts`: adds a `pending` outcome (`InvokePendingOutcome`) for a
+  transaction the network accepted but did not confirm within the polling
+  budget. It is reported as neither success nor failure: it carries the
+  transaction hash, the `SubmissionResult`, and explicit guidance not to
+  rebroadcast without first querying status, so an in-flight transaction can no
+  longer be mistaken for a failed one and accidentally executed twice.
+- `src/heartbeat.ts`: classifies that same `pending` outcome once through
+  `onError` as a typed non-beat, without advancing `lastBeatAt` or the
+  same-second dedupe marker — the same treatment already given to `blocked`,
+  `error` and `dry_run`.
+- `src/telemetry.ts`: isolates a committed event whose topic/data XDR fails to
+  decode to that single event (counted, never delivered), and makes the count
+  observable through `onMalformed`/`onMalformedEvent`. Also honors a pre-aborted
+  `signal` before every startup request and retries a failed startup
+  `getLatestLedger` inside the existing bounded, abort-aware envelope.
+
+### What did not change
+
+- No guard-policy decision path, authorization-entry construction, signing, or
+  `__check_auth` classification logic was modified. `blocked` and `admissible`
+  verdicts, and the enforced-simulation invariant, are untouched.
+- `src/tx.ts`, `src/policy.ts` and the pre-flight enforcement pipeline are
+  unchanged by this PR.
+- The new `pending` arm is reached only after the enforced simulation has
+  already passed and the transaction has been broadcast — it cannot turn a
+  refusal into a pass, and it never reports `allowed`.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run check:strict-ratchet
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+npm run test:browser
+npm run check:secrets
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+As above, these are valuable but are not a substitute for the Phase-2 live
+suite. A maintainer with `.env.phase2` should run `npm run test:integration`
+against this branch before merge.

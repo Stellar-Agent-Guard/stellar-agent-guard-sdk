@@ -440,6 +440,11 @@ export interface PreFlightConfig {
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
+   *
+   * The cache's ledger lookup is one of the RPC calls the check makes, so it
+   * carries the check's `signal`/`timeoutMs` bound like every other one: an
+   * already-aborted signal issues no RPC at all, and a stalled lookup fails the
+   * check closed with an `undetermined` verdict instead of hanging it.
    */
   cache?: PreFlightCacheOptions;
   /**
@@ -488,6 +493,24 @@ interface CacheContext {
   ledger: number;
   expiresAt: number;
 }
+
+/**
+ * The outcome of a cache-context lookup.
+ *
+ * - `context` — the cache could be consulted: the ledger marker is known and
+ *   the entry key is derived from it.
+ * - `unavailable` — the cache could *not* be consulted (an unreadable policy
+ *   revision, or a ledger read that failed for a reason that is not the
+ *   caller's bound). That is not a security decision: the check falls back to
+ *   the uncached enforcement path, which runs under the same bound.
+ * - `bounded` — the caller's own signal or timeout fired during the lookup.
+ *   There is no budget left to run the uncached path within, so the check
+ *   fails closed with an `undetermined` verdict.
+ */
+type CacheLookup =
+  | { kind: "context"; context: CacheContext }
+  | { kind: "unavailable" }
+  | { kind: "bounded"; error: RpcTimeoutError };
 
 /** The fail-closed verdict for a caller bound that fired. */
 function timeoutDecision(error: RpcTimeoutError): PreFlightDecision {
@@ -624,30 +647,58 @@ export class PreFlightInterceptor {
     return Math.min(requested, MAX_CACHE_TTL_MS);
   }
 
-  private async cacheContext(call: ContractCall): Promise<CacheContext | null> {
-    if (!this.cacheOptions) return null;
+  /**
+   * Resolve the cache context for `call`: the ledger marker the cached verdict
+   * must belong to, and the key it is stored under.
+   *
+   * The ledger read is one of the RPC calls the check makes, so it carries the
+   * same abort/timeout semantics as the enforcement pipeline: an already-aborted
+   * signal issues no RPC at all, and a stalled read is bounded by the caller's
+   * `timeoutMs` instead of leaving the check pending indefinitely.
+   *
+   * A failed read is not a security decision. Without a trustworthy ledger
+   * marker no cached verdict may be reused, so the lookup reports
+   * `unavailable` and the caller falls back to the uncached enforcement path.
+   * That fallback is only allowed while it remains inside the caller's bound:
+   * a lookup whose own bound fired reports `bounded`, and the check fails
+   * closed rather than spending a budget the caller never granted.
+   */
+  private async cacheContext(
+    call: ContractCall,
+    bound: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined },
+  ): Promise<CacheLookup> {
+    if (!this.cacheOptions) return { kind: "unavailable" };
 
     let revision: PolicyRevision;
     try {
       if (typeof this.cacheOptions.policyRevision === "function") {
         revision = await this.cacheOptions.policyRevision();
-        if (revision === undefined) return null;
+        if (revision === undefined) return { kind: "unavailable" };
       } else {
         revision = this.cacheOptions.policyRevision;
       }
     } catch {
       // A revision read failure must not turn a cache lookup into a security
       // decision. Fall through to the uncached path instead.
-      return null;
+      return { kind: "unavailable" };
     }
 
     let ledger: number;
     try {
-      const latest = await this.config.server.getLatestLedger();
+      const latest = await withRpcAbort(
+        { stage: "pre-flight", signal: bound.signal, timeoutMs: bound.timeoutMs },
+        () => this.config.server.getLatestLedger(),
+      );
       ledger = latest.sequence;
-    } catch {
+    } catch (error) {
+      if (error instanceof RpcTimeoutError) {
+        // The caller's bound fired while the ledger read was in flight. The
+        // uncached path would need a budget the caller has not granted, so the
+        // check fails closed instead of running on.
+        return { kind: "bounded", error };
+      }
       // Without a trustworthy ledger marker, do not reuse a cached verdict.
-      return null;
+      return { kind: "unavailable" };
     }
 
     const now = this.clock.now();
@@ -656,9 +707,12 @@ export class PreFlightInterceptor {
     }
 
     return {
-      key: `${this.namespace}:${callFingerprint(call)}:${policyRevisionToken(revision)}`,
-      ledger,
-      expiresAt: now + this.cacheTtlMs(),
+      kind: "context",
+      context: {
+        key: `${this.namespace}:${callFingerprint(call)}:${policyRevisionToken(revision)}`,
+        ledger,
+        expiresAt: now + this.cacheTtlMs(),
+      },
     };
   }
 
@@ -691,6 +745,12 @@ export class PreFlightInterceptor {
    * effect on the verdict itself; existing single-argument callers are
    * unaffected.
    *
+   * With the cache enabled, the cache's ledger lookup is one of the RPC calls
+   * the check makes, so it carries the same `signal`/`timeoutMs` bound as the
+   * enforcement pipeline: an already-aborted signal issues no RPC at all, and a
+   * stalled lookup returns the fail-closed `undetermined` verdict instead of
+   * leaving the check pending forever.
+   *
    * Concurrent checks for the same call and config share a single in-flight
    * discovery/enforcement run by default. The shared run is not bound by any
    * one caller's signal or timeout — one caller giving up must not cancel a
@@ -706,7 +766,24 @@ export class PreFlightInterceptor {
       return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
     }
 
-    const context = await this.cacheContext(call);
+    const lookup = await this.cacheContext(call, {
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+    if (lookup.kind === "bounded") {
+      // The caller's bound fired while the cache's ledger read was in flight.
+      // The check fails closed: a stalled RPC must never leave a guardrail
+      // call pending indefinitely, and the uncached path would need a budget
+      // the caller has not granted.
+      return timeoutDecision(lookup.error);
+    }
+    if (lookup.kind === "unavailable" && options?.signal?.aborted) {
+      // The cache could not be consulted and the caller has already given up:
+      // the uncached path is no longer within the caller's bound, so the check
+      // fails closed instead of starting work nobody is waiting for.
+      return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+    }
+    const context = lookup.kind === "context" ? lookup.context : null;
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {

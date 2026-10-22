@@ -76,7 +76,8 @@ Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, and `signal`.
+`maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`,
+`onMalformed`, `onMalformedEvent`, and `signal`.
 
 #### Unknown topics
 
@@ -88,6 +89,49 @@ page that contains at least one unrecognised event. Each entry is
 are exposed — never raw XDR or the source payload. The callback is isolated like
 `onGap`, so a throwing sink cannot stop the stream. See
 [`docs/event-schema.md`](../event-schema.md#unknown-event-topics--observability-without-payloads).
+
+#### Malformed events (issue #284)
+
+An event whose topic or data XDR cannot be decoded is **isolated to that
+event**: the listener skips it, counts it, and keeps decoding the rest of the
+page. One corrupt event never fails a page, never discards its valid
+neighbours, and never stops the stream.
+
+`poll()` reports the count in two places — `dropped.malformedEvent` in the
+drop breakdown and `malformedEvents` as a top-level summary on `PollResult` —
+and `watch()`/`watchAll()` accept two opt-in callbacks:
+
+```ts
+watch({
+  // Once per page that contains at least one malformed committed event.
+  onMalformed: (count) => metrics.increment("guard.events.malformed", { count }),
+  // Per malformed event, with safe diagnostics only.
+  onMalformedEvent: ({ ledger, transactionHash }) => {
+    reportSuspiciousLedger(ledger, transactionHash);
+  },
+});
+```
+
+Only the count and the safe metadata (ledger, transaction hash) are exposed —
+never the malformed payload or its raw XDR, so an observability sink cannot
+become an exfiltration path. Both callbacks are isolated like `onGap`: a
+throwing sink is swallowed and cannot stop the stream.
+
+#### Startup: resolving the first ledger (issue #281)
+
+When neither `startLedger` nor `cursor` is supplied, `watch()` must resolve a
+starting point before its first poll. That startup read now follows the same
+contract as every later poll:
+
+- A `signal` that is **already aborted** short-circuits before *any* startup
+  work — no cursor load, no `getLatestLedger` — so teardown issues zero RPCs.
+  Additional abort checks guard each subsequent startup request.
+- A `getLatestLedger` that fails is retried inside the same bounded, abort-aware
+  backoff envelope (`retry`) as a mid-watch poll failure. Recovery resumes
+  normally; exhaustion reports through `onStreamError` exactly once and leaves
+  `health().state === "failed"`.
+- An abort during the backoff wait ends the stream promptly, with no
+  `onStreamError` — an abort is not a failure.
 
 #### One active stream per listener
 
@@ -316,8 +360,11 @@ interface GuardTelemetryHealthSnapshot {
 `poll()` re-checks the emitting `contractId` before decoding rather than
 trusting the RPC's contract filter. `PollResult.dropped` reports every rejection
 by reason — `unknownTopic`, `foreignContract`, `missingContractId`,
-`malformedContractId` — and the same breakdown is logged with the page summary.
-Events with missing or malformed identity fail closed. See
+`malformedContractId`, `malformedEvent` — and the same breakdown is logged with
+the page summary. `malformedEvent` counts committed events whose XDR failed to
+decode; they are skipped individually rather than failing the page (issue
+#284), and `PollResult.malformedEvents` repeats the count as a top-level
+summary. Events with missing or malformed identity fail closed. See
 [`event-schema.md`](../event-schema.md#emitting-identity-validation-before-decode-issue-322).
 
 ## Event identity
