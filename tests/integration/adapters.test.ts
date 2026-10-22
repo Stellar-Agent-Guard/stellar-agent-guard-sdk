@@ -31,7 +31,7 @@ import { Address, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import { PreFlightInterceptor, type PreFlightDecision } from "../../src/preflight.ts";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
 import { createGuardValidator, guardAction } from "../../src/adapters/elizaos.ts";
-import { GuardError } from "../../src/index.ts";
+import { GuardError, GuardBlockedError, GuardUndeterminedError } from "../../src/index.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
 import { loadPhase2Config, installPolicy, type Phase2Config } from "./harness.ts";
 
@@ -92,6 +92,10 @@ interface VerdictRow {
    * of the live interceptor — the adapters' mapping is what is under test.
    */
   fixedVerdict?: PreFlightDecision;
+  /**
+   * An error thrown by the interceptor instead of returning a decision.
+   */
+  throwsError?: Error;
   /** LangChain expected behaviour. */
   langchain: {
     /** Whether the tool body is entered. */
@@ -146,6 +150,36 @@ const VERDICT_TABLE: VerdictRow[] = [
     },
     elizaos: { validate: false, onBlocked: ["undetermined"] },
   },
+  {
+    name: "thrown GuardBlockedError(per_tx_cap_exceeded)",
+    args: { to: "recipient", amount: "5" },
+    throwsError: new GuardBlockedError({
+      stage: "preflight",
+      reason: "per_tx_cap_exceeded",
+      detail: "enforced simulation refused the transfer",
+      rawEvent: null,
+    }),
+    langchain: {
+      toolEntered: false,
+      error: true,
+      matches: /per_tx_cap_exceeded/,
+    },
+    elizaos: { validate: false, onBlocked: ["per_tx_cap_exceeded"] },
+  },
+  {
+    name: "thrown GuardUndeterminedError(rpc unavailable)",
+    args: { to: "recipient", amount: "5" },
+    throwsError: new GuardUndeterminedError("simulation failed: rpc unavailable", {
+      stage: "preflight",
+      cause: new Error("rpc unavailable"),
+    }),
+    langchain: {
+      toolEntered: false,
+      error: true,
+      matches: /could not determine|rpc unavailable/,
+    },
+    elizaos: { validate: false, onBlocked: ["undetermined"] },
+  },
 ];
 
 const RECIPIENT_KEY = "recipient";
@@ -167,6 +201,13 @@ function resolveArgs(row: VerdictRow): { to: unknown; amount?: unknown } | null 
  * made to return, a fixed-verdict stand-in for the `undetermined` row.
  */
 function interceptorForRow(row: VerdictRow): PreFlightInterceptor {
+  if (row.throwsError) {
+    return {
+      check: async () => {
+        throw row.throwsError;
+      },
+    } as unknown as PreFlightInterceptor;
+  }
   if (!row.fixedVerdict) return interceptor;
   return {
     check: async () => row.fixedVerdict as PreFlightDecision,
@@ -246,7 +287,7 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
 describe("LangChain wrapToolCall adapter — shared verdict-fixture harness", () => {
   for (const row of VERDICT_TABLE) {
     it(`${row.name}: toolEntered=${row.langchain.toolEntered}, error=${row.langchain.error}`, async () => {
-      if (!row.fixedVerdict) await installPolicy(server, config);
+      if (!row.fixedVerdict && !row.throwsError) await installPolicy(server, config);
       let toolEntered = false;
       const middleware = createLangChainGuardMiddleware({
         interceptor: interceptorForRow(row),
@@ -537,7 +578,7 @@ describe("adapter options validation (construction-time fail-fast)", () => {
 describe("ElizaOS Action.validate adapter — shared verdict-fixture harness", () => {
   for (const row of VERDICT_TABLE) {
     it(`${row.name}: validate=${row.elizaos.validate}, onBlocked=${JSON.stringify(row.elizaos.onBlocked ?? [])}`, async () => {
-      if (!row.fixedVerdict) await installPolicy(server, config);
+      if (!row.fixedVerdict && !row.throwsError) await installPolicy(server, config);
       const blocked: string[] = [];
       const validate = createGuardValidator({
         interceptor: interceptorForRow(row),
