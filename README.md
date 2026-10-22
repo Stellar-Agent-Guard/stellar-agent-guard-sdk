@@ -1358,6 +1358,7 @@ This boundary is an inherent property of the platform (the auth context does not
 
 - GitHub issues: <https://github.com/aigbagbobila/stellar-agent-guard-sdk/issues>
 - Maintainer (GitHub): [@aigbagbobila](https://github.com/aigbagbobila)
+- Funding: This project has no funding channel — that's deliberate.
 - Security disclosures: see the local [SECURITY.md](SECURITY.md) for SDK issues; contract/protocol issues and deployed-instance incidents go to the contracts repo's [SECURITY.md](https://github.com/aigbagbobila/stellar-agent-guard-contracts/blob/main/SECURITY.md)
 - Security review: [`docs/attack-surface.md`](docs/attack-surface.md) maps where untrusted data enters and leaves the SDK, and [`docs/threat-model.md`](docs/threat-model.md) states what can go wrong
 
