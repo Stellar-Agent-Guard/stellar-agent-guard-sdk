@@ -69,10 +69,120 @@ export function parseEnvContent(raw: string): Record<string, string> {
   return out;
 }
 
+/** The gitignored env file the live suite reads. Template: `ENV_EXAMPLE_FILE`. */
+export const ENV_FILE = ".env.phase2";
+
+/** Safe-to-commit template listing every key, with no values. */
+export const ENV_EXAMPLE_FILE = ".env.phase2.example";
+
+/** Ephemeral env file generated per isolated live run. */
+export const EPHEMERAL_ENV_FILE = ".env.phase2.ephemeral";
+
+/** Ephemeral fixture file generated per isolated live run. */
+export const EPHEMERAL_FIXTURE_PATH = ".env.phase2.ephemeral.json";
+
+/** Environment variable opting in to shared-instance mode. */
+export const GUARD_FIXTURE_ENV_VAR = "GUARD_FIXTURE";
+
+/** What produces a populated `.env.phase2`, including the keys the suite does not read. */
+export const DEPLOY_COMMAND = "npm run deploy:phase2";
+
+let sharedFixtureWarned = false;
+
+/**
+ * Returns true when explicitly opting in to the shared testnet instance via GUARD_FIXTURE.
+ * Accepts any non-empty value (e.g. GUARD_FIXTURE=shared, GUARD_FIXTURE=1,
+ * or a specific fixture path like tests/fixtures/phase2-instance.json).
+ */
+export function isSharedFixtureMode(): boolean {
+  const val = process.env[GUARD_FIXTURE_ENV_VAR]?.trim();
+  return Boolean(val && val.length > 0);
+}
+
+/**
+ * Returns true when running in the default isolated (ephemeral) instance mode.
+ */
+export function isEphemeralMode(): boolean {
+  return !isSharedFixtureMode();
+}
+
+/**
+ * Resolves the fixture JSON path:
+ * - In shared mode: returns custom path if GUARD_FIXTURE points to a file, else FIXTURE_PATH.
+ * - In ephemeral mode: returns GUARD_EPHEMERAL_FIXTURE or EPHEMERAL_FIXTURE_PATH if it exists,
+ *   falling back to FIXTURE_PATH.
+ */
+export function resolveFixturePath(): string {
+  if (isSharedFixtureMode()) {
+    const val = process.env[GUARD_FIXTURE_ENV_VAR]?.trim();
+    if (val && !["shared", "1", "true", "default"].includes(val.toLowerCase())) {
+      return val;
+    }
+    return FIXTURE_PATH;
+  }
+  if (process.env["GUARD_EPHEMERAL_FIXTURE"]) {
+    return process.env["GUARD_EPHEMERAL_FIXTURE"];
+  }
+  try {
+    if (readFileSync(EPHEMERAL_FIXTURE_PATH)) return EPHEMERAL_FIXTURE_PATH;
+  } catch {
+    // Falls back to FIXTURE_PATH
+  }
+  return FIXTURE_PATH;
+}
+
+/**
+ * Resolves the environment file path:
+ * - If GUARD_EPHEMERAL_ENV_FILE is set, returns that path.
+ * - If in ephemeral mode and EPHEMERAL_ENV_FILE exists, returns that path.
+ * - Otherwise returns ENV_FILE (".env.phase2").
+ */
+export function resolveEnvFile(): string {
+  if (process.env["GUARD_EPHEMERAL_ENV_FILE"]) {
+    return process.env["GUARD_EPHEMERAL_ENV_FILE"];
+  }
+  if (isEphemeralMode()) {
+    try {
+      if (readFileSync(EPHEMERAL_ENV_FILE)) return EPHEMERAL_ENV_FILE;
+    } catch {
+      // Falls back to ENV_FILE
+    }
+  }
+  return process.env["PHASE2_ENV_FILE_PATH"] ?? ENV_FILE;
+}
+
+/**
+ * Actionable warning message printed when running in shared-instance mode.
+ */
+export function sharedFixtureWarningMessage(fixturePath = resolveFixturePath()): string {
+  return (
+    `[GUARD_FIXTURE] WARNING: Running against shared testnet fixture (${fixturePath}).\n` +
+    `  Concurrent test runs may interleave sequence numbers and rolling window spend.\n` +
+    `  For isolated parallel-safe execution, unset ${GUARD_FIXTURE_ENV_VAR} to use default ephemeral mode.`
+  );
+}
+
+/**
+ * Warns once to stderr when shared fixture mode is active.
+ */
+export function warnIfSharedFixture(): void {
+  if (!sharedFixtureWarned && isSharedFixtureMode()) {
+    sharedFixtureWarned = true;
+    console.warn(sharedFixtureWarningMessage());
+  }
+}
+
+/**
+ * Reset warning state (used in unit testing).
+ */
+export function resetSharedFixtureWarning(): void {
+  sharedFixtureWarned = false;
+}
+
 /**
  * Synchronous reader for the env file, used for up-front entry checks before test runners launch.
  */
-export function readEnvFileSync(path = ENV_FILE): Record<string, string> | null {
+export function readEnvFileSync(path = resolveEnvFile()): Record<string, string> | null {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -83,14 +193,11 @@ export function readEnvFileSync(path = ENV_FILE): Record<string, string> | null 
   return parseEnvContent(raw);
 }
 
-async function readEnvFile(path = ENV_FILE): Promise<Record<string, string> | null> {
+async function readEnvFile(path = resolveEnvFile()): Promise<Record<string, string> | null> {
   let raw: string;
   try {
     raw = await readFile(path, "utf8");
   } catch (error) {
-    // A missing file is the ordinary first-run case, not an unexpected I/O
-    // failure. Return null so the caller fails with the same actionable pointer
-    // an incomplete file gets, instead of a bare ENOENT with no next step.
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
@@ -113,26 +220,17 @@ export const REQUIRED_PHASE2_KEYS = [
   "PHASE2_OUTSIDER_SECRET",
 ] as const;
 
-/** The gitignored env file the live suite reads. Template: `ENV_EXAMPLE_FILE`. */
-export const ENV_FILE = ".env.phase2";
-
-/** Safe-to-commit template listing every key, with no values. */
-export const ENV_EXAMPLE_FILE = ".env.phase2.example";
-
-/** What produces a populated `.env.phase2`, including the keys the suite does not read. */
-export const DEPLOY_COMMAND = "npm run deploy:phase2";
-
 /**
  * The fail-fast message for an incomplete `.env.phase2`: every missing key at
  * once, plus the two ways to produce a complete file. Exported so it can be
  * asserted verbatim rather than pattern-matched loosely.
  */
-export function missingPhase2KeysMessage(missing: readonly string[]): string {
+export function missingPhase2KeysMessage(missing: readonly string[], file = ENV_FILE): string {
   return [
-    `.env.phase2 is incomplete: ${missing.length} required key(s) are missing:`,
+    `${file} is incomplete: ${missing.length} required key(s) are missing:`,
     ...missing.map((key) => `  - ${key}`),
     "",
-    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} .env.phase2`,
+    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} ${file}`,
     `Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  ${DEPLOY_COMMAND}`,
   ].join("\n");
 }
@@ -146,11 +244,11 @@ export function missingPhase2KeysMessage(missing: readonly string[]): string {
  * exact case the README's quick start hits first — with no `cp`/deploy pointer;
  * only a file that existed *and* was incomplete got the actionable message.
  */
-export function missingEnvFileMessage(): string {
+export function missingEnvFileMessage(file = ENV_FILE): string {
   return [
-    `${ENV_FILE} was not found in the working directory.`,
+    `${file} was not found in the working directory.`,
     "",
-    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} ${ENV_FILE}`,
+    `Copy the documented template and fill it in:  cp ${ENV_EXAMPLE_FILE} ${file}`,
     `Or provision a fresh instance (writes the file, including PHASE2_ISSUER_SECRET):  ${DEPLOY_COMMAND}`,
   ].join("\n");
 }
@@ -184,7 +282,27 @@ export function validatePhase2Env(
 }
 
 export async function loadPhase2Config(): Promise<Phase2Config> {
-  const env = await readEnvFile();
+  if (isSharedFixtureMode()) {
+    warnIfSharedFixture();
+  }
+
+  const envPath = resolveEnvFile();
+  let env = await readEnvFile(envPath);
+
+  if ((env === null || !validatePhase2Env(env).ok) && isEphemeralMode()) {
+    // Auto-deploy fresh isolated instance if running directly without run-tests.ts pre-deployment
+    const { deployPhase2Instance } = await import("../../scripts/deploy-phase2-instance.ts");
+    const ephemeral = await deployPhase2Instance({
+      ephemeral: true,
+      envPath: EPHEMERAL_ENV_FILE,
+      fixturesPath: EPHEMERAL_FIXTURE_PATH,
+      quiet: true,
+    });
+    process.env["GUARD_EPHEMERAL_ENV_FILE"] = ephemeral.envPath;
+    process.env["GUARD_EPHEMERAL_FIXTURE"] = ephemeral.fixturesPath;
+    env = await readEnvFile(ephemeral.envPath);
+  }
+
   const validation = validatePhase2Env(env);
   if (!validation.ok || env === null) {
     throw new Error(validation.message);
@@ -435,7 +553,9 @@ export function assertFixtureSchema(data: unknown): asserts data is Phase2Instan
   }
 }
 
-export async function readFixtureInstance(path = FIXTURE_PATH): Promise<Phase2InstanceFixture> {
+export async function readFixtureInstance(
+  path = resolveFixturePath(),
+): Promise<Phase2InstanceFixture> {
   const content = await readFile(path, "utf8");
   const parsed = JSON.parse(content) as unknown;
   assertFixtureSchema(parsed);
