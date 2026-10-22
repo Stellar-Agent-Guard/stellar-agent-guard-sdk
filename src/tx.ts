@@ -57,6 +57,7 @@ import {
 import {
   BroadcastError,
   ContractResponseError,
+  InvalidInputError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -68,6 +69,52 @@ import type { ContractAddress } from "./policy.ts";
 const SIG_EXPIRATION_LEDGERS = 10_000;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
+/** Default inclusion fee in stroops as a bigint. */
+export const DEFAULT_INCLUSION_FEE_STROOPS = 100n;
+
+/**
+ * Validate and parse an inclusion fee into a non-negative bigint stroop count.
+ */
+export function parseInclusionFee(fee?: bigint | string | number | null): bigint {
+  if (fee === undefined || fee === null) return DEFAULT_INCLUSION_FEE_STROOPS;
+  if (typeof fee === "bigint") {
+    if (fee < 0n) {
+      throw new InvalidInputError(
+        "inclusionFee",
+        "non_negative",
+        `expected a non-negative inclusion fee in stroops, got ${fee}n`,
+      );
+    }
+    return fee;
+  }
+  if (typeof fee === "number") {
+    if (!Number.isSafeInteger(fee) || fee < 0) {
+      throw new InvalidInputError(
+        "inclusionFee",
+        "non_negative_integer",
+        `expected a non-negative safe integer inclusion fee, got ${fee}`,
+      );
+    }
+    return BigInt(fee);
+  }
+  if (typeof fee === "string") {
+    const trimmed = fee.trim();
+    if (/^\d+$/.test(trimmed)) {
+      return BigInt(trimmed);
+    }
+    throw new InvalidInputError(
+      "inclusionFee",
+      "non_negative_integer",
+      `expected a non-negative base-10 integer inclusion fee string, got ${JSON.stringify(fee)}`,
+    );
+  }
+  throw new InvalidInputError(
+    "inclusionFee",
+    "invalid_type",
+    `expected bigint | string | number, got ${typeof fee}`,
+  );
+}
+
 const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
 
 export interface ContractCall {
@@ -572,9 +619,10 @@ export function assembleFromSimulation(params: {
   networkPassphrase: string;
   guard: string | null;
   extraResourceFee?: bigint | undefined;
-  inclusionFee?: bigint | string | undefined;
+  inclusionFee?: bigint | string | number | null | undefined;
 }): AssembleResult {
   const { simulation, source, operation, networkPassphrase, guard } = params;
+  const parsedInclusionFee = parseInclusionFee(params.inclusionFee);
   // v17 hands back a builder already; older shapes hand back the data itself.
   const data =
     simulation.transactionData instanceof SorobanDataBuilder
@@ -616,12 +664,12 @@ export function assembleFromSimulation(params: {
   const extra = params.extraResourceFee ?? 0n;
   data.setResourceFee(minResourceFee + extra);
 
-  const inclusionFee = (params.inclusionFee ?? INCLUSION_FEE).toString();
+  const inclusionFeeStr = parsedInclusionFee.toString();
 
   // `TransactionBuilder` folds the resource fee declared in `sorobanData` into
   // the transaction fee on build(), so `fee` here is the inclusion fee only.
   const transaction = new TransactionBuilder(source, {
-    fee: inclusionFee,
+    fee: inclusionFeeStr,
     networkPassphrase,
     sorobanData: data.build(),
   })
@@ -629,7 +677,7 @@ export function assembleFromSimulation(params: {
     .setTimeout(0)
     .build();
 
-  return { transaction, resourceFee: minResourceFee + extra, footprintKeys, inclusionFee: BigInt(inclusionFee) };
+  return { transaction, resourceFee: minResourceFee + extra, footprintKeys, inclusionFee: parsedInclusionFee };
 }
 
 /**
@@ -1104,10 +1152,12 @@ export function buildInitialEnvelope(params: {
   operation: xdr.Operation;
   networkPassphrase: string;
   guard: string | null;
-  fee?: bigint | string | undefined;
+  fee?: bigint | string | number | null | undefined;
+  inclusionFee?: bigint | string | number | null | undefined;
 }): Transaction {
+  const inclusionFee = parseInclusionFee(params.inclusionFee ?? params.fee);
   const builder = new TransactionBuilder(params.source, {
-    fee: (params.fee ?? INCLUSION_FEE).toString(),
+    fee: inclusionFee.toString(),
     networkPassphrase: params.networkPassphrase,
     ...(params.guard
       ? {

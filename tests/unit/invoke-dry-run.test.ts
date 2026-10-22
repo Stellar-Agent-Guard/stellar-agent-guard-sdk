@@ -210,6 +210,25 @@ describe("invoke dry run", () => {
     assert.ok(!("txHash" in result));
   });
 
+  it("uses custom inclusion fee in dry-run fee estimate (#310)", async () => {
+    const source = Keypair.random();
+    const agent = Keypair.random();
+    const mock = mockServer([simulationSuccess("777"), simulationSuccess("777")]);
+
+    const result = await invoke({
+      ...dryParams(mock.server, source, agent),
+      inclusionFee: 250n,
+    });
+
+    assert.equal(result.kind, "dry_run");
+    assert.equal(result.admissible, true);
+    assert.deepEqual(result.fees, {
+      resourceFeeStroops: 777n,
+      inclusionFeeStroops: 250n,
+      totalFeeStroops: 1027n,
+    });
+  });
+
   it("signs and attaches real guard authorization in the enforced dry-run simulation", async () => {
     const source = Keypair.random();
     const agent = Keypair.random();
