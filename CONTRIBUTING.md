@@ -137,6 +137,7 @@ maintainer-only (npm 2FA/automation token, outside this repo).
 
 ```bash
 npm run typecheck
+npm run test:types   # type-level regression tests (expect-type on exported public types)
 npm run lint
 npm run format:check   # Prettier; run `npm run format` to fix
 npm test
@@ -173,6 +174,7 @@ Contributors use diverse operating systems and editors. To prevent cross-platfor
 ## Test tiers and fixtures
 
 - **Unit** (`npm test`) — no network, no secrets, deterministic.
+- **Type-level** (`npm run test:types`) — offline; type-level compile-time tests (`expect-type` against `tsconfig.test-d.json`).
 - **Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
   (template: `.env.phase2.example`). Not run on pull requests; see
   "The live testnet suite is not run on every PR" above.
@@ -183,6 +185,7 @@ Both tiers run through one runner configuration, `tests/test.config.ts`, read by
 | Script | Project(s) | Notes |
 | --- | --- | --- |
 | `npm test` / `npm run test:unit` | `unit` (`tests/unit`) | Offline; Node test-runner default concurrency. |
+| `npm run test:types` | `types` (`tests/types`) | Offline; type-level regression tests asserting discriminant narrowing, error hierarchy, and options interfaces via `expect-type`. |
 | `npm run test:watch` | `unit` (`tests/unit`) | Development loop: Node's test-runner watch mode, re-running the unit suite on every change to a watched file, so you can edit → read the failure → fix → repeat without re-issuing `npm test`. Same project, same `tsx` transform, same files as `npm test`. |
 | `npm run test:integration` | `integration` (`tests/integration`) | Live; concurrency pinned to `1`. Supports two execution modes: (1) **Default ephemeral mode**: automatically deploys an isolated on-chain instance per run, eliminating sequence collisions and rolling window pollution from concurrent suites; (2) **Shared-instance mode**: opt in via `GUARD_FIXTURE=tests/fixtures/phase2-instance.json` (or `GUARD_FIXTURE=shared`) to run against `.env.phase2`, emitting an explicit warning about concurrent run hazards. Serialized in CI via `concurrency: live-suite`. |
 | `npm run test:all` | every project, one run | Both suites in a single invocation. |
