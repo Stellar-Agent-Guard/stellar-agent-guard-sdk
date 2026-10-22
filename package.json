@@ -85,6 +85,7 @@
     "test:exports": "node --import tsx scripts/check-export-map.ts",
     "test:pack": "node --import tsx scripts/check-pack-contents.ts",
     "test:packed-install": "node --import tsx scripts/check-packed-install.ts",
+    "test:types": "tsc -p tsconfig.test-d.json",
     "test:types:packed": "node --import tsx scripts/check-packed-types.ts",
     "test:browser": "node scripts/check-browser-entry.mjs",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
