@@ -4,12 +4,22 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import { Account, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
+  ENV_FILE,
+  FIXTURE_PATH as HARNESS_FIXTURE_PATH,
+  GUARD_FIXTURE_ENV_VAR,
   REDEPLOY_INSTRUCTION,
   assertFixtureSchema,
   assertPreconditions,
+  isEphemeralMode,
+  isSharedFixtureMode,
+  resetSharedFixtureWarning,
+  resolveEnvFile,
+  resolveFixturePath,
+  sharedFixtureWarningMessage,
+  warnIfSharedFixture,
   type Phase2Config,
 } from "../integration/harness.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
@@ -306,5 +316,92 @@ describe("assertPreconditions live suite preflight checks", () => {
     assert.equal(result.policyInstalled, true);
     assert.equal(result.agentFunded, true);
     assert.equal(result.tokenFunded, true);
+  });
+});
+
+describe("parallel-safe live suite execution and fixture resolution (issue #98)", () => {
+  const originalGuardFixture = process.env[GUARD_FIXTURE_ENV_VAR];
+  const originalEphemeralEnv = process.env["GUARD_EPHEMERAL_ENV_FILE"];
+  const originalEphemeralFixture = process.env["GUARD_EPHEMERAL_FIXTURE"];
+
+  afterEach(() => {
+    if (originalGuardFixture !== undefined) {
+      process.env[GUARD_FIXTURE_ENV_VAR] = originalGuardFixture;
+    } else {
+      delete process.env[GUARD_FIXTURE_ENV_VAR];
+    }
+    if (originalEphemeralEnv !== undefined) {
+      process.env["GUARD_EPHEMERAL_ENV_FILE"] = originalEphemeralEnv;
+    } else {
+      delete process.env["GUARD_EPHEMERAL_ENV_FILE"];
+    }
+    if (originalEphemeralFixture !== undefined) {
+      process.env["GUARD_EPHEMERAL_FIXTURE"] = originalEphemeralFixture;
+    } else {
+      delete process.env["GUARD_EPHEMERAL_FIXTURE"];
+    }
+    resetSharedFixtureWarning();
+  });
+
+  it("defaults to ephemeral mode when GUARD_FIXTURE is not set", () => {
+    delete process.env[GUARD_FIXTURE_ENV_VAR];
+    assert.equal(isSharedFixtureMode(), false);
+    assert.equal(isEphemeralMode(), true);
+  });
+
+  it("recognizes shared mode when GUARD_FIXTURE is set to shared, 1, true, or path", () => {
+    for (const val of ["shared", "1", "true", "default", "tests/fixtures/phase2-instance.json"]) {
+      process.env[GUARD_FIXTURE_ENV_VAR] = val;
+      assert.equal(isSharedFixtureMode(), true, `Expected shared mode for ${val}`);
+      assert.equal(isEphemeralMode(), false, `Expected not ephemeral mode for ${val}`);
+    }
+  });
+
+  it("resolves default fixture path to FIXTURE_PATH in shared mode", () => {
+    process.env[GUARD_FIXTURE_ENV_VAR] = "shared";
+    assert.equal(resolveFixturePath(), HARNESS_FIXTURE_PATH);
+  });
+
+  it("resolves custom fixture path when specified in GUARD_FIXTURE", () => {
+    process.env[GUARD_FIXTURE_ENV_VAR] = "custom/test-fixture.json";
+    assert.equal(resolveFixturePath(), "custom/test-fixture.json");
+  });
+
+  it("resolves env file to ENV_FILE in shared mode", () => {
+    process.env[GUARD_FIXTURE_ENV_VAR] = "shared";
+    assert.equal(resolveEnvFile(), ENV_FILE);
+  });
+
+  it("resolves to ephemeral env and fixture files when GUARD_EPHEMERAL_* env vars are set", () => {
+    delete process.env[GUARD_FIXTURE_ENV_VAR];
+    process.env["GUARD_EPHEMERAL_ENV_FILE"] = ".env.custom.ephemeral";
+    process.env["GUARD_EPHEMERAL_FIXTURE"] = "custom.ephemeral.json";
+    assert.equal(resolveEnvFile(), ".env.custom.ephemeral");
+    assert.equal(resolveFixturePath(), "custom.ephemeral.json");
+  });
+
+  it("generates actionable shared fixture warning message", () => {
+    const msg = sharedFixtureWarningMessage("tests/fixtures/phase2-instance.json");
+    assert.match(msg, /\[GUARD_FIXTURE\] WARNING: Running against shared testnet fixture/);
+    assert.match(msg, /tests\/fixtures\/phase2-instance\.json/);
+    assert.match(msg, /interleave sequence numbers and rolling window spend/);
+    assert.match(msg, /unset GUARD_FIXTURE to use default ephemeral mode/);
+  });
+
+  it("warnIfSharedFixture warns once and deduplicates", () => {
+    process.env[GUARD_FIXTURE_ENV_VAR] = "shared";
+    resetSharedFixtureWarning();
+
+    const warnings: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (msg: string) => warnings.push(msg);
+    try {
+      warnIfSharedFixture();
+      warnIfSharedFixture();
+      assert.equal(warnings.length, 1);
+      assert.match(warnings[0]!, /\[GUARD_FIXTURE\] WARNING/);
+    } finally {
+      console.warn = origWarn;
+    }
   });
 });
