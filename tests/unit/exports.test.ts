@@ -1,4 +1,4 @@
-/**
+/*
  * Unit tests asserting package module format, exports map, and CJS interop resolution.
  */
 import assert from "node:assert/strict";
@@ -79,6 +79,10 @@ describe("package module format and export-map", () => {
       "InvokeRetryError",
       "verifyAgentSignature",
       "TRACE_STEP_NAMES",
+      // SAC ContractCall builders (SPEC Section 6.2). Argument order is contract-verified
+      // and these are the public entry points for constructing transfer calls.
+      "sacTransfer",
+      "sacTransferFrom",
     ];
 
     for (const exp of requiredExports) {

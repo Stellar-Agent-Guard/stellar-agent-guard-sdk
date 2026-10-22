@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-109-feat-preflight-build-contractcall-helpers-for",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-109-feat-preflight-build-contractcall-helpers-for": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-109-feat-preflight-build-contractcall-helpers-for",
+    "origin"
+  ]
+}

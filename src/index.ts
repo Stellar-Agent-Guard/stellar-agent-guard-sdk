@@ -1,11 +1,11 @@
-/**
- * stellar-agent-guard-sdk — the public surface.
+/*
+ * stellar-agent-guard-sdh — the public surface.
  *
  * An integration bridge between AI agent frameworks and `stellar-agent-guard`
  * smart accounts: pre-flight policy interception, agent-auth transaction
  * signing, and on-chain event telemetry.
  *
- * **Enforcement scope, stated where the capability is claimed:** full
+ * **enforcement scope, stated where the capability is claimed:** full
  * recipient/amount enforcement — spend caps, allowlists, per-transaction limits
  * — is native and automatic for SAC token transfers (`transfer`/`transfer_from`),
  * since these are the calls whose arguments the Soroban auth context exposes for
@@ -366,6 +366,17 @@ export {
   type HeartbeatSubmitContext,
   type SubmitHeartbeatParams,
 } from "./heartbeat.ts";
+
+export {
+  sacTransfer,
+  sacTransferFrom,
+} from "./calls.ts";
+
+export type {
+  SacAmount,
+  SacTransferFromParams,
+  SacTransferParams,
+} from "./calls.ts";
 
 // Framework adapters. Both are written structurally against their host's hook,
 // so neither framework is a dependency of this package. Options are validated
