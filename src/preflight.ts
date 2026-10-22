@@ -29,6 +29,9 @@ import { concatBytes, sha256Hex, utf8Bytes } from "./hash.ts";
 import { GuardError, InvalidInputError, SimulationError } from "./errors.ts";
 import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
 import {
+  DEFAULT_RPC_TIMEOUT_MS,
+} from "./invoke.ts";
+import {
   resourceBreakdownFromSimulation,
   type CostProvenance,
   type ResourceBreakdown,
@@ -248,11 +251,30 @@ export interface CheckBatchOptions {
    */
   onStep?: (step: InvokeStepEvent) => void;
 
-  /** Caller-owned cancellation, forwarded to every call's `check()`. */
+  /**
+   * Caller-owned cancellation for the whole batch. Once it fires, no further
+   * call is started; every unfinished call is reported as a fail-closed
+   * `undetermined` verdict carrying a typed `RpcTimeoutError`.
+   */
   signal?: AbortSignal | undefined;
 
-  /** Per-RPC timeout, forwarded to every call's `check()`. */
+  /**
+   * Per-call timeout, forwarded to each `check()`. Independent of
+   * `deadlineMs`: a fired per-call timeout leaves the rest of the batch free to
+   * continue, while a spent batch deadline stops it.
+   */
   timeoutMs?: number | undefined;
+
+  /**
+   * Overall time budget for the whole batch, in milliseconds, measured from
+   * the start of `checkBatch()` on the interceptor's injected clock.
+   *
+   * Once spent, no further call is started and the remaining verdicts are
+   * fail-closed `undetermined` results carrying an `RpcTimeoutError` with
+   * `deadline: true`. The budget also caps each individual check's timeout, so
+   * a single long RPC cannot overrun it. Omit for the per-call default.
+   */
+  deadlineMs?: number | undefined;
 }
 
 /**
@@ -376,6 +398,26 @@ export interface PreFlightCacheOptions {
    * change invalidate the entry even if the wall-clock TTL has not elapsed.
    */
   policyRevision?: PolicyRevision | (() => PolicyRevision | Promise<PolicyRevision>);
+  /**
+   * Maximum number of verdicts this interceptor holds at once. Omit it for an
+   * unbounded cache (the pre-#333 behaviour); set it to bound a high-volume
+   * agent's memory without disabling caching entirely.
+   *
+   * When the cache is full, storing a new call fingerprint evicts the
+   * **least-recently-used** entry: a cache hit counts as use, as does a fresh
+   * store for a fingerprint already present. Eviction is deterministic (Map
+   * insertion order, refreshed on every hit), so the same sequence of checks
+   * always evicts the same entries.
+   *
+   * Eviction only ever *removes* entries. A lookup still requires the entry to
+   * be present, from the current ledger, and inside its TTL, so evicting can
+   * never resurrect an expired or cross-ledger verdict — the worst it can do is
+   * force a fresh simulation for a fingerprint that was recently cached.
+   *
+   * Must be a positive integer. `invalidate()` clears the entries; the bound
+   * applies again to whatever refills the cache afterwards.
+   */
+  maxEntries?: number;
 }
 
 export interface PreFlightConfig {
@@ -410,8 +452,21 @@ export interface PreFlightConfig {
    */
   logger?: GuardLoggerInput | undefined;
   /**
-   * Inject a custom clock for time-dependent operations (cache TTL, etc.).
-   * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
+   * Coalesce concurrent checks for the same call and config into one
+   * discovery/enforcement run. Defaults to `true`; set `false` to force every
+   * call to run its own simulation.
+   *
+   * Coalescing is per interceptor, so the call fingerprint plus this instance's
+   * config identity is the whole key. Each waiter still applies its own
+   * `signal`/`timeoutMs`, and a settled run — including an undetermined one — is
+   * removed immediately rather than retained as a cache. Checks that supply
+   * `onStep` are never coalesced, so each caller receives its own trace.
+   */
+  coalesceInFlight?: boolean;
+  /**
+   * Inject a custom clock for time-dependent operations (cache TTL, batch
+   * deadlines, etc.). Defaults to the system clock; use a FakeClock in tests
+   * for deterministic timing.
    */
   clock?: Clock;
 }
@@ -432,6 +487,17 @@ interface CacheContext {
   key: string;
   ledger: number;
   expiresAt: number;
+}
+
+/** The fail-closed verdict for a caller bound that fired. */
+function timeoutDecision(error: RpcTimeoutError): PreFlightDecision {
+  const outcome = timeoutOutcome(error);
+  return {
+    allowed: false,
+    kind: "undetermined",
+    detail: outcome.detail,
+    error: outcome.error,
+  };
 }
 
 function policyRevisionToken(revision: PolicyRevision): string {
@@ -471,14 +537,20 @@ export class PreFlightInterceptor {
   private readonly config: PreFlightConfig;
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly inFlight = new Map<string, Promise<PreFlightDecision>>();
   private readonly namespace: string;
+  private readonly coalesceInFlight: boolean;
   private readonly logger: GuardLogger;
   private readonly clock: Clock;
+  private _hits = 0;
+  private _misses = 0;
+  private _invalidations = 0;
 
   constructor(config: PreFlightConfig) {
     this.config = config;
     this.cacheOptions = config.cache;
     this.clock = config.clock ?? systemClock;
+    this.coalesceInFlight = config.coalesceInFlight !== false;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
     this.logger = resolveLogger(config.logger);
@@ -486,7 +558,7 @@ export class PreFlightInterceptor {
 
   private validateCacheOptions(): void {
     if (!this.cacheOptions) return;
-    const { ttlMs, ttlLedgers } = this.cacheOptions;
+    const { ttlMs, ttlLedgers, maxEntries } = this.cacheOptions;
     if (ttlMs === undefined && ttlLedgers === undefined) {
       throw new TypeError("preflight cache requires ttlMs or ttlLedgers");
     }
@@ -496,6 +568,54 @@ export class PreFlightInterceptor {
     if (ttlLedgers !== undefined && (!Number.isFinite(ttlLedgers) || ttlLedgers <= 0)) {
       throw new TypeError("preflight cache ttlLedgers must be a positive finite number");
     }
+    if (maxEntries !== undefined && (!Number.isInteger(maxEntries) || maxEntries <= 0)) {
+      throw new TypeError("preflight cache maxEntries must be a positive integer");
+    }
+  }
+
+  /**
+   * Record a cache hit as the most recent use. Map iteration is insertion
+   * order, so re-inserting is what makes the head of the map the least
+   * recently used entry for `storeCacheEntry` to evict next.
+   *
+   * Only the bounded mode needs this bookkeeping; an unbounded cache never
+   * evicts, so it keeps the cheaper read-only hit path.
+   */
+  private touch(key: string, entry: CacheEntry): void {
+    if (this.cacheOptions?.maxEntries === undefined) return;
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+  }
+
+  /**
+   * Store a verdict, keeping the cache at or below `maxEntries`.
+   *
+   * Expired and cross-ledger entries are already purged by `cacheContext`
+   * before this runs, but eviction is still an unconditional removal: it never
+   * selects an entry to *return*, only one to drop, so a bounded cache cannot
+   * revive a verdict the freshness checks would reject.
+   */
+  private storeCacheEntry(key: string, entry: CacheEntry): void {
+    const maxEntries = this.cacheOptions?.maxEntries;
+    if (maxEntries !== undefined) {
+      // An overwrite is not a new fingerprint: drop the previous occurrence
+      // first so it cannot count against capacity or be evicted as "old".
+      this.cache.delete(key);
+      let evicted = 0;
+      while (this.cache.size >= maxEntries) {
+        const oldest = this.cache.keys().next();
+        if (oldest.done) break;
+        this.cache.delete(oldest.value);
+        evicted += 1;
+      }
+      if (evicted > 0) {
+        this.logger.debug("pre-flight cache evicted least-recently-used verdicts", {
+          evicted,
+          maxEntries,
+        });
+      }
+    }
+    this.cache.set(key, entry);
   }
 
   private cacheTtlMs(): number {
@@ -548,6 +668,7 @@ export class PreFlightInterceptor {
       const cleared = this.cache.size;
       this.cache.clear();
       this.logger.debug("pre-flight cache invalidated", { scope: "all", cleared });
+      this._invalidations += cleared;
       return;
     }
     const prefix = `${this.namespace}:${callFingerprint(call)}:`;
@@ -559,6 +680,7 @@ export class PreFlightInterceptor {
       }
     }
     this.logger.debug("pre-flight cache invalidated", { scope: "call", cleared });
+    this._invalidations += cleared;
   }
 
   /**
@@ -568,9 +690,21 @@ export class PreFlightInterceptor {
    * Accepts per-call `options` (e.g. `onStep` observability) without any
    * effect on the verdict itself; existing single-argument callers are
    * unaffected.
+   *
+   * Concurrent checks for the same call and config share a single in-flight
+   * discovery/enforcement run by default. The shared run is not bound by any
+   * one caller's signal or timeout — one caller giving up must not cancel a
+   * result another waiter is still entitled to — so each caller races the same
+   * work against its own bound instead.
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
+
+    // An already-aborted caller asks for no work at all, including the cache
+    // lookup's ledger read. Answer before any RPC or in-flight registration.
+    if (options?.signal?.aborted) {
+      return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+    }
 
     const context = await this.cacheContext(call);
     if (context) {
@@ -578,6 +712,7 @@ export class PreFlightInterceptor {
       if (cached) {
         const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
+          this.touch(context.key, cached);
           // A hit is worth a line of its own: it is the one verdict the caller
           // gets without a simulation, so a host reading logs needs to be able
           // to tell a reused verdict from a fresh one.
@@ -588,11 +723,71 @@ export class PreFlightInterceptor {
             kind: cached.decision.kind,
             ledger: context.ledger,
           });
+          this._hits++;
           return cached.decision;
         }
         this.cache.delete(context.key);
       }
+      // If we have a context but didn't get a valid hit, it's a miss.
+      this._misses++;
     }
+
+    // An `onStep` observer owns its enforcement trace, so a check that supplies
+    // one is not coalesced: sharing a run would either drop that observer's
+    // events or interleave two observers over one pipeline.
+    if (options?.onStep || !this.coalesceInFlight) {
+      return this.computeDecision(call, context, options?.onStep, {
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      });
+    }
+
+    // The map is per interceptor, so the call fingerprint plus this instance's
+    // config identity is the whole in-flight key.
+    const key = context ? context.key : callFingerprint(call);
+    let shared = this.inFlight.get(key);
+    if (!shared) {
+      // The shared run keeps the pipeline's default bound so a hung RPC cannot
+      // pin the entry forever; callers that asked for a tighter bound race it
+      // below, and never shorten it for anyone else.
+      shared = this.computeDecision(call, context, undefined, {
+        timeoutMs: DEFAULT_RPC_TIMEOUT_MS,
+      });
+      this.inFlight.set(key, shared);
+      const settle = () => {
+        if (this.inFlight.get(key) === shared) this.inFlight.delete(key);
+      };
+      // Remove on both success and failure. Coalescing is not a cache: no
+      // outcome — admitted, refused or undetermined — survives the run.
+      shared.then(settle, settle);
+    }
+    return this.awaitWithCallerBound(shared, options);
+  }
+
+  /** Race coalesced work against the waiting caller's own signal/timeout. */
+  private async awaitWithCallerBound(
+    work: Promise<PreFlightDecision>,
+    options?: PreFlightCheckOptions,
+  ): Promise<PreFlightDecision> {
+    const { signal, timeoutMs } = options ?? {};
+    if (!signal && timeoutMs === undefined) return work;
+    try {
+      return await withRpcAbort(
+        { stage: "pre-flight", signal, timeoutMs: timeoutMs ?? 0 },
+        () => work,
+      );
+    } catch (error) {
+      if (!(error instanceof RpcTimeoutError)) throw error;
+      return timeoutDecision(error);
+    }
+  }
+
+  private async computeDecision(
+    call: ContractCall,
+    context: CacheContext | null,
+    onStep: ((step: InvokeStepEvent) => void) | undefined,
+    bound: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined },
+  ): Promise<PreFlightDecision> {
     // A bound that fired is a verdict, not a crash: the guard never reached a
     // decision, so the check returns its fail-closed `undetermined` arm (the
     // same arm any other unrunnable simulation takes) carrying the typed
@@ -603,8 +798,8 @@ export class PreFlightInterceptor {
       outcome = await withRpcAbort(
         {
           stage: "pre-flight",
-          signal: options?.signal,
-          timeoutMs: options?.timeoutMs,
+          signal: bound.signal,
+          timeoutMs: bound.timeoutMs,
         },
         () =>
           enforceCall({
@@ -614,7 +809,7 @@ export class PreFlightInterceptor {
             networkPassphrase: this.config.networkPassphrase,
             guardAuth: { guard: this.config.guard, agent: this.config.agent },
             ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-            ...(options?.onStep ? { onStep: options.onStep } : {}),
+            ...(onStep ? { onStep } : {}),
             ...(this.config.logger ? { logger: this.config.logger } : {}),
           }),
       );
@@ -686,7 +881,7 @@ export class PreFlightInterceptor {
     // An undetermined result is not a verdict and may be transient, so it is
     // deliberately not cached. Actual admissible/blocked results are.
     if (context && decision.kind !== "undetermined") {
-      this.cache.set(context.key, {
+      this.storeCacheEntry(context.key, {
         decision,
         ledger: context.ledger,
         expiresAt: context.expiresAt,
@@ -764,6 +959,18 @@ export class PreFlightInterceptor {
     calls: ContractCall[],
     options?: CheckBatchOptions,
   ): Promise<PreFlightBatchDecision> {
+    if (options?.deadlineMs !== undefined) {
+      if (
+        typeof options.deadlineMs !== "number" ||
+        !Number.isFinite(options.deadlineMs) ||
+        options.deadlineMs <= 0
+      ) {
+        throw new RangeError(
+          "checkBatch deadlineMs must be a positive finite number of milliseconds",
+        );
+      }
+    }
+
     if (calls.length === 0) {
       return {
         admissible: true,
@@ -857,13 +1064,13 @@ export class PreFlightInterceptor {
       );
     };
 
-    const checkOptions: PreFlightCheckOptions = {
-      ...(options?.onStep ? { onStep: options.onStep } : {}),
-      ...(options?.signal !== undefined ? { signal: options.signal } : {}),
-      ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-    };
-
     for (const call of calls) {
+      const checkOptions: PreFlightCheckOptions = {
+        ...(options?.onStep ? { onStep: options.onStep } : {}),
+        ...(options?.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      };
+
       const decision = await this.check(call, checkOptions);
 
       if (decision.kind === "admissible") {
@@ -1017,6 +1224,19 @@ export class PreFlightInterceptor {
         ? decision.detail
         : "batch refused by guardrails",
     );
+  }
+
+  /**
+   * Get a snapshot of the cache statistics.
+   * @returns An object with hits, misses, invalidations, and size.
+   */
+  getCacheStats() {
+    return {
+      hits: this._hits,
+      misses: this._misses,
+      invalidations: this._invalidations,
+      size: this.cache.size,
+    };
   }
 }
 

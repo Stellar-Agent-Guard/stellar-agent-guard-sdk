@@ -70,8 +70,14 @@ describe("runtime support matrix (issue #326)", () => {
       assert.match(row.status, /^(Supported|Unsupported)$/, `unexpected status: ${row.status}`);
       assert.ok(row.target.length > 0, "every row names a target");
     }
-    assert.ok(rows.some((row) => row.status === "Supported"), "at least one tested target");
-    assert.ok(rows.some((row) => row.status === "Unsupported"), "unsupported targets are stated");
+    assert.ok(
+      rows.some((row) => row.status === "Supported"),
+      "at least one tested target",
+    );
+    assert.ok(
+      rows.some((row) => row.status === "Unsupported"),
+      "unsupported targets are stated",
+    );
   });
 
   it("gives every supported target a real, CI-executed gate", () => {
@@ -100,9 +106,7 @@ describe("runtime support matrix (issue #326)", () => {
   });
 
   it("references only fixtures that exist", () => {
-    const paths = [
-      ...markdown.matchAll(/`((?:scripts|tests)\/[^`]+)`/g),
-    ].map((match) => match[1]!);
+    const paths = [...markdown.matchAll(/`((?:scripts|tests)\/[^`]+)`/g)].map((match) => match[1]!);
     assert.ok(paths.length > 0, "the fixture table must name its fixtures");
     for (const path of new Set(paths)) {
       assert.ok(existsSync(resolve(ROOT, path)), `fixture named but missing: ${path}`);

@@ -39,7 +39,7 @@
  * `POLICY_RULE_IDS` vocabulary. Summary:
  *
  * - **Schema-interpreted**: field types, required fields, `minimum: 0`
-   * (§8 bullet 1), §8 bullet 2 (`window_cap > 0 ⇒ window_secs > 0`) and bullet 3
+ * (§8 bullet 1), §8 bullet 2 (`window_cap > 0 ⇒ window_secs > 0`) and bullet 3
  *   (`recipient cap > 0 ⇒ window_secs > 0`) as `if`/`then` blocks.
  * - **Code-enforced**: full StrKey validity (a regex re-implementing the SDK's
  *   decoder would be worse than no check), §8 bullet 4's cross-field comparison
@@ -130,18 +130,30 @@ export const SCHEMA_VS_CODE_RULES = {
     },
   ],
   codeEnforced: [
-    { rule: "invalid_address", why: "full StrKey checksum decode; a regex would re-implement it badly" },
+    {
+      rule: "invalid_address",
+      why: "full StrKey checksum decode; a regex would re-implement it badly",
+    },
     {
       rule: "active_window_inverted",
       why: "§8 bullet 4 cross-field comparison (active_until > active_from) is not expressible in the dialect",
     },
-    { rule: "empty_vector_noop", why: "§8 bullet 5 advisory: a shape-valid policy the contract no-ops" },
+    {
+      rule: "empty_vector_noop",
+      why: "§8 bullet 5 advisory: a shape-valid policy the contract no-ops",
+    },
     {
       rule: "duplicate_*",
       why: "§8 bullet 6: uniqueItems compares raw values, not normalized addresses; per-list rule ids differ",
     },
-    { rule: "empty_protocol_functions", why: "schema-valid shape ([] ) the contract rejects; null means any" },
-    { rule: "max_recipient_entries_exceeded", why: "§8 bullet 8: contract constant kept as a caller option" },
+    {
+      rule: "empty_protocol_functions",
+      why: "schema-valid shape ([] ) the contract rejects; null means any",
+    },
+    {
+      rule: "max_recipient_entries_exceeded",
+      why: "§8 bullet 8: contract constant kept as a caller option",
+    },
     { rule: "recipient_conflict", why: "§8 bullet 9: set intersection across two lists" },
     { rule: "self_as_*", why: "§8 bullet 10: needs the caller-supplied guardAddress" },
   ],
@@ -193,7 +205,13 @@ function matchesType(value: unknown, expected: string): boolean {
 /** ── The interpreter ─────────────────────────────────────────────────────── */
 
 interface FailureSink {
-  push(path: string, keyword: string, schemaPath: string, message: string, ruleOverride?: string): void;
+  push(
+    path: string,
+    keyword: string,
+    schemaPath: string,
+    message: string,
+    ruleOverride?: string,
+  ): void;
 }
 
 interface ResolvedOptions {
@@ -219,24 +237,44 @@ function evaluateSchema(
   if (typeof schema !== "object" || schema === null || typeof schema === "boolean") return;
   const node = schema as Record<string, unknown>;
   const shown = displayPath(path);
-  const ruleOverride = typeof node[SCHEMA_RULE_ID_ANNOTATION] === "string"
-    ? (node[SCHEMA_RULE_ID_ANNOTATION] as string)
-    : undefined;
+  const ruleOverride =
+    typeof node[SCHEMA_RULE_ID_ANNOTATION] === "string"
+      ? (node[SCHEMA_RULE_ID_ANNOTATION] as string)
+      : undefined;
 
   // `type`, in singular or union form (`["array", "null"]` for `fns`).
   if (node.type !== undefined) {
     const expected = Array.isArray(node.type) ? (node.type as string[]) : [node.type as string];
     if (!expected.some((t) => matchesType(value, t))) {
-      out.push(shown, "type", schemaPath, `${shown} must be of type ${expected.join(" | ")}`, ruleOverride);
+      out.push(
+        shown,
+        "type",
+        schemaPath,
+        `${shown} must be of type ${expected.join(" | ")}`,
+        ruleOverride,
+      );
       return; // type failure: deeper structural checks would only cascade
     }
   }
 
-  if (Array.isArray(node.enum) && !(node.enum as unknown[]).some((candidate) => candidate === value)) {
-    out.push(shown, "enum", schemaPath, `${shown} must be one of ${JSON.stringify(node.enum)}`, ruleOverride);
+  if (
+    Array.isArray(node.enum) &&
+    !(node.enum as unknown[]).some((candidate) => candidate === value)
+  ) {
+    out.push(
+      shown,
+      "enum",
+      schemaPath,
+      `${shown} must be one of ${JSON.stringify(node.enum)}`,
+      ruleOverride,
+    );
   }
 
-  if (typeof node.minLength === "number" && typeof value === "string" && value.length < node.minLength) {
+  if (
+    typeof node.minLength === "number" &&
+    typeof value === "string" &&
+    value.length < node.minLength
+  ) {
     out.push(shown, "minLength", schemaPath, `${shown} must not be empty`, ruleOverride);
   }
 
@@ -262,15 +300,32 @@ function evaluateSchema(
     if (node.properties !== undefined && typeof node.properties === "object") {
       for (const [key, subschema] of Object.entries(node.properties as Record<string, unknown>)) {
         if (record[key] !== undefined) {
-          evaluateSchema(subschema, record[key], path === "" ? key : `${path}.${key}`, `${schemaPath}/properties/${key}`, out, options);
+          evaluateSchema(
+            subschema,
+            record[key],
+            path === "" ? key : `${path}.${key}`,
+            `${schemaPath}/properties/${key}`,
+            out,
+            options,
+          );
         }
       }
     }
-    if (node.additionalProperties === false && node.properties !== undefined && typeof node.properties === "object") {
+    if (
+      node.additionalProperties === false &&
+      node.properties !== undefined &&
+      typeof node.properties === "object"
+    ) {
       const known = new Set(Object.keys(node.properties as Record<string, unknown>));
       for (const key of Object.keys(record)) {
         if (!known.has(key)) {
-          out.push(path === "" ? key : path, "additionalProperties", schemaPath, `unknown field ${JSON.stringify(key)}`, ruleOverride);
+          out.push(
+            path === "" ? key : path,
+            "additionalProperties",
+            schemaPath,
+            `unknown field ${JSON.stringify(key)}`,
+            ruleOverride,
+          );
         }
       }
     }
@@ -287,7 +342,13 @@ function evaluateSchema(
   if (node.contains !== undefined && Array.isArray(value)) {
     const anyMatch = value.some((item) => conditionHolds(node.contains, item, options));
     if (!anyMatch) {
-      out.push(shown, "contains", schemaPath, `${shown} must contain at least one matching entry`, ruleOverride);
+      out.push(
+        shown,
+        "contains",
+        schemaPath,
+        `${shown} must contain at least one matching entry`,
+        ruleOverride,
+      );
     }
   }
 
@@ -313,7 +374,18 @@ function evaluateSchema(
 /** True when `condition` (a schema) accepts `value`, with failures discarded. */
 function conditionHolds(condition: unknown, value: unknown, options: ResolvedOptions): boolean {
   let holds = true;
-  evaluateSchema(condition, value, "", "", { push: () => { holds = false; } }, options);
+  evaluateSchema(
+    condition,
+    value,
+    "",
+    "",
+    {
+      push: () => {
+        holds = false;
+      },
+    },
+    options,
+  );
   return holds;
 }
 
@@ -354,7 +426,13 @@ function checkAddressList(
   for (const [index, entry] of list.entries()) {
     const path = entryPath(name, index);
     if (typeof entry !== "string" || normalizeStellarAddress(entry) === null) {
-      out.push(path, "invalid_address", `/code/${name}`, `"${String(entry)}" is not a valid Stellar address`, duplicateRule === "invalid_address" ? undefined : "invalid_address");
+      out.push(
+        path,
+        "invalid_address",
+        `/code/${name}`,
+        `"${String(entry)}" is not a valid Stellar address`,
+        duplicateRule === "invalid_address" ? undefined : "invalid_address",
+      );
       continue;
     }
     const norm = normalizeStellarAddress(entry)!;
@@ -363,7 +441,13 @@ function checkAddressList(
     }
     seen.add(norm);
     if (options.guardAddress !== null && norm === options.guardAddress) {
-      out.push(path, "code", `/code/${name}`, "guard contract address cannot appear in this list", selfRule);
+      out.push(
+        path,
+        "code",
+        `/code/${name}`,
+        "guard contract address cannot appear in this list",
+        selfRule,
+      );
     }
   }
 }
@@ -373,7 +457,11 @@ function checkAddressList(
  * emitted with the shared `PolicyRuleId` vocabulary (see `SCHEMA_VS_CODE_RULES`
  * and the module docblock for the reasoned list).
  */
-function enforceCodeRules(record: Record<string, unknown>, out: FailureSink, options: ResolvedOptions): void {
+function enforceCodeRules(
+  record: Record<string, unknown>,
+  out: FailureSink,
+  options: ResolvedOptions,
+): void {
   const assets = arrayAt(record, "assets");
   const recipients = arrayAt(record, "recipients");
   const blocked = arrayAt(record, "blocked_recipients");
@@ -399,8 +487,22 @@ function enforceCodeRules(record: Record<string, unknown>, out: FailureSink, opt
 
   // Per-list address rules: validity, duplicates, self-reference.
   checkAddressList(assets, "assets", "duplicate_asset", "self_as_asset", out, options);
-  checkAddressList(recipients, "recipients", "duplicate_recipient", "self_as_recipient", out, options);
-  checkAddressList(blocked, "blocked_recipients", "duplicate_blocked_recipient", "self_as_recipient", out, options);
+  checkAddressList(
+    recipients,
+    "recipients",
+    "duplicate_recipient",
+    "self_as_recipient",
+    out,
+    options,
+  );
+  checkAddressList(
+    blocked,
+    "blocked_recipients",
+    "duplicate_blocked_recipient",
+    "self_as_recipient",
+    out,
+    options,
+  );
   checkAddressList(
     caps?.map((entry) => objectAt(entry, "recipient")) ?? null,
     "recipient_window_caps",
@@ -419,28 +521,64 @@ function enforceCodeRules(record: Record<string, unknown>, out: FailureSink, opt
       if (typeof contract === "string" && normalizeStellarAddress(contract) !== null) {
         const norm = normalizeStellarAddress(contract)!;
         if (seenProtocols.has(norm)) {
-          out.push(`protocols[${index}].contract`, "code", "/code/protocols", `duplicate protocol contract "${contract}"`, "duplicate_protocol");
+          out.push(
+            `protocols[${index}].contract`,
+            "code",
+            "/code/protocols",
+            `duplicate protocol contract "${contract}"`,
+            "duplicate_protocol",
+          );
         }
         seenProtocols.add(norm);
         if (options.guardAddress !== null && norm === options.guardAddress) {
-          out.push(`protocols[${index}].contract`, "code", "/code/protocols", "guard contract address cannot be listed as a protocol", "self_as_protocol");
+          out.push(
+            `protocols[${index}].contract`,
+            "code",
+            "/code/protocols",
+            "guard contract address cannot be listed as a protocol",
+            "self_as_protocol",
+          );
         }
       } else {
-        out.push(`protocols[${index}].contract`, "invalid_address", "/code/protocols", `"${String(contract)}" is not a valid Stellar address`, "invalid_address");
+        out.push(
+          `protocols[${index}].contract`,
+          "invalid_address",
+          "/code/protocols",
+          `"${String(contract)}" is not a valid Stellar address`,
+          "invalid_address",
+        );
       }
       const fns = objectAt(rule, "fns");
       if (Array.isArray(fns)) {
         if (fns.length === 0) {
-          out.push(`protocols[${index}].fns`, "code", "/code/protocols", "protocol fns list must not be empty (use null to allow any function)", "empty_protocol_functions");
+          out.push(
+            `protocols[${index}].fns`,
+            "code",
+            "/code/protocols",
+            "protocol fns list must not be empty (use null to allow any function)",
+            "empty_protocol_functions",
+          );
         }
         const seenFns = new Set<string>();
         for (const [fnIndex, fn] of fns.entries()) {
           if (typeof fn !== "string" || fn.length === 0) {
-            out.push(`protocols[${index}].fns[${fnIndex}]`, "code", "/code/protocols", "protocol function name must be a non-empty string", "invalid_type");
+            out.push(
+              `protocols[${index}].fns[${fnIndex}]`,
+              "code",
+              "/code/protocols",
+              "protocol function name must be a non-empty string",
+              "invalid_type",
+            );
             continue;
           }
           if (seenFns.has(fn)) {
-            out.push(`protocols[${index}].fns[${fnIndex}]`, "code", "/code/protocols", `duplicate function "${fn}" in protocol rule`, "duplicate_protocol_function");
+            out.push(
+              `protocols[${index}].fns[${fnIndex}]`,
+              "code",
+              "/code/protocols",
+              `duplicate function "${fn}" in protocol rule`,
+              "duplicate_protocol_function",
+            );
           }
           seenFns.add(fn);
         }
@@ -460,7 +598,13 @@ function enforceCodeRules(record: Record<string, unknown>, out: FailureSink, opt
       if (typeof entry !== "string") continue;
       const norm = normalizeStellarAddress(entry);
       if (norm !== null && recipientSet.has(norm)) {
-        out.push(`blocked_recipients[${index}]`, "code", "/code/blocked", `recipient "${entry}" appears in both recipients and blocked_recipients`, "recipient_conflict");
+        out.push(
+          `blocked_recipients[${index}]`,
+          "code",
+          "/code/blocked",
+          `recipient "${entry}" appears in both recipients and blocked_recipients`,
+          "recipient_conflict",
+        );
       }
     }
   }
@@ -469,16 +613,39 @@ function enforceCodeRules(record: Record<string, unknown>, out: FailureSink, opt
   // A cross-field comparison, which the dialect cannot express — code column.
   const activeFrom = toIntegerLike(record.active_from);
   const activeUntil = toIntegerLike(record.active_until);
-  if (activeFrom !== null && activeUntil !== null && activeUntil !== 0n && activeUntil <= activeFrom) {
-    out.push("active_until", "code", "/code/active_until", "active_until must be 0 (no expiration) or strictly greater than active_from", "active_window_inverted");
+  if (
+    activeFrom !== null &&
+    activeUntil !== null &&
+    activeUntil !== 0n &&
+    activeUntil <= activeFrom
+  ) {
+    out.push(
+      "active_until",
+      "code",
+      "/code/active_until",
+      "active_until must be 0 (no expiration) or strictly greater than active_from",
+      "active_window_inverted",
+    );
   }
 
   // §8 bullet 5 advisories: shape-valid policies the contract no-ops.
   if (assets && assets.length === 0) {
-    out.push("assets", "code", "/code/assets", "assets list is empty; SAC token transfers will never be allowed", "empty_vector_noop");
+    out.push(
+      "assets",
+      "code",
+      "/code/assets",
+      "assets list is empty; SAC token transfers will never be allowed",
+      "empty_vector_noop",
+    );
   }
   if (recipients && recipients.length === 0 && record.allow_any_recipient === false) {
-    out.push("recipients", "code", "/code/recipients", "recipients list is empty while allow_any_recipient is false; no recipient will be allowed", "empty_vector_noop");
+    out.push(
+      "recipients",
+      "code",
+      "/code/recipients",
+      "recipients list is empty while allow_any_recipient is false; no recipient will be allowed",
+      "empty_vector_noop",
+    );
   }
 }
 
@@ -503,7 +670,7 @@ export function validateGuardPolicyAgainstSchema(
   const options: SchemaValidationOptions =
     typeof optionsOrGuardAddress === "string"
       ? { guardAddress: optionsOrGuardAddress }
-      : optionsOrGuardAddress ?? {};
+      : (optionsOrGuardAddress ?? {});
 
   const resolved: ResolvedOptions = {
     guardAddress: options.guardAddress ? normalizeStellarAddress(options.guardAddress) : null,
@@ -557,5 +724,7 @@ export function ruleForKeyword(keyword: string): PolicyRuleId {
 
 /** Resolve an `x-policy-rule-id` annotation to the shared vocabulary. */
 export function ruleFromAnnotation(annotation: string): PolicyRuleId {
-  return POLICY_RULE_IDS.includes(annotation as PolicyRuleId) ? (annotation as PolicyRuleId) : "invalid_type";
+  return POLICY_RULE_IDS.includes(annotation as PolicyRuleId)
+    ? (annotation as PolicyRuleId)
+    : "invalid_type";
 }

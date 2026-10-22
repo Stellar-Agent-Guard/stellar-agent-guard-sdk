@@ -45,7 +45,11 @@ describe("runnable framework adapter examples", () => {
     assert.equal(res.baseValidateRan, 2);
 
     // Run 1: Allowed
-    assert.equal(res.allowedDirectVerdict, true, "direct validator must return true for allowed state");
+    assert.equal(
+      res.allowedDirectVerdict,
+      true,
+      "direct validator must return true for allowed state",
+    );
     assert.equal(res.allowedVerdict, true, "allowed action must validate to true");
 
     // Run 2: Blocked
@@ -55,7 +59,10 @@ describe("runnable framework adapter examples", () => {
     assert.equal(res.blockedDecisions[0]!.kind, "blocked");
     if (res.blockedDecisions[0]!.kind === "blocked") {
       assert.equal(res.blockedDecisions[0]!.reason, "per_tx_cap_exceeded");
-      assert.match(res.blockedDecisions[0]!.explanation, /exceeds the policy's per-transaction cap/);
+      assert.match(
+        res.blockedDecisions[0]!.explanation,
+        /exceeds the policy's per-transaction cap/,
+      );
     }
     assert.equal(res.blockedDecisions[0]!.call?.fn, "transfer");
   });

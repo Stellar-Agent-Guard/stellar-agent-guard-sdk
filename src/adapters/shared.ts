@@ -137,9 +137,12 @@ export function normalizeMappedCall(
 ): ContractCall[] {
   if (value === null || value === undefined) return [];
   if (!isContractCall(value)) {
-    throw new AdapterMappingError(`\`${field}\` returned a malformed contract call: ${MALFORMED_CALL}.`, {
-      field,
-    });
+    throw new AdapterMappingError(
+      `\`${field}\` returned a malformed contract call: ${MALFORMED_CALL}.`,
+      {
+        field,
+      },
+    );
   }
   return [value];
 }
@@ -313,11 +316,7 @@ export function hostAbortSignal(value: unknown): AbortSignal | undefined {
  * supplied a sink). The hook is never awaited, so a slow sink cannot delay —
  * or resume — the halt path (issue #313).
  */
-function isolateHookRun(
-  run: () => unknown,
-  describe: string,
-  logger?: BlockedHookLogger,
-): void {
+function isolateHookRun(run: () => unknown, describe: string, logger?: BlockedHookLogger): void {
   let result: unknown;
   try {
     result = run();

@@ -892,6 +892,11 @@ committed `getEvents` poll:
   `cursorStore`. A restart resumes each stream from its own last confirmed
   page; one stream advancing (or failing) never moves the other's cursor.
   The two stores are never used as fallbacks for each other.
+- **Scoped cursor records (issue #282):** every durable cursor read/write is
+  keyed to a `CursorStoreScope` — the RPC host, the canonical guard id and the
+  stream kind (`"events"` vs `"failed_tx"`) — so a shared backing store can
+  serve several guards and networks without one listener resuming from
+  another stream's position.
 
 #### Retention and replay when no store is present
 

@@ -128,7 +128,11 @@ describe("PreFlightInterceptor against the live guard", () => {
     // A call to a function that does not exist is not a policy decision — the
     // guard never rules on it. Reporting that as "the guard blocked you" would
     // be a false claim about the security boundary.
-    const call = { contract: unsafeContractAddress(config.token), fn: "no_such_function", args: [] };
+    const call = {
+      contract: unsafeContractAddress(config.token),
+      fn: "no_such_function",
+      args: [],
+    };
 
     const decision = await interceptor.check(call);
     assert.equal(decision.allowed, false);
@@ -141,9 +145,6 @@ describe("PreFlightInterceptor against the live guard", () => {
     assert.equal(decision.kind, "undetermined");
     console.log(`[interceptor] undetermined (not a block): ${decision.detail.slice(0, 120)}`);
 
-    await assert.rejects(
-      () => interceptor.assertAllowed(call),
-      PreFlightUndeterminedError,
-    );
+    await assert.rejects(() => interceptor.assertAllowed(call), PreFlightUndeterminedError);
   });
 });

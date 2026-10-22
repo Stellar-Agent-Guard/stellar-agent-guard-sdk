@@ -1,6 +1,7 @@
 # Summary
 
 * [Introduction](introduction.md)
+* [Glossary](glossary.md)
 * [Installation](installation.md)
 * [Runtime and Bundler Support](runtime-support.md)
 * [Concepts](concepts/)

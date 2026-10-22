@@ -93,10 +93,13 @@ describe("policyDiff", () => {
   });
 
   it("distinguishes a swap from a reorder", () => {
-    assert.deepEqual(policyDiff(policy({ recipients: [R1, R2] }), policy({ recipients: [R3, R1] })), [
-      { field: "recipients", path: "recipients[1]", kind: "removed", before: R2 },
-      { field: "recipients", path: "recipients[0]", kind: "added", after: R3 },
-    ]);
+    assert.deepEqual(
+      policyDiff(policy({ recipients: [R1, R2] }), policy({ recipients: [R3, R1] })),
+      [
+        { field: "recipients", path: "recipients[1]", kind: "removed", before: R2 },
+        { field: "recipients", path: "recipients[0]", kind: "added", after: R3 },
+      ],
+    );
   });
 
   it("reports nested protocol fn-list changes with indexed paths", () => {
@@ -129,10 +132,25 @@ describe("policyDiff", () => {
   });
 
   it("matches recipient window caps by recipient", () => {
-    const a = policy({ recipient_window_caps: [{ recipient: R1, cap: 10n }, { recipient: R2, cap: 20n }] });
-    const b = policy({ recipient_window_caps: [{ recipient: R2, cap: 25n }, { recipient: R3, cap: 5n }] });
+    const a = policy({
+      recipient_window_caps: [
+        { recipient: R1, cap: 10n },
+        { recipient: R2, cap: 20n },
+      ],
+    });
+    const b = policy({
+      recipient_window_caps: [
+        { recipient: R2, cap: 25n },
+        { recipient: R3, cap: 5n },
+      ],
+    });
     assert.deepEqual(policyDiff(a, b), [
-      { field: "recipient_window_caps", path: "recipient_window_caps[0]", kind: "removed", before: R1 },
+      {
+        field: "recipient_window_caps",
+        path: "recipient_window_caps[0]",
+        kind: "removed",
+        before: R1,
+      },
       {
         field: "recipient_window_caps",
         path: "recipient_window_caps[0].cap",
@@ -140,7 +158,12 @@ describe("policyDiff", () => {
         before: 20n,
         after: 25n,
       },
-      { field: "recipient_window_caps", path: "recipient_window_caps[1]", kind: "added", after: R3 },
+      {
+        field: "recipient_window_caps",
+        path: "recipient_window_caps[1]",
+        kind: "added",
+        after: R3,
+      },
     ]);
   });
 
@@ -163,13 +186,20 @@ describe("policyDiff", () => {
     const pairs: Array<[string, PolicyConfig, PolicyConfig]> = [
       ["identical", policy(), policy()],
       ["permuted recipients", policy(), policy({ recipients: [R2, R3, R1] })],
-      ["permuted fns", policy(), policy({ protocols: [{ contract: DEX, fns: ["deposit", "swap"] }] })],
+      [
+        "permuted fns",
+        policy(),
+        policy({ protocols: [{ contract: DEX, fns: ["deposit", "swap"] }] }),
+      ],
       ["absent vs empty caps", policy(), policy({ recipient_window_caps: [] })],
       ["scalar change", policy(), policy({ window_cap: 151n })],
       ["recipient removed", policy(), policy({ recipients: [R1, R2] })],
       ["fns any vs list", policy(), policy({ protocols: [{ contract: DEX, fns: null }] })],
-      ["cap changed", policy({ recipient_window_caps: [{ recipient: R1, cap: 1n }] }),
-        policy({ recipient_window_caps: [{ recipient: R1, cap: 2n }] })],
+      [
+        "cap changed",
+        policy({ recipient_window_caps: [{ recipient: R1, cap: 1n }] }),
+        policy({ recipient_window_caps: [{ recipient: R1, cap: 2n }] }),
+      ],
       ["blocked added", policy(), policy({ blocked_recipients: [R3] })],
     ];
     for (const [label, a, b] of pairs) {
@@ -180,7 +210,11 @@ describe("policyDiff", () => {
           canonical(a) === canonical(b),
           "empty diff exactly when set-equal",
         );
-        assert.equal(policyDiff(a, b).length === 0, policyDiff(b, a).length === 0, "symmetric emptiness");
+        assert.equal(
+          policyDiff(a, b).length === 0,
+          policyDiff(b, a).length === 0,
+          "symmetric emptiness",
+        );
       });
     }
   });

@@ -177,19 +177,16 @@ describe("serializeEvent golden strings", () => {
 
   it("covers one fixture for every GuardEventKind", () => {
     const kinds = new Set(FIXTURES.map((event) => event.kind));
-    assert.deepEqual(
-      [...kinds].sort(),
-      [
-        "auth_checked",
-        "frozen",
-        "heartbeat",
-        "initialized",
-        "policy_revoked",
-        "policy_set",
-        "unfrozen",
-        "unknown",
-      ],
-    );
+    assert.deepEqual([...kinds].sort(), [
+      "auth_checked",
+      "frozen",
+      "heartbeat",
+      "initialized",
+      "policy_revoked",
+      "policy_set",
+      "unfrozen",
+      "unknown",
+    ]);
   });
 });
 
@@ -282,10 +279,7 @@ describe("serializeEvent contract", () => {
  * deliberate diff rather than an unremarked one.
  */
 describe("versioned event records (issue #323)", () => {
-  const GOLDEN_PATH = new URL(
-    "../fixtures/telemetry/event-record-v1.golden.json",
-    import.meta.url,
-  );
+  const GOLDEN_PATH = new URL("../fixtures/telemetry/event-record-v1.golden.json", import.meta.url);
 
   it("matches the committed golden fixture", () => {
     const golden = readFileSync(GOLDEN_PATH, "utf8").trimEnd();
