@@ -29,6 +29,7 @@ import {
   GuardTelemetryListener,
   type CursorStore,
   type GuardEvent,
+  type GuardTelemetryWatchParams,
 } from "../../src/telemetry.ts";
 
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
@@ -139,6 +140,8 @@ function harness(options: {
   eventsPages?: { events: unknown[]; cursor: string; latestLedger: number }[];
   latestLedger?: number;
   failGetTransactions?: boolean;
+  /** Fail only the first `getTransactions` call, then recover. */
+  failGetTransactionsOnce?: boolean;
   failedTx?: boolean;
   cursorStore?: CursorStore;
   failedTxCursorStore?: CursorStore;
@@ -160,7 +163,10 @@ function harness(options: {
     },
     getTransactions: async (request: Record<string, unknown>) => {
       requests.getTransactions.push(request);
-      if (options.failGetTransactions) throw new Error("rpc unavailable");
+      if (remainingFailures > 0) {
+        remainingFailures -= 1;
+        throw new Error("rpc unavailable");
+      }
       return options.txPages[Math.min(txPage++, options.txPages.length - 1)];
     },
   } as unknown as rpc.Server;
@@ -187,6 +193,7 @@ async function collectAfterPolls(
   listener: GuardTelemetryListener,
   requests: { getEvents: unknown[] },
   polls: number,
+  params: Omit<GuardTelemetryWatchParams, "pollIntervalMs" | "signal"> = {},
 ): Promise<GuardEvent[]> {
   const out: GuardEvent[][] = [];
   const controller = new AbortController();
@@ -194,7 +201,11 @@ async function collectAfterPolls(
     if (requests.getEvents.length >= polls) controller.abort();
   }, 1);
   try {
-    for await (const page of listener.watch({ pollIntervalMs: 0, signal: controller.signal })) {
+    for await (const page of listener.watch({
+      pollIntervalMs: 0,
+      signal: controller.signal,
+      ...params,
+    })) {
       out.push(page);
     }
   } finally {
@@ -334,6 +345,15 @@ describe("pollFailedTransactions", () => {
     const page = await listener.pollFailedTransactions({ cursor: "tx-cursor-0" });
     assert.deepEqual(page.events, []);
     assert.equal(page.cursor, "tx-cursor-0");
+  });
+
+  it("reports the failure on its result instead of swallowing it (issue #280)", async () => {
+    const { listener } = harness({ txPages: [], failGetTransactions: true });
+    const page = await listener.pollFailedTransactions({ cursor: "tx-cursor-0" });
+    assert.deepEqual(page.events, []);
+    assert.equal(page.cursor, "tx-cursor-0", "a failed page fabricates no progress");
+    assert.ok(page.error instanceof Error, "the failure is carried out to the caller");
+    assert.match((page.error as Error).message, /rpc unavailable/);
   });
 
   it("skips an event with no decodable topics and still decodes the good one", async () => {
@@ -612,6 +632,93 @@ describe("durable failed-tx cursor (issue #279)", () => {
         ?.cursor,
       "500",
       "no persisted cursor means the scan starts at the current head",
+    );
+  });
+});
+
+describe("failed-transaction scan failures are observable (issue #280)", () => {
+  /** A committed heartbeat, so delivery through a failed scan is provable. */
+  const heartbeatPage = {
+    events: [
+      {
+        contractId: GUARD,
+        topic: [xdr.ScVal.scvSymbol("event_heartbeat")],
+        value: xdr.ScVal.scvMap([
+          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(1_789_393_232n) }),
+        ]),
+        ledger: 4_675_001,
+        ledgerClosedAt: "2026-09-14T00:00:00Z",
+        txHash: HASH,
+      },
+    ],
+    cursor: "events-cursor-1",
+    latestLedger: 502,
+  };
+
+  it("reports a failed page through onFailedTxError and recovers from the same cursor", async () => {
+    const { listener, requests } = harness({
+      eventsPages: [heartbeatPage],
+      txPages: [
+        {
+          transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })],
+          latestLedger: 502,
+          cursor: "tx-cursor-1",
+        },
+      ],
+      failedTx: true,
+      failGetTransactionsOnce: true,
+    });
+    const failures: unknown[] = [];
+
+    const events = await collectAfterPolls(listener, requests, 4, {
+      onFailedTxError: (error) => failures.push(error),
+    });
+
+    assert.equal(failures.length, 1, "the scan failure is surfaced exactly once");
+    assert.ok(failures[0] instanceof Error);
+    assert.match((failures[0] as Error).message, /rpc unavailable/);
+    assert.ok(
+      events.filter((event) => event.stream === "committed").length >= 1,
+      "committed delivery continued straight through the failed scan",
+    );
+    assert.equal(
+      events.filter((event) => event.stream === "failed_tx").length,
+      1,
+      "recovery re-reads the unread page and surfaces the failed tx exactly once",
+    );
+
+    const txCursors = requests.getTransactions.map(
+      (request) => (request.pagination as { cursor?: string } | undefined)?.cursor,
+    );
+    assert.ok(txCursors.length >= 2, "the scan was retried after the failure");
+    assert.equal(
+      txCursors[1],
+      txCursors[0],
+      "the retry re-reads from the cursor the failed page left behind — nothing was skipped",
+    );
+    assert.ok(
+      txCursors.includes("tx-cursor-1"),
+      "once the page succeeds the scan advances to the next cursor",
+    );
+  });
+
+  it("isolates a throwing onFailedTxError so the committed stream keeps its delivery", async () => {
+    const { listener, requests } = harness({
+      eventsPages: [heartbeatPage],
+      txPages: [],
+      failedTx: true,
+      failGetTransactions: true,
+    });
+
+    const events = await collectAfterPolls(listener, requests, 3, {
+      onFailedTxError: () => {
+        throw new Error("sink down");
+      },
+    });
+
+    assert.ok(
+      events.filter((event) => event.stream === "committed").length >= 1,
+      "an observability sink that throws cannot stop telemetry",
     );
   });
 });

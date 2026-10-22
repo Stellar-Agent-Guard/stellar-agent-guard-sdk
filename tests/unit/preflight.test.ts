@@ -1282,6 +1282,91 @@ describe("PreFlightInterceptor simulation cache", () => {
     assert.equal(simulations, 2);
   });
 
+  it("a mutated admissible verdict cannot change a later cache hit (issue #273)", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    const first = await interceptor.check(harness.call);
+    assert.equal(first.kind, "admissible");
+    if (first.kind !== "admissible") assert.fail("expected an admissible verdict");
+    const servedFee = first.estimatedResourceFee;
+
+    // A scalar field first, then the top-level discriminant.
+    first.estimatedResourceFee = 0n;
+    (first as { allowed: boolean }).allowed = false;
+    (first as { kind: string }).kind = "blocked";
+
+    const second = await interceptor.check(harness.call);
+    assert.notEqual(second, first, "the cache must not hand back the object the caller edited");
+    assert.equal(second.kind, "admissible");
+    assert.equal(second.allowed, true);
+    if (second.kind === "admissible") {
+      assert.equal(second.estimatedResourceFee, servedFee, "the stored fee is untouched by the edit");
+    }
+    assert.equal(harness.simulations, 2, "the second check was still a cache hit, not a resimulation");
+  });
+
+  it("a mutated blocked verdict and its diagnosticEvents cannot change a later cache hit (issue #273)", async () => {
+    // A guard refusal, so the verdict carries the nested `diagnosticEvents`
+    // array the acceptance criteria name.
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const server = createMockServer({ enforcedSimulateResponse: blockedResponse });
+    const interceptor = new PreFlightInterceptor({
+      server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      cache: { ttlMs: 5_000 },
+    });
+    const call = validTransferCall(5_000n);
+
+    const first = await interceptor.check(call);
+    assert.equal(first.kind, "blocked");
+    if (first.kind !== "blocked") assert.fail("expected a blocked verdict");
+    assert.equal(first.diagnosticEvents.length, 1, "the refusal carries its diagnostic");
+
+    // Top-level discriminant, then the nested array: push onto it and edit an
+    // element already inside it.
+    (first as { allowed: boolean }).allowed = true;
+    (first as { kind: string }).kind = "admissible";
+    first.diagnosticEvents.push({ forged: true });
+    (first.diagnosticEvents[0] as Record<string, unknown>)["forged"] = true;
+
+    const second = await interceptor.check(call);
+    assert.notEqual(second, first, "the cache must not hand back the object the caller edited");
+    assert.equal(second.kind, "blocked");
+    assert.equal(second.allowed, false);
+    if (second.kind !== "blocked") assert.fail("a mutated hit must still report the guard's refusal");
+    assert.equal(second.diagnosticEvents.length, 1, "the pushed entry is not in the stored verdict");
+    assert.notEqual(second.diagnosticEvents, first.diagnosticEvents, "nested arrays are copies too");
+    assert.equal(
+      (second.diagnosticEvents[0] as Record<string, unknown>)["forged"],
+      undefined,
+      "an edit inside a retained diagnostic does not reach the stored verdict",
+    );
+    assert.equal(second.reason, "per_tx_cap_exceeded");
+  });
+
   it("rejects a cache configuration without a positive TTL", () => {
     const harness = makeHarness();
     assert.throws(() => makeInterceptor(harness, { cache: {} }), /requires ttlMs or ttlLedgers/);
