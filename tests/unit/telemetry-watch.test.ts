@@ -218,6 +218,76 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
+describe("watchPages page metadata (issue #288)", () => {
+  it("yields empty pages with cursor and ledger/retention metadata", async () => {
+    const { server, requests } = scriptedServer([
+      { events: [], cursor: "empty-page", latestLedger: 520, oldestLedger: 500 },
+    ]);
+    const store = recordingCursorStore();
+    const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: store.store });
+
+    const [page] = await takeWatchPages(listener, 1, { startLedger: 500 });
+
+    assert.deepEqual(page?.events, []);
+    assert.equal(page?.cursor, "empty-page");
+    assert.equal(page?.latestLedger, 520);
+    assert.equal(page?.oldestLedger, 500);
+    assert.deepEqual(page?.gaps, []);
+    assert.equal(requests[0]?.startLedger, 500);
+    assert.deepEqual(store.saves, ["empty-page"]);
+  });
+
+  it("advances and exposes the cursor on each successive page", async () => {
+    const { server, requests } = scriptedServer([
+      { events: [rawLedgerEvent(501)], cursor: "page-1", latestLedger: 501 },
+      { events: [rawLedgerEvent(502)], cursor: "page-2", latestLedger: 502 },
+    ]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const pages = await takeWatchPages(listener, 2, { startLedger: 501 });
+
+    assert.deepEqual(
+      pages.map((page) => page.cursor),
+      ["page-1", "page-2"],
+    );
+    assert.deepEqual(
+      pages.map((page) => page.events),
+      [[decodedEvent(501)], [decodedEvent(502)]],
+    );
+    assert.equal(requests[1]?.cursor, "page-1");
+    assert.equal(requests[1]?.startLedger, undefined);
+  });
+
+  it("includes retention gaps on the page that detects them", async () => {
+    const { server } = scriptedServer([
+      { events: [], cursor: "after-gap", latestLedger: 30, oldestLedger: 20 },
+    ]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const [page] = await takeWatchPages(listener, 1, { startLedger: 10 });
+
+    assert.deepEqual(page?.gaps, [
+      {
+        fromLedger: 10,
+        toLedger: 19,
+        reason: "history_pruned",
+        retainedFromLedger: 20,
+        retainedToLedger: 30,
+      },
+    ]);
+  });
+
+  it("keeps watch() yielding only non-empty event arrays", async () => {
+    const { server } = scriptedServer([
+      { events: [], cursor: "empty" },
+      { events: [rawLedgerEvent(501)], cursor: "with-event" },
+    ]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    assert.deepEqual(await take(listener, 1), [[decodedEvent(501)]]);
+  });
+});
+
 describe("watch(signal) cursor persistence", () => {
   it("consults load() once at start and resumes from the stored cursor", async () => {
     const page = { events: [rawLedgerEvent(501)], cursor: "cursor-43" };

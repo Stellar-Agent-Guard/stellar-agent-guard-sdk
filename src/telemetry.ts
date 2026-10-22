@@ -1071,6 +1071,18 @@ interface WatchPage {
   events: GuardEvent[];
   /** The `getEvents` cursor this page advances to. */
   cursor: string;
+  /** Latest ledger the RPC reported for this page. */
+  latestLedger: number;
+  /** Oldest ledger the RPC still retains, or `null` when unreported. */
+  oldestLedger: number | null;
+  /** Why this page's events were dropped, by reason. */
+  dropped: GuardEventDropCounts;
+  /** Unknown name topics on this page. */
+  unknownTopics: GuardUnknownTopic[];
+  /** How many committed events on this page failed decoding. */
+  malformedEvents: number;
+  /** Provable retention gaps detected while processing this page. */
+  gaps: GuardTelemetryGap[];
   /**
    * The failed-transaction scan's own cursor for this poll, when it should be
    * persisted — the `!failedTxScanFailed` gate is applied by the watch loop,
@@ -2749,6 +2761,45 @@ export class GuardTelemetryListener {
   }
 
   /**
+   * Follow the committed stream like `watch()`, but yield every page with its
+   * cursor, ledger/retention boundaries, drop summaries, and detected gaps.
+   *
+   * Unlike `watch()`, empty pages are yielded so consumers can checkpoint
+   * cursor progress even when no events were returned. Cursors are persisted
+   * per poll, before the page is yielded, matching `watch()`'s
+   * at-least-once contract.
+   */
+  async *watchPages(
+    params: GuardTelemetryWatchParams = {},
+  ): AsyncGenerator<GuardTelemetryWatchPage, void, undefined> {
+    const lease = this.acquireStreamLease("watchPages");
+    this.healthStream = "watch";
+    try {
+      for await (const page of this.watchStream(params, { includeEmptyPages: true })) {
+        yield this.toWatchPage(page);
+      }
+    } finally {
+      this.finishHealthStream(params.signal);
+      this.healthStream = null;
+      this.releaseStreamLease(lease);
+    }
+  }
+
+  /** Project the internal page envelope onto the public watch-page shape. */
+  private toWatchPage(page: WatchPage): GuardTelemetryWatchPage {
+    return {
+      events: page.events,
+      cursor: page.cursor,
+      latestLedger: page.latestLedger,
+      oldestLedger: page.oldestLedger,
+      dropped: page.dropped,
+      unknownTopics: page.unknownTopics,
+      malformedEvents: page.malformedEvents,
+      gaps: page.gaps,
+    };
+  }
+
+  /**
    * Settle the state of a stream that has just ended (#286): an abort wins,
    * while a stream that ended on its own is `stopped`; `failed` is preserved.
    */
@@ -2770,7 +2821,7 @@ export class GuardTelemetryListener {
    */
   private async *watchStream(
     params: GuardTelemetryWatchParams = {},
-    options: { deferCursorSave?: boolean } = {},
+    options: { deferCursorSave?: boolean; includeEmptyPages?: boolean } = {},
   ): AsyncGenerator<WatchPage, void, undefined> {
     const interval = params.pollIntervalMs ?? 5_000;
     const jitter = params.jitter ?? "full";
@@ -2978,11 +3029,7 @@ export class GuardTelemetryListener {
       // window is silence, not loss — so a sparse but fully-retained history
       // cannot raise a false notice. No events are fabricated for the hole.
       const gaps: GuardTelemetryGap[] = [];
-      if (
-        expectedFrom !== null &&
-        page.oldestLedger !== null &&
-        expectedFrom < page.oldestLedger
-      ) {
+      if (expectedFrom !== null && page.oldestLedger !== null && expectedFrom < page.oldestLedger) {
         const gap: GuardTelemetryGap = {
           fromLedger: expectedFrom,
           toLedger: page.oldestLedger - 1,
@@ -3052,10 +3099,18 @@ export class GuardTelemetryListener {
 
       // In deferred mode every page is yielded — an empty one included — so
       // the pump still advances the cursors of polls that produced no batch.
-      if (events.length > 0 || options.deferCursorSave) {
+      // `watchPages()` also opts into empty pages so a consumer can observe
+      // cursor/ledger progress on a quiet poll.
+      if (events.length > 0 || options.deferCursorSave || options.includeEmptyPages) {
         yield {
           events,
           cursor: page.cursor,
+          latestLedger: page.latestLedger,
+          oldestLedger: page.oldestLedger,
+          dropped: page.dropped,
+          unknownTopics: page.unknownTopics,
+          malformedEvents: page.malformedEvents,
+          gaps,
           ...(scannedFailedTxCursor !== undefined ? { failedTxCursor: scannedFailedTxCursor } : {}),
         };
       }
