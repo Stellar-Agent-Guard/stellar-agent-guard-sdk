@@ -1,4 +1,3 @@
-
 /**
  * Unit tests for the telemetry decoder's pure parts.
  *
@@ -9,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { StrKey, xdr } from "@stellar/stellar-sdk";
+import { rpc, StrKey, xdr } from "@stellar/stellar-sdk";
 import {
   DEFAULT_JITTER_FRACTION,
   GuardEventRingBuffer,
@@ -1877,7 +1876,6 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
   });
 });
 
-
 /**
  * Injectable transport (issue: custom rpc Server instance or fetch function).
  *
@@ -1908,14 +1906,20 @@ describe("injectable transport config (shared { server? | url? })", () => {
     await listener.poll({ startLedger: 100 });
 
     assert.equal(getEventsCalls, 1, "calls must land on the injected instance");
-    assert.equal(getLatestLedgerCalls, 0, "poll() with an explicit startLedger does not probe the head");
+    assert.equal(
+      getLatestLedgerCalls,
+      0,
+      "poll() with an explicit startLedger does not probe the head",
+    );
   });
 
   it("rejects a config that supplies both server and url with a typed error", () => {
     assert.throws(
       () =>
         new GuardTelemetryListener({
-          server: { getEvents: async () => ({ events: [], cursor: "c", latestLedger: 1 }) } as never,
+          server: {
+            getEvents: async () => ({ events: [], cursor: "c", latestLedger: 1 }),
+          } as unknown as rpc.Server,
           // @ts-expect-error intentionally passing both server and url
           url: "https://soroban-testnet.stellar.org",
           guard: GUARD,
