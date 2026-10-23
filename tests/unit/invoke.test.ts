@@ -26,6 +26,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { DEFAULT_INVOKE_RETRY_OPTIONS, invoke, InvokeRetryError } from "../../src/invoke.ts";
+import type { InvokeParams } from "../../src/invoke.ts";
 import { BroadcastError } from "../../src/tx.ts";
 import { ContractResponseError, SimulationError } from "../../src/errors.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
@@ -175,10 +176,7 @@ function createMockServer(options: MockServerOptions = {}) {
   return mock;
 }
 
-function makeParams(
-  server: rpc.Server,
-  overrides: Partial<Parameters<typeof invoke>[0]> = {},
-): Parameters<typeof invoke>[0] {
+function makeParams(server: rpc.Server, overrides: Partial<InvokeParams> = {}): InvokeParams {
   return {
     server,
     source: Keypair.random(),
