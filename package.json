@@ -102,7 +102,7 @@
     "check:secrets": "node scripts/check-secrets.ts"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^17.0.1"
+    "@stellar/stellar-sdk": "^17.2.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
