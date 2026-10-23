@@ -685,7 +685,14 @@ export class GuardEventRingBuffer {
 }
 
 export interface GuardTelemetryConfig {
+  /**
+   * The RPC transport, used verbatim. Inject your own instance to route RPC
+   * through a proxy (auth headers, mTLS) or to mock it in tests. Mutually
+   * exclusive with `url`.
+   */
   server: rpc.Server;
+  /** Not allowed alongside `server`; see `GuardTelemetryUrlConfig`. */
+  url?: never;
   /** The guard contract to follow. */
   guard: string;
   /** Opt in to scanning failed transaction diagnostics as a third stream. */
@@ -2089,11 +2096,25 @@ function cursorNetworkIdentity(config: GuardTelemetryConfig): string {
 }
 
 /**
+ * Config that names an RPC URL instead of injecting a `server`: the listener
+ * builds its own `rpc.Server` from `url`. Mutually exclusive with `server`.
+ */
+export type GuardTelemetryUrlConfig = Omit<GuardTelemetryConfig, "server" | "url"> & {
+  /** Soroban RPC URL the listener builds its `rpc.Server` from. */
+  url: string;
+  server?: never;
+};
+
+/**
  * Config for a listener used purely for local state (counters, `recent()`),
  * with no RPC transport. A host that only wants `observe()`/`stats()` does not
  * need a `server` and should not have to fabricate one.
  */
 export interface GuardTelemetryLocalConfig {
+  /** A local listener has no transport. */
+  server?: never;
+  /** A local listener has no transport. */
+  url?: never;
   /** Opt-in sliding-window counters over allowed/blocked decisions. */
   counters?: GuardTelemetryCountersOptions;
   /** Clock the counters consult for `windowMs` eviction. */
@@ -2280,16 +2301,38 @@ export class GuardTelemetryListener {
    */
   private readonly counters: GuardDecisionCounters | null;
 
-  constructor(config: GuardTelemetryConfig | GuardTelemetryLocalConfig = {}) {
-    // Exactly one of `server` or `url` must be supplied.
-    const supplied = config as { server?: unknown; url?: unknown };
-    if ((supplied.server !== undefined) === (supplied.url !== undefined)) {
+  constructor(
+    config: GuardTelemetryConfig | GuardTelemetryUrlConfig | GuardTelemetryLocalConfig = {},
+  ) {
+    // Transport: exactly one of `server` (an injected `rpc.Server`, used
+    // verbatim) or `url` (the SDK builds the `rpc.Server`). A purely local
+    // listener (no `guard`, see `GuardTelemetryLocalConfig`) needs neither.
+    const supplied = config as { server?: unknown; url?: unknown; guard?: unknown };
+    const hasServer = supplied.server !== undefined;
+    const hasUrl = supplied.url !== undefined;
+    if (hasServer && hasUrl) {
+      throw new TypeError(
+        "GuardTelemetryListener config must supply exactly one of `server` or `url`, not both.",
+      );
+    }
+    if (!hasServer && !hasUrl && supplied.guard !== undefined) {
       throw new TypeError(
         "GuardTelemetryListener config must supply exactly one of `server` or `url`.",
       );
     }
-    
-    const resolved = config as GuardTelemetryConfig;
+    if (hasUrl && typeof supplied.url !== "string") {
+      throw new TypeError("GuardTelemetryListener config `url` must be a string.");
+    }
+
+    const resolved = (
+      hasUrl
+        ? {
+            ...config,
+            server: new rpc.Server(supplied.url as string),
+            rpcUrl: (config as { rpcUrl?: string }).rpcUrl ?? (supplied.url as string),
+          }
+        : config
+    ) as GuardTelemetryConfig;
     this.config = resolved;
     this.guardContractId = canonicalContractId(resolved.guard) ?? resolved.guard ?? "";
     this.cursorNetwork = cursorNetworkIdentity(resolved);
