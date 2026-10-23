@@ -26,21 +26,26 @@ on:
     - cron: "17 6 * * 1"
   workflow_dispatch:
 
+# Least-privilege default for the whole workflow; the one write scope is
+# granted to the single job that needs it (below), not workflow-wide.
 permissions:
   contents: read
-  # Issue #143: the notify steps below open/comment/close ONE tracked issue on
-  # failure/recovery. Nothing else in this workflow writes.
-  issues: write
 
 jobs:
   live:
     name: live-suite (testnet)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Issue #143: the notify steps open/comment/close ONE tracked issue on
+    # failure/recovery. Nothing else in this workflow writes, so `issues: write`
+    # is scoped to this job only.
+    permissions:
+      contents: read
+      issues: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: npm
