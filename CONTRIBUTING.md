@@ -249,6 +249,16 @@ code or the SDK beneath them changes:
 
 - `tests/fixtures/contract-fixtures.json` — the guard's event vocabulary. Refresh
   with `npm run sync:fixtures` when the contracts repo's schema moves.
+- `tests/fixtures/vendor/*.json` — hash-pinned cross-repo artifacts (policy
+  schema, auth-checked vocabulary, policy vectors, reason glossary), each
+  carrying a `_provenance` header with its source URL and pinned commit.
+  Refresh with `npm run vendor:refresh` after bumping the pinned `repoCommit`
+  in `scripts/vendor-fixtures.ts`, and commit the artifact together with its
+  refreshed digest. `tests/fixtures/vendor/reasons.fixture.json` (issue #38) is
+  the contract's reason glossary that `tests/unit/reasons.test.ts` asserts
+  `explainReason` against in both directions, so a contract-added reason fails
+  this repo's tests until the SDK's guidance is extended. CI never fetches
+  these files — they are vendored so the suite stays hermetic.
 - `tests/fixtures/rpc/*.json` — real RPC payloads decoded by
   `tests/unit/rpc-fixtures.test.ts`. Refresh with `npm run capture:rpc-fixtures`
   after touching `src/telemetry.ts` or `src/invoke.ts`, or after upgrading

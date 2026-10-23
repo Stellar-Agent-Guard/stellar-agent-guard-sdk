@@ -12,8 +12,14 @@
  * `tests/fixtures/vendor/auth-checked-vocabulary.json`, so a reason the
  * contract adds fails this test until the SDK's table is extended — instead of
  * being silently accepted by a second, hand-maintained copy.
+ *
+ * The `explainReason` coverage the issue #38 suite adds is driven the same
+ * way, from the machine-readable reason glossary vendored at
+ * `tests/fixtures/vendor/reasons.fixture.json`: every fixture symbol must have
+ * non-empty SDK guidance, and every SDK reason must exist upstream.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -138,6 +144,161 @@ describe("explainReason", () => {
 
   it("falls back for an unrecognised reason rather than throwing", () => {
     assert.match(explainReason(777), /Unrecognised/);
+  });
+});
+
+/**
+ * The contract's reason glossary, read from the vendored machine-readable
+ * extraction (issue #38).
+ *
+ * The canonical glossary lives in
+ * `stellar-agent-guard-contracts/docs/reason-glossary.md`; the vendored
+ * `tests/fixtures/vendor/reasons.fixture.json` is its machine-readable form
+ * (symbol -> Error code + what-was-attempted + per-observer guidance + SPEC
+ * ref), refreshed by `npm run vendor:refresh` and digest-pinned so a hand-edit
+ * fails the integrity test below instead of silently becoming the truth.
+ */
+interface GlossaryRow {
+  code: number;
+  what_was_attempted: string;
+  agent_guidance: string;
+  operator_action: string;
+  auditor_note: string;
+  spec_ref: string;
+}
+
+interface VendoredGlossary {
+  _provenance: {
+    sourceRepo: string;
+    sourceCommit: string;
+    sourcePath: string;
+    sourceUrl: string;
+    digest: string;
+    refreshCommand: string;
+    upstreamLanded: boolean;
+  };
+  reasonGlossary: {
+    schema_version: number;
+    reasons: Record<string, GlossaryRow>;
+  };
+}
+
+function loadVendoredGlossary(): VendoredGlossary {
+  const path = resolve(process.cwd(), "tests/fixtures/vendor/reasons.fixture.json");
+  return JSON.parse(readFileSync(path, "utf8")) as VendoredGlossary;
+}
+
+describe("reason glossary parity (issue #38)", () => {
+  it("vendors the contracts reason glossary with its provenance and an intact digest", () => {
+    const doc = loadVendoredGlossary();
+    const provenance = doc._provenance;
+
+    assert.equal(provenance.sourceRepo, "Stellar-Agent-Guard/stellar-agent-guard-contracts");
+    assert.match(provenance.sourceCommit, /^[0-9a-f]{40}$/, "source commit must be a pinned SHA");
+    assert.equal(provenance.sourcePath, "docs/reason-glossary.md");
+    assert.equal(
+      provenance.sourceUrl,
+      `https://raw.githubusercontent.com/${provenance.sourceRepo}/${provenance.sourceCommit}/${provenance.sourcePath}`,
+      "the provenance header must carry the exact source URL the refresh fetches",
+    );
+    assert.equal(provenance.refreshCommand, "npm run vendor:refresh");
+    assert.equal(provenance.upstreamLanded, true);
+
+    // Recomputed from the vendored file alone, so a hand-edit or a truncated
+    // refresh fails here instead of silently becoming the vocabulary.
+    const canonical = `${JSON.stringify(doc.reasonGlossary, null, 2)}\n`;
+    const digest = createHash("sha256").update(canonical, "utf8").digest("hex");
+    assert.equal(
+      provenance.digest,
+      `sha256:${digest}`,
+      "the vendored reason glossary was modified without refreshing its digest — run npm run vendor:refresh and commit both together",
+    );
+  });
+
+  it("explains every fixture symbol with non-empty guidance, and carries guidance upstream", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    for (const [symbol, row] of Object.entries(reasonGlossary.reasons)) {
+      // The upstream row must carry its own guidance columns — a glossary row
+      // with an empty seat is a broken glossary, refreshed or not.
+      assert.ok(row.what_was_attempted.length > 0, `${symbol}: empty what_was_attempted`);
+      assert.ok(row.agent_guidance.length > 0, `${symbol}: empty agent_guidance`);
+      assert.ok(row.operator_action.length > 0, `${symbol}: empty operator_action`);
+      assert.ok(row.auditor_note.length > 0, `${symbol}: empty auditor_note`);
+      assert.ok(row.spec_ref.length > 0, `${symbol}: empty spec_ref`);
+
+      // The SDK side: the symbol must be a known reason and `explainReason`
+      // must return real guidance — not the unrecognised-reason fallback and
+      // not an empty string.
+      assert.ok(isGuardReason(symbol), `'${symbol}' is not a known guard reason`);
+      const explanation = explainReason(symbol);
+      assert.ok(explanation.length > 0, `${symbol}: explainReason returned an empty string`);
+      assert.notEqual(
+        explanation,
+        `Unrecognised guard reason: ${symbol}`,
+        `${symbol}: explainReason has no entry for this contract reason`,
+      );
+      assert.notEqual(explanation, undefined);
+      const english = reasonMessagesEn[symbol as GuardReason];
+      assert.ok(english.title.length > 0, `${symbol}: empty title`);
+      assert.ok(english.body.length > 0, `${symbol}: empty body`);
+      assert.ok(english.remediation.length > 0, `${symbol}: empty remediation`);
+    }
+  });
+
+  it("keeps the SDK's reason set and the upstream glossary in lockstep, both directions", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    const sdkSymbols = Object.keys(GUARD_REASON_CODES).sort();
+    const fixtureSymbols = Object.keys(reasonGlossary.reasons).sort();
+
+    const missingFromSdk = fixtureSymbols.filter((symbol) => !(symbol in GUARD_REASON_CODES));
+    const missingUpstream = sdkSymbols.filter((symbol) => !(symbol in reasonGlossary.reasons));
+
+    // Bidirectional: a reason present in only one of the two vocabularies
+    // fails here, with the offending symbols named — a contract-added reason
+    // fails this repo's CI until the SDK's table and guidance are extended,
+    // and a renamed or dropped SDK entry cannot pass as upstream drift.
+    assert.deepEqual(
+      missingFromSdk,
+      [],
+      `contract reason(s) the SDK does not know: ${missingFromSdk.join(", ")} — extend GUARD_REASON_CODES/reasonMessagesEn in src/reasons.ts, or refresh the fixture with \`npm run vendor:refresh\` if the glossary moved`,
+    );
+    assert.deepEqual(
+      missingUpstream,
+      [],
+      `SDK reason(s) missing from the upstream glossary: ${missingUpstream.join(", ")} — the contract's docs/reason-glossary.md must list every reason before the SDK ships it`,
+    );
+    assert.deepEqual(fixtureSymbols, sdkSymbols);
+  });
+
+  it("pins each fixture row's Error code to the SDK's code table", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    for (const [symbol, row] of Object.entries(reasonGlossary.reasons)) {
+      assert.equal(
+        GUARD_REASON_CODES[symbol as GuardReason],
+        row.code,
+        `${symbol}: the SDK's numeric code drifted from the contract glossary`,
+      );
+    }
+    const codes = Object.values(reasonGlossary.reasons).map((row) => row.code);
+    assert.equal(new Set(codes).size, codes.length, "duplicate codes in the glossary fixture");
+  });
+
+  it("flags a newly added contract reason instead of accepting it silently", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    // The lockstep check above is only meaningful if it can fail: a synthetic
+    // reason the SDK does not know must be reported as a mismatch.
+    const withNewReason = Object.keys(reasonGlossary.reasons).concat("brand_new_reason").sort();
+    const sdkSymbols = Object.keys(GUARD_REASON_CODES).sort();
+    const missingFromSdk = withNewReason.filter((symbol) => !(symbol in GUARD_REASON_CODES));
+
+    assert.deepEqual(missingFromSdk, ["brand_new_reason"]);
+    assert.notDeepEqual(withNewReason, sdkSymbols);
+    assert.equal(isGuardReason("brand_new_reason"), false);
+    assert.match(explainReason("brand_new_reason"), /Unrecognised/);
   });
 });
 
