@@ -504,9 +504,9 @@ export interface InvokeRetryOptions {
 }
 
 export interface InvokePollOptions {
-  /** Number of ledger-status polls after a pending broadcast. */
+  /** Number of ledger-status polls after a pending broadcast. Default: 20. */
   pollAttempts?: number;
-  /** Delay between ledger-status polls. */
+  /** Delay between ledger-status polls, in milliseconds. Default: 3,000. */
   pollIntervalMs?: number;
 }
 
@@ -516,17 +516,28 @@ export interface InvokeParams {
   source: Keypair | AdminSigner;
   call: ContractCall;
   networkPassphrase: string;
-  /** Present when the call requires the smart account's own authorization. */
+  /**
+   * Present when the call requires the smart account's own authorization.
+   * Default: none (no smart-account authorization is signed).
+   */
   guardAuth?: GuardAuthorization | null | undefined;
-  /** Extra classic-account authorizers available to sign (e.g. an admin). */
+  /** Extra classic-account authorizers available to sign (e.g. an admin). Default: none. */
   accountSigners?: Array<Keypair | AdminSigner> | undefined;
-  /** Skip broadcast even if the enforced simulation passes (dry run). */
+  /** Skip broadcast even if the enforced simulation passes (dry run). Default: `false`. */
   dryRun?: boolean | undefined;
-  /** Configure bounded full-jitter retries for stale ledger resource limits. */
+  /**
+   * Configure bounded full-jitter retries for stale ledger resource limits.
+   * Default: `DEFAULT_INVOKE_RETRY_OPTIONS` (3 attempts, 100 ms base, 2,000 ms max).
+   */
   retry?: InvokeRetryOptions | undefined;
+  /** Ledger-status polls after the broadcast is accepted. Default: 20. */
   pollAttempts?: number | undefined;
+  /** Delay between ledger-status polls, in milliseconds. Default: 3,000. */
   pollIntervalMs?: number | undefined;
-  /** Options controlling polling interval and attempts after submission. */
+  /**
+   * Options controlling polling interval and attempts after submission. Must
+   * agree with the top-level values when both are set. Default: none.
+   */
   pollOptions?: { pollAttempts?: number; pollIntervalMs?: number } | undefined;
   /**
    * Optional configuration for fee-bump retry when broadcast hits min-fee.
@@ -538,15 +549,20 @@ export interface InvokeParams {
    * Overall maximum retries across retryable classes. If specified, bounds the
    * total attempts across all triggers (so `0` means one attempt). When both
    * this and a per-class budget are supplied, the tighter bound wins.
+   * Default: none (each retry class keeps its own budget).
    */
   maxRetries?: number | undefined;
-  /** Custom inclusion fee (used internally during fee-bump retries). */
+  /**
+   * Custom inclusion fee (used internally during fee-bump retries).
+   * Default: 100 stroops (`INCLUSION_FEE`).
+   */
   fee?: bigint | string | undefined;
   /**
    * Caller-owned cancellation. When aborted, the pipeline stops at the next
    * RPC boundary and `invoke()` returns its `error` outcome carrying an
    * `RpcTimeoutError` (see `RpcTimeoutError` for the local-only cancellation
    * caveat). An already-aborted signal short-circuits before any RPC call.
+   * Default: none.
    */
   signal?: AbortSignal | undefined;
   /**
