@@ -15,7 +15,7 @@ constructor(options: PreFlightInterceptorOptions)
 - `guard: string` — Custom account contract address (`C...`)
 - `agent: Keypair` — Keypair registered as the agent in the guard
 - `source: Keypair` — Keypair paying for transaction fees
-- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default
+- `cache?: PreFlightCacheOptions` — Optional short-lived verdict cache; disabled by default. Accepts `ttlMs`/`ttlLedgers`, an optional `policyRevision`, and an optional `maxEntries` cardinality bound.
 
 ### Optional cache
 
@@ -27,6 +27,13 @@ or an async getter; changing it invalidates the matching entry. Call
 be staler than one admitted transfer, so callers must accept that tradeoff
 explicitly.
 
+`maxEntries` bounds how many verdicts the cache retains. When the cache is full,
+storing a new call fingerprint evicts the least-recently-used entry; a hit counts
+as use, so the eviction order is deterministic. Eviction only removes entries —
+lookups still require a current-ledger, unexpired entry — so a bounded cache
+never returns an expired or cross-ledger verdict. Omit `maxEntries` for an
+unbounded cache.
+
 ## Methods
 
 ### `check(call: ContractCall): Promise<PreFlightDecision>`
@@ -37,9 +44,40 @@ Evaluates a contract call against the guard without throwing or broadcasting.
 
 Clears all cached decisions, or only the entries for the supplied call.
 
-### `assertAllowed(call: ContractCall): Promise<AdmissibleDecision>`
+### `assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }>`
 
-Evaluates a call and throws `GuardBlockedError` if blocked or undetermined.
+Evaluates a call and returns the decision if admissible, or throws `GuardBlockedError` if blocked and `GuardUndeterminedError` if undetermined or on transport failure. Raw transport errors never escape.
+
+### `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>`
+
+Evaluates a sequence of calls with the guard's all-or-nothing semantics. Every
+call is simulated independently, and positive SAC transfer amounts are staged
+against the rolling `window_cap`. A call that passes alone but would push the
+cumulative staged spend over the cap is reported as `blocked` with reason
+`window_cap_exceeded`; a refusal or undetermined result from any member makes
+the batch inadmissible.
+
+Staging state is fail-closed:
+
+- `options.initialWindowSpent` (including an explicit `0n`) is a trusted caller
+  snapshot and avoids the ledger read.
+- An absent `Window` ledger entry means zero committed spend, not a failed read.
+- A failed policy or window RPC read leaves the state unknown. When a positive
+  transfer needs that state, the affected verdicts are `undetermined` and the
+  batch `kind` is `undetermined`; the SDK never stages against an assumed zero.
+- The returned `staging` field records the snapshot: `source` is
+  `provided | ledger | absent | unavailable`, `windowSpent` is `null` when
+  required state could not be read, and `unavailable` says whether staging was
+  blocked. It is omitted for an empty batch or when no snapshot was resolved.
+
+Non-transfer calls and policies with a zero cap do not require the window
+snapshot and are unaffected by an unavailable read.
+
+### `assertBatchAllowed(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision & { admissible: true }>`
+
+The throw-on-refusal form: returns the batch decision if all calls are admissible, or throws `GuardBlockedError` for the first blocked
+member, or `GuardUndeterminedError` for an undetermined member, an
+unavailable staging state, or transport failure.
 
 ## CheckResult decoding and fallback behavior
 
@@ -64,7 +102,7 @@ returns the typed fallback for the call-site contract:
 | Call site | Fallback verdict | Notes |
 | --- | --- | --- |
 | `PreFlightInterceptor.check` | `undetermined` with `null` reason | The caller sees a typed decision, not an exception. |
-| `assertAllowed` | `GuardBlockedError` with an `undetermined` verdict | The error is thrown by the caller-facing assertion, not by the decoder. |
+| `assertAllowed` | `GuardUndeterminedError` | When `CheckResult` cannot be decoded, `assertAllowed` throws `GuardUndeterminedError` with cause preserved. |
 
 In other words, a malformed or future `CheckResult` never escapes to the agent
 loop as a raw throw. The interceptor treats any decode failure as

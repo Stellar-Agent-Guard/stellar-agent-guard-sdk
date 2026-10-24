@@ -11,8 +11,7 @@
  * See the README's "Verified against live testnet" section and
  * `docs/verification.md`.
  */
-export const GUARD_WASM_HASH =
-  "f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63";
+export const GUARD_WASM_HASH = "f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63";
 
 /** The outcome of verifying WASM bytes against a pinned hash. */
 export interface GuardWasmVerification {

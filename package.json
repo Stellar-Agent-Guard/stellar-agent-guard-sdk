@@ -14,6 +14,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./fs": {
+      "types": "./dist/fs.d.ts",
+      "import": "./dist/fs.js"
     }
   },
   "files": [
@@ -69,6 +73,8 @@
     "typecheck": "tsc --noEmit",
     "check:strict-ratchet": "node scripts/check-strict-ratchet.mjs",
     "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "node --import tsx scripts/run-tests.ts unit",
     "test:unit": "node --import tsx scripts/run-tests.ts unit",
     "test:property": "node --import tsx scripts/run-tests.ts property",
@@ -78,6 +84,11 @@
     "test:coverage": "node --import tsx scripts/run-tests.ts all --coverage",
     "test:coverage:floor": "c8 --check-coverage --include=src/preflight.ts --include=src/policy.ts --include=src/invoke.ts node --import tsx scripts/run-tests.ts unit",
     "test:exports": "node --import tsx scripts/check-export-map.ts",
+    "test:pack": "node --import tsx scripts/check-pack-contents.ts",
+    "test:packed-install": "node --import tsx scripts/check-packed-install.ts",
+    "test:types": "tsc -p tsconfig.test-d.json",
+    "test:types:packed": "node --import tsx scripts/check-packed-types.ts",
+    "test:browser": "node scripts/check-browser-entry.mjs",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
     "test:smoke": "node --input-type=module -e \"import('./dist/index.js').then(m => { if (!m.PreFlightInterceptor) throw new Error('Missing PreFlightInterceptor'); console.log('ESM export-map resolution smoke test passed: ' + Object.keys(m).length + ' exports found'); })\"",
     "bench": "node --import tsx benches/check-decode.bench.ts",
@@ -88,7 +99,8 @@
     "vendor:refresh": "node --import tsx scripts/vendor-fixtures.ts",
     "policy-schema:bootstrap": "node --import tsx -e \"import { bootstrapAheadOfUpstream } from './scripts/vendor-fixtures.ts'; import { readFileSync } from 'node:fs'; const r = bootstrapAheadOfUpstream(readFileSync('scripts/policy-schema.bootstrap.json', 'utf8')); console.log('vendored', r.artifact.outputPath, 'sha256:' + r.digest);\"",
     "capture:rpc-fixtures": "node --import tsx scripts/capture-rpc-fixtures.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "check:secrets": "node scripts/check-secrets.ts"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^17.0.1"
@@ -98,6 +110,8 @@
     "@types/node": "^26.5.1",
     "c8": "^12.0.0",
     "eslint": "^10.10.0",
+    "expect-type": "^1.4.0",
+    "prettier": "^3.6.2",
     "tinybench": "^6.2.0",
     "tsx": "^4.23.13",
     "typescript": "^5.9.2",
