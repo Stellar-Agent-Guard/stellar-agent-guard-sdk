@@ -33,6 +33,7 @@ import {
   type GuardLoggerInput,
 } from "./logger.ts";
 import type { TraceStepName, TraceStepStatus } from "./trace.ts";
+import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 import type {
   InvokeErrorCause,
   InvokeRetryAttempt,
@@ -1338,12 +1339,21 @@ function reserveNextSequence(
   return next.toString();
 }
 
-export function invoke(params: InvokeParams & { dryRun: true }): Promise<InvokeDryRunResult>;
+/**
+ * What `invoke()`/`enforceCall()` accept: `InvokeParams` with the shared
+ * `{ server? | url? }` transport (issue #117) in place of a mandatory `server`.
+ */
+export type InvokeParamsInput = WithRpcTransport<InvokeParams>;
+
+export function invoke(params: InvokeParamsInput & { dryRun: true }): Promise<InvokeDryRunResult>;
 export function invoke(
-  params: InvokeParams & { dryRun?: false },
+  params: InvokeParamsInput & { dryRun?: false },
 ): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
-export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
-export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+export function invoke(params: InvokeParamsInput): Promise<InvokeOutcome>;
+export async function invoke(input: InvokeParamsInput): Promise<InvokeOutcome> {
+  // Shared transport (issue #117): exactly one of `server` or `url`, resolved
+  // before anything else so a misconfigured transport never reaches RPC.
+  const params = withResolvedServer<InvokeParams>(input);
   // The public boundary: every option is validated before the account queue,
   // signing or any RPC. A bad option is a field-specific RangeError, not an
   // `undetermined` outcome produced after a wasted simulation.
@@ -1997,10 +2007,11 @@ async function invokePipeline(
  * Nothing here mutates the ledger, which is what makes a refusal free.
  */
 export async function enforceCall(
-  params: InvokeParams,
+  input: InvokeParamsInput,
   attempt: number = 0,
   options: { deadline?: InvokeDeadline | undefined; clock?: Clock | undefined } = {},
 ): Promise<EnforcementOutcome> {
+  const params = withResolvedServer<InvokeParams>(input);
   validateInvokeOptions(params);
   const clock = options.clock ?? params.clock ?? systemClock;
   const deadline = options.deadline ?? makeDeadline(params, clock);

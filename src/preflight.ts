@@ -48,6 +48,7 @@ import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
 import { systemClock, type Clock } from "./clock.ts";
+import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 
 /**
  * Re-exported from `errors.ts` for the existing import path.
@@ -433,6 +434,12 @@ export interface PreFlightCacheOptions {
   maxEntries?: number;
 }
 
+/**
+ * What `new PreFlightInterceptor()` accepts: `PreFlightConfig` with the shared
+ * `{ server? | url? }` transport (issue #117) in place of a mandatory `server`.
+ */
+export type PreFlightConfigInput = WithRpcTransport<PreFlightConfig>;
+
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
@@ -590,7 +597,9 @@ export class PreFlightInterceptor {
   private _misses = 0;
   private _invalidations = 0;
 
-  constructor(config: PreFlightConfig) {
+  constructor(input: PreFlightConfigInput) {
+    // Shared transport (issue #117): exactly one of `server` or `url`.
+    const config = withResolvedServer<PreFlightConfig>(input);
     this.config = config;
     this.cacheOptions = config.cache;
     this.clock = config.clock ?? systemClock;
@@ -1382,13 +1391,13 @@ export class PreFlightInterceptor {
 }
 
 /** One-shot form, for callers that do not want to hold an interceptor. */
-export function preflight(config: PreFlightConfig, call: ContractCall): Promise<PreFlightDecision> {
+export function preflight(config: PreFlightConfigInput, call: ContractCall): Promise<PreFlightDecision> {
   return new PreFlightInterceptor(config).check(call);
 }
 
 /** One-shot form for batch pre-flight checks. */
 export function preflightBatch(
-  config: PreFlightConfig,
+  config: PreFlightConfigInput,
   calls: ContractCall[],
   options?: CheckBatchOptions,
 ): Promise<PreFlightBatchDecision> {

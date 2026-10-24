@@ -173,9 +173,10 @@ one-shot form.
   - `serializeEvent(event: GuardEvent): string` — Canonical single-line JSON for deterministic JSON-lines log shipping. Fixed key order, drops `undefined`, keeps `null`, renders `bigint` as a decimal string. Unversioned legacy (v0) format. Contract: [`event-schema.md`](event-schema.md#canonical-json-serialization--serializeevent).
   - `serializeEventRecord(event: GuardEvent): string` — Persisted-record envelope `{ "v": 1, "event": { … } }` with the same event projection as `serializeEvent()`; `v` is explicit so a reader can tell a record written by a newer SDK. See [Versioned event records](event-schema.md#versioned-event-records--serializeeventrecord-issue-323).
   - `parseEventRecord(line: string): { version, event }` — Reads either a versioned envelope or a legacy bare line (reported as `version: 0`).
-- `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX.
+- `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX. Also checks every `i128` and `u64` field against its wire maximum, reporting `integer_out_of_range` before encoding.
+- `policyAddressComparisonKey(address: unknown): string | null` — Returns the canonical comparison key produced by Stellar SDK address parsing for a valid account or contract address. Invalid inputs return `null`; they are not case-folded or normalized into a match.
 - `validatePolicyForEncoding(policy: unknown): PolicyEncodingFailure[]` — Checks that a draft can be represented as the contract's `PolicyConfig` `ScVal` at all, without encoding it or throwing. Each failure carries a dotted `path` into the draft (for example `protocols[1].contract` or `recipient_window_caps[0].cap`), a stable `rule`, and a human-readable `message`; an empty array means `policyToScVal` will accept the draft. This is the form-validation counterpart to `validateGuardPolicy`: it checks wire representability (types, address and symbol syntax, `u64`/`i128` bounds), while `validateGuardPolicy` checks SPEC §8 policy semantics. Use `validateGuardPolicy` before broadcasting and `validatePolicyForEncoding` when the editor needs to explain why encoding itself would fail.
-- `POLICY_RULE_IDS` — Canonical array of SPEC §8 validation rule identifiers.
+- `POLICY_RULE_IDS` — Canonical array of policy validation rule identifiers: SPEC §8 rules plus the SDK-specific `integer_out_of_range` wire-representability rule.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct. The draft is validated **before** any partial `ScVal` is constructed: a field that cannot be represented throws `PolicyEncodeError` carrying every actionable failure path, rather than leaking a low-level `nativeToScVal`/`Address` exception. A `number` is accepted only when it is a safe integer; an unsafe `number` and every numeric string are rejected instead of being silently rounded or coerced, because the contract's caps are `i128`/`u64` and the SDK refuses to narrow them. Valid policies encode byte-for-byte as before.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct. Emits the contract `PolicyConfig` struct's full field set, including `recipient_window_caps`, `blocked_recipients`, the `u32` `protocol_calls_per_window` and the empty `asset_caps` vector, byte-aligned with the contracts repo's shared encode-parity vectors (issue #260); `ProtocolRule` maps carry the per-rule `paused` flag.
 - `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
@@ -194,7 +195,7 @@ one-shot form.
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 - `dmsUrgency(status: GuardStatus, policy: PolicyConfig | null, nowSecs?: bigint, warnRatio = DMS_WARN_RATIO_DEFAULT): 'ok' | 'warn' | 'expired' | 'unknown'` — Dead-man countdown urgency for dashboards: `warn` from `warnRatio` (default `DMS_WARN_RATIO_DEFAULT` = 0.8) of the grace period, `expired` once the grace has elapsed. `unknown` exactly where `deadManRemaining` is `null` (no policy, switch disabled, never heartbeated — never ≠ expired).
-- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; protocols match by contract and report `fns` changes at paths like `protocols[0].fns[1]`.
+- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; valid addresses compare through `policyAddressComparisonKey`, and protocols match by contract. Duplicate members in malformed drafts collapse by set membership; the first duplicate protocol or recipient cap wins. The helper is deterministic but does not replace validation before encoding or submission.
 
 #### Dashboard-style snapshot (issue #68)
 
@@ -316,3 +317,23 @@ describePolicy(policy);
 ```ts
 describePolicy(policy, { detail: true, nowSecs: 1_700_000_000 });
 ```
+
+#### Freezing a policy without taking ownership (issue #293)
+
+`freezePolicy(policy)` is the immutable boundary helper: it returns a policy whose properties and every nested collection are frozen, so a later mutation throws in strict mode (ESM modules are always strict) instead of silently producing a wrong verdict. It returns `ReadonlyPolicyConfig`, the type the SDK's internal consumers use.
+
+**It copies; it does not freeze its input.** The policy object, `assets`, `recipients`, `protocols` (each rule and its `fns` array), `recipient_window_caps` (each entry) and `blocked_recipients` are all copied before they are frozen. The caller's object shares no mutable state with the returned one and can still be edited or reused:
+
+```ts
+import { freezePolicy, policyToScVal } from "stellar-agent-guard-sdk";
+
+const config = { /* a reusable configuration object */ } satisfies PolicyConfig;
+const policy = freezePolicy(config);
+
+policyToScVal(policy);        // encodes the frozen copy
+config.per_tx_cap = 2_000n;   // still legal: the caller owns `config`
+```
+
+- **Ownership is explicit.** An SDK-owned immutable value never implies a side effect on the caller's value, so the copy is a fix for the earlier behaviour where the input was frozen in place and the same reference was returned. An address, a `bigint` cap or a boolean is an immutable primitive and is kept by value, so the copy costs one array/object per collection — not a deep value copy — and is still cheap enough to call once when a policy first enters the SDK.
+- **Deep, not shallow.** A partially frozen policy would let a caller mutate a rule's `fns` array or a `recipient_window_caps` entry after the SDK accepted it, which is exactly how a passing pre-flight check turns into a wrong verdict.
+- **Contents are unchanged.** Copying and freezing do not add, drop, normalise or validate fields, so the fail-closed policy behaviour and `policyToScVal` output are identical to the policy passed in. Optional collections the caller omitted stay omitted.
