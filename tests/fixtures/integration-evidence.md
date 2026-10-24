@@ -26,6 +26,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Note** (feat(preflight)/preflight-verify-assertallowed-throws-guardblockederror-only-never-transport-errors, PR for #90): Formalizes and pins the `assertAllowed` and `assertBatchAllowed` throw-on-refusal contract, ensuring policy blocks throw `GuardBlockedError` and undetermined / transport errors throw `GuardUndeterminedError` with root cause preserved. The underlying on-chain simulation and policy enforcement evaluation remain unchanged; live Phase 2 integration evidence remains valid.
 
+**Note** (security/issue-117-feat-telemetry-injectable-transport-custom-rpc, PR #373 for #117): `src/preflight.ts` and `src/invoke.ts` now take the shared `{ server? | url? }` transport config (`src/transport.ts`). The only new code on the enforcement path runs at the public boundary: it resolves the `rpc.Server` (an injected instance verbatim, or `new rpc.Server(url, rpcOptions)`) and throws `InvalidInputError` when both or neither are supplied, before any RPC. Simulation, signing, broadcast and the guard's block/admit decision are unchanged, so the scenario evidence below remains valid. A live re-run was attempted on 2026-10-24 against a freshly deployed instance (`npm run deploy:phase2`). It stopped at `set_policy` with `HostError: Error(Object, UnexpectedSize)`: the Phase-1 WASM does not decode the current `policyToScVal` ABI, which is the redeploy prerequisite recorded above. That deploy also showed `initialize` failing with `txBadAuthExtra` when the same key is both `source` and an `accountSigners` entry, reproduced on `main` and reported separately. No scenario output from that attempt is recorded here.
+
 ## Instance under test
 
 | | |
