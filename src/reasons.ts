@@ -99,6 +99,23 @@ const BY_CODE = new Map<number, GuardReason>(
 );
 
 /**
+ * Precomputed `guard.reason.<reason>.<part>` keys, built once at module load.
+ *
+ * `explainReason` is on the decode path for every blocked event, so the key
+ * strings are hoisted out of the per-call path instead of being re-derived
+ * (or re-templated) on each invocation.
+ */
+const BODY_KEYS: Readonly<Record<GuardReason, string>> = Object.freeze(
+  (Object.keys(GUARD_REASON_CODES) as GuardReason[]).reduce(
+    (keys, reason) => {
+      keys[reason] = `guard.reason.${reason}.body`;
+      return keys;
+    },
+    {} as Record<GuardReason, string>,
+  ),
+);
+
+/**
  * A reason's stable message keys plus its numeric contract code (issue #96).
  *
  * The keys — not concatenated English sentences — are the contract a consumer
@@ -332,7 +349,7 @@ export function explainReason(
   if (override !== undefined) return override;
   const english = reasonMessagesEn[name].body;
   if (locale === undefined) return english;
-  return locale[reasonMessages[name].bodyKey] ?? english;
+  return locale[BODY_KEYS[name]] ?? english;
 }
 
 import type { ContractCall } from "./tx.ts";

@@ -59,6 +59,12 @@ export { GuardUndeterminedError, InvalidInputError };
  * Validate a ContractCall's input shape before RPC dispatch.
  * Throws InvalidInputError synchronously if any validation rule fails.
  */
+/**
+ * Symbol-shape pattern for method names. Hoisted to a module constant so the
+ * regex is compiled once rather than on every `validateContractCall` call.
+ */
+const SYMBOL_SHAPE_RE = /^[a-zA-Z0-9_]+$/;
+
 export function validateContractCall(call: ContractCall): void {
   if (!call || typeof call !== "object") {
     throw new InvalidInputError("call", "required", "call must be an object");
@@ -80,7 +86,7 @@ export function validateContractCall(call: ContractCall): void {
   if (typeof call.fn !== "string" || call.fn.trim() === "") {
     throw new InvalidInputError("fn", "required", "method name is required and must be non-empty");
   }
-  if (call.fn.length > 32 || !/^[a-zA-Z0-9_]+$/.test(call.fn)) {
+  if (call.fn.length > 32 || !SYMBOL_SHAPE_RE.test(call.fn)) {
     throw new InvalidInputError(
       "fn",
       "symbol_shape",
