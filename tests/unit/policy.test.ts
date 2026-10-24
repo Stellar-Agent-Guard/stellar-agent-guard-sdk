@@ -2128,6 +2128,8 @@ function failAt(assertion: string, iteration: number, policy: PolicyConfig, erro
   assert.fail(`${replayContext(assertion, iteration, policy)}\n${detail}`);
 }
 
+// Property tests below are load-bearing: determinism and encodability violations
+// are NOT acceptable and must be fixed in the same PR, never downgraded.
 describe("policyToScVal property tests (seeded, issue #48)", () => {
   it("encodes exactly the committed field set, sorted, with well-formed rule maps", () => {
     const rand = mulberry32(PROPERTY_SEED);
@@ -2232,6 +2234,79 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
       }
     }
   });
+
+  it("encodes deterministically: same policy twice yields byte-identical XDR", () => {
+    // Canonical sorted-struct guarantee: accidental key-order instability would
+    // break on-chain decode, since contracts parity depends on field order.
+    const rand = mulberry32(PROPERTY_SEED);
+    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+      const policy = randomPolicy(rand);
+      try {
+        const first = policyToScVal(policy).toXDR("base64");
+        const second = policyToScVal(policy).toXDR("base64");
+        assert.equal(second, first, "two encodes of the same policy must be byte-identical");
+        const clone = JSON.parse(
+          JSON.stringify(policy, (_key, value) =>
+            typeof value === "bigint" ? value.toString() : value,
+          ),
+          (_key, value) => (typeof value === "string" && /^-?\d+$/.test(value) ? BigInt(value) : value),
+        ) as PolicyConfig;
+        assert.equal(policyToScVal(clone).toXDR("base64"), first, "structurally-equal policy must encode identically");
+      } catch (error) {
+        failAt("determinism", iteration, policy, error);
+      }
+    }
+  });
+
+  it("validation-before-encode: every definePolicy output encodes", () => {
+    // Invariant: any policy the SDK hands you (i.e. one that passes
+    // validateGuardPolicy) is encodable. Generator applies definePolicy first.
+    const rand = mulberry32(PROPERTY_SEED);
+    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+      const policy = randomPolicy(rand);
+      try {
+        const failures = validateGuardPolicy(policy);
+        assert.deepEqual(failures, [], "generated policy must pass definePolicy validation");
+        assert.doesNotThrow(() => policyToScVal(policy), "validated policy must encode");
+      } catch (error) {
+        failAt("validation-before-encode", iteration, policy, error);
+      }
+    }
+  });
+
+  it("decode(encode(p)) is field-equal under documented normalizations at boundaries", () => {
+    // Extends round-trip to boundary values: i128 min/max, u64 max as string,
+    // empty lists, and list-at-cardinality-limit.
+    const boundaryPolicies: PolicyConfig[] = [
+      samplePolicy({ per_tx_cap: I128_MAX, window_cap: -(2n ** 127n), window_secs: U64_MAX }),
+      samplePolicy({ per_tx_cap: 0n, window_cap: 0n, window_secs: 0n, active_from: 0n, active_until: 0n }),
+      samplePolicy({ assets: [TOKEN], recipients: [], allow_any_recipient: true }),
+      samplePolicy({ protocols: [{ contract: TOKEN, fns: null }, { contract: GUARD, fns: [] }] }),
+    ];
+    for (const [index, policy] of boundaryPolicies.entries()) {
+      try {
+        const decoded = decodePolicy(policyToScVal(policy));
+        assert.deepEqual(decoded, policy, `boundary corpus[${index}] must round-trip field-equal`);
+        assert.equal(
+          policyToScVal(decoded).toXDR("base64"),
+          policyToScVal(policy).toXDR("base64"),
+          `boundary corpus[${index}] must re-encode identically`,
+        );
+      } catch (error) {
+        failAt("boundary round-trip", index, policy, error);
+      }
+    }
+
+    const rand = mulberry32(PROPERTY_SEED);
+    for (let iteration = 0; iteration < PROPERTY_ITERATIONS; iteration += 1) {
+      const policy = randomPolicy(rand);
+      try {
+        assert.deepEqual(decodePolicy(policyToScVal(policy)), policy);
+      } catch (error) {
+        failAt("boundary round-trip (seeded)", iteration, policy, error);
+      }
+    }
+  });
 });
 
 /**
@@ -2243,12 +2318,14 @@ describe("policyToScVal property tests (seeded, issue #48)", () => {
  * `fetchGuardPolicyAndWindow` is driven with the same canned server: Policy is
  * read first, Window second, exactly as the two reads are issued.
  */
+// Seeded generators are shared with the round-trip issue's module (single source).
 describe("ledger reads (policy and window from storage)", () => {
   type LedgerServer = Parameters<typeof readPersistentEntry>[0];
 
   /** Minimal `rpc.Server` stand-in: one canned entry per call, in call order. */
   function ledgerServer(entries: unknown[]): LedgerServer {
     let call = 0;
+    // CI-bounded iteration count mirrors contracts property-test runtime discipline.
     return {
       getLedgerEntries: () => Promise.resolve({ entries: [entries[call++]] }),
     } as unknown as LedgerServer;
