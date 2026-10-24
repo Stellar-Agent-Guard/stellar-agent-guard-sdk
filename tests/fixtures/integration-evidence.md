@@ -292,3 +292,29 @@ node scripts/check-enforcement-evidence.ts --check-structure
 As above, these are valuable but are not a substitute for the Phase-2 live
 suite. A maintainer with `.env.phase2` should run `npm run test:integration`
 against this branch before merge.
+
+## Addendum — 2026-10-22 (PR: policy validation and comparison, issues #306–#308)
+
+This PR touches `src/policy.ts`, so the enforcement-path evidence file is included
+as required. The policy validator now rejects values beyond the contract's
+`i128`/`u64` wire maxima; the address comparison key and duplicate-tolerant diff
+are client-side validation/display behavior and do not alter the contract's
+authorization decision.
+
+**The live suite did not reach its enforcement scenarios.** `npm run test:integration`
+used the documented default ephemeral deployment, deployed a SAC and guard, then
+failed during `initialize` with `txBadAuthExtra`. No fresh live enforcement
+result is claimed. The generated ephemeral environment file was removed after
+the failure. A maintainer should rerun the live suite successfully before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm test
+node --import tsx --test tests/unit/policy.test.ts tests/unit/policy-schema.test.ts tests/unit/policy-diff.test.ts
+```
+
+The full unit suite passed; these offline checks do not substitute for the
+missing live-testnet scenarios above.

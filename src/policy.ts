@@ -245,16 +245,17 @@ export function freezePolicy(policy: PolicyConfig): ReadonlyPolicyConfig {
 }
 
 /**
- * SPEC §8 rule identifiers for granular policy validation failures.
+ * Rule identifiers for granular policy validation failures.
  *
- * Hand-listed SPEC §8 rule IDs pending contract-level granular validation issue.
- * Swap-in point for contract-level vocabulary once available across repos.
+ * The SPEC §8 identifiers mirror the contract fixture; integer_out_of_range is
+ * SDK-specific because wire representability is stricter than policy semantics.
  */
 export const POLICY_RULE_IDS = [
   "invalid_type",
   "missing_field",
   "invalid_address",
   "negative_amount",
+  "integer_out_of_range",
   "window_requires_secs",
   "recipient_cap_requires_window",
   "active_window_inverted",
@@ -1253,9 +1254,15 @@ function isValidStellarAddress(addr: unknown): addr is string {
   }
 }
 
-function normalizeStellarAddress(addr: string): string | null {
+/**
+ * Return the Stellar SDK's canonical string key for a valid account or contract
+ * address. Invalid values return null; they are never case-folded or otherwise
+ * normalized into a possible match.
+ */
+export function policyAddressComparisonKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
   try {
-    return new Address(addr).toString();
+    return new Address(value).toString();
   } catch {
     return null;
   }
@@ -1273,6 +1280,22 @@ function toBigInt(val: unknown): bigint {
   if (typeof val === "number") return BigInt(val);
   if (typeof val === "string") return BigInt(val.trim());
   return 0n;
+}
+
+function checkIntegerMaximum(
+  value: unknown,
+  path: string,
+  wireType: "i128" | "u64",
+  failures: PolicyFailure[],
+): void {
+  const maximum = wireType === "i128" ? I128_MAX : U64_MAX;
+  if (toBigInt(value) > maximum) {
+    failures.push({
+      path,
+      rule: "integer_out_of_range",
+      message: `${path} must be within ${wireType} range [0, ${maximum}]`,
+    });
+  }
 }
 
 /** Soroban symbol grammar: 1–32 ASCII letters, digits, or underscores. */
@@ -1618,7 +1641,9 @@ export function validateGuardPolicy(
   const raw = policy as Record<string, unknown>;
   const failures: PolicyFailure[] = [];
   const maxRecipientEntries = options.maxRecipientEntries ?? 256;
-  const guardAddress = options.guardAddress ? normalizeStellarAddress(options.guardAddress) : null;
+  const guardAddress = options.guardAddress
+    ? policyAddressComparisonKey(options.guardAddress)
+    : null;
 
   // 1. per_tx_cap (SPEC §8 bullet 1)
   if (raw.per_tx_cap === undefined || raw.per_tx_cap === null) {
@@ -1639,6 +1664,8 @@ export function validateGuardPolicy(
       rule: "negative_amount",
       message: "per_tx_cap must be non-negative (>= 0)",
     });
+  } else {
+    checkIntegerMaximum(raw.per_tx_cap, "per_tx_cap", "i128", failures);
   }
 
   // 2. window_secs (SPEC §8 bullet 1)
@@ -1663,6 +1690,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "window_secs must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.window_secs, "window_secs", "u64", failures);
     }
   }
 
@@ -1687,6 +1716,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "window_cap must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.window_cap, "window_cap", "i128", failures);
     }
     // SPEC §8 bullet 2: window_cap != 0 requires window_secs != 0
     if (windowCap > 0n && windowSecs !== null && windowSecs === 0n) {
@@ -1724,7 +1755,7 @@ export function validateGuardPolicy(
         });
         continue;
       }
-      const norm = normalizeStellarAddress(a)!;
+      const norm = policyAddressComparisonKey(a)!;
       if (seenAssets.has(norm)) {
         failures.push({
           path: `assets[${i}]`,
@@ -1770,7 +1801,7 @@ export function validateGuardPolicy(
           message: `"${ruleObj.contract}" is not a valid Stellar address`,
         });
       } else {
-        const norm = normalizeStellarAddress(ruleObj.contract)!;
+        const norm = policyAddressComparisonKey(ruleObj.contract)!;
         if (seenProtocols.has(norm)) {
           failures.push({
             path: `protocols[${i}].contract`,
@@ -1869,7 +1900,7 @@ export function validateGuardPolicy(
         });
         continue;
       }
-      const norm = normalizeStellarAddress(r)!;
+      const norm = policyAddressComparisonKey(r)!;
       if (seenRecipients.has(norm)) {
         failures.push({
           path: `recipients[${i}]`,
@@ -1915,7 +1946,7 @@ export function validateGuardPolicy(
           });
           continue;
         }
-        const norm = normalizeStellarAddress(b)!;
+        const norm = policyAddressComparisonKey(b)!;
         if (seenBlocked.has(norm)) {
           failures.push({
             path: `blocked_recipients[${i}]`,
@@ -1978,7 +2009,7 @@ export function validateGuardPolicy(
             message: `"${rcObj.recipient}" is not a valid Stellar address`,
           });
         } else {
-          const norm = normalizeStellarAddress(rcObj.recipient)!;
+          const norm = policyAddressComparisonKey(rcObj.recipient)!;
           if (seenCapRecipients.has(norm)) {
             failures.push({
               path: `recipient_window_caps[${i}].recipient`,
@@ -2016,6 +2047,13 @@ export function validateGuardPolicy(
               rule: "negative_amount",
               message: "recipient window cap must be non-negative (>= 0)",
             });
+          } else {
+            checkIntegerMaximum(
+              rcObj.cap,
+              `recipient_window_caps[${i}].cap`,
+              "i128",
+              failures,
+            );
           }
           // SPEC §8 bullet 3: A per-recipient cap > 0 requires window_secs != 0
           if (capVal > 0n && windowSecs !== null && windowSecs === 0n) {
@@ -2052,6 +2090,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "active_from must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.active_from, "active_from", "u64", failures);
     }
   }
 
@@ -2076,6 +2116,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "active_until must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.active_until, "active_until", "u64", failures);
     }
   }
 
@@ -2118,6 +2160,8 @@ export function validateGuardPolicy(
       rule: "negative_amount",
       message: "dms_grace_secs must be non-negative (>= 0)",
     });
+  } else {
+    checkIntegerMaximum(raw.dms_grace_secs, "dms_grace_secs", "u64", failures);
   }
 
   return failures;

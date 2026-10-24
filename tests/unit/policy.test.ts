@@ -1141,18 +1141,21 @@ describe("address decoding", () => {
 });
 
 describe("validateGuardPolicy (SPEC §8)", () => {
-  it("passes parity check against vendored policy-rule-ids.json fixture", async () => {
+  it("matches the contract fixture plus the SDK-only wire-range rule", async () => {
     const fixturePath = new URL("../fixtures/policy-rule-ids.json", import.meta.url);
     const content = JSON.parse(await readFile(fixturePath, "utf-8")) as {
       rules: Array<{ id: string; specSection: string; description: string }>;
     };
     const fixtureIds = content.rules.map((r) => r.id).sort();
-    const declaredIds = [...POLICY_RULE_IDS].sort();
+    const declaredIds = [...POLICY_RULE_IDS]
+      .filter((rule) => rule !== "integer_out_of_range")
+      .sort();
     assert.deepEqual(
       declaredIds,
       fixtureIds,
-      "POLICY_RULE_IDS must exactly match vendored fixture both ways",
+      "SPEC rule ids must exactly match the vendored contract fixture",
     );
+    assert.ok(POLICY_RULE_IDS.includes("integer_out_of_range"));
   });
 
   it("returns zero failures for a valid policy", () => {
@@ -1249,6 +1252,77 @@ describe("validateGuardPolicy (SPEC §8)", () => {
         failures.some(
           (f) => f.path === "recipient_window_caps[0].cap" && f.rule === "negative_amount",
         ),
+      );
+    });
+  });
+
+  describe("wire integer bounds", () => {
+    it("accepts exact i128/u64 maxima across all policy numeric fields", () => {
+      const maximumI128 = 2n ** 127n - 1n;
+      const maximumU64 = 2n ** 64n - 1n;
+      assert.deepEqual(
+        validateGuardPolicy(
+          samplePolicy({
+            per_tx_cap: 0n,
+            window_secs: 0n,
+            window_cap: 0n,
+            active_from: 0n,
+            active_until: 0n,
+            dms_grace_secs: 0n,
+            recipient_window_caps: [{ recipient: RECIPIENT, cap: 0n }],
+          }),
+        ),
+        [],
+      );
+      const failures = validateGuardPolicy(
+        samplePolicy({
+          per_tx_cap: maximumI128.toString() as unknown as bigint,
+          window_secs: maximumU64,
+          window_cap: maximumI128,
+          active_from: maximumU64.toString() as unknown as bigint,
+          active_until: 0n,
+          dms_grace_secs: maximumU64.toString() as unknown as bigint,
+          recipient_window_caps: [
+            { recipient: RECIPIENT, cap: maximumI128.toString() as unknown as bigint },
+          ],
+        }),
+      );
+      assert.deepEqual(failures, []);
+      assert.deepEqual(
+        validateGuardPolicy(samplePolicy({ active_from: 0n, active_until: maximumU64 })),
+        [],
+      );
+    });
+
+    it("rejects one-past-max i128/u64 values with the same range rule", () => {
+      const maximumI128 = 2n ** 127n - 1n;
+      const maximumU64 = 2n ** 64n - 1n;
+      const failures = validateGuardPolicy(
+        samplePolicy({
+          per_tx_cap: maximumI128 + 1n,
+          window_secs: (maximumU64 + 1n).toString() as unknown as bigint,
+          window_cap: (maximumI128 + 1n).toString() as unknown as bigint,
+          active_from: maximumU64 + 1n,
+          active_until: (maximumU64 + 1n).toString() as unknown as bigint,
+          dms_grace_secs: maximumU64 + 1n,
+          recipient_window_caps: [
+            { recipient: RECIPIENT, cap: (maximumI128 + 1n).toString() as unknown as bigint },
+          ],
+        }),
+      );
+      assert.deepEqual(
+        failures
+          .filter((failure) => failure.rule === "integer_out_of_range")
+          .map((failure) => failure.path),
+        [
+          "per_tx_cap",
+          "window_secs",
+          "window_cap",
+          "recipient_window_caps[0].cap",
+          "active_from",
+          "active_until",
+          "dms_grace_secs",
+        ],
       );
     });
   });

@@ -79,6 +79,7 @@ export {
   isDeadManFrozen,
   isPublicKeyHex,
   isStrKeyAddress,
+  policyAddressComparisonKey,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
