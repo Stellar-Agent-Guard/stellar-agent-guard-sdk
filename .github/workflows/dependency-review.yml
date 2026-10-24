@@ -1,0 +1,50 @@
+name: Dependency Review
+
+# Supply-chain gate for pull requests.
+#
+# This implements the gale choice recorded in the security-posture issue
+# (dependency-review-action over `npm audit --audit-level`). See
+# docs/security-posture.md for the bidirectional link and the full
+# severity policy.
+#
+# Advisory policy (block vs warn):
+#   - Block: newly-introduced dependencies with HIGH or CRITICAL severity
+#     advisories (including transitive introductions through the lockfile).
+#   - Warn: newly-introduced MODERATE advisories are reported but do not
+#     fail the check; LOW advisories are ignored.
+#   - Pre-existing vulnerabilities in the current lockfile are not the
+#     focus of this PR-time gate (they are surfaced by the scheduled
+#     `npm audit --omit=dev run in ci.yml).
+#
+# Advisory source: GitHub Advisory Database (GHSA), managed and
+# updated by GitHub. Update cadence is GitHub-managed and not
+# controlled by this repository.
+
+on:
+  pull_request:
+    types: [opened, synchronized, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@v4
+        with:
+          # Block HIGH and CRITICAL advisories introduced by this PR.
+          fail-on-severity: high
+          # Surface MODERATE advisories as warnings without failing the check.
+          warn-on-severity: moderate
+          # LOW advisories are ignored.
+          comment-summary-in-pr-review: true
+          deny-licenses: nothing
+          deny-packages: nothing
+          deny-groups: nothing
+          allow-dependency-types: runtime,development

@@ -1,3 +1,4 @@
+# Dependency-review gate: see `.github/workflows/dependency-review.yml`.
 # The repo's branch-protection ruleset requires a status check named exactly
 # `ci`. The job below is named `ci` — both the job name and its `name:` key — so
 # the check this workflow reports is the one the ruleset gates on.
@@ -45,6 +46,15 @@
 #   (plus `smoke test export resolution`, `export-map resolution (pack + install
 #    + import)`, `evidence structure check`, and `enforcement-path evidence gate`.)
 # ---------------------------------------------------------------------------
+# Supply-chain gate (issue: dependency-review on PRs):
+#   The PR-time gate lives in its own workflow, `.github/workflows/
+#   dependency-review.yml`, so it can report a distinct status check and run
+#   only on `pull_request` (it needs the PR base/head diff). It is advisory-
+#   source based (GitHub Advisory Database, GitHub-managed update cadence) and
+#   blocks PRs that introduce new vulnerable dependencies. Severity policy:
+#   block on new `high`/`critical`; warn on new `moderate`; ignore `low`.
+#   A scheduled `npm audit --omit=dev` run covers transitive drift between PRs
+#   (informational only). See `docs/security-posture.md` for the policy line.
 name: ci
 
 on:
@@ -211,4 +221,35 @@ jobs:
       # number that is never a gate.
       - name: decode-path benchmarks (informational)
         run: npm run bench
+        continue-on-error: true
+
+  # Scheduled transitive-drift audit (informational only, never gating).
+  # The PR-time gate above only sees *newly introduced* dependencies; this job
+  # catches advisories published against already-locked transitive deps between
+  # PRs. It runs weekly and on manual dispatch, and `continue-on-error` keeps a
+  # noisy advisory feed from reddening the workflow. Severity policy mirrors the
+  # PR gate: `high`/`critical` are surfaced as the actionable tier; `moderate`
+  # and `low` are informational. This job is NOT part of the required `ci`
+  # check and does not gate merges.
+  audit:
+    name: npm audit (informational)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      # `--omit=dev` matches the shipped surface: dev-only advisories are not a
+      # supply-chain risk for consumers of the published package. Informational
+      # only — the PR-time dependency-review gate is the actual blocker.
+      - name: npm audit (production deps, informational)
+        run: npm audit --omit=dev --audit-level=high
         continue-on-error: true
