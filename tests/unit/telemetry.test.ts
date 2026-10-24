@@ -20,11 +20,13 @@ import {
   guardEventsFromDiagnostics,
   isAllowedDecision,
   mergeGuardEventStreams,
+  resolveStartCursor,
   telemetryFromDecision,
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardTelemetryGap,
   type RecentEventFilter,
+  type StartFrom,
 } from "../../src/telemetry.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
 
@@ -1509,6 +1511,7 @@ describe("opt-in raw event retention (issue #94)", () => {
     assert.deepEqual(seen[0]!.raw, source);
   });
 });
+
 
 describe("GuardTelemetryListener counters", () => {
   const decisionEvent = (

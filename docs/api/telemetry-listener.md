@@ -77,7 +77,30 @@ diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`,
-`onMalformed`, `onMalformedEvent`, and `signal`.
+`onMalformed`, `onMalformedEvent`, `startFrom`, and `signal`.
+
+#### Start position (`startFrom`)
+
+By default the start position is implicit (the RPC default — recent pages only).
+Pass `startFrom` to make it explicit:
+
+```ts
+type StartFrom = { ledger: number } | "latest" | "oldest-available";
+```
+
+- `{ ledger: number }` — begin at that ledger (backfill after a cursor-store gap).
+Maps to `startLedger` on `getEvents`.
+- `'latest'` — fetch the current cursor and yield only events that arrive
+afterward. **No history replay**: the backlog already present at start is
+skipped. Consumers that need replay pass a ledger or use the default.
+- `'oldest-available'` — start at the oldest event the RPC still retains.
+
+Mapping to the `stellar-sdk` `getEvents` start-cursor semantics is implemented
+against `@stellar/stellar-sdk` ^v17.
+
+#### Interaction with `cursorStore`
+
+An explicit `startFrom` **always wins** over a stored cursor: the store is not consulted for the start position when `startFrom` is set, and a log line notes that the stored cursor was ignored. This is the escape hatch for a deliberate backfill or a clean watch start. Once the stream is running, `save()` continues to persist the advancing cursor as usual.
 
 #### Unknown topics
 
@@ -182,11 +205,10 @@ Failure-mode matrix:
 | Persistent (retries exhausted) | yes, then gives up | called once with final error | ends normally |
 | Abort (`signal`) | no | not called | ends immediately |
 
-If no `onStreamError` is configured, retry-then-end still happens; the terminal
-error is retrievable via the `lastError` getter for observability.
+If no `onStreamError` is configured, retry-then-end still happens; the terminal error is retrievable via the `lastError` getter for observability.
 
 If the callback itself throws, that throw **propagates** out of the `for await`
-loop — the consumer asked for halt-on-first-error semantics by supplying a
+loop — the consumer asked for halt-at-first-error semantics by supplying a
 throwing callback, so it is not swallowed.
 
 #### Bounded look-ahead (backpressure, issue #36)
@@ -455,8 +477,9 @@ interface CursorStoreScope {
 - `save()` is called once per poll, **before** the page is yielded, so a
   consumer that stops after a page (crash, abort, throw) resumes from that
   page's cursor.
-- An explicit `startLedger` passed to `watch()` pins the start and is not
-  second-guessed by the store.
+- An explicit `startLedger` or `startFrom` passed to `watch()` pins the start
+  and is not second-guessed by the store (see
+  [Start position (`startFrom`)](@start-position-startfrom)).
 - The default store is in-memory (`InMemoryCursorStore`): no `cursorStore`
   means no resume across restarts.
 - The failed-transaction scan has its **own** store, `failedTxCursorStore`

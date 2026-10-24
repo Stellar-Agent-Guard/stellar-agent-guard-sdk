@@ -1,0 +1,21 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-115-feat-telemetry-fromledger-tail-from-now-cursor",
+    "fix/issue-136-test-adapters-live-enforcement-through",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-115-feat-telemetry-fromledger-tail-from-now-cursor": "main",
+    "fix/issue-136-test-adapters-live-enforcement-through": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-115-feat-telemetry-fromledger-tail-from-now-cursor",
+    "fix/issue-136-test-adapters-live-enforcement-through",
+    "origin"
+  ]
+}
