@@ -1,4 +1,17 @@
 /**
+ * @example
+ * Expected output (run via `npx tsx examples/elizaos.ts`):
+ *
+ *   === ElizaOS Validator Example Run ===
+ *   [Run 1: Allowed] Validation verdict (true => eligible): true
+ *   [Run 2: Blocked] Validation verdict (false => dropped): false
+ *   [Run 2: Blocked] adapter=elizaos kind=policy_violation
+ *   [Run 2: Blocked] Reason: per_tx_cap_exceeded
+ *   [Run 2: Blocked] Explanation: <human-readable refusal explanation>
+ *
+ * This file is typechecked in CI via the `examples` tsconfig project
+ * (see examples/README.md §Rule 1 and .github/workflows/ci.yml).
+ *
  * ElizaOS Action Validator Example — Full runnable demonstration with action wiring.
  *
  * Demonstrates:
@@ -200,6 +213,7 @@ export async function runElizaOSExample(serverOverride?: rpc.Server) {
   };
 }
 
+/** CLI entrypoint — prints the expected-output transcript documented in the header. */
 if (import.meta.url === `file://${process.argv[1]}`) {
   runElizaOSExample().then((res) => {
     console.log("=== ElizaOS Validator Example Run ===");
