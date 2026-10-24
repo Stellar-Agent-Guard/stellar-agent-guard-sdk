@@ -27,13 +27,7 @@
  *       action handler is never scheduled or executed.
  *  5. Undetermined handling note (fails closed by returning `false`).
  */
-import {
-  Address,
-  Keypair,
-  nativeToScVal,
-  rpc,
-  xdr,
-} from "@stellar/stellar-sdk";
+import { Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
   PreFlightInterceptor,
   createGuardValidator,
@@ -45,11 +39,18 @@ import {
   type GuardBlockedInfo,
 } from "../src/index.ts";
 
-/** Guard contract used by this example (testnet fixture). */
-export const EXAMPLE_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
-export const EXAMPLE_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
-export const ALLOWED_RECIPIENT = unsafeAccountAddress("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ");
-export const BLOCKED_RECIPIENT = unsafeAccountAddress("GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM");
+export const EXAMPLE_GUARD = unsafeContractAddress(
+  "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+);
+export const EXAMPLE_TOKEN = unsafeContractAddress(
+  "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+);
+export const ALLOWED_RECIPIENT = unsafeAccountAddress(
+  "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+);
+export const BLOCKED_RECIPIENT = unsafeAccountAddress(
+  "GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM",
+);
 
 export interface ElizaTransferState {
   token?: string;

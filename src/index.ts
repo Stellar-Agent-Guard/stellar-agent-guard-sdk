@@ -22,22 +22,26 @@
  */
 export {
   AdapterConfigError,
+  AdapterMappingError,
   BroadcastError,
   ContractResponseError,
   GuardError,
+  GuardUndeterminedError,
+  InvalidFeeCeilingError,
+  InvalidInputError,
   PolicyDecodeError,
+  PolicyEncodeError,
+  PolicyFileReadError,
+  PolicyValidationError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
 
-export {
-  FakeClock,
-  systemClock,
-} from "./clock.ts";
+export type { PolicyEncodingFailure, PolicyEncodingRuleId } from "./errors.ts";
 
-export type {
-  Clock,
-} from "./clock.ts";
+export { FakeClock, systemClock } from "./clock.ts";
+
+export type { Clock } from "./clock.ts";
 
 export {
   GuardBlockedError,
@@ -75,6 +79,7 @@ export {
   isDeadManFrozen,
   isPublicKeyHex,
   isStrKeyAddress,
+  policyAddressComparisonKey,
   policyFromScVal,
   policyToScVal,
   readPersistentEntry,
@@ -83,7 +88,10 @@ export {
   unsafePublicKeyHex,
   unsafeStrKeyAddress,
   validateGuardPolicy,
+  validatePolicyForEncoding,
 } from "./policy.ts";
+
+export type { ActiveWindowState, DescribePolicyOptions } from "./policy.ts";
 
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
 export { policyDiff } from "./policy-diff.ts";
@@ -109,6 +117,20 @@ export type {
 } from "./policy.ts";
 
 export {
+  POLICY_JSON_VERSION,
+  decodePolicyJson,
+  encodePolicyJson,
+  policyFromJson,
+  policyToJson,
+} from "./policy-json.ts";
+
+export type {
+  PolicyJson,
+  PolicyJsonProtocolRule,
+  PolicyJsonRecipientWindowCap,
+} from "./policy-json.ts";
+
+export {
   POLICY_SCHEMA_PATH,
   SCHEMA_DIALECT,
   SCHEMA_RULE_ID_ANNOTATION,
@@ -129,11 +151,19 @@ export {
   decodeGuardEventXdr,
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
+  validateGuardEventXdr,
 } from "./events.ts";
 
 export type {
   GuardAuthDecision,
   GuardAuthResult,
+  GuardEventValidationCode,
+  GuardEventValidationEntry,
+  GuardEventValidationFailure,
+  GuardEventValidationOptions,
+  GuardEventValidationReport,
+  GuardEventValidationStage,
+  GuardEventValidationSuccess,
 } from "./events.ts";
 
 export {
@@ -155,37 +185,48 @@ export {
   type InvokeErrorOutcome,
   type InvokeOptions,
   type InvokeOutcome,
-  type InvokePipelineStep,
   type InvokeParams,
+  type InvokeParamsInput,
+  type InvokePendingOutcome,
+  type InvokePipelineStep,
+  type InvokeRetryAttempt,
+  type InvokeRetryMetadata,
   type InvokeStepEvent,
   type RetryableInvokeFailure,
+  type SubmissionAcceptedEvent,
 } from "./invoke.ts";
 
-export {
-  TRACE_STEP_NAMES,
-} from "./trace.ts";
+export { resolveRpcServer } from "./transport.ts";
 
 export type {
-  TraceStepName,
-  TraceStepStatus,
-} from "./trace.ts";
+  RpcServerTransport,
+  RpcTransportConfig,
+  RpcUrlTransport,
+  WithRpcTransport,
+} from "./transport.ts";
+
+export { TRACE_STEP_NAMES } from "./trace.ts";
+
+export type { TraceStepName, TraceStepStatus } from "./trace.ts";
 
 export {
-  InvalidInputError,
+  GuardUndeterminedError as PreFlightUndeterminedError,
   PreFlightInterceptor,
-  PreFlightUndeterminedError,
   preflight,
   preflightBatch,
   validateContractCall,
 } from "./preflight.ts";
 
 export type {
+  BatchStagingSource,
   CheckBatchOptions,
   PolicyRevision,
   PreFlightBatchDecision,
+  PreFlightBatchStaging,
   PreFlightCacheOptions,
   PreFlightCheckOptions,
   PreFlightConfig,
+  PreFlightConfigInput,
   PreFlightDecision,
   PreFlightInterceptorOptions,
 } from "./preflight.ts";
@@ -207,17 +248,23 @@ export type {
   CostPreCheckConfig,
   CostPreCheckOptions,
   CostPreCheckResult,
+  CostProvenance,
   CostWithDecision,
   FeeBreakdown,
   PolicyContext,
   ResourceBreakdown,
+  WindowSpendSnapshot,
 } from "./cost.ts";
 
 export {
+  ConcurrentTelemetryStreamError,
   DEFAULT_JITTER_FRACTION,
+  DEFAULT_MAX_BUFFERED_PAGES,
+  DEFAULT_TELEMETRY_RETRY_OPTIONS,
   GuardEventRingBuffer,
   GuardTelemetryListener,
   InMemoryCursorStore,
+  compareCommittedEvents,
   computePollDelay,
   describeGuardEvent,
   diagnosticsToEvents,
@@ -226,26 +273,42 @@ export {
   guardEventsFromFailedTransaction,
   isAllowedDecision,
   mergeGuardEventStreams,
+  parseEventRecord,
   serializeEvent,
+  serializeEventLines,
+  serializeEventRecord,
   telemetryFromDecision,
+  TELEMETRY_EVENT_RECORD_VERSION,
   type CursorStore,
+  type CursorStoreScope,
+  type CursorStreamKind,
   type GuardDiagnosticBatch,
   type GuardEvent,
   type GuardEventBufferOptions,
   type GuardEventContext,
   type GuardEventDecodeOptions,
+  type GuardEventDropCounts,
   type GuardEventIdentityInput,
   type GuardEventKind,
+  type GuardEventRecord,
   type GuardEventStream,
   type GuardTelemetryConfig,
+  type GuardTelemetryInputConfig,
+  type GuardTelemetryCoverage,
+  type GuardTelemetryCoverageStatus,
   type GuardTelemetryGap,
   type GuardTelemetryGapReason,
+  type GuardTelemetryHealthSnapshot,
+  type GuardTelemetryStreamState,
   type GuardTelemetryUnifiedParams,
   type GuardTelemetryWatchParams,
+  type GuardUnknownTopic,
+  type ParsedGuardEventRecord,
   type PollResult,
   type PollSleep,
   type RecentEventFilter,
   type TelemetryJitter,
+  type TelemetryRetryOptions,
 } from "./telemetry.ts";
 
 export {
@@ -261,8 +324,10 @@ export {
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
+  isValidAgentPublicKey,
   keypairAgentSigner,
   toAgentSigner,
+  validateAgentPublicKey,
   verifyAgentSignature,
 } from "./tx.ts";
 
@@ -288,11 +353,7 @@ export {
   submitUnfreeze,
 } from "./admin.ts";
 
-export type {
-  AdminOpParams,
-  RotateAgentKeyParams,
-  SetPolicyParams,
-} from "./admin.ts";
+export type { AdminOpParams, RotateAgentKeyParams, SetPolicyParams } from "./admin.ts";
 
 export {
   GUARD_WASM_HASH,
@@ -303,13 +364,21 @@ export {
 } from "./wasm.ts";
 
 export {
+  DEFAULT_HEARTBEAT_RETRY_OPTIONS,
+  HeartbeatBlockedError,
+  HeartbeatDryRunError,
   HeartbeatIntervalError,
+  isRetryableHeartbeatFailure,
   startHeartbeat,
   submitHeartbeat,
   type HeartbeatBeat,
   type HeartbeatHandle,
   type HeartbeatOptions,
+  type HeartbeatRetryOptions,
+  type HeartbeatStopOptions,
+  type HeartbeatStopResult,
   type HeartbeatSubmission,
+  type HeartbeatSubmitContext,
   type SubmitHeartbeatParams,
 } from "./heartbeat.ts";
 
@@ -318,9 +387,7 @@ export {
 // at construction time (see `src/adapters/validate.ts`), so a misconfigured
 // adapter throws `AdapterConfigError` before the first action rather than
 // failing mid-loop.
-export {
-  createLangChainGuardMiddleware,
-} from "./adapters/langchain.ts";
+export { createLangChainGuardMiddleware } from "./adapters/langchain.ts";
 
 export type {
   LangChainGuardOptions,
@@ -328,21 +395,19 @@ export type {
   LangChainToolMessage,
 } from "./adapters/langchain.ts";
 
-export {
-  createGuardValidator,
-  guardAction,
-} from "./adapters/elizaos.ts";
+export { createGuardValidator, guardAction } from "./adapters/elizaos.ts";
 
-export type {
-  ElizaActionLike,
-  ElizaGuardOptions,
-  ElizaValidator,
-} from "./adapters/elizaos.ts";
+export type { ElizaActionLike, ElizaGuardOptions, ElizaValidator } from "./adapters/elizaos.ts";
 
 export {
   throwAdapterConfigError,
+  validateBatchInterceptor,
+  validateBlockedHookLogger,
+  validateContractMapping,
   validateInterceptor,
   validateOptionalFunction,
+  validateOptionalSignal,
+  validateOptionalTimeout,
   validateRequiredFunction,
   type AdapterConfigIssue,
 } from "./adapters/validate.ts";
@@ -355,10 +420,7 @@ export {
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
 
-export {
-  guardMcpCallTool,
-  guardMcpToolHandler,
-} from "./adapters/mcp.ts";
+export { guardMcpCallTool, guardMcpToolHandler } from "./adapters/mcp.ts";
 
 export type {
   McpCallTool,
@@ -372,7 +434,15 @@ export type {
 // Exported so a consumer can type its sink and build the payload itself.
 export {
   blockedInfoFor,
+  blockedInfoForBatch,
+  checkOptionsFor,
+  hostAbortSignal,
+  mapContractCalls,
+  mappingFailureFor,
+  normalizeMappedCall,
+  normalizeMappedCalls,
   runBlockedHook,
+  runDecisionHook,
 } from "./adapters/shared.ts";
 
 export type {
@@ -380,12 +450,14 @@ export type {
   GuardAdapterName,
   GuardBlockedHook,
   GuardBlockedInfo,
+  GuardCallMapper,
 } from "./adapters/shared.ts";
 
 // Optional logging. `SILENT_LOGGER` is the default every config resolves to
 // when no logger is supplied: the SDK writes nothing unless a host asks.
 export {
   GUARD_LOG_LEVELS,
+  redactLogMeta,
   SILENT_LOGGER,
   resolveLogger,
   type GuardLogger,

@@ -33,3 +33,9 @@ The TTL is capped at one approximate ledger-close interval. A cached verdict
 can be staler than one admitted transfer, so integrations that need immediate
 freshness after a transfer or policy change should leave the cache disabled,
 provide a revision getter, and invalidate explicitly.
+
+Set `maxEntries` to bound the number of distinct call fingerprints held at once.
+When the cache is full, storing a new fingerprint evicts the least-recently-used
+entry (hits refresh recency). Eviction only removes entries: every lookup still
+checks ledger and TTL, so a bounded cache cannot serve an expired or
+cross-ledger verdict, and `invalidate()` continues to clear entries explicitly.

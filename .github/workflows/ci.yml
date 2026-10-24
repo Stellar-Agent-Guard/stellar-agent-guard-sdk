@@ -40,7 +40,8 @@
 #
 # Every gate is still enforced; none is dropped, and none moved out of `ci`:
 #   typecheck -> `typecheck`        lint      -> `lint`
-#   test      -> `unit tests`       build     -> `build`
+#   format    -> `format check`      test      -> `unit tests`
+#   build     -> `build`
 #   (plus `smoke test export resolution`, `export-map resolution (pack + install
 #    + import)`, `evidence structure check`, and `enforcement-path evidence gate`.)
 # ---------------------------------------------------------------------------
@@ -88,6 +89,9 @@ jobs:
       - name: strictness ratchet
         run: npm run check:strict-ratchet
 
+      - name: type-level tests
+        run: npm run test:types
+
       - name: lint
         run: npm run lint
 
@@ -96,6 +100,12 @@ jobs:
       # project so a new example cannot land without being checked.
       - name: typecheck examples
         run: npm run typecheck:examples
+
+      # Formatting gate (issue #138): Prettier owns whitespace, so review no
+      # longer re-litigates it. Golden/evidence fixtures and hand-wrapped
+      # Markdown are excluded in `.prettierignore` with the rationale there.
+      - name: format check
+        run: npm run format:check
 
       - name: unit tests
         run: npm test
@@ -111,8 +121,18 @@ jobs:
       - name: build
         run: npm run build
 
-      - name: unit tests
-        run: npm test
+      # Browser-safe core (issue #325): bundle the built root entry for the
+      # browser with no `node:*` externals. A Node-only import reachable from
+      # the root entry fails here instead of in a consumer's bundler.
+      - name: browser root-entry smoke test
+        run: npm run test:browser
+
+      # Packed-consumer declaration smoke test (issue #327): pack the built
+      # package, install it into a temp consumer, and compile a fixture that
+      # imports only public values/types. Source-tree typecheck cannot see a
+      # missing or mis-pathed declaration in the published tarball.
+      - name: packed-consumer TypeScript declarations
+        run: npm run test:types:packed
 
       - name: smoke test export resolution
         run: npm run test:smoke
@@ -123,6 +143,15 @@ jobs:
       # dist/ in-place; this one exercises the published artifact.
       - name: export-map resolution (pack + install + import)
         run: npm run test:exports
+
+      # Install the packed tarball in a production-only consumer outside the
+      # workspace, then import the root and adapter exports and typecheck a
+      # typed invocation path against the declarations shipped in the tarball.
+      - name: clean packed-install consumer
+        run: npm run test:packed-install
+
+      - name: published-file-set check
+        run: npm run test:pack
 
       # Browser-consumer bundle-size canary (issue #145): the dashboard imports
       # the SDK client-side, so this number ships to every operator's browser.

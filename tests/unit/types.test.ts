@@ -51,22 +51,14 @@ describe("Type Guards", () => {
     });
 
     it("should reject invalid prefixes", () => {
-      assert.ok(
-        !isStrKeyAddress("TAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"),
-      );
-      assert.ok(
-        !isStrKeyAddress("XAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"),
-      );
+      assert.ok(!isStrKeyAddress("TAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"));
+      assert.ok(!isStrKeyAddress("XAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"));
     });
 
     it("should reject strings with invalid length", () => {
+      assert.ok(!isStrKeyAddress("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
       assert.ok(
-        !isStrKeyAddress("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-      );
-      assert.ok(
-        !isStrKeyAddress(
-          "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4EXTRA",
-        ),
+        !isStrKeyAddress("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4EXTRA"),
       );
     });
 
@@ -79,12 +71,8 @@ describe("Type Guards", () => {
     });
 
     it("should reject strings with invalid characters", () => {
-      assert.ok(
-        !isStrKeyAddress("GB7BDSOOQCFFVLZ37PF5LTQVLNCJYJ5ONUH3MBIUCUSD4B2LGYXJJP!"),
-      );
-      assert.ok(
-        !isStrKeyAddress("GB7BDSOOQCFFVLZ37PF5LTQVLNCJYJ5ONUH3MBIUCUSD4B2LGYXJJP#"),
-      );
+      assert.ok(!isStrKeyAddress("GB7BDSOOQCFFVLZ37PF5LTQVLNCJYJ5ONUH3MBIUCUSD4B2LGYXJJP!"));
+      assert.ok(!isStrKeyAddress("GB7BDSOOQCFFVLZ37PF5LTQVLNCJYJ5ONUH3MBIUCUSD4B2LGYXJJP#"));
     });
   });
 
@@ -110,33 +98,21 @@ describe("Type Guards", () => {
     });
 
     it("should reject invalid prefix", () => {
-      assert.ok(
-        !isContractAddress("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"),
-      );
-      assert.ok(
-        !isContractAddress("TAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"),
-      );
+      assert.ok(!isContractAddress("GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"));
+      assert.ok(!isContractAddress("TAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4"));
     });
 
     it("should reject invalid length", () => {
       // Too short
-      assert.ok(
-        !isContractAddress("CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
-      );
+      assert.ok(!isContractAddress("CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));
       // Too long
       assert.ok(
-        !isContractAddress(
-          "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4EXTRA",
-        ),
+        !isContractAddress("CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4EXTRA"),
       );
     });
 
     it("should reject mixed case (contracts are case-sensitive)", () => {
-      assert.ok(
-        !isContractAddress(
-          "ca7qkfukgmj5hghz6exw7h3ofukz5c5gn7nnfqn7n5npezrwwbqb7od",
-        ),
-      );
+      assert.ok(!isContractAddress("ca7qkfukgmj5hghz6exw7h3ofukz5c5gn7nnfqn7n5npezrwwbqb7od"));
     });
 
     it("should reject non-string types", () => {
@@ -151,11 +127,7 @@ describe("Type Guards", () => {
     });
 
     it("should reject strings with invalid characters", () => {
-      assert.ok(
-        !isContractAddress(
-          "CA7QKFUKGMJ5HGHZ6EXW7H3OFUKZ5C5GN7NNFQN7N5NPEZRWWBQB7O!",
-        ),
-      );
+      assert.ok(!isContractAddress("CA7QKFUKGMJ5HGHZ6EXW7H3OFUKZ5C5GN7NNFQN7N5NPEZRWWBQB7O!"));
     });
   });
 
@@ -182,39 +154,19 @@ describe("Type Guards", () => {
     });
 
     it("should reject invalid prefix", () => {
-      assert.ok(
-        !isAccountAddress(
-          "CBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL2",
-        ),
-      );
-      assert.ok(
-        !isAccountAddress(
-          "TBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL2",
-        ),
-      );
+      assert.ok(!isAccountAddress("CBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL2"));
+      assert.ok(!isAccountAddress("TBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL2"));
     });
 
     it("should reject invalid length", () => {
       // Too short
-      assert.ok(
-        !isAccountAddress(
-          "GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL",
-        ),
-      );
+      assert.ok(!isAccountAddress("GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL"));
       // Too long
-      assert.ok(
-        !isAccountAddress(
-          "GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL2EXTRA",
-        ),
-      );
+      assert.ok(!isAccountAddress("GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL2EXTRA"));
     });
 
     it("should reject mixed case", () => {
-      assert.ok(
-        !isAccountAddress(
-          "gbrpyhil2ci3whzdtooqfc6eb4cgqofn4l7mrje47jreumb5qfo6yl2",
-        ),
-      );
+      assert.ok(!isAccountAddress("gbrpyhil2ci3whzdtooqfc6eb4cgqofn4l7mrje47jreumb5qfo6yl2"));
     });
 
     it("should reject non-string types", () => {
@@ -229,11 +181,7 @@ describe("Type Guards", () => {
     });
 
     it("should reject strings with invalid characters", () => {
-      assert.ok(
-        !isAccountAddress(
-          "GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL!",
-        ),
-      );
+      assert.ok(!isAccountAddress("GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL!"));
     });
   });
 
@@ -250,39 +198,25 @@ describe("Type Guards", () => {
     });
 
     it("should accept mixed case hex strings", () => {
-      assert.ok(
-        isPublicKeyHex(
-          "AbCdEf0123456789AbCdEf0123456789AbCdEf0123456789AbCdEf0123456789",
-        ),
-      );
+      assert.ok(isPublicKeyHex("AbCdEf0123456789AbCdEf0123456789AbCdEf0123456789AbCdEf0123456789"));
     });
 
     it("should reject strings shorter than 64 characters", () => {
-      assert.ok(
-        !isPublicKeyHex(
-          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678",
-        ),
-      );
+      assert.ok(!isPublicKeyHex("abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678"));
     });
 
     it("should reject strings longer than 64 characters", () => {
       assert.ok(
-        !isPublicKeyHex(
-          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
-        ),
+        !isPublicKeyHex("abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab"),
       );
     });
 
     it("should reject strings with non-hex characters", () => {
       assert.ok(
-        !isPublicKeyHex(
-          "ghijkl0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-        ),
+        !isPublicKeyHex("ghijkl0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
       );
       assert.ok(
-        !isPublicKeyHex(
-          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678!",
-        ),
+        !isPublicKeyHex("abcdef0123456789abcdef0123456789abcdef0123456789abcdef012345678!"),
       );
     });
 
@@ -301,9 +235,7 @@ describe("Type Guards", () => {
     it("should reject whitespace", () => {
       assert.ok(!isPublicKeyHex("   "));
       assert.ok(
-        !isPublicKeyHex(
-          " abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
-        ),
+        !isPublicKeyHex(" abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"),
       );
     });
   });
