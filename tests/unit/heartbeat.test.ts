@@ -8,11 +8,17 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Keypair } from "@stellar/stellar-sdk";
 import {
+  HeartbeatBlockedError,
+  HeartbeatDryRunError,
   HeartbeatIntervalError,
+  isRetryableHeartbeatFailure,
   startHeartbeat,
   type HeartbeatBeat,
   type HeartbeatOptions,
 } from "../../src/heartbeat.ts";
+import { BroadcastError, SimulationError } from "../../src/errors.ts";
+import { RpcTimeoutError, type InvokeOutcome } from "../../src/invoke.ts";
+import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
@@ -209,7 +215,9 @@ describe("startHeartbeat", () => {
 
     assert.equal(beats[1]!.at, 5000);
     assert.equal(beats[1]!.lateMs, 4000);
-    assert.equal(handle.missedBeats, 1, "a beat past maxSkewMs counts as missed");
+    // The beat is late by four slots and the slots it passed over are skipped
+    // rather than fired as a catch-up burst.
+    assert.equal(handle.missedBeats, 5, "one late beat plus four skipped cadence slots");
 
     await handle.stop();
   });
@@ -282,10 +290,7 @@ describe("startHeartbeat", () => {
   });
 
   it("rejects a non-positive interval", async () => {
-    await assert.rejects(
-      startHeartbeat(baseOptions({ intervalMs: 0 })),
-      RangeError,
-    );
+    await assert.rejects(startHeartbeat(baseOptions({ intervalMs: 0 })), RangeError);
   });
 
   it("reports the default-submission misconfiguration through onError", async () => {
@@ -324,9 +329,7 @@ describe("startHeartbeat grace validation", () => {
   it("validates against a policy read from the chain", async () => {
     const policy = { dms_grace_secs: 30n } as PolicyConfig;
     await assert.rejects(
-      startHeartbeat(
-        baseOptions({ intervalMs: 20_000, readPolicy: async () => policy }),
-      ),
+      startHeartbeat(baseOptions({ intervalMs: 20_000, readPolicy: async () => policy })),
       HeartbeatIntervalError,
     );
   });
@@ -366,6 +369,854 @@ describe("startHeartbeat grace validation", () => {
     const handle = await startHeartbeat(
       baseOptions({ intervalMs: 20_000, readPolicy: async () => policy }),
     );
+    await handle.stop();
+  });
+});
+
+/**
+ * Bounded retry and backoff for transient submission failures (issue #340).
+ *
+ * A heartbeat that fails on a transport error used to wait for the next fixed
+ * interval before trying again, which could freeze an account whose grace
+ * window closed in between. The retry is bounded, jittered, and never applied
+ * to a policy block.
+ */
+describe("startHeartbeat bounded retry (issue #340)", () => {
+  /**
+   * The fake clock plus a record of every delay it was asked for, so the
+   * backoff can be asserted exactly.
+   */
+  function recordingClock() {
+    const clock = fakeClock();
+    const delays: number[] = [];
+    const wait = (ms: number, signal?: AbortSignal): Promise<void> => {
+      delays.push(ms);
+      return clock.wait(ms, signal);
+    };
+    return { clock, delays, wait, now: clock.now };
+  }
+
+  it("makes one attempt per beat when no retry policy is configured", async () => {
+    const clock = fakeClock();
+    let attempts = 0;
+    const errors: unknown[] = [];
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => {
+          attempts += 1;
+          throw new BroadcastError("rpc down");
+        },
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+    assert.equal(attempts, 1, "retries are opt-in: one attempt per beat by default");
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0] instanceof BroadcastError, "the original error is reported as-is");
+
+    await handle.stop();
+  });
+
+  it("retries a transport failure and reports how many attempts the beat took", async () => {
+    const { clock, delays, wait, now } = recordingClock();
+    const beats: HeartbeatBeat[] = [];
+    const warnings: string[] = [];
+    const errors: unknown[] = [];
+    let attempts = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now,
+        wait,
+        graceSecs: 30,
+        retry: { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 1_000, random: () => 0.5 },
+        submit: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new BroadcastError("rpc down");
+          return {};
+        },
+        onBeat: (beat) => beats.push(beat),
+        onWarning: (message) => warnings.push(message),
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+    assert.equal(attempts, 1);
+    assert.equal(errors.length, 0, "a failure that will be retried is not the final failure");
+    assert.equal(warnings.length, 1, "the attempt and its delay are announced");
+    assert.match(warnings[0]!, /attempt 1 of 3/);
+    assert.match(warnings[0]!, /retrying in 50ms/);
+    assert.deepEqual(delays, [0, 50], "the backoff is the full-jitter sample of the base window");
+
+    await clock.tick();
+    assert.equal(attempts, 2);
+    assert.equal(beats.length, 1);
+    assert.equal(beats[0]!.attempt, 2, "the beat reports how many attempts it took");
+    assert.equal(errors.length, 0, "a recovered beat is not an error");
+
+    await handle.stop();
+  });
+
+  it("exhausts the budget and reports the final failure exactly once", async () => {
+    const { clock, wait, now } = recordingClock();
+    const errors: unknown[] = [];
+    const warnings: string[] = [];
+    let attempts = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now,
+        wait,
+        graceSecs: 30,
+        retry: { maxAttempts: 3, baseDelayMs: 10, random: () => 0 },
+        submit: async () => {
+          attempts += 1;
+          throw new BroadcastError("rpc down");
+        },
+        onError: (error) => errors.push(error),
+        onWarning: (message) => warnings.push(message),
+      }),
+    );
+
+    await clock.tick();
+    await clock.tick();
+    await clock.tick();
+
+    assert.equal(attempts, 3, "the budget bounds the attempts per beat");
+    assert.equal(errors.length, 1, "the final failure is reported once");
+    assert.ok(errors[0] instanceof BroadcastError);
+    assert.equal(
+      warnings.length,
+      2,
+      "only the attempts that are followed by a retry are announced",
+    );
+
+    await handle.stop();
+  });
+
+  it("never retries a policy block", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    let attempts = 0;
+    const blocked: InvokeOutcome = {
+      kind: "blocked",
+      reason: "paused",
+      detail: "the policy is paused",
+      diagnosticEvents: [],
+    };
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        retry: { maxAttempts: 3, baseDelayMs: 10, random: () => 0 },
+        submit: async () => {
+          attempts += 1;
+          return { outcome: blocked };
+        },
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+    assert.equal(attempts, 1, "a refusal is a decision, not a transport failure");
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0] instanceof HeartbeatBlockedError);
+    assert.equal((errors[0] as HeartbeatBlockedError).reason, "paused");
+
+    await handle.stop();
+  });
+
+  it("does not retry a failure the SDK cannot classify", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    let attempts = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        retry: { maxAttempts: 3, baseDelayMs: 10, random: () => 0 },
+        submit: async () => {
+          attempts += 1;
+          throw new Error("boom");
+        },
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+    assert.equal(attempts, 1, "an unknown error is reported, not retried");
+    assert.equal(errors.length, 1);
+    assert.equal((errors[0] as Error).message, "boom");
+
+    await handle.stop();
+  });
+
+  it("stops during the backoff without another attempt and without an error", async () => {
+    const { clock, wait, now } = recordingClock();
+    const errors: unknown[] = [];
+    let attempts = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now,
+        wait,
+        graceSecs: 30,
+        retry: { maxAttempts: 3, baseDelayMs: 100, random: () => 0.5 },
+        submit: async () => {
+          attempts += 1;
+          throw new BroadcastError("rpc down");
+        },
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+    assert.equal(attempts, 1);
+
+    await handle.stop();
+
+    assert.equal(attempts, 1, "a stopped scheduler makes no further attempt");
+    assert.equal(errors.length, 0, "a stop is teardown, not a failure");
+  });
+
+  it("classifies retryable and non-retryable failures", () => {
+    assert.equal(isRetryableHeartbeatFailure(new BroadcastError("rpc down")), true);
+    assert.equal(
+      isRetryableHeartbeatFailure(new RpcTimeoutError({ stage: "invoke", aborted: false })),
+      true,
+    );
+    assert.equal(
+      isRetryableHeartbeatFailure(
+        new SimulationError("probe failed", { stage: "probe", cause: new Error("offline") }),
+      ),
+      true,
+    );
+    // A policy refusal is a decision, never a transport failure.
+    assert.equal(
+      isRetryableHeartbeatFailure(new GuardBlockedError({ reason: "paused", stage: "submission" })),
+      false,
+    );
+    assert.equal(
+      isRetryableHeartbeatFailure(new HeartbeatBlockedError({ reason: "paused" })),
+      false,
+    );
+    // A dry run never reached the guard; re-running the same configuration as a
+    // retry cannot change that.
+    assert.equal(
+      isRetryableHeartbeatFailure(
+        new HeartbeatDryRunError({ verdict: "admissible", reason: null, detail: null }),
+      ),
+      false,
+    );
+    // Anything unclassifiable is reported, not retried.
+    assert.equal(isRetryableHeartbeatFailure(new Error("boom")), false);
+    assert.equal(isRetryableHeartbeatFailure("boom"), false);
+  });
+});
+
+/**
+ * Input validation (issue #341).
+ *
+ * The scheduler's inputs decide whether a beat is late or the agent is
+ * misconfigured. A negative skew threshold, an unusable grace window, or a
+ * callback that is not callable must fail before the first beat — and before
+ * the grace window is even read from the chain.
+ */
+describe("startHeartbeat input validation (issue #341)", () => {
+  it("rejects a non-finite maxSkewMs", async () => {
+    for (const maxSkewMs of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+      await assert.rejects(
+        startHeartbeat(baseOptions({ maxSkewMs })),
+        (error: unknown) =>
+          error instanceof RangeError && /maxSkewMs/.test((error as Error).message),
+      );
+    }
+  });
+
+  it("rejects a negative maxSkewMs", async () => {
+    await assert.rejects(
+      startHeartbeat(baseOptions({ maxSkewMs: -1 })),
+      (error: unknown) => error instanceof RangeError && /maxSkewMs/.test((error as Error).message),
+    );
+  });
+
+  it("accepts a zero and a positive maxSkewMs", async () => {
+    const strict = await startHeartbeat(baseOptions({ maxSkewMs: 0 }));
+    await strict.stop();
+    const tolerant = await startHeartbeat(baseOptions({ maxSkewMs: 2_000 }));
+    await tolerant.stop();
+  });
+
+  it("rejects a grace window that cannot survive the conversion", async () => {
+    for (const graceSecs of [
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      -1,
+      1.5,
+      Number.MAX_SAFE_INTEGER + 2,
+    ]) {
+      await assert.rejects(
+        startHeartbeat(baseOptions({ graceSecs })),
+        (error: unknown) =>
+          error instanceof RangeError && /graceSecs/.test((error as Error).message),
+      );
+    }
+  });
+
+  it("rejects a negative bigint grace window", async () => {
+    await assert.rejects(
+      startHeartbeat(baseOptions({ graceSecs: -1n })),
+      (error: unknown) => error instanceof RangeError && /graceSecs/.test((error as Error).message),
+    );
+  });
+
+  it("accepts the grace values that survive the conversion", async () => {
+    for (const graceSecs of [0, 30, 30n, Number.MAX_SAFE_INTEGER]) {
+      const handle = await startHeartbeat(baseOptions({ graceSecs, intervalMs: 1_000 }));
+      await handle.stop();
+    }
+  });
+
+  it("rejects a scheduler callback that is not callable", async () => {
+    await assert.rejects(
+      startHeartbeat(baseOptions({ onBeat: "not-a-function" as never })),
+      TypeError,
+    );
+    await assert.rejects(startHeartbeat(baseOptions({ wait: 42 as never })), TypeError);
+    await assert.rejects(startHeartbeat(baseOptions({ now: 42 as never })), TypeError);
+  });
+
+  it("rejects an unusable retry budget", async () => {
+    await assert.rejects(startHeartbeat(baseOptions({ retry: { maxAttempts: 0 } })), RangeError);
+    await assert.rejects(startHeartbeat(baseOptions({ retry: { maxAttempts: 1.5 } })), RangeError);
+    await assert.rejects(startHeartbeat(baseOptions({ retry: { baseDelayMs: -1 } })), RangeError);
+    await assert.rejects(
+      startHeartbeat(baseOptions({ retry: { maxDelayMs: Number.NaN } })),
+      RangeError,
+    );
+  });
+
+  it("rejects before anything is scheduled, submitted or read from the chain", async () => {
+    let submissions = 0;
+    let policyReads = 0;
+    await assert.rejects(
+      startHeartbeat(
+        baseOptions({
+          maxSkewMs: -1,
+          submit: async () => {
+            submissions += 1;
+            return {};
+          },
+          readPolicy: async () => {
+            policyReads += 1;
+            return null;
+          },
+        }),
+      ),
+      RangeError,
+    );
+    assert.equal(submissions, 0, "no beat may be submitted");
+    assert.equal(policyReads, 0, "and the grace window must not even be read");
+  });
+
+  it("rejects an unusable stopTimeoutMs", async () => {
+    for (const stopTimeoutMs of [Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+      await assert.rejects(
+        startHeartbeat(baseOptions({ stopTimeoutMs })),
+        (error: unknown) =>
+          error instanceof RangeError && /stopTimeoutMs/.test((error as Error).message),
+      );
+    }
+  });
+});
+
+/**
+ * Stopping with an in-flight submission (issue #338).
+ *
+ * A custom submit function can outlive the scheduler. `stop()` requests
+ * cancellation through the submission context and, by default, still waits for
+ * the promise to settle; a caller that cannot trust its transport can put a
+ * deadline on that wait and learn from the result that the submission was not
+ * settled when `stop()` returned.
+ */
+describe("startHeartbeat stop contract (issue #338)", () => {
+  it("requests cancellation and waits for an in-flight submission to settle", async () => {
+    const clock = fakeClock();
+    let submissions = 0;
+    let context: { signal: AbortSignal } | undefined;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        submit: (_beat, submitContext) => {
+          submissions += 1;
+          context = submitContext;
+          return new Promise((_resolve, reject) => {
+            submitContext.signal.addEventListener(
+              "abort",
+              () => reject(new Error("cancelled by stop")),
+              { once: true },
+            );
+          });
+        },
+      }),
+    );
+
+    await clock.tick();
+    assert.equal(submissions, 1, "the first beat is in flight");
+    assert.equal(context?.signal.aborted, false);
+
+    const result = await handle.stop();
+
+    assert.equal(context?.signal.aborted, true, "stop requests cancellation first");
+    assert.equal(result.reason, "completed");
+    assert.equal(result.settled, true);
+    assert.ok(result.error instanceof Error);
+    assert.match(result.error.message, /cancelled by stop/);
+    assert.equal(handle.stopped, true);
+  });
+
+  it("returns at its deadline when a custom submit never settles", async () => {
+    const clock = fakeClock();
+    let context: { signal: AbortSignal } | undefined;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        submit: (_beat, submitContext) => {
+          context = submitContext;
+          return new Promise<never>(() => {});
+        },
+      }),
+    );
+
+    await clock.tick();
+    const result = await handle.stop({ timeoutMs: 20 });
+
+    assert.equal(result.reason, "timeout");
+    assert.equal(result.settled, false);
+    assert.equal(context?.signal.aborted, true, "the submission was still asked to cancel");
+    assert.equal(handle.stopped, true);
+  });
+
+  it("uses stopTimeoutMs as the default bound and is idempotent", async () => {
+    const clock = fakeClock();
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        stopTimeoutMs: 20,
+        submit: () => new Promise<never>(() => {}),
+      }),
+    );
+
+    await clock.tick();
+    const first = handle.stop();
+    const second = handle.stop();
+    assert.equal(first, second, "stop is one shared operation");
+
+    const [a, b] = await Promise.all([first, second]);
+    assert.deepEqual(a, b);
+    assert.equal(a.reason, "timeout");
+    assert.equal(a.settled, false);
+
+    const after = handle.stop();
+    assert.equal(after, first, "a later stop returns the same settled result");
+    assert.deepEqual(await after, a);
+  });
+
+  it("rejects a negative stop deadline without stopping the scheduler", async () => {
+    const clock = fakeClock();
+    const handle = await startHeartbeat(baseOptions({ now: clock.now, wait: clock.wait }));
+
+    await assert.rejects(handle.stop({ timeoutMs: -1 }), RangeError);
+    assert.equal(handle.stopped, false, "an invalid stop call must not tear the scheduler down");
+
+    await handle.stop();
+    assert.equal(handle.stopped, true);
+  });
+});
+
+/**
+ * Stale cadence slots after a slow submission (issue #339).
+ *
+ * A beat that takes longer than several intervals used to leave the fixed
+ * deadline behind, so the loop immediately fired the whole overdue backlog. The
+ * scheduler now skips the stale slots, counts them once, and waits for the next
+ * future deadline.
+ */
+describe("startHeartbeat stale cadence slots (issue #339)", () => {
+  it("skips the slots a long submission passed and does not fire a catch-up burst", async () => {
+    const clock = fakeClock();
+    const beats: HeartbeatBeat[] = [];
+    let submissions = 0;
+    let release: (() => void) | undefined;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        intervalMs: 1_000,
+        maxSkewMs: 100,
+        now: clock.now,
+        wait: clock.wait,
+        submit: async () => {
+          submissions += 1;
+          if (submissions === 1) {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          }
+          return {};
+        },
+        onBeat: (beat) => beats.push(beat),
+      }),
+    );
+
+    await clock.tick(); // t=0: first beat starts and stays in flight
+    assert.equal(submissions, 1);
+
+    // The submission takes 5.5 intervals. Slots 1000…5000 are stale by the
+    // time it settles; the next beat must be scheduled at 6000.
+    clock.advanceTo(5_500);
+    release!();
+    await flush();
+    await flush();
+
+    assert.equal(submissions, 1, "no overdue beat is fired immediately after the submit");
+    assert.equal(handle.missedBeats, 5, "each stale cadence slot is counted once");
+    assert.equal(beats.length, 1);
+
+    await clock.tick(); // t=6000
+    assert.equal(submissions, 2, "the next submission lands on the next future slot");
+    assert.equal(beats[1]?.at, 6_000);
+    assert.equal(beats[1]?.lateMs, 0, "the re-anchored cadence is on time");
+
+    await clock.tick(); // t=7000
+    assert.equal(submissions, 3);
+    assert.equal(beats[2]?.at, 7_000);
+    assert.equal(handle.missedBeats, 5, "the recovered cadence adds no further misses");
+
+    await handle.stop();
+  });
+
+  it("preserves the same-second duplicate courtesy across skipped slots", async () => {
+    const clock = fakeClock();
+    let submissions = 0;
+    let release: (() => void) | undefined;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        intervalMs: 400,
+        now: clock.now,
+        wait: clock.wait,
+        submit: async () => {
+          submissions += 1;
+          if (submissions === 1) {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          }
+          return {};
+        },
+      }),
+    );
+
+    await clock.tick(); // t=0, still in second 0
+    clock.advanceTo(900); // second 0; all overdue slots remain in the courtesy second
+    release!();
+    await flush();
+    await flush();
+
+    // The scheduler advances past 400 and 800 (both in second 0) and does not
+    // submit another beat in the same second.
+    assert.equal(submissions, 1);
+    assert.equal(handle.missedBeats, 2);
+
+    await clock.tick(); // t=1200, second 1
+    assert.equal(submissions, 2);
+
+    await handle.stop();
+  });
+});
+
+/**
+ * Outcome classification (issue #292).
+ *
+ * `invoke()` resolves with a refusal (`blocked`), a pipeline failure (`error`)
+ * or a dry run (`dry_run`) just as it resolves with an allowed submission.
+ * Only the allowed arm is a beat: every other resolved outcome must leave
+ * `lastBeatAt` — and the same-second dedupe marker — untouched, report itself
+ * once through `onError` with a type that distinguishes a refusal from an RPC
+ * failure, and leave the next cadence free to try again.
+ */
+describe("startHeartbeat outcome classification (issue #292)", () => {
+  const allowedOutcome: InvokeOutcome = {
+    kind: "allowed",
+    submission: {
+      hash: "a1b2c3",
+      status: "SUCCESS",
+      ledger: 42,
+      failure: null,
+      events: [],
+    },
+  };
+
+  const blockedOutcome: InvokeOutcome = {
+    kind: "blocked",
+    reason: "paused",
+    detail: "the policy is paused",
+    diagnosticEvents: [],
+  };
+
+  const errorOutcome: InvokeOutcome = {
+    kind: "error",
+    detail: "the RPC was unreachable",
+    error: new BroadcastError("rpc down"),
+    diagnosticEvents: [],
+  };
+
+  const dryRunOutcome: InvokeOutcome = {
+    kind: "dry_run",
+    admissible: true,
+    verdict: "admissible",
+    reason: null,
+    detail: null,
+    error: null,
+    fees: { resourceFeeStroops: 1n, inclusionFeeStroops: 2n, totalFeeStroops: 3n },
+    diagnostics: [],
+    steps: [],
+  };
+
+  it("does not count a dry-run outcome as a beat", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    const beats: HeartbeatBeat[] = [];
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => ({ outcome: dryRunOutcome }),
+        onBeat: (beat) => beats.push(beat),
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+
+    assert.equal(beats.length, 0, "a dry run never reached the guard, so it is not a beat");
+    assert.equal(handle.lastBeatAt, null, "lastBeatAt must not advance");
+    assert.equal(errors.length, 1, "the resolved non-answer is reported exactly once");
+    assert.ok(errors[0] instanceof HeartbeatDryRunError);
+    assert.equal((errors[0] as HeartbeatDryRunError).verdict, "admissible");
+    assert.equal((errors[0] as HeartbeatDryRunError).reason, null);
+
+    await handle.stop();
+  });
+
+  it("retries every non-allowed outcome on the next cadence", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    const beats: HeartbeatBeat[] = [];
+    const outcomes = [blockedOutcome, errorOutcome, dryRunOutcome, allowedOutcome];
+    let submissions = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        intervalMs: 1_000,
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => {
+          const outcome = outcomes[submissions] ?? allowedOutcome;
+          submissions += 1;
+          const ledger = outcome.kind === "allowed" ? outcome.submission.ledger : null;
+          return ledger === null ? { outcome } : { outcome, ledger };
+        },
+        onBeat: (beat) => beats.push(beat),
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    // t=0: refused by the guard. A refusal is terminal for this beat, not for
+    // the scheduler: no beat is counted and the same second is not marked.
+    await clock.tick();
+    assert.equal(submissions, 1);
+    assert.equal(handle.lastBeatAt, null);
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0] instanceof HeartbeatBlockedError);
+
+    // t=1000: the RPC failed. The typed pipeline error is reported as-is, so an
+    // operator can tell it from a refusal.
+    await clock.tick();
+    assert.equal(submissions, 2, "the next cadence tries again after a refusal");
+    assert.equal(handle.lastBeatAt, null);
+    assert.equal(errors.length, 2);
+    assert.ok(errors[1] instanceof BroadcastError);
+
+    // t=2000: the submission ran as a dry run, so nothing was broadcast.
+    await clock.tick();
+    assert.equal(submissions, 3, "the next cadence tries again after an RPC failure");
+    assert.equal(handle.lastBeatAt, null);
+    assert.equal(errors.length, 3);
+    assert.ok(errors[2] instanceof HeartbeatDryRunError);
+
+    // t=3000: the guard accepts the heartbeat. Only now is it a beat.
+    await clock.tick();
+    assert.equal(submissions, 4, "the next cadence tries again after a dry run");
+    assert.equal(errors.length, 3, "a recovered beat reports no further error");
+    assert.equal(beats.length, 1);
+    assert.equal(beats[0]!.at, 3_000);
+    assert.equal(beats[0]!.ledger, 42);
+    assert.equal(handle.lastBeatAt, 3_000, "the allowed outcome advances lastBeatAt once");
+
+    await handle.stop();
+  });
+
+  it("does not let a refused beat claim the same-second courtesy", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    const beats: HeartbeatBeat[] = [];
+    let submissions = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        intervalMs: 400,
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => {
+          submissions += 1;
+          if (submissions === 1) return { outcome: blockedOutcome };
+          return { outcome: allowedOutcome, ledger: 42 };
+        },
+        onBeat: (beat) => beats.push(beat),
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick(); // t=0, second 0: refused
+    assert.equal(submissions, 1);
+    assert.equal(handle.lastBeatAt, null);
+    assert.equal(errors.length, 1);
+
+    // t=400, still second 0. If the refusal had advanced `lastBeatSecond`, this
+    // cadence would be suppressed as a duplicate; it must be submitted.
+    await clock.tick();
+    assert.equal(submissions, 2, "a refused beat must not suppress the next cadence");
+    assert.equal(handle.lastBeatAt, 400);
+    assert.equal(beats.length, 1, "the accepted result is counted once");
+    assert.equal(errors.length, 1, "a successful result reports no error");
+
+    // The accepted beat at t=400 now owns second 0, so t=800 is the courtesy
+    // skip. A successful result updates the dedupe marker exactly once.
+    await clock.tick();
+    assert.equal(submissions, 2, "an accepted beat suppresses a same-second duplicate");
+
+    // t=1200 is a new second: the scheduler beats again, once.
+    await clock.tick();
+    assert.equal(submissions, 3);
+    assert.equal(beats.length, 2);
+    assert.equal(handle.lastBeatAt, 1_200);
+
+    await handle.stop();
+  });
+});
+
+/**
+ * A submitted-but-unconfirmed heartbeat (issue #299).
+ *
+ * The transaction was broadcast and the guard may well have accepted it — only
+ * the confirmation polling ran out of budget. Counting it as a beat would claim
+ * success for an unconfirmed heartbeat; retrying it would risk beating twice.
+ * It is therefore reported once, as a `BroadcastError` carrying the hash so an
+ * operator can reconcile it out of band, and it is never counted and never
+ * retried within the same beat.
+ */
+describe("startHeartbeat pending outcome (issue #299)", () => {
+  const HASH = "d".repeat(64);
+
+  const pendingOutcome: InvokeOutcome = {
+    kind: "pending",
+    transactionHash: HASH,
+    submission: {
+      hash: HASH,
+      status: "TIMEOUT",
+      ledger: null,
+      failure: null,
+      events: [],
+    },
+    detail: `transaction ${HASH} submitted but unconfirmed after 2 poll attempt(s)`,
+    guidance: "Do not rebroadcast without querying transaction status.",
+  };
+
+  it("reports a pending beat once and does not count it", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    const beats: HeartbeatBeat[] = [];
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => ({ outcome: pendingOutcome }),
+        onBeat: (beat) => beats.push(beat),
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+
+    assert.equal(beats.length, 0, "an unconfirmed heartbeat is not a beat");
+    assert.equal(handle.lastBeatAt, null, "lastBeatAt must not advance");
+    assert.equal(errors.length, 1, "the pending outcome is reported exactly once");
+    // A `BroadcastError` carrying the hash: the operator's handle for
+    // reconciling the transaction that may still land.
+    assert.ok(errors[0] instanceof BroadcastError);
+    assert.equal((errors[0] as BroadcastError).transactionHash, HASH);
+    assert.match((errors[0] as BroadcastError).message, /submitted but unconfirmed/);
+
+    await handle.stop();
+  });
+
+  it("does not retry a pending beat within the same submission", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    let submissions = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => {
+          submissions += 1;
+          return { outcome: pendingOutcome };
+        },
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+
+    assert.equal(submissions, 1, "pending is not retryable: no rebroadcast");
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0] instanceof BroadcastError);
+
     await handle.stop();
   });
 });

@@ -24,14 +24,21 @@
  * A refused call never has a transaction hash. That is not a gap in the
  * evidence: the block happens before broadcast, which is what makes it free.
  */
-import { createHash } from "node:crypto";
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
-import { GuardError, SimulationError } from "./errors.ts";
+import { concatBytes, sha256Hex, utf8Bytes } from "./hash.ts";
+import { GuardError, GuardUndeterminedError, InvalidInputError, SimulationError } from "./errors.ts";
 import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
-import { resourceBreakdownFromSimulation, type ResourceBreakdown } from "./cost.ts";
+import {
+  DEFAULT_RPC_TIMEOUT_MS,
+} from "./invoke.ts";
+import {
+  resourceBreakdownFromSimulation,
+  type CostProvenance,
+  type ResourceBreakdown,
+} from "./cost.ts";
 import {
   extractTransferAmount,
-  fetchGuardPolicyAndWindow,
+  readPersistentEntry,
   type ContractAddress,
   type ReadonlyPolicyConfig,
 } from "./policy.ts";
@@ -41,32 +48,12 @@ import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
 import { systemClock, type Clock } from "./clock.ts";
+import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 
 /**
- * Thrown synchronously when a ContractCall has invalid shape or types
- * before any RPC round-trip is attempted.
- *
- * Distinguishes programmer errors (malformed contract ID, invalid symbol shape,
- * invalid argument types) from policy outcomes (blocked decisions).
+ * Re-exported from `errors.ts` for the existing import path.
  */
-export class InvalidInputError extends Error {
-  readonly field: string;
-  readonly rule: string;
-  readonly detail?: string | undefined;
-
-  constructor(field: string, rule: string, detail?: string) {
-    const message = detail
-      ? `Invalid input for '${field}': violates rule '${rule}' (${detail})`
-      : `Invalid input for '${field}': violates rule '${rule}'`;
-    super(message);
-    this.name = "InvalidInputError";
-    this.field = field;
-    this.rule = rule;
-    if (detail !== undefined) {
-      this.detail = detail;
-    }
-  }
-}
+export { GuardUndeterminedError, InvalidInputError };
 
 /**
  * Validate a ContractCall's input shape before RPC dispatch.
@@ -171,22 +158,10 @@ export function validateContractCall(call: ContractCall): void {
 /**
  * Thrown when enforcement could not reach a decision.
  *
- * Deliberately not a `GuardBlockedError`: reporting "the guard refused this"
- * when the guard never ruled would be a false claim about the security
- * boundary, which is the one thing an operator must be able to trust.
+ * @deprecated Use `GuardUndeterminedError`. Kept as an alias for backward compatibility.
  */
-export class PreFlightUndeterminedError extends SimulationError {
-  readonly detail: string;
-
-  constructor(detail: string, options: { cause?: unknown } = {}) {
-    super(`stellar-agent-guard could not determine this action's status\n${detail}`, {
-      stage: "preflight",
-      ...(options.cause === undefined ? {} : { cause: options.cause }),
-    });
-    this.name = "PreFlightUndeterminedError";
-    this.detail = detail;
-  }
-}
+export const PreFlightUndeterminedError = GuardUndeterminedError;
+export type PreFlightUndeterminedError = GuardUndeterminedError;
 
 export type PreFlightDecision =
   | {
@@ -198,6 +173,13 @@ export type PreFlightDecision =
       footprintKeys: number;
       /** Resource limits and footprint counts from the same simulation. */
       resourceBreakdown?: ResourceBreakdown;
+      /**
+       * Ledger snapshot the simulation priced against, read from that same
+       * simulation response. Informational only: it identifies the state the
+       * quote describes, not a guarantee that submission will land there.
+       * Omitted when the RPC response did not establish a usable ledger.
+       */
+      provenance?: CostProvenance;
     }
   | {
       allowed: false;
@@ -218,6 +200,24 @@ export type PreFlightDecision =
     };
 
 /**
+ * Read the ledger marker out of the simulation that produced the quote.
+ *
+ * This deliberately reads the successful enforced simulation's own
+ * `latestLedger` instead of issuing `getLatestLedger()` again: a second read
+ * can land on a newer ledger and would then describe state the simulation never
+ * saw. The value is informational, and an absent or malformed marker is omitted
+ * rather than replaced with a fabricated sequence number.
+ */
+function provenanceFromSimulation(simulation: unknown): CostProvenance | undefined {
+  if (typeof simulation !== "object" || simulation === null) return undefined;
+  const ledger = (simulation as { latestLedger?: unknown }).latestLedger;
+  if (typeof ledger !== "number" || !Number.isSafeInteger(ledger) || ledger < 0) {
+    return undefined;
+  }
+  return { ledger };
+}
+
+/**
  * Options for a batched pre-flight check.
  *
  * Both fields exist so a caller can run the batch check against values it
@@ -236,6 +236,64 @@ export interface CheckBatchOptions {
    * If omitted, attempts to fetch it from the guard's `Window` ledger entry (defaults to 0n).
    */
   initialWindowSpent?: bigint;
+
+  /**
+   * Optional per-call observability, forwarded to each call's `check()`:
+   * one event per enforcement-stage attempt, in call order.
+   */
+  onStep?: (step: InvokeStepEvent) => void;
+
+  /**
+   * Caller-owned cancellation for the whole batch. Once it fires, no further
+   * call is started; every unfinished call is reported as a fail-closed
+   * `undetermined` verdict carrying a typed `RpcTimeoutError`.
+   */
+  signal?: AbortSignal | undefined;
+
+  /**
+   * Per-call timeout, forwarded to each `check()`. Independent of
+   * `deadlineMs`: a fired per-call timeout leaves the rest of the batch free to
+   * continue, while a spent batch deadline stops it.
+   */
+  timeoutMs?: number | undefined;
+
+  /**
+   * Overall time budget for the whole batch, in milliseconds, measured from
+   * the start of `checkBatch()` on the interceptor's injected clock.
+   *
+   * Once spent, no further call is started and the remaining verdicts are
+   * fail-closed `undetermined` results carrying an `RpcTimeoutError` with
+   * `deadline: true`. The budget also caps each individual check's timeout, so
+   * a single long RPC cannot overrun it. Omit for the per-call default.
+   */
+  deadlineMs?: number | undefined;
+}
+
+/**
+ * Where the committed window spend used for batch staging came from.
+ *
+ * The distinction matters: an explicit `initialWindowSpent` (including `0n`)
+ * is a caller-provided snapshot and is trusted, while a failed live read means
+ * the SDK does not know the committed spend. A missing `Window` ledger entry is
+ * a definitive "nothing committed yet", not a failed read.
+ */
+export type BatchStagingSource = "provided" | "ledger" | "absent" | "unavailable";
+
+/** The staging snapshot a batch verdict was evaluated against. */
+export interface PreFlightBatchStaging {
+  /**
+   * Committed window spend used for staging, or `null` when a required live
+   * read failed. An explicitly supplied `0n` is reported as `0n` with source
+   * `"provided"` — never confused with an unavailable read.
+   */
+  windowSpent: bigint | null;
+  /** Where `windowSpent` came from. */
+  source: BatchStagingSource;
+  /**
+   * True when a positive SAC transfer needed state that could not be read, so
+   * the batch could not be staged to a definite verdict.
+   */
+  unavailable: boolean;
 }
 
 export interface PreFlightBatchDecision {
@@ -249,6 +307,17 @@ export interface PreFlightBatchDecision {
    * Alias for `admissible`.
    */
   overallAdmissible: boolean;
+
+  /**
+   * Overall batch classification. `undetermined` means the batch cannot be
+   * reported as admissible because required staging state was unavailable (or
+   * an individual call was undetermined); `blocked` means at least one call was
+   * definitely refused. Always set on a result returned by `checkBatch()`.
+   */
+  kind?: "admissible" | "blocked" | "undetermined";
+
+  /** Human-readable explanation when `kind` is `undetermined`. */
+  detail?: string;
 
   /**
    * Per-call decisions in the exact order of the input batch.
@@ -265,6 +334,12 @@ export interface PreFlightBatchDecision {
    * that were admissible.
    */
   totalEstimatedResourceFee: bigint;
+
+  /**
+   * The window snapshot used for staging. Omitted for an empty batch, which
+   * performs no staging.
+   */
+  staging?: PreFlightBatchStaging;
 }
 
 /** A caller-supplied policy revision token used as part of the cache key. */
@@ -315,7 +390,33 @@ export interface PreFlightCacheOptions {
    * change invalidate the entry even if the wall-clock TTL has not elapsed.
    */
   policyRevision?: PolicyRevision | (() => PolicyRevision | Promise<PolicyRevision>);
+  /**
+   * Maximum number of verdicts this interceptor holds at once. Omit it for an
+   * unbounded cache (the pre-#333 behaviour); set it to bound a high-volume
+   * agent's memory without disabling caching entirely.
+   *
+   * When the cache is full, storing a new call fingerprint evicts the
+   * **least-recently-used** entry: a cache hit counts as use, as does a fresh
+   * store for a fingerprint already present. Eviction is deterministic (Map
+   * insertion order, refreshed on every hit), so the same sequence of checks
+   * always evicts the same entries.
+   *
+   * Eviction only ever *removes* entries. A lookup still requires the entry to
+   * be present, from the current ledger, and inside its TTL, so evicting can
+   * never resurrect an expired or cross-ledger verdict — the worst it can do is
+   * force a fresh simulation for a fingerprint that was recently cached.
+   *
+   * Must be a positive integer. `invalidate()` clears the entries; the bound
+   * applies again to whatever refills the cache afterwards.
+   */
+  maxEntries?: number;
 }
+
+/**
+ * What `new PreFlightInterceptor()` accepts: `PreFlightConfig` with the shared
+ * `{ server? | url? }` transport (issue #117) in place of a mandatory `server`.
+ */
+export type PreFlightConfigInput = WithRpcTransport<PreFlightConfig>;
 
 export interface PreFlightConfig {
   server: rpc.Server;
@@ -337,6 +438,11 @@ export interface PreFlightConfig {
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
+   *
+   * The cache's ledger lookup is one of the RPC calls the check makes, so it
+   * carries the check's `signal`/`timeoutMs` bound like every other one: an
+   * already-aborted signal issues no RPC at all, and a stalled lookup fails the
+   * check closed with an `undetermined` verdict instead of hanging it.
    */
   cache?: PreFlightCacheOptions;
   /**
@@ -349,8 +455,21 @@ export interface PreFlightConfig {
    */
   logger?: GuardLoggerInput | undefined;
   /**
-   * Inject a custom clock for time-dependent operations (cache TTL, etc.).
-   * Defaults to the system clock; use a FakeClock in tests for deterministic timing.
+   * Coalesce concurrent checks for the same call and config into one
+   * discovery/enforcement run. Defaults to `true`; set `false` to force every
+   * call to run its own simulation.
+   *
+   * Coalescing is per interceptor, so the call fingerprint plus this instance's
+   * config identity is the whole key. Each waiter still applies its own
+   * `signal`/`timeoutMs`, and a settled run — including an undetermined one — is
+   * removed immediately rather than retained as a cache. Checks that supply
+   * `onStep` are never coalesced, so each caller receives its own trace.
+   */
+  coalesceInFlight?: boolean;
+  /**
+   * Inject a custom clock for time-dependent operations (cache TTL, batch
+   * deadlines, etc.). Defaults to the system clock; use a FakeClock in tests
+   * for deterministic timing.
    */
   clock?: Clock;
 }
@@ -373,52 +492,88 @@ interface CacheContext {
   expiresAt: number;
 }
 
+/**
+ * The outcome of a cache-context lookup.
+ *
+ * - `context` — the cache could be consulted: the ledger marker is known and
+ *   the entry key is derived from it.
+ * - `unavailable` — the cache could *not* be consulted (an unreadable policy
+ *   revision, or a ledger read that failed for a reason that is not the
+ *   caller's bound). That is not a security decision: the check falls back to
+ *   the uncached enforcement path, which runs under the same bound.
+ * - `bounded` — the caller's own signal or timeout fired during the lookup.
+ *   There is no budget left to run the uncached path within, so the check
+ *   fails closed with an `undetermined` verdict.
+ */
+type CacheLookup =
+  | { kind: "context"; context: CacheContext }
+  | { kind: "unavailable" }
+  | { kind: "bounded"; error: RpcTimeoutError };
+
+/** The fail-closed verdict for a caller bound that fired. */
+function timeoutDecision(error: RpcTimeoutError): PreFlightDecision {
+  const outcome = timeoutOutcome(error);
+  return {
+    allowed: false,
+    kind: "undetermined",
+    detail: outcome.detail,
+    error: outcome.error,
+  };
+}
+
 function policyRevisionToken(revision: PolicyRevision): string {
   if (revision === undefined) return "unknown";
   if (revision === null) return "null";
   return `${typeof revision}:${String(revision)}`;
 }
 
-function hashPart(hash: ReturnType<typeof createHash>, value: string | Uint8Array): void {
-  const bytes = typeof value === "string" ? Buffer.from(value) : Buffer.from(value);
-  const length = Buffer.alloc(4);
-  length.writeUInt32BE(bytes.length);
-  hash.update(length);
-  hash.update(bytes);
+function hashPart(parts: Uint8Array[], value: string | Uint8Array): void {
+  const bytes = typeof value === "string" ? utf8Bytes(value) : value;
+  const length = new Uint8Array(4);
+  new DataView(length.buffer).setUint32(0, bytes.length, false);
+  parts.push(length, bytes);
 }
 
 function callFingerprint(call: ContractCall): string {
-  const hash = createHash("sha256");
-  hashPart(hash, call.contract);
-  hashPart(hash, call.fn);
-  for (const arg of call.args) hashPart(hash, arg.toXDR());
-  return hash.digest("hex");
+  const parts: Uint8Array[] = [];
+  hashPart(parts, call.contract);
+  hashPart(parts, call.fn);
+  for (const arg of call.args) hashPart(parts, arg.toXDR());
+  return sha256Hex(concatBytes(parts));
 }
 
 function configFingerprint(config: PreFlightConfig): string {
-  const hash = createHash("sha256");
-  hashPart(hash, config.networkPassphrase);
-  hashPart(hash, config.guard);
-  hashPart(hash, config.source.publicKey());
-  hashPart(hash, toAgentSigner(config.agent).publicKey);
+  const parts: Uint8Array[] = [];
+  hashPart(parts, config.networkPassphrase);
+  hashPart(parts, config.guard);
+  hashPart(parts, config.source.publicKey());
+  hashPart(parts, toAgentSigner(config.agent).publicKey);
   for (const signer of (config.accountSigners ?? []).map((keypair) => keypair.publicKey()).sort()) {
-    hashPart(hash, signer);
+    hashPart(parts, signer);
   }
-  return hash.digest("hex");
+  return sha256Hex(concatBytes(parts));
 }
 
 export class PreFlightInterceptor {
   private readonly config: PreFlightConfig;
   private readonly cacheOptions: PreFlightCacheOptions | undefined;
   private readonly cache = new Map<string, CacheEntry>();
+  private readonly inFlight = new Map<string, Promise<PreFlightDecision>>();
   private readonly namespace: string;
+  private readonly coalesceInFlight: boolean;
   private readonly logger: GuardLogger;
   private readonly clock: Clock;
+  private _hits = 0;
+  private _misses = 0;
+  private _invalidations = 0;
 
-  constructor(config: PreFlightConfig) {
+  constructor(input: PreFlightConfigInput) {
+    // Shared transport (issue #117): exactly one of `server` or `url`.
+    const config = withResolvedServer<PreFlightConfig>(input);
     this.config = config;
     this.cacheOptions = config.cache;
     this.clock = config.clock ?? systemClock;
+    this.coalesceInFlight = config.coalesceInFlight !== false;
     this.validateCacheOptions();
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
     this.logger = resolveLogger(config.logger);
@@ -426,7 +581,7 @@ export class PreFlightInterceptor {
 
   private validateCacheOptions(): void {
     if (!this.cacheOptions) return;
-    const { ttlMs, ttlLedgers } = this.cacheOptions;
+    const { ttlMs, ttlLedgers, maxEntries } = this.cacheOptions;
     if (ttlMs === undefined && ttlLedgers === undefined) {
       throw new TypeError("preflight cache requires ttlMs or ttlLedgers");
     }
@@ -436,6 +591,54 @@ export class PreFlightInterceptor {
     if (ttlLedgers !== undefined && (!Number.isFinite(ttlLedgers) || ttlLedgers <= 0)) {
       throw new TypeError("preflight cache ttlLedgers must be a positive finite number");
     }
+    if (maxEntries !== undefined && (!Number.isInteger(maxEntries) || maxEntries <= 0)) {
+      throw new TypeError("preflight cache maxEntries must be a positive integer");
+    }
+  }
+
+  /**
+   * Record a cache hit as the most recent use. Map iteration is insertion
+   * order, so re-inserting is what makes the head of the map the least
+   * recently used entry for `storeCacheEntry` to evict next.
+   *
+   * Only the bounded mode needs this bookkeeping; an unbounded cache never
+   * evicts, so it keeps the cheaper read-only hit path.
+   */
+  private touch(key: string, entry: CacheEntry): void {
+    if (this.cacheOptions?.maxEntries === undefined) return;
+    this.cache.delete(key);
+    this.cache.set(key, entry);
+  }
+
+  /**
+   * Store a verdict, keeping the cache at or below `maxEntries`.
+   *
+   * Expired and cross-ledger entries are already purged by `cacheContext`
+   * before this runs, but eviction is still an unconditional removal: it never
+   * selects an entry to *return*, only one to drop, so a bounded cache cannot
+   * revive a verdict the freshness checks would reject.
+   */
+  private storeCacheEntry(key: string, entry: CacheEntry): void {
+    const maxEntries = this.cacheOptions?.maxEntries;
+    if (maxEntries !== undefined) {
+      // An overwrite is not a new fingerprint: drop the previous occurrence
+      // first so it cannot count against capacity or be evicted as "old".
+      this.cache.delete(key);
+      let evicted = 0;
+      while (this.cache.size >= maxEntries) {
+        const oldest = this.cache.keys().next();
+        if (oldest.done) break;
+        this.cache.delete(oldest.value);
+        evicted += 1;
+      }
+      if (evicted > 0) {
+        this.logger.debug("pre-flight cache evicted least-recently-used verdicts", {
+          evicted,
+          maxEntries,
+        });
+      }
+    }
+    this.cache.set(key, entry);
   }
 
   private cacheTtlMs(): number {
@@ -444,30 +647,58 @@ export class PreFlightInterceptor {
     return Math.min(requested, MAX_CACHE_TTL_MS);
   }
 
-  private async cacheContext(call: ContractCall): Promise<CacheContext | null> {
-    if (!this.cacheOptions) return null;
+  /**
+   * Resolve the cache context for `call`: the ledger marker the cached verdict
+   * must belong to, and the key it is stored under.
+   *
+   * The ledger read is one of the RPC calls the check makes, so it carries the
+   * same abort/timeout semantics as the enforcement pipeline: an already-aborted
+   * signal issues no RPC at all, and a stalled read is bounded by the caller's
+   * `timeoutMs` instead of leaving the check pending indefinitely.
+   *
+   * A failed read is not a security decision. Without a trustworthy ledger
+   * marker no cached verdict may be reused, so the lookup reports
+   * `unavailable` and the caller falls back to the uncached enforcement path.
+   * That fallback is only allowed while it remains inside the caller's bound:
+   * a lookup whose own bound fired reports `bounded`, and the check fails
+   * closed rather than spending a budget the caller never granted.
+   */
+  private async cacheContext(
+    call: ContractCall,
+    bound: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined },
+  ): Promise<CacheLookup> {
+    if (!this.cacheOptions) return { kind: "unavailable" };
 
     let revision: PolicyRevision;
     try {
       if (typeof this.cacheOptions.policyRevision === "function") {
         revision = await this.cacheOptions.policyRevision();
-        if (revision === undefined) return null;
+        if (revision === undefined) return { kind: "unavailable" };
       } else {
         revision = this.cacheOptions.policyRevision;
       }
     } catch {
       // A revision read failure must not turn a cache lookup into a security
       // decision. Fall through to the uncached path instead.
-      return null;
+      return { kind: "unavailable" };
     }
 
     let ledger: number;
     try {
-      const latest = await this.config.server.getLatestLedger();
+      const latest = await withRpcAbort(
+        { stage: "pre-flight", signal: bound.signal, timeoutMs: bound.timeoutMs },
+        () => this.config.server.getLatestLedger(),
+      );
       ledger = latest.sequence;
-    } catch {
+    } catch (error) {
+      if (error instanceof RpcTimeoutError) {
+        // The caller's bound fired while the ledger read was in flight. The
+        // uncached path would need a budget the caller has not granted, so the
+        // check fails closed instead of running on.
+        return { kind: "bounded", error };
+      }
       // Without a trustworthy ledger marker, do not reuse a cached verdict.
-      return null;
+      return { kind: "unavailable" };
     }
 
     const now = this.clock.now();
@@ -476,9 +707,12 @@ export class PreFlightInterceptor {
     }
 
     return {
-      key: `${this.namespace}:${callFingerprint(call)}:${policyRevisionToken(revision)}`,
-      ledger,
-      expiresAt: now + this.cacheTtlMs(),
+      kind: "context",
+      context: {
+        key: `${this.namespace}:${callFingerprint(call)}:${policyRevisionToken(revision)}`,
+        ledger,
+        expiresAt: now + this.cacheTtlMs(),
+      },
     };
   }
 
@@ -488,6 +722,7 @@ export class PreFlightInterceptor {
       const cleared = this.cache.size;
       this.cache.clear();
       this.logger.debug("pre-flight cache invalidated", { scope: "all", cleared });
+      this._invalidations += cleared;
       return;
     }
     const prefix = `${this.namespace}:${callFingerprint(call)}:`;
@@ -499,6 +734,7 @@ export class PreFlightInterceptor {
       }
     }
     this.logger.debug("pre-flight cache invalidated", { scope: "call", cleared });
+    this._invalidations += cleared;
   }
 
   /**
@@ -508,16 +744,52 @@ export class PreFlightInterceptor {
    * Accepts per-call `options` (e.g. `onStep` observability) without any
    * effect on the verdict itself; existing single-argument callers are
    * unaffected.
+   *
+   * With the cache enabled, the cache's ledger lookup is one of the RPC calls
+   * the check makes, so it carries the same `signal`/`timeoutMs` bound as the
+   * enforcement pipeline: an already-aborted signal issues no RPC at all, and a
+   * stalled lookup returns the fail-closed `undetermined` verdict instead of
+   * leaving the check pending forever.
+   *
+   * Concurrent checks for the same call and config share a single in-flight
+   * discovery/enforcement run by default. The shared run is not bound by any
+   * one caller's signal or timeout — one caller giving up must not cancel a
+   * result another waiter is still entitled to — so each caller races the same
+   * work against its own bound instead.
    */
   async check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision> {
     validateContractCall(call);
 
-    const context = await this.cacheContext(call);
+    // An already-aborted caller asks for no work at all, including the cache
+    // lookup's ledger read. Answer before any RPC or in-flight registration.
+    if (options?.signal?.aborted) {
+      return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+    }
+
+    const lookup = await this.cacheContext(call, {
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+    if (lookup.kind === "bounded") {
+      // The caller's bound fired while the cache's ledger read was in flight.
+      // The check fails closed: a stalled RPC must never leave a guardrail
+      // call pending indefinitely, and the uncached path would need a budget
+      // the caller has not granted.
+      return timeoutDecision(lookup.error);
+    }
+    if (lookup.kind === "unavailable" && options?.signal?.aborted) {
+      // The cache could not be consulted and the caller has already given up:
+      // the uncached path is no longer within the caller's bound, so the check
+      // fails closed instead of starting work nobody is waiting for.
+      return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+    }
+    const context = lookup.kind === "context" ? lookup.context : null;
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {
         const now = this.clock.now();
         if (cached.ledger === context.ledger && cached.expiresAt > now) {
+          this.touch(context.key, cached);
           // A hit is worth a line of its own: it is the one verdict the caller
           // gets without a simulation, so a host reading logs needs to be able
           // to tell a reused verdict from a fresh one.
@@ -528,11 +800,71 @@ export class PreFlightInterceptor {
             kind: cached.decision.kind,
             ledger: context.ledger,
           });
+          this._hits++;
           return cached.decision;
         }
         this.cache.delete(context.key);
       }
+      // If we have a context but didn't get a valid hit, it's a miss.
+      this._misses++;
     }
+
+    // An `onStep` observer owns its enforcement trace, so a check that supplies
+    // one is not coalesced: sharing a run would either drop that observer's
+    // events or interleave two observers over one pipeline.
+    if (options?.onStep || !this.coalesceInFlight) {
+      return this.computeDecision(call, context, options?.onStep, {
+        signal: options?.signal,
+        timeoutMs: options?.timeoutMs,
+      });
+    }
+
+    // The map is per interceptor, so the call fingerprint plus this instance's
+    // config identity is the whole in-flight key.
+    const key = context ? context.key : callFingerprint(call);
+    let shared = this.inFlight.get(key);
+    if (!shared) {
+      // The shared run keeps the pipeline's default bound so a hung RPC cannot
+      // pin the entry forever; callers that asked for a tighter bound race it
+      // below, and never shorten it for anyone else.
+      shared = this.computeDecision(call, context, undefined, {
+        timeoutMs: DEFAULT_RPC_TIMEOUT_MS,
+      });
+      this.inFlight.set(key, shared);
+      const settle = () => {
+        if (this.inFlight.get(key) === shared) this.inFlight.delete(key);
+      };
+      // Remove on both success and failure. Coalescing is not a cache: no
+      // outcome — admitted, refused or undetermined — survives the run.
+      shared.then(settle, settle);
+    }
+    return this.awaitWithCallerBound(shared, options);
+  }
+
+  /** Race coalesced work against the waiting caller's own signal/timeout. */
+  private async awaitWithCallerBound(
+    work: Promise<PreFlightDecision>,
+    options?: PreFlightCheckOptions,
+  ): Promise<PreFlightDecision> {
+    const { signal, timeoutMs } = options ?? {};
+    if (!signal && timeoutMs === undefined) return work;
+    try {
+      return await withRpcAbort(
+        { stage: "pre-flight", signal, timeoutMs: timeoutMs ?? 0 },
+        () => work,
+      );
+    } catch (error) {
+      if (!(error instanceof RpcTimeoutError)) throw error;
+      return timeoutDecision(error);
+    }
+  }
+
+  private async computeDecision(
+    call: ContractCall,
+    context: CacheContext | null,
+    onStep: ((step: InvokeStepEvent) => void) | undefined,
+    bound: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined },
+  ): Promise<PreFlightDecision> {
     // A bound that fired is a verdict, not a crash: the guard never reached a
     // decision, so the check returns its fail-closed `undetermined` arm (the
     // same arm any other unrunnable simulation takes) carrying the typed
@@ -543,8 +875,8 @@ export class PreFlightInterceptor {
       outcome = await withRpcAbort(
         {
           stage: "pre-flight",
-          signal: options?.signal,
-          timeoutMs: options?.timeoutMs,
+          signal: bound.signal,
+          timeoutMs: bound.timeoutMs,
         },
         () =>
           enforceCall({
@@ -554,7 +886,7 @@ export class PreFlightInterceptor {
             networkPassphrase: this.config.networkPassphrase,
             guardAuth: { guard: this.config.guard, agent: this.config.agent },
             ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-            ...(options?.onStep ? { onStep: options.onStep } : {}),
+            ...(onStep ? { onStep } : {}),
             ...(this.config.logger ? { logger: this.config.logger } : {}),
           }),
       );
@@ -592,7 +924,9 @@ export class PreFlightInterceptor {
       // back an admissible verdict carrying a fabricated or silently zero fee.
       let estimatedResourceFee: bigint;
       try {
-        estimatedResourceFee = parseSimulationResourceFee(outcome.simulation.minResourceFee);
+        estimatedResourceFee = parseSimulationResourceFee(outcome.simulation.minResourceFee, {
+          stage: "preflight",
+        });
       } catch (cause) {
         decision = {
           allowed: false,
@@ -610,19 +944,21 @@ export class PreFlightInterceptor {
         };
         return decision;
       }
+      const provenance = provenanceFromSimulation(outcome.simulation);
       decision = {
         allowed: true,
         kind: "admissible",
         estimatedResourceFee,
         footprintKeys,
         ...(resourceBreakdown ? { resourceBreakdown } : {}),
+        ...(provenance ? { provenance } : {}),
       };
     }
 
     // An undetermined result is not a verdict and may be transient, so it is
     // deliberately not cached. Actual admissible/blocked results are.
     if (context && decision.kind !== "undetermined") {
-      this.cache.set(context.key, {
+      this.storeCacheEntry(context.key, {
         decision,
         ledger: context.ledger,
         expiresAt: context.expiresAt,
@@ -673,6 +1009,14 @@ export class PreFlightInterceptor {
    *    `window_cap_exceeded`.
    * 4. If any call is blocked or undetermined, the overall batch `admissible` is false.
    *
+   * Staging state is fail-closed. An explicit `initialWindowSpent` (including
+   * `0n`) is a caller snapshot and is trusted; an absent `Window` ledger entry
+   * means no spend has been committed yet. A *failed* policy or window read is
+   * different: when a positive transfer needs that state, the affected calls
+   * are reported `undetermined` and the batch is never reported admissible from
+   * missing state. Non-transfer calls, and batches whose known cap is zero, do
+   * not need the snapshot and are unaffected.
+   *
    * Documented approximation vs true batch simulation:
    * This sequential simulation with staged window accounting is an off-chain approximation
    * of the contract's atomic auth batch evaluation:
@@ -692,91 +1036,244 @@ export class PreFlightInterceptor {
     calls: ContractCall[],
     options?: CheckBatchOptions,
   ): Promise<PreFlightBatchDecision> {
+    if (options?.deadlineMs !== undefined) {
+      if (
+        typeof options.deadlineMs !== "number" ||
+        !Number.isFinite(options.deadlineMs) ||
+        options.deadlineMs <= 0
+      ) {
+        throw new RangeError(
+          "checkBatch deadlineMs must be a positive finite number of milliseconds",
+        );
+      }
+    }
+
     if (calls.length === 0) {
       return {
         admissible: true,
         overallAdmissible: true,
+        kind: "admissible",
         verdicts: [],
         calls: [],
         totalEstimatedResourceFee: 0n,
       };
     }
 
-    // Resolve policy and initial window spend for staging
-    let policy: ReadonlyPolicyConfig | null = options?.policy ?? this.config.policy ?? null;
-    let initialWindowSpent: bigint = options?.initialWindowSpent ?? 0n;
+    // Resolve policy and committed window spend. `undefined` means "not
+    // supplied"; an explicit `null` policy is a caller decision that there is
+    // no policy to enforce, not a missing read.
+    const suppliedPolicy =
+      options?.policy !== undefined ? options.policy : this.config.policy;
+    const suppliedWindowSpent = options?.initialWindowSpent;
 
-    if (policy === null || options?.initialWindowSpent === undefined) {
-      try {
-        const fetched = await fetchGuardPolicyAndWindow(this.config.server, this.config.guard);
-        if (policy === null) {
-          policy = fetched.policy;
+    let policy: ReadonlyPolicyConfig | null = suppliedPolicy ?? null;
+    let policyStatus: BatchStagingSource = suppliedPolicy === undefined ? "unavailable" : "provided";
+    let policyReadError: unknown;
+
+    let initialWindowSpent = suppliedWindowSpent ?? 0n;
+    let windowStatus: BatchStagingSource =
+      suppliedWindowSpent === undefined ? "unavailable" : "provided";
+    let windowReadError: unknown;
+
+    if (suppliedPolicy === undefined || suppliedWindowSpent === undefined) {
+      // Read the missing entries independently: one failed read must not hide a
+      // successful read of the other, and the result must distinguish an absent
+      // entry (a definitive zero/no-policy answer) from an RPC failure.
+      const [policyRead, windowRead] = await Promise.allSettled([
+        suppliedPolicy === undefined
+          ? readPersistentEntry(this.config.server, this.config.guard, "Policy")
+          : Promise.resolve(null),
+        suppliedWindowSpent === undefined
+          ? readPersistentEntry(this.config.server, this.config.guard, "Window")
+          : Promise.resolve(null),
+      ]);
+
+      if (suppliedPolicy === undefined) {
+        if (policyRead.status === "rejected") {
+          policyReadError = policyRead.reason;
+        } else if (policyRead.value === null) {
+          policyStatus = "absent";
+        } else if (policyRead.value.value && typeof policyRead.value.value === "object") {
+          policy = policyRead.value.value as ReadonlyPolicyConfig;
+          policyStatus = "ledger";
+        } else {
+          // A present but malformed policy is not evidence of "no cap".
+          policyStatus = "unavailable";
+          policyReadError = new Error("Policy ledger entry did not contain a policy object");
         }
-        if (options?.initialWindowSpent === undefined) {
-          initialWindowSpent = fetched.windowSpent;
+      }
+
+      if (suppliedWindowSpent === undefined) {
+        if (windowRead.status === "rejected") {
+          windowReadError = windowRead.reason;
+        } else if (windowRead.value === null) {
+          initialWindowSpent = 0n;
+          windowStatus = "absent";
+        } else if (windowRead.value.value && typeof windowRead.value.value === "object") {
+          try {
+            const windowValue = windowRead.value.value as { total?: bigint | number };
+            initialWindowSpent = BigInt(windowValue.total ?? 0);
+            windowStatus = "ledger";
+          } catch (error) {
+            windowReadError = error;
+            windowStatus = "unavailable";
+          }
+        } else {
+          // A present but malformed window entry is not evidence of zero spend.
+          windowStatus = "unavailable";
+          windowReadError = new Error("Window ledger entry did not contain a window object");
         }
-      } catch {
-        // Fall back gracefully if ledger entry fetch is not possible (e.g. mock server in unit tests)
       }
     }
 
     let stagedWindowSpent = 0n;
-    let allAdmissible = true;
     let totalEstimatedResourceFee = 0n;
     const verdicts: PreFlightDecision[] = [];
+    let stagingRequired = false;
+    let stagingUnavailableDetail: string | undefined;
+    let stagingUnavailableError: unknown;
+
+    const describeUnavailable = (source: string, error: unknown): string => {
+      const reason = error instanceof Error ? `: ${error.message}` : "";
+      return (
+        `batch staging state unavailable: could not read the guard ${source}${reason}; ` +
+        "the rolling window cap cannot be evaluated for this transfer"
+      );
+    };
 
     for (const call of calls) {
-      const decision = await this.check(call);
+      const checkOptions: PreFlightCheckOptions = {
+        ...(options?.onStep ? { onStep: options.onStep } : {}),
+        ...(options?.signal !== undefined ? { signal: options.signal } : {}),
+        ...(options?.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      };
+
+      const decision = await this.check(call, checkOptions);
 
       if (decision.kind === "admissible") {
         const amount = extractTransferAmount(call);
-        const windowCap = policy?.window_cap ?? 0n;
 
-        // If this is a transfer with a positive amount and a window cap is defined:
-        if (amount !== null && amount > 0n && windowCap > 0n) {
-          const projectedSpend = initialWindowSpent + stagedWindowSpent + amount;
-          if (projectedSpend > windowCap) {
-            const blockedDecision: PreFlightDecision = {
+        if (amount !== null && amount > 0n) {
+          const windowCap = policy?.window_cap ?? 0n;
+          const policyKnown = policyStatus !== "unavailable";
+
+          if (!policyKnown) {
+            stagingRequired = true;
+            stagingUnavailableDetail ??= describeUnavailable("policy", policyReadError);
+            stagingUnavailableError ??= policyReadError;
+          } else if (windowCap > 0n) {
+            stagingRequired = true;
+            if (windowStatus === "unavailable") {
+              stagingUnavailableDetail ??= describeUnavailable(
+                "committed window spend",
+                windowReadError,
+              );
+              stagingUnavailableError ??= windowReadError;
+            }
+          }
+
+          if (stagingUnavailableDetail !== undefined) {
+            // The individual simulation is admissible, but a batch verdict
+            // cannot be staged from state we do not have. Report it as
+            // undetermined rather than silently staging against zero.
+            verdicts.push({
               allowed: false,
-              kind: "blocked",
-              reason: "window_cap_exceeded",
-              explanation: explainReason("window_cap_exceeded"),
-              detail: `staged window cap exceeded: cumulative spend ${projectedSpend} > window_cap ${windowCap}`,
-              diagnosticEvents: [],
-            };
-            verdicts.push(blockedDecision);
-            allAdmissible = false;
+              kind: "undetermined",
+              detail: stagingUnavailableDetail,
+              error:
+                stagingUnavailableError instanceof GuardError
+                  ? stagingUnavailableError
+                  : new SimulationError(stagingUnavailableDetail, {
+                      stage: "preflight",
+                      ...(stagingUnavailableError === undefined
+                        ? {}
+                        : { cause: stagingUnavailableError }),
+                    }),
+            });
             continue;
           }
-          stagedWindowSpent += amount;
+
+          if (windowCap > 0n) {
+            const projectedSpend = initialWindowSpent + stagedWindowSpent + amount;
+            if (projectedSpend > windowCap) {
+              verdicts.push({
+                allowed: false,
+                kind: "blocked",
+                reason: "window_cap_exceeded",
+                explanation: explainReason("window_cap_exceeded"),
+                detail: `staged window cap exceeded: cumulative spend ${projectedSpend} > window_cap ${windowCap}`,
+                diagnosticEvents: [],
+              });
+              continue;
+            }
+            stagedWindowSpent += amount;
+          }
         }
 
         verdicts.push(decision);
         totalEstimatedResourceFee += decision.estimatedResourceFee;
       } else {
         verdicts.push(decision);
-        allAdmissible = false;
       }
     }
 
+    const hasBlocked = verdicts.some((verdict) => verdict.kind === "blocked");
+    const undeterminedVerdict = verdicts.find((verdict) => verdict.kind === "undetermined");
+    const kind: PreFlightBatchDecision["kind"] = hasBlocked
+      ? "blocked"
+      : undeterminedVerdict
+        ? "undetermined"
+        : "admissible";
+
     return {
-      admissible: allAdmissible,
-      overallAdmissible: allAdmissible,
+      admissible: kind === "admissible",
+      overallAdmissible: kind === "admissible",
+      kind,
+      ...(kind === "undetermined" && undeterminedVerdict?.kind === "undetermined"
+        ? { detail: undeterminedVerdict.detail }
+        : {}),
       verdicts,
       calls: verdicts,
       totalEstimatedResourceFee,
+      ...(stagingRequired || windowStatus !== "unavailable"
+        ? {
+            staging: {
+              windowSpent: windowStatus === "unavailable" ? null : initialWindowSpent,
+              source: windowStatus,
+              unavailable: stagingUnavailableDetail !== undefined,
+            },
+          }
+        : {}),
     };
   }
 
   /**
    * Convenience for adapters that want a throw-on-refusal shape.
    *
-   * Throws `GuardBlockedError` for both `blocked` and `undetermined` — an
-   * interceptor that returned happily on `undetermined` would hand an agent a
-   * green light the chain never gave.
+   * Throws `GuardBlockedError` on `blocked`, and `GuardUndeterminedError` on
+   * `undetermined` or transport failures — an interceptor that returned happily
+   * on `undetermined` would hand an agent a green light the chain never gave.
+   * Never lets a raw non-Guard error escape.
    */
   async assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }> {
-    const decision = await this.check(call);
+    let decision: PreFlightDecision;
+    try {
+      decision = await this.check(call);
+    } catch (cause) {
+      if (cause instanceof InvalidInputError) {
+        throw cause;
+      }
+      if (cause instanceof GuardBlockedError || cause instanceof GuardUndeterminedError) {
+        throw cause;
+      }
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new GuardUndeterminedError(message, {
+        stage: "preflight",
+        cause,
+        detail: message,
+      });
+    }
+
     if (decision.allowed) return decision;
     if (decision.kind === "blocked") {
       const rawEvent = decision.diagnosticEvents?.[0];
@@ -788,20 +1285,42 @@ export class PreFlightInterceptor {
         rawEvent,
       });
     }
-    throw new PreFlightUndeterminedError(decision.detail, { cause: decision.error });
+    throw new GuardUndeterminedError(decision.detail, {
+      stage: "preflight",
+      cause: decision.error,
+      detail: decision.detail,
+    });
   }
 
   /**
    * Convenience for adapters that want a throw-on-refusal shape for batches.
    *
    * Throws `GuardBlockedError` if any call in the batch is blocked, or
-   * `PreFlightUndeterminedError` if any call is undetermined.
+   * `GuardUndeterminedError` if any call is undetermined or a transport error occurs.
+   * Never lets a raw non-Guard error escape.
    */
   async assertBatchAllowed(
     calls: ContractCall[],
     options?: CheckBatchOptions,
   ): Promise<PreFlightBatchDecision & { admissible: true }> {
-    const decision = await this.checkBatch(calls, options);
+    let decision: PreFlightBatchDecision;
+    try {
+      decision = await this.checkBatch(calls, options);
+    } catch (cause) {
+      if (cause instanceof InvalidInputError) {
+        throw cause;
+      }
+      if (cause instanceof GuardBlockedError || cause instanceof GuardUndeterminedError) {
+        throw cause;
+      }
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new GuardUndeterminedError(message, {
+        stage: "preflight",
+        cause,
+        detail: message,
+      });
+    }
+
     if (decision.admissible) return decision as PreFlightBatchDecision & { admissible: true };
     for (const verdict of decision.verdicts) {
       if (verdict.kind === "blocked") {
@@ -812,21 +1331,43 @@ export class PreFlightInterceptor {
         });
       }
       if (verdict.kind === "undetermined") {
-        throw new PreFlightUndeterminedError(verdict.detail);
+        throw new GuardUndeterminedError(verdict.detail, {
+          stage: "preflight",
+          ...(verdict.error === undefined ? {} : { cause: verdict.error }),
+          detail: verdict.detail,
+        });
       }
     }
-    throw new PreFlightUndeterminedError("batch refused by guardrails");
+    throw new GuardUndeterminedError(
+      decision.kind === "undetermined" && decision.detail !== undefined
+        ? decision.detail
+        : "batch refused by guardrails",
+      { stage: "preflight" },
+    );
+  }
+
+  /**
+   * Get a snapshot of the cache statistics.
+   * @returns An object with hits, misses, invalidations, and size.
+   */
+  getCacheStats() {
+    return {
+      hits: this._hits,
+      misses: this._misses,
+      invalidations: this._invalidations,
+      size: this.cache.size,
+    };
   }
 }
 
 /** One-shot form, for callers that do not want to hold an interceptor. */
-export function preflight(config: PreFlightConfig, call: ContractCall): Promise<PreFlightDecision> {
+export function preflight(config: PreFlightConfigInput, call: ContractCall): Promise<PreFlightDecision> {
   return new PreFlightInterceptor(config).check(call);
 }
 
 /** One-shot form for batch pre-flight checks. */
 export function preflightBatch(
-  config: PreFlightConfig,
+  config: PreFlightConfigInput,
   calls: ContractCall[],
   options?: CheckBatchOptions,
 ): Promise<PreFlightBatchDecision> {

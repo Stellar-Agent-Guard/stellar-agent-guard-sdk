@@ -155,7 +155,9 @@ export function validateEvidenceStructure(content: string): EvidenceStructureVer
   });
 
   const ok = sections.every((section) => section.ok);
-  const summary = sections.map((section) => `${section.name}: found ${section.found}/${section.required}`).join(", ");
+  const summary = sections
+    .map((section) => `${section.name}: found ${section.found}/${section.required}`)
+    .join(", ");
   if (ok) {
     return { ok, sections, message: `evidence structure check: ok (${summary})` };
   }
@@ -179,7 +181,9 @@ export function validateEvidenceStructure(content: string): EvidenceStructureVer
  * a git repository.
  */
 export function decideEvidenceRequirement(changedFiles: readonly string[]): EvidenceVerdict {
-  const changed = new Set(changedFiles.map((file) => file.trim()).filter((file) => file.length > 0));
+  const changed = new Set(
+    changedFiles.map((file) => file.trim()).filter((file) => file.length > 0),
+  );
   const enforcementTouched = ENFORCEMENT_PATH_FILES.filter((file) => changed.has(file));
   const evidenceTouched = changed.has(EVIDENCE_FILE);
 
@@ -257,7 +261,9 @@ function main(): void {
 
   if (!base) {
     console.error("usage: node scripts/check-enforcement-evidence.ts <base-ref> [head-ref]");
-    console.error("       node scripts/check-enforcement-evidence.ts --check-structure [--evidence <path>]");
+    console.error(
+      "       node scripts/check-enforcement-evidence.ts --check-structure [--evidence <path>]",
+    );
     process.exit(2);
   }
 
@@ -276,7 +282,9 @@ function main(): void {
   if (!verdict.ok) {
     // A GitHub Actions annotation makes the failure legible in the run summary,
     // where an engineer will actually look first.
-    console.error(`::error title=enforcement-path evidence required::${verdict.message.split("\n")[0] ?? ""}`);
+    console.error(
+      `::error title=enforcement-path evidence required::${verdict.message.split("\n")[0] ?? ""}`,
+    );
     process.exit(1);
   }
 }

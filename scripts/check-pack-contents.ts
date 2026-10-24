@@ -47,11 +47,11 @@ function fail(message: string): never {
 function packedFiles() {
   const packDir = mkdtempSync(join(tmpdir(), "stellar-agent-guard-pack-check-"));
   try {
-    const output = execFileSync(
-      "npm",
-      ["pack", "--json", "--pack-destination", packDir],
-      { cwd: ROOT, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
-    );
+    const output = execFileSync("npm", ["pack", "--json", "--pack-destination", packDir], {
+      cwd: ROOT,
+      encoding: "utf8",
+      maxBuffer: 64 * 1024 * 1024,
+    });
     const packed = JSON.parse(output) as Array<{
       files?: Array<{ path: string }>;
       unpackedSize?: number | string;
@@ -89,7 +89,8 @@ function run() {
   if (!files.includes("package.json")) fail("tarball does not contain package.json");
   if (!files.includes("README.md")) fail("tarball does not contain README.md");
   if (!files.includes("LICENSE")) fail("tarball does not contain LICENSE");
-  if (!files.some((path) => path === "dist/index.js")) fail("tarball does not contain dist/index.js");
+  if (!files.some((path) => path === "dist/index.js"))
+    fail("tarball does not contain dist/index.js");
   if (!files.some((path) => path === "dist/index.d.ts")) {
     fail("tarball does not contain dist/index.d.ts");
   }
