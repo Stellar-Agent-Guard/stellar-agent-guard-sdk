@@ -38,7 +38,10 @@ const NETWORK = "Test SDF Network ; September 2015";
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 
-function simulationSuccess(resourceFee: unknown = "777", auth: xdr.SorobanAuthorizationEntry[] = []): object {
+function simulationSuccess(
+  resourceFee: unknown = "777",
+  auth: xdr.SorobanAuthorizationEntry[] = [],
+): object {
   return {
     transactionData: new SorobanDataBuilder().setResources(10, 20, 30).build(),
     minResourceFee: resourceFee,
@@ -211,10 +214,7 @@ describe("invoke dry run", () => {
     const source = Keypair.random();
     const agent = Keypair.random();
     const guardAuth = requiredAddressAuth(GUARD);
-    const mock = mockServer([
-      simulationSuccess("777", [guardAuth]),
-      simulationSuccess("777"),
-    ]);
+    const mock = mockServer([simulationSuccess("777", [guardAuth]), simulationSuccess("777")]);
 
     const result = await invoke(dryParams(mock.server, source, agent));
 

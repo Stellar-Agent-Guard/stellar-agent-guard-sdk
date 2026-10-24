@@ -12,21 +12,37 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
-import { Keypair, SorobanDataBuilder, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { ContractResponseError } from "../../src/errors.ts";
+import {
+  Account,
+  Address,
+  Keypair,
+  Operation,
+  SorobanDataBuilder,
+  Transaction,
+  TransactionBuilder,
+  rpc,
+  scValToNative,
+  xdr,
+} from "@stellar/stellar-sdk";
+import { ContractResponseError, SigningError } from "../../src/errors.ts";
 import {
   BroadcastError,
+  assembleFromSimulation,
   buildGuardAuthEntry,
   describeSimulationResources,
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
+  isValidAgentPublicKey,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   parseSimulationResourceFee,
+  submitAndPoll,
   toAgentSigner,
+  validateAgentPublicKey,
   verifyAgentSignature,
   type AgentSigner,
   type ContractCall,
+  type SubmissionAcceptedEvent,
 } from "../../src/tx.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
 
@@ -36,6 +52,7 @@ const CALL: ContractCall = {
   fn: "transfer",
   args: [],
 };
+const PASSPHRASE = "Test SDF Network ; September 2015";
 
 /** The real failure payload from the live testnet run, trimmed. */
 const staleLedgerFailure = {
@@ -46,10 +63,7 @@ const staleLedgerFailure = {
     {
       body: {
         v0: {
-          topics: [
-            "error",
-            { type: "system", code: 5, value: "scecExceededLimit" },
-          ],
+          topics: ["error", { type: "system", code: 5, value: "scecExceededLimit" }],
           data: ["operation byte-write resources exceeds amount specified", "724", "652"],
         },
       },
@@ -121,7 +135,18 @@ describe("parseSimulationResourceFee", () => {
   });
 
   it("rejects missing, malformed, negative, unsafe, and out-of-range fees", () => {
-    for (const value of [undefined, null, "", "not-a-fee", "1.5", Number.MAX_SAFE_INTEGER + 1, -1, -1n, "-1", 2n ** 64n]) {
+    for (const value of [
+      undefined,
+      null,
+      "",
+      "not-a-fee",
+      "1.5",
+      Number.MAX_SAFE_INTEGER + 1,
+      -1,
+      -1n,
+      "-1",
+      2n ** 64n,
+    ]) {
       assert.throws(
         () => parseSimulationResourceFee(value),
         (error: unknown) => {
@@ -131,6 +156,187 @@ describe("parseSimulationResourceFee", () => {
         },
       );
     }
+  });
+
+  it("records the stage that read the fee, so the failure says where it happened", () => {
+    assert.throws(
+      () => parseSimulationResourceFee("not-a-fee", { stage: "assemble" }),
+      (error: unknown) => {
+        assert.ok(error instanceof ContractResponseError);
+        assert.equal(error.field, "minResourceFee");
+        assert.equal(error.stage, "assemble");
+        return true;
+      },
+    );
+  });
+
+  it("leaves the stage absent when the caller names none", () => {
+    try {
+      parseSimulationResourceFee("not-a-fee");
+      assert.fail("expected a ContractResponseError");
+    } catch (error) {
+      assert.ok(error instanceof ContractResponseError);
+      assert.equal(error.stage, undefined);
+    }
+  });
+});
+
+/**
+ * A simulation payload whose only interesting field is the resource fee.
+ *
+ * The rest of the shape is what the assembler needs to build a transaction, so
+ * a malformed fee is the *only* thing wrong with it — which is what makes the
+ * failure attributable to the fee and nothing else.
+ */
+function simulationWithFee(minResourceFee: unknown): rpc.Api.SimulateTransactionSuccessResponse {
+  return {
+    minResourceFee,
+    transactionData: new SorobanDataBuilder().build().toXDR(),
+    result: { auth: [] },
+  } as unknown as rpc.Api.SimulateTransactionSuccessResponse;
+}
+
+describe("assembleFromSimulation resource-fee handling", () => {
+  const operation = Operation.invokeContractFunction({
+    contract: CALL.contract,
+    function: CALL.fn,
+    args: [],
+  });
+
+  function assemble(minResourceFee: unknown) {
+    return assembleFromSimulation({
+      simulation: simulationWithFee(minResourceFee),
+      source: new Account(Keypair.random().publicKey(), "100"),
+      operation,
+      networkPassphrase: PASSPHRASE,
+      guard: null,
+    });
+  }
+
+  it("accepts the fee in every representation the SDK may hand back", () => {
+    assert.equal(assemble("42").resourceFee, 42n);
+    assert.equal(assemble(42).resourceFee, 42n);
+    assert.equal(assemble(42n).resourceFee, 42n);
+  });
+
+  it("rejects a malformed fee with the typed contract-response error, not a native conversion error", () => {
+    for (const value of [undefined, null, "", "not-a-fee", "1.5", -1, 2n ** 64n]) {
+      assert.throws(
+        () => assemble(value),
+        (error: unknown) => {
+          assert.ok(
+            error instanceof ContractResponseError,
+            `expected a ContractResponseError for ${String(value)}`,
+          );
+          assert.equal(error.field, "minResourceFee");
+          assert.equal(error.stage, "assemble");
+          return true;
+        },
+      );
+    }
+  });
+});
+
+/** A signed-shaped transaction, enough for the submission path. */
+function buildTestTransaction(): Transaction {
+  return new TransactionBuilder(new Account(Keypair.random().publicKey(), "100"), {
+    fee: "100",
+    networkPassphrase: PASSPHRASE,
+  })
+    .addOperation(
+      Operation.invokeContractFunction({
+        contract: CALL.contract,
+        function: CALL.fn,
+        args: [],
+      }),
+    )
+    .setTimeout(0)
+    .build();
+}
+
+describe("submitAndPoll: the submission is reported before any polling", () => {
+  const HASH = "a".repeat(64);
+
+  it("publishes the hash the moment the network accepted the submission", async () => {
+    const events: SubmissionAcceptedEvent[] = [];
+    const order: string[] = [];
+    const server = {
+      async sendTransaction() {
+        order.push("send");
+        return { status: "PENDING", hash: HASH };
+      },
+      async getTransaction(hash: string) {
+        order.push(`poll:${hash}`);
+        return { status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 42 };
+      },
+    } as unknown as rpc.Server;
+
+    const result = await submitAndPoll(server, buildTestTransaction(), [], {
+      pollAttempts: 1,
+      pollIntervalMs: 0,
+      onSubmitted: (event) => {
+        order.push("submitted");
+        events.push(event);
+      },
+    });
+
+    assert.deepEqual(events, [{ hash: HASH, status: "PENDING" }]);
+    assert.deepEqual(order, ["send", "submitted", `poll:${HASH}`]);
+    assert.equal(result.hash, HASH);
+  });
+
+  it("reports an ambiguous response — no hash — and fails closed", async () => {
+    const events: SubmissionAcceptedEvent[] = [];
+    let polls = 0;
+    const server = {
+      async sendTransaction() {
+        return { status: "PENDING", hash: "" };
+      },
+      async getTransaction() {
+        polls += 1;
+        return { status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 42 };
+      },
+    } as unknown as rpc.Server;
+
+    await assert.rejects(
+      () =>
+        submitAndPoll(server, buildTestTransaction(), [], {
+          pollAttempts: 1,
+          pollIntervalMs: 0,
+          onSubmitted: (event) => events.push(event),
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof BroadcastError);
+        assert.equal(error.transactionHash, null);
+        assert.match(error.message, /no transaction hash/);
+        return true;
+      },
+    );
+
+    assert.deepEqual(events, [{ hash: null, status: "PENDING" }]);
+    assert.equal(polls, 0, "an untrackable transaction must not be polled for");
+  });
+
+  it("isolates a throwing hook: the submission still completes", async () => {
+    const server = {
+      async sendTransaction() {
+        return { status: "PENDING", hash: HASH };
+      },
+      async getTransaction() {
+        return { status: rpc.Api.GetTransactionStatus.SUCCESS, ledger: 42 };
+      },
+    } as unknown as rpc.Server;
+
+    const result = await submitAndPoll(server, buildTestTransaction(), [], {
+      pollAttempts: 1,
+      pollIntervalMs: 0,
+      onSubmitted: () => {
+        throw new Error("consumer exploded");
+      },
+    });
+
+    assert.equal(result.hash, HASH);
+    assert.equal(result.failure, null);
   });
 });
 
@@ -185,8 +391,12 @@ describe("verifyAgentSignature", () => {
   const agent = Keypair.random();
   const signature = agent.sign(payload);
 
-  it("accepts the exact payload/signature pair for strkey and raw public keys", () => {
+  it("accepts the exact payload/signature pair for strkey, hex, and raw public keys", () => {
     assert.equal(verifyAgentSignature(agent.publicKey(), payload, signature), true);
+    assert.equal(
+      verifyAgentSignature(Buffer.from(agent.rawPublicKey()).toString("hex"), payload, signature),
+      true,
+    );
     assert.equal(verifyAgentSignature(agent.rawPublicKey(), payload, signature), true);
   });
 
@@ -212,7 +422,10 @@ describe("verifyAgentSignature", () => {
 
   it("returns false for empty, truncated, and oversized signatures", () => {
     assert.equal(verifyAgentSignature(agent.publicKey(), payload, new Uint8Array()), false);
-    assert.equal(verifyAgentSignature(agent.publicKey(), payload, signature.subarray(0, 63)), false);
+    assert.equal(
+      verifyAgentSignature(agent.publicKey(), payload, signature.subarray(0, 63)),
+      false,
+    );
     const oversized = Buffer.alloc(65);
     oversized.set(signature);
     assert.equal(verifyAgentSignature(agent.publicKey(), payload, oversized), false);
@@ -255,6 +468,111 @@ describe("describeSimulationResources", () => {
 });
 
 /**
+ * Agent signer identity validation (issue #295).
+ *
+ * The signing boundary accepts only verify-only encodings of the registered
+ * Ed25519 public key. A configuration mismatch must fail here, before the
+ * signer is invoked, rather than after a probe simulation surfaces a contract
+ * `__check_auth` failure that says nothing about which key was misconfigured.
+ */
+describe("agent public-key validation", () => {
+  const local = Keypair.random();
+  const validHex = Buffer.from(local.rawPublicKey()).toString("hex");
+
+  it("accepts a checksum-valid StrKey and returns it unchanged", () => {
+    assert.equal(validateAgentPublicKey(local.publicKey()), local.publicKey());
+    assert.equal(isValidAgentPublicKey(local.publicKey()), true);
+  });
+
+  it("accepts the raw 32-byte key as hex and normalises it to the StrKey form", () => {
+    assert.equal(validateAgentPublicKey(validHex), local.publicKey());
+    assert.equal(validateAgentPublicKey(validHex.toUpperCase()), local.publicKey());
+    assert.equal(isValidAgentPublicKey(validHex), true);
+  });
+
+  it("rejects a StrKey with a bad checksum", () => {
+    const invalid = local.publicKey().slice(0, -1) + (local.publicKey().endsWith("A") ? "B" : "A");
+    assert.throws(
+      () => validateAgentPublicKey(invalid),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.match(error.message, /signer\.publicKey/);
+        return true;
+      },
+    );
+    assert.equal(isValidAgentPublicKey(invalid), false);
+  });
+
+  it("rejects secret seeds instead of deriving a public key from them", () => {
+    assert.throws(
+      () => validateAgentPublicKey(local.secret()),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.match(error.message, /must not be a secret key/);
+        return true;
+      },
+    );
+    assert.equal(isValidAgentPublicKey(local.secret()), false);
+  });
+
+  it("rejects malformed and non-Ed25519 values", () => {
+    const malformed = [
+      "",
+      "not-a-stellar-key",
+      `0x${validHex}`,
+      validHex.slice(0, -1),
+      `${validHex}00`,
+      "g".repeat(64),
+      "C".repeat(56),
+      new Address(CALL.contract).toString(),
+      undefined,
+      null,
+      42,
+    ];
+    for (const value of malformed) {
+      assert.equal(isValidAgentPublicKey(value), false, `expected ${String(value)} to be rejected`);
+      assert.throws(
+        () => validateAgentPublicKey(value as string),
+        (error: unknown) => error instanceof SigningError,
+      );
+    }
+  });
+
+  it("rejects an invalid custom signer at construction", () => {
+    const invalid: AgentSigner = {
+      publicKey: "GINVALID",
+      signDigest: () => new Uint8Array(64),
+    };
+    assert.throws(
+      () => toAgentSigner(invalid),
+      (error: unknown) => error instanceof SigningError,
+    );
+  });
+
+  it("accepts a valid remote signer, including a hex-encoded identity", async () => {
+    const remote = Keypair.random();
+    const signer: AgentSigner = {
+      publicKey: Buffer.from(remote.rawPublicKey()).toString("hex"),
+      signDigest: (digest) => remote.sign(Buffer.from(digest)),
+    };
+
+    const entry = await buildGuardAuthEntry({
+      guard: GUARD,
+      call: CALL,
+      signer,
+      nonce: 3n,
+      signatureExpirationLedger: 100,
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
+    const addressCredentials = (
+      entry.credentials as unknown as { address: xdr.SorobanAddressCredentials }
+    ).address;
+    const signature = scValToNative(addressCredentials.signature) as Uint8Array;
+    assert.equal(signature.length, 64);
+  });
+});
+
+/**
  * The agent-signing seam (issue #29).
  *
  * `buildGuardAuthEntry` used to take a `Keypair` and call `.sign()` on it
@@ -282,9 +600,9 @@ describe("AgentSigner", () => {
     );
   });
 
-  it("passes an AgentSigner through unchanged", () => {
+  it("passes a valid AgentSigner through unchanged", () => {
     const custom: AgentSigner = {
-      publicKey: "GREMOTEAGENTSIGNER",
+      publicKey: Keypair.random().publicKey(),
       signDigest: () => new Uint8Array(64),
     };
     assert.equal(toAgentSigner(custom), custom, "no wrapping an already-adapted signer");
@@ -355,6 +673,34 @@ describe("AgentSigner", () => {
       false,
       "a signature over a real preimage must not validate against an unrelated digest",
     );
+  });
+
+  it("rejects an invalid signer identity before invoking signDigest", async () => {
+    let signs = 0;
+    const invalid: AgentSigner = {
+      publicKey: "not-a-stellar-public-key",
+      signDigest: () => {
+        signs += 1;
+        return new Uint8Array(64);
+      },
+    };
+
+    await assert.rejects(
+      buildGuardAuthEntry({
+        guard: GUARD,
+        call: CALL,
+        signer: invalid,
+        nonce: 1n,
+        signatureExpirationLedger: 100,
+        networkPassphrase,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.match(error.message, /signer\.publicKey/);
+        return true;
+      },
+    );
+    assert.equal(signs, 0, "the signer must not be invoked with an invalid public identity");
   });
 
   it("answers a V2 (address-bound) credential with the matching preimage", async () => {

@@ -22,7 +22,9 @@ async function main(): Promise<void> {
   // 1. Check fixture schema
   try {
     const fixture = await readFixtureInstance();
-    console.log(`[precondition 0/4] ✓ fixture JSON schema valid (guard ${fixture.phase2EnforcementInstance.guard})`);
+    console.log(
+      `[precondition 0/4] ✓ fixture JSON schema valid (guard ${fixture.phase2EnforcementInstance.guard})`,
+    );
   } catch (err) {
     console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
