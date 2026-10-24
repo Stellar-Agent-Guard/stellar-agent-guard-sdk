@@ -185,6 +185,7 @@ export {
   type InvokeOptions,
   type InvokeOutcome,
   type InvokeParams,
+  type InvokeParamsInput,
   type InvokePendingOutcome,
   type InvokePipelineStep,
   type InvokeRetryAttempt,
@@ -193,6 +194,15 @@ export {
   type RetryableInvokeFailure,
   type SubmissionAcceptedEvent,
 } from "./invoke.ts";
+
+export { resolveRpcServer } from "./transport.ts";
+
+export type {
+  RpcServerTransport,
+  RpcTransportConfig,
+  RpcUrlTransport,
+  WithRpcTransport,
+} from "./transport.ts";
 
 export { TRACE_STEP_NAMES } from "./trace.ts";
 
@@ -215,6 +225,7 @@ export type {
   PreFlightCacheOptions,
   PreFlightCheckOptions,
   PreFlightConfig,
+  PreFlightConfigInput,
   PreFlightDecision,
   PreFlightInterceptorOptions,
 } from "./preflight.ts";
@@ -281,6 +292,7 @@ export {
   type GuardEventRecord,
   type GuardEventStream,
   type GuardTelemetryConfig,
+  type GuardTelemetryInputConfig,
   type GuardTelemetryCoverage,
   type GuardTelemetryCoverageStatus,
   type GuardTelemetryGap,

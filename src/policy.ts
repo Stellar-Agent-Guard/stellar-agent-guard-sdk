@@ -177,26 +177,71 @@ export type DeepReadonly<T> = T extends string | number | bigint | boolean | sym
 export type ReadonlyPolicyConfig = DeepReadonly<PolicyConfig>;
 
 /**
- * Freeze a policy object at the boundary so any later mutation throws in strict
- * mode (ESM modules are always strict) rather than silently producing a wrong
- * verdict. Cheap: one freeze per array, no copies.
+ * Return a deeply frozen **copy** of a policy: the SDK's immutable boundary.
+ *
+ * ## Ownership
+ *
+ * `freezePolicy` never takes ownership of the argument. The returned policy is a
+ * new object, and every nested collection in it is copied too — `assets`,
+ * `recipients`, `protocols` (each rule and its `fns` array),
+ * `recipient_window_caps` (each entry) and `blocked_recipients`. The input and
+ * the returned copy therefore share no mutable state: a caller can keep a
+ * reusable configuration object, edit it, and pass it to another call without
+ * the earlier {@link ReadonlyPolicyConfig} changing underneath it.
+ *
+ * The earlier version froze the caller's object in place and returned the same
+ * reference. Freezing a value the caller still owns is a surprising side effect
+ * — a reusable config became un-editable the moment it was handed to the SDK —
+ * and it is not what an "SDK-owned immutable boundary" should mean.
+ *
+ * ## Why deep
+ *
+ * Every nested collection is copied and frozen, not just the top-level object.
+ * A partially frozen policy would still let a caller mutate a rule's `fns`
+ * array or a `recipient_window_caps` entry after the SDK accepted it, which is
+ * exactly how a passing pre-flight check turns into a wrong verdict. Attempts to
+ * mutate the returned copy throw in strict mode (ESM modules are always strict)
+ * instead of silently succeeding.
+ *
+ * Copying is per policy entry and keeps the values themselves (addresses,
+ * `bigint` caps, booleans) by reference — they are immutable primitives, so the
+ * copy is one array/object allocation per collection, not a deep value copy.
  *
  * Call this once when a policy first enters the SDK — not on every read.
  */
 export function freezePolicy(policy: PolicyConfig): ReadonlyPolicyConfig {
-  for (const rule of policy.protocols) {
+  const copy: PolicyConfig = {
+    ...policy,
+    assets: [...policy.assets],
+    protocols: policy.protocols.map((rule) => ({
+      contract: rule.contract,
+      fns: rule.fns === null ? null : [...rule.fns],
+    })),
+    recipients: [...policy.recipients],
+  };
+  if (policy.recipient_window_caps !== undefined) {
+    copy.recipient_window_caps = policy.recipient_window_caps.map((cap) => ({
+      recipient: cap.recipient,
+      cap: cap.cap,
+    }));
+  }
+  if (policy.blocked_recipients !== undefined) {
+    copy.blocked_recipients = [...policy.blocked_recipients];
+  }
+
+  for (const rule of copy.protocols) {
     if (rule.fns !== null) Object.freeze(rule.fns);
     Object.freeze(rule);
   }
-  Object.freeze(policy.assets);
-  Object.freeze(policy.protocols);
-  Object.freeze(policy.recipients);
-  if (policy.recipient_window_caps) {
-    for (const cap of policy.recipient_window_caps) Object.freeze(cap);
-    Object.freeze(policy.recipient_window_caps);
+  Object.freeze(copy.assets);
+  Object.freeze(copy.protocols);
+  Object.freeze(copy.recipients);
+  if (copy.recipient_window_caps) {
+    for (const cap of copy.recipient_window_caps) Object.freeze(cap);
+    Object.freeze(copy.recipient_window_caps);
   }
-  if (policy.blocked_recipients) Object.freeze(policy.blocked_recipients);
-  return Object.freeze(policy) as ReadonlyPolicyConfig;
+  if (copy.blocked_recipients) Object.freeze(copy.blocked_recipients);
+  return Object.freeze(copy) as ReadonlyPolicyConfig;
 }
 
 /**

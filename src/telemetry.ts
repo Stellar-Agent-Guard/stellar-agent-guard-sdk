@@ -42,6 +42,7 @@ import {
 } from "./events.ts";
 import { bytesToHex, sha256Hex, utf8Length } from "./hash.ts";
 import { topicSymbols } from "./invoke.ts";
+import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 
 /** The event name topics this SDK knows how to interpret. */
@@ -685,6 +686,11 @@ export class GuardEventRingBuffer {
 }
 
 export interface GuardTelemetryConfig {
+  /**
+   * The RPC transport, used verbatim. Inject your own instance to route RPC
+   * through a proxy (auth headers, mTLS) or to mock it in tests. Mutually
+   * exclusive with `url`.
+   */
   server: rpc.Server;
   /** The guard contract to follow. */
   guard: string;
@@ -2089,11 +2095,21 @@ function cursorNetworkIdentity(config: GuardTelemetryConfig): string {
 }
 
 /**
+ * What a transport-backed `GuardTelemetryListener` accepts: `GuardTelemetryConfig`
+ * with the shared `{ server? | url? }` transport (issue #117).
+ */
+export type GuardTelemetryInputConfig = WithRpcTransport<GuardTelemetryConfig>;
+
+/**
  * Config for a listener used purely for local state (counters, `recent()`),
  * with no RPC transport. A host that only wants `observe()`/`stats()` does not
  * need a `server` and should not have to fabricate one.
  */
 export interface GuardTelemetryLocalConfig {
+  /** A local listener has no transport. */
+  server?: never;
+  /** A local listener has no transport. */
+  url?: never;
   /** Opt-in sliding-window counters over allowed/blocked decisions. */
   counters?: GuardTelemetryCountersOptions;
   /** Clock the counters consult for `windowMs` eviction. */
@@ -2280,8 +2296,23 @@ export class GuardTelemetryListener {
    */
   private readonly counters: GuardDecisionCounters | null;
 
-  constructor(config: GuardTelemetryConfig | GuardTelemetryLocalConfig = {}) {
-    const resolved = config as GuardTelemetryConfig;
+  constructor(config: GuardTelemetryInputConfig | GuardTelemetryLocalConfig = {}) {
+    // Shared transport (issue #117): exactly one of `server` (used verbatim)
+    // or `url` (the SDK builds the `rpc.Server`). A purely local listener (no
+    // `guard`, see `GuardTelemetryLocalConfig`) has no transport at all.
+    const supplied = config as { server?: unknown; url?: unknown; guard?: unknown };
+    const isLocal =
+      supplied.guard === undefined && supplied.server === undefined && supplied.url === undefined;
+    const resolved = (
+      isLocal
+        ? config
+        : {
+            ...withResolvedServer<GuardTelemetryConfig>(config as GuardTelemetryInputConfig),
+            rpcUrl:
+              (config as { rpcUrl?: string }).rpcUrl ??
+              (typeof supplied.url === "string" ? supplied.url : undefined),
+          }
+    ) as GuardTelemetryConfig;
     this.config = resolved;
     this.guardContractId = canonicalContractId(resolved.guard) ?? resolved.guard ?? "";
     this.cursorNetwork = cursorNetworkIdentity(resolved);

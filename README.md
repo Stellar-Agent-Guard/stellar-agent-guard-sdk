@@ -454,6 +454,52 @@ When an opt-in `policySource` (contract address or `GuardPolicy`/`PolicyConfig`)
 - `reason`: The contract's policy block reason (e.g. `"window_cap_exceeded"` or `"per_tx_cap_exceeded"`), or `null` when allowed.
 - When no policy source is configured in options, `policyContext` is `null` (no policy call is made).
 
+### Injectable transport (`server` or `url`)
+
+Every RPC-facing surface — `PreFlightInterceptor` / `preflight()`, `invoke()` /
+`enforceCall()`, and `GuardTelemetryListener` — takes the same transport shape
+(`RpcTransportConfig`): supply **exactly one** of
+
+- `server` — a pre-built `rpc.Server`, used verbatim. The SDK never replaces it
+  with a fresh one.
+- `url` — a Soroban RPC URL. The SDK builds `new rpc.Server(url, rpcOptions)`;
+  `rpcOptions` is optional and passed through unchanged.
+
+Supplying both, or neither, throws `InvalidInputError` (a `TypeError`, rules
+`server-url-mutually-exclusive` / `server-or-url-required`) at construction,
+before any RPC. A telemetry listener used only for local state (counters,
+`recent()`, no `guard`) needs no transport.
+
+```ts
+import { rpc } from "@stellar/stellar-sdk";
+import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+// Proxy / auth setup happens *before* the Server is constructed, then it is passed in.
+const server = new rpc.Server("https://rpc.example.com", {
+  headers: { Authorization: `Bearer ${process.env.RPC_TOKEN}` },
+});
+const guard = new PreFlightInterceptor({ server, networkPassphrase, guard, agent, source });
+
+// Or let the SDK build it from a URL:
+const guard2 = new PreFlightInterceptor({ url: "https://soroban-testnet.stellar.org", networkPassphrase, guard, agent, source });
+```
+
+What `@stellar/stellar-sdk` 17 supports (from `lib/esm/rpc/server.d.ts`, 17.0.1):
+
+- The constructor is `new rpc.Server(serverURL: string, opts?: rpc.Server.Options)`.
+- `rpc.Server.Options` has `allowHttp?: boolean`, `timeout?: number`, and
+  `headers?: Record<string, string>`.
+- `server.httpClient` (`readonly httpClient: HttpClient`) is exposed; its
+  `defaults.headers` and `interceptors.request.use(...)` can be set on an
+  instance before it is injected.
+- There is **no** custom `fetch` / transport function option in sdk 17, so
+  `server` instance injection is the only lever this SDK exposes. mTLS or a
+  custom agent must be configured on the instance (or the process) before it is
+  passed in.
+
+Unit tests can inject a plain object implementing just the methods a test
+exercises (cast to `rpc.Server`) instead of mocking a URL.
+
 ### Deterministic time control in tests (Clock injection)
 
 Time-dependent operations (cache TTL, transaction polling) support optional `Clock` injection for deterministic testing without real delays.

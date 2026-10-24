@@ -26,6 +26,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Note** (feat(preflight)/preflight-verify-assertallowed-throws-guardblockederror-only-never-transport-errors, PR for #90): Formalizes and pins the `assertAllowed` and `assertBatchAllowed` throw-on-refusal contract, ensuring policy blocks throw `GuardBlockedError` and undetermined / transport errors throw `GuardUndeterminedError` with root cause preserved. The underlying on-chain simulation and policy enforcement evaluation remain unchanged; live Phase 2 integration evidence remains valid.
 
+**Note** (security/issue-117-feat-telemetry-injectable-transport-custom-rpc, PR #373 for #117): `src/preflight.ts` and `src/invoke.ts` now take the shared `{ server? | url? }` transport config (`src/transport.ts`). The only new code on the enforcement path runs at the public boundary: it resolves the `rpc.Server` (an injected instance verbatim, or `new rpc.Server(url, rpcOptions)`) and throws `InvalidInputError` when both or neither are supplied, before any RPC. Simulation, signing, broadcast and the guard's block/admit decision are unchanged, so the scenario evidence below remains valid. A live re-run was attempted on 2026-10-24 against a freshly deployed instance (`npm run deploy:phase2`). It stopped at `set_policy` with `HostError: Error(Object, UnexpectedSize)`: the Phase-1 WASM does not decode the current `policyToScVal` ABI, which is the redeploy prerequisite recorded above. That deploy also showed `initialize` failing with `txBadAuthExtra` when the same key is both `source` and an `accountSigners` entry, reproduced on `main`; that is out of scope for this PR and is not fixed here. No scenario output from that attempt is recorded here.
+
 ## Instance under test
 
 | | |
@@ -35,6 +37,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 | Network | Test SDF Network ; September 2015 |
 | Deployed WASM SHA-256 | `f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63` |
 | Same artifact as Phase 1 | yes — verified against the ledger's `ContractExecutable` and the SHA-256 of the fetched bytecode |
+
+**Note** (fix/policy-293-avoid-freezing-caller-owned-policy-objects, PR for #293): `freezePolicy()` no longer freezes the caller's policy object in place; it returns a deeply frozen **copy** — the policy object, `assets`, `recipients`, `protocols` (each rule and its `fns` array), `recipient_window_caps` (each entry) and `blocked_recipients` are copied before freezing. The change is confined to an ownership/immutability helper on the policy model: it copies and freezes, it does not add, drop, normalise or validate any field, and the `ScVal` produced by `policyToScVal` is byte-identical to the one produced for the same policy before this change. The five scenarios recorded below are enforced by the contract during simulation and are unchanged; the new ownership semantics are covered by unit tests in `tests/unit/policy.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
 
 This is **not** the Phase 1 instance. Phase 1's guard (`CAYJZT4X…`) is left frozen
 by its own dead-man switch as Phase 1's evidence, and is never touched by this

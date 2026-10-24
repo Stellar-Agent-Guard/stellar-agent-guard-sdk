@@ -1702,11 +1702,94 @@ describe("validateGuardPolicy (SPEC §8)", () => {
   });
 });
 
+/**
+ * `freezePolicy` returns a frozen **copy**: the caller keeps ownership of the
+ * object it passed in (issue #293). Every assertion below is therefore about
+ * two separate values — the input, which must stay editable, and the returned
+ * policy, which must be immutable all the way down.
+ */
 describe("freezePolicy", () => {
-  it("returns the same object reference (no copy)", () => {
+  /** A policy carrying every nested collection, so each one can be checked. */
+  function fullPolicy(): PolicyConfig {
+    return samplePolicy({
+      protocols: [
+        { contract: TOKEN, fns: ["transfer", "approve"] },
+        { contract: GUARD, fns: null },
+      ],
+      recipient_window_caps: [{ recipient: RECIPIENT, cap: 10n }],
+      blocked_recipients: [RECIPIENT],
+    });
+  }
+
+  it("returns a distinct object with the same contents (does not return the input)", () => {
     const policy = samplePolicy();
     const frozen = freezePolicy(policy);
-    assert.equal(frozen, policy as unknown);
+    assert.notEqual(frozen, policy as unknown);
+    assert.deepEqual(frozen, policy);
+    assert.ok(Object.isFrozen(frozen));
+  });
+
+  it("leaves the caller's top-level object editable", () => {
+    const policy = samplePolicy();
+    freezePolicy(policy);
+    assert.equal(Object.isFrozen(policy), false);
+    policy.per_tx_cap = 9999n;
+    policy.paused = true;
+    assert.equal(policy.per_tx_cap, 9999n);
+    assert.equal(policy.paused, true);
+  });
+
+  it("leaves every nested collection of the caller's policy editable", () => {
+    const policy = fullPolicy();
+    freezePolicy(policy);
+
+    policy.assets.push(TOKEN);
+    policy.recipients.push(RECIPIENT);
+    policy.protocols.push({ contract: TOKEN, fns: null });
+    policy.protocols[0]!.fns!.push("swap");
+    policy.protocols[0]!.contract = TOKEN;
+    policy.recipient_window_caps!.push({ recipient: RECIPIENT, cap: 20n });
+    policy.recipient_window_caps![0]!.cap = 99n;
+    policy.blocked_recipients!.push(RECIPIENT);
+
+    assert.equal(policy.assets.length, 2);
+    assert.equal(policy.recipients.length, 2);
+    assert.equal(policy.protocols.length, 3);
+    assert.deepEqual(policy.protocols[0]!.fns, ["transfer", "approve", "swap"]);
+    assert.equal(policy.recipient_window_caps![1]!.cap, 20n);
+    assert.equal(policy.blocked_recipients!.length, 2);
+  });
+
+  it("shares no nested references with the caller's policy", () => {
+    const policy = fullPolicy();
+    const frozen = freezePolicy(policy);
+    const frozenProtocols = frozen.protocols as unknown as PolicyConfig["protocols"];
+    const frozenCaps = frozen.recipient_window_caps as unknown as RecipientWindowCap[];
+
+    assert.notEqual(frozen.assets, policy.assets);
+    assert.notEqual(frozen.recipients, policy.recipients);
+    assert.notEqual(frozen.protocols, policy.protocols);
+    assert.notEqual(frozenProtocols[0], policy.protocols[0]);
+    assert.notEqual(frozenProtocols[0]!.fns, policy.protocols[0]!.fns);
+    assert.notEqual(frozen.recipient_window_caps, policy.recipient_window_caps);
+    assert.notEqual(frozenCaps[0], policy.recipient_window_caps![0]);
+    // Addresses are immutable string primitives, so the arrays are copies while
+    // the elements are intentionally the same values — sharing them is safe.
+    assert.notEqual(frozen.blocked_recipients, policy.blocked_recipients);
+  });
+
+  it("editing the caller's policy after the call does not change the returned copy", () => {
+    const policy = fullPolicy();
+    const before = structuredClone(policy);
+    const frozen = freezePolicy(policy);
+
+    policy.assets.push(TOKEN);
+    policy.recipients.push(RECIPIENT);
+    policy.protocols[0]!.fns!.push("swap");
+    policy.recipient_window_caps![0]!.cap = 99n;
+    policy.blocked_recipients!.push(RECIPIENT);
+
+    assert.deepEqual(frozen, before);
   });
 
   it("freezes the top-level object — mutation throws in strict mode (ESM = strict)", () => {
@@ -1718,16 +1801,35 @@ describe("freezePolicy", () => {
 
   it("freezes the assets array — push throws", () => {
     const frozen = freezePolicy(samplePolicy());
+    assert.ok(Object.isFrozen(frozen.assets));
     assert.throws(() => {
       (frozen.assets as ContractAddress[]).push(TOKEN);
     }, TypeError);
   });
 
+  it("freezes the recipients array — push throws", () => {
+    const frozen = freezePolicy(samplePolicy());
+    assert.ok(Object.isFrozen(frozen.recipients));
+    assert.throws(() => {
+      (frozen.recipients as AccountAddress[]).push(RECIPIENT);
+    }, TypeError);
+  });
+
   it("freezes protocol rule objects and their fns arrays", () => {
     const policy = samplePolicy({
-      protocols: [{ contract: TOKEN, fns: ["transfer"] }],
+      protocols: [
+        { contract: TOKEN, fns: ["transfer"] },
+        { contract: GUARD, fns: null },
+      ],
     });
     const frozen = freezePolicy(policy);
+    assert.ok(Object.isFrozen(frozen.protocols));
+    assert.ok(Object.isFrozen(frozen.protocols[0]));
+    assert.ok(Object.isFrozen(frozen.protocols[0]!.fns));
+    assert.equal(frozen.protocols[1]!.fns, null);
+    assert.throws(() => {
+      (frozen.protocols as ProtocolRule[]).push({ contract: TOKEN, fns: null });
+    }, TypeError);
     assert.throws(() => {
       (frozen.protocols[0]!.fns as string[]).push("swap");
     }, TypeError);
@@ -1741,6 +1843,8 @@ describe("freezePolicy", () => {
     const frozen = freezePolicy(samplePolicy({ recipient_window_caps: caps }));
     const frozenCaps = (frozen as unknown as { recipient_window_caps: RecipientWindowCap[] })
       .recipient_window_caps;
+    assert.ok(Object.isFrozen(frozenCaps));
+    assert.ok(Object.isFrozen(frozenCaps[0]));
     assert.throws(() => {
       frozenCaps.push({ recipient: RECIPIENT, cap: 20n });
     }, TypeError);
@@ -1749,8 +1853,33 @@ describe("freezePolicy", () => {
     }, TypeError);
   });
 
-  it("still encodes correctly after freeze", () => {
+  it("freezes the blocked_recipients array — push throws", () => {
+    const frozen = freezePolicy(samplePolicy({ blocked_recipients: [RECIPIENT] }));
+    assert.ok(Object.isFrozen(frozen.blocked_recipients));
+    assert.throws(() => {
+      (frozen as unknown as { blocked_recipients: AccountAddress[] }).blocked_recipients.push(
+        RECIPIENT,
+      );
+    }, TypeError);
+  });
+
+  it("does not invent optional collections the caller omitted", () => {
     const frozen = freezePolicy(samplePolicy());
+    assert.equal(Object.hasOwn(frozen, "recipient_window_caps"), false);
+    assert.equal(Object.hasOwn(frozen, "blocked_recipients"), false);
+  });
+
+  it("is safe to call on a policy that was already frozen", () => {
+    const first = freezePolicy(fullPolicy());
+    // Re-freezing a returned policy is a no-op value-wise: a fresh copy is
+    // produced, so nothing is mutated and nothing throws.
+    const second = freezePolicy(structuredClone(first) as unknown as PolicyConfig);
+    assert.deepEqual(second, first);
+    assert.ok(Object.isFrozen(second));
+  });
+
+  it("still encodes correctly after freeze", () => {
+    const frozen = freezePolicy(fullPolicy());
     assert.doesNotThrow(() => policyToScVal(frozen));
   });
 
