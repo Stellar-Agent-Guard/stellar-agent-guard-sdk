@@ -44,7 +44,10 @@ interface CapturedEvent {
 }
 
 /** Decode one contract event into the vocabulary a listener would consume. */
-function decodeContractEvent(event: unknown, source: CapturedEvent["source"]): CapturedEvent | null {
+function decodeContractEvent(
+  event: unknown,
+  source: CapturedEvent["source"],
+): CapturedEvent | null {
   // Two shapes reach here: a ledger event from `getTransaction` wraps the body
   // in a `DiagnosticEvent` (`.event.body`), while a simulation diagnostic is a
   // bare event (`.body`). Reading only one silently drops the other — which is
@@ -140,7 +143,9 @@ async function main(): Promise<void> {
     guardAuth: { guard: unsafeContractAddress(guard), agent },
   });
   if (heartbeat instanceof Error || heartbeat.kind !== "allowed") {
-    throw new Error(`heartbeat was not allowed: ${heartbeat instanceof Error ? heartbeat.message : json(heartbeat)}`);
+    throw new Error(
+      `heartbeat was not allowed: ${heartbeat instanceof Error ? heartbeat.message : json(heartbeat)}`,
+    );
   }
   console.log(`    tx ${heartbeat.submission.hash} (ledger ${heartbeat.submission.ledger})`);
 
@@ -149,10 +154,13 @@ async function main(): Promise<void> {
   // contract, and each group is itself an array of events. Reading it as a flat
   // event list yields one element that is an array and decodes to nothing —
   // which is how the first capture run lost this event entirely.
-  const groups = (tx as unknown as { events?: { contractEventsXdr?: unknown[] } }).events
-    ?.contractEventsXdr ?? [];
+  const groups =
+    (tx as unknown as { events?: { contractEventsXdr?: unknown[] } }).events?.contractEventsXdr ??
+    [];
   const ledgerEvents = groups.flatMap((group) => (Array.isArray(group) ? group : [group]));
-  console.log(`    ledger contract events returned: ${ledgerEvents.length} (in ${groups.length} group(s))`);
+  console.log(
+    `    ledger contract events returned: ${ledgerEvents.length} (in ${groups.length} group(s))`,
+  );
   for (const event of ledgerEvents) {
     const decoded = decodeContractEvent(event, "ledger");
     if (decoded && GUARD_TOPICS.has(decoded.topics[0] ?? "")) captured.push(decoded);
@@ -165,7 +173,9 @@ async function main(): Promise<void> {
   // is deliberately not reported as a block.
   const recipientSecret = env["PHASE2_RECIPIENT_SECRET"];
   if (!recipientSecret) {
-    throw new Error("PHASE2_RECIPIENT_SECRET missing from .env.phase2 (needed as the transfer destination)");
+    throw new Error(
+      "PHASE2_RECIPIENT_SECRET missing from .env.phase2 (needed as the transfer destination)",
+    );
   }
   const recipient = Keypair.fromSecret(recipientSecret).publicKey();
   console.log(`[2] attempting a per-tx-cap violation (1100 > per_tx_cap 1000) to ${recipient}`);
@@ -185,7 +195,9 @@ async function main(): Promise<void> {
     guardAuth: { guard: unsafeContractAddress(guard), agent },
   });
   if (blocked instanceof Error || blocked.kind !== "blocked") {
-    throw new Error(`expected a pre-broadcast block, got: ${blocked instanceof Error ? blocked.message : json(blocked)}`);
+    throw new Error(
+      `expected a pre-broadcast block, got: ${blocked instanceof Error ? blocked.message : json(blocked)}`,
+    );
   }
   console.log(`    reason reported by invoke(): ${blocked.reason}`);
   for (const summary of summarizeDiagnosticEvents(blocked.diagnosticEvents)) {
