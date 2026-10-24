@@ -221,7 +221,7 @@ describe("watch(signal) cursor persistence", () => {
     );
   });
 
-  it("saves once per poll, before the page is delivered", async () => {
+  it("saves once per poll, after the consumer resumes past yield (issue #274)", async () => {
     const pages: ScriptedPage[] = [
       { events: [rawLedgerEvent(501)], cursor: "cursor-2" },
       { events: [rawLedgerEvent(502)], cursor: "cursor-3" },
@@ -231,38 +231,49 @@ describe("watch(signal) cursor persistence", () => {
     const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
 
     const seen: GuardEvent[][] = [];
-    let savedBeforeFirstPage = false;
-    for await (const events of listener.watch({ pollIntervalMs: 1 })) {
-      if (seen.length === 0) {
-        savedBeforeFirstPage = rec.saves.length === 1 && rec.saves[0] === "cursor-2";
-      }
-      seen.push(events);
-      if (seen.length >= 2) break;
+    let savedDuringFirstPageYield = false;
+    const gen = listener.watch({ pollIntervalMs: 1 });
+    const res1 = await gen.next();
+    if (!res1.done && res1.value) {
+      savedDuringFirstPageYield = rec.saves.length > 0;
+      seen.push(res1.value);
     }
+    const res2 = await gen.next(); // resumes past yield of page 1, saving cursor-2
+    if (!res2.done && res2.value) {
+      seen.push(res2.value);
+    }
+    await gen.next(); // resumes past yield of page 2, saving cursor-3
+    await gen.return();
 
     assert.deepEqual(seen, [[decodedEvent(501)], [decodedEvent(502)]]);
-    assert.ok(savedBeforeFirstPage, "page 1's cursor is persisted before the page is yielded");
-    assert.deepEqual(rec.saves, ["cursor-2", "cursor-3"], "exactly one save per poll");
+    assert.equal(savedDuringFirstPageYield, false, "page 1's cursor is acknowledged only after consumer advances past yield");
+    assert.deepEqual(rec.saves, ["cursor-2", "cursor-3"], "exactly one save per poll after yield");
   });
 
   it("a restarted listener resumes from the saved cursor without re-fetching history", async () => {
-    const pages: ScriptedPage[] = [
-      { events: [rawLedgerEvent(501)], cursor: "cursor-2" },
-      { events: [rawLedgerEvent(502)], cursor: "cursor-3" },
-      { events: [rawLedgerEvent(503)], cursor: "cursor-4" },
-    ];
-    const { server, requests } = scriptedServer(pages);
+    const page1 = { events: [rawLedgerEvent(501)], cursor: "cursor-2" };
+    const page2 = { events: [rawLedgerEvent(502)], cursor: "cursor-3" };
+    const page3 = { events: [rawLedgerEvent(503)], cursor: "cursor-4" };
+
+    const server1 = scriptedServer([page1, page2]).server;
+    const server2 = scriptedServer([page3]).server;
+
     const rec = recordingCursorStore(null);
 
-    // First process: consumes two pages, then "crashes" (iteration stops).
-    const first = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
-    await take(first, 2);
+    // First process: consumes two pages. To save cursor-3 (page2's cursor), consumer takes 2 pages
+    // and then triggers the next iteration step.
+    const first = new GuardTelemetryListener({ server: server1, guard: GUARD, cursorStore: rec.store });
+    const gen = first.watch({ pollIntervalMs: 1 });
+    await gen.next(); // receives page 1 (501)
+    await gen.next(); // advances past page 1's yield (saves cursor-2), receives page 2 (502)
+    await gen.next(); // advances past page 2's yield (saves cursor-3)
+    await gen.return();
+
     assert.equal(rec.lastStored(), "cursor-3", "the restart point is the last saved cursor");
 
     // Second process: fresh listener, same store.
-    const second = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
+    const second = new GuardTelemetryListener({ server: server2, guard: GUARD, cursorStore: rec.store });
     const resumed = await take(second, 1);
-    const resumedRequest = requests[2];
 
     assert.deepEqual(
       resumed,
@@ -310,7 +321,11 @@ describe("watch(signal) cursor persistence", () => {
     const { server, requests } = scriptedServer(pages);
     const listener = new GuardTelemetryListener({ server, guard: GUARD });
 
-    await take(listener, 1);
+    const gen1 = listener.watch({ pollIntervalMs: 1 });
+    await gen1.next(); // receives page 1
+    await gen1.next(); // resumes past yield of page 1 (saving cursor-2)
+    await gen1.return();
+
     await take(listener, 1); // the "restart": watch() invoked again on the same listener
     const secondRunRequest = requests[1];
 
@@ -1835,5 +1850,160 @@ describe("bounded look-ahead pump (issue #36)", () => {
       assert.equal(pages[0]!.length, 2);
       assert.deepEqual(malformedCounts, [1], "onMalformed callback was notified with the count");
     });
+  });
+});
+
+describe("watch() safe checkpointing on interruption & crash (issue #274)", () => {
+  it("does not advance cursor when consumer crashes/throws before advancing past yield", async () => {
+    const page1 = { events: [rawLedgerEvent(501)], cursor: "cursor-1" };
+    const page1Replay = { events: [rawLedgerEvent(501)], cursor: "cursor-1" };
+
+    const server1 = scriptedServer([page1]).server;
+    const { server: server2, requests: requests2 } = scriptedServer([page1Replay]);
+    const rec = recordingCursorStore(null);
+
+    const firstListener = new GuardTelemetryListener({ server: server1, guard: GUARD, cursorStore: rec.store });
+
+    // Simulate crash on consumer side when processing page 1 (before resuming/advancing past yield of page 1)
+    try {
+      for await (const events of firstListener.watch({ pollIntervalMs: 1 })) {
+        if (events[0] && events[0].ledger === 501) {
+          // Check saved cursor immediately inside the yield iteration block
+          // The cursor for page 1 ("cursor-1") must NOT have been saved yet!
+          assert.equal(rec.lastStored(), null, "cursor must not be saved while consumer is processing yielded page");
+          throw new Error("consumer crash mid-processing");
+        }
+      }
+    } catch (err) {
+      assert.equal((err as Error).message, "consumer crash mid-processing");
+    }
+
+    assert.equal(rec.lastStored(), null, "cursor remains unadvanced after crash");
+
+    // Second listener (simulating process restart)
+    const secondListener = new GuardTelemetryListener({ server: server2, guard: GUARD, cursorStore: rec.store });
+    const resumedPages = await take(secondListener, 1);
+
+    // Should re-fetch page 1 because cursor was not saved before crash
+    assert.deepEqual(resumedPages, [[decodedEvent(501)]], "re-delivers page 1 on restart (at-least-once guarantee)");
+    assert.equal(requests2[0]?.cursor, undefined, "first poll after restart resumes from unadvanced cursor");
+  });
+
+  it("saves page cursor after consumer advances past yield", async () => {
+    const pages: ScriptedPage[] = [
+      { events: [rawLedgerEvent(501)], cursor: "cursor-1" },
+      { events: [rawLedgerEvent(502)], cursor: "cursor-2" },
+    ];
+    const { server } = scriptedServer(pages);
+    const rec = recordingCursorStore(null);
+
+    const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
+
+    const consumed: number[] = [];
+    for await (const events of listener.watch({ pollIntervalMs: 1 })) {
+      if (events[0] && events[0].ledger !== null) {
+        consumed.push(events[0].ledger);
+      }
+      if (consumed.length === 1) {
+        // While processing 501, rec.lastStored() is still null
+        assert.equal(rec.lastStored(), null);
+      } else if (consumed.length === 2) {
+        // When processing 502, consumer has advanced past yield of 501, so cursor-1 is saved!
+        assert.equal(rec.lastStored(), "cursor-1");
+        break;
+      }
+    }
+  });
+});
+
+describe("Bounded event-ID de-duplication (issue #278)", () => {
+  it("suppresses duplicate events across overlapping pages and re-fed diagnostic batches within horizon", async () => {
+    const event1: GuardEvent = {
+      id: "diag:hash1",
+      kind: "auth_checked",
+      topic: "event_auth_checked",
+      source: "diagnostic",
+      stream: "diagnostic",
+      contractId: GUARD,
+      ledger: null,
+      ledgerClosedAt: null,
+      observedAt: "2026-09-14T18:20:32Z",
+      transactionHash: null,
+      decision: { result: "blocked", reason: "per_tx_cap_exceeded", source: "diagnostic" },
+      data: {},
+    };
+    const event2: GuardEvent = {
+      id: "diag:hash2",
+      kind: "auth_checked",
+      topic: "event_auth_checked",
+      source: "diagnostic",
+      stream: "diagnostic",
+      contractId: GUARD,
+      ledger: null,
+      ledgerClosedAt: null,
+      observedAt: "2026-09-14T18:20:32Z",
+      transactionHash: null,
+      decision: { result: "blocked", reason: "protocol_call_rate_exceeded", source: "diagnostic" },
+      data: {},
+    };
+
+    const batches = [
+      { events: [event1, event2], observedAt: "2026-09-14T18:20:32Z" },
+      { events: [event2], observedAt: "2026-09-14T18:20:33Z" }, // re-fed batch
+    ];
+
+    const { mergeGuardEventStreams } = await import("../../src/telemetry.ts");
+    const emitted: GuardEvent[] = [];
+
+    for await (const event of mergeGuardEventStreams([], batches, undefined, 10)) {
+      emitted.push(event);
+    }
+
+    assert.equal(emitted.length, 2);
+    assert.deepEqual(emitted.map((e) => e.id), ["diag:hash1", "diag:hash2"]);
+  });
+
+  it("bounds retained identity state over long streams past capacity", async () => {
+    const { BoundedEventDeduplicator, mergeGuardEventStreams } = await import("../../src/telemetry.ts");
+
+    const dedup = new BoundedEventDeduplicator(5);
+    for (let i = 1; i <= 10; i++) {
+      dedup.add(`id-${i}`);
+    }
+
+    assert.equal(dedup.size, 5, "deduplicator size never exceeds capacity 5");
+    assert.equal(dedup.has("id-1"), false, "oldest id-1 was evicted");
+    assert.equal(dedup.has("id-5"), false, "id-5 was evicted");
+    assert.equal(dedup.has("id-6"), true, "id-6 is retained");
+    assert.equal(dedup.has("id-10"), true, "id-10 is retained");
+
+    // Test eviction and re-emission past bounded horizon in stream
+    const batches = Array.from({ length: 15 }, (_, i) => ({
+      events: [
+        {
+          id: `id-${i + 1}`,
+          kind: "heartbeat" as const,
+          topic: "event_heartbeat",
+          source: "ledger" as const,
+          stream: "committed" as const,
+          contractId: GUARD,
+          ledger: 100 + i,
+          ledgerClosedAt: null,
+          observedAt: null,
+          transactionHash: `tx-${i + 1}`,
+          decision: null,
+          data: {},
+        },
+      ],
+      observedAt: "2026-09-14T18:20:32Z",
+    }));
+
+    const streamedEvents: GuardEvent[] = [];
+    // Stream with small dedupCapacity of 5
+    for await (const event of mergeGuardEventStreams([], batches, undefined, 5)) {
+      streamedEvents.push(event);
+    }
+
+    assert.equal(streamedEvents.length, 15, "all 15 unique events yielded");
   });
 });
