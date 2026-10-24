@@ -20,6 +20,7 @@ import {
   decodeCheckResult,
   decodePolicy,
   deadManRemaining,
+  definePolicy,
   describePolicy,
   extractTransferAmount,
   fetchGuardPolicyAndWindow,
@@ -31,6 +32,7 @@ import {
   validateGuardPolicy,
   validatePolicyForEncoding,
   freezePolicy,
+  DEFAULT_GUARD_POLICY,
   unsafeContractAddress,
   unsafeAccountAddress,
   unsafePublicKeyHex,
@@ -63,6 +65,45 @@ function samplePolicy(overrides: Partial<PolicyConfig> = {}): PolicyConfig {
     ...overrides,
   };
 }
+
+describe("definePolicy", () => {
+  it("merges a partial override over the defaults", () => {
+    const policy = definePolicy({ recipients: [RECIPIENT], per_tx_cap: 100n });
+    assert.equal(policy.per_tx_cap, 100n);
+    assert.deepEqual(policy.recipients, [RECIPIENT]);
+    assert.equal(policy.window_secs, DEFAULT_GUARD_POLICY.window_secs);
+    assert.equal(policy.paused, DEFAULT_GUARD_POLICY.paused);
+  });
+
+  it("replaces nested lists entirely rather than concatenating", () => {
+    const policy = definePolicy({ recipients: [RECIPIENT] });
+    assert.deepEqual(policy.recipients, [RECIPIENT]);
+    assert.notEqual(policy.recipients.length, DEFAULT_GUARD_POLICY.recipients.length + 1);
+  });
+
+  it("returns a frozen policy", () => {
+    const policy = definePolicy({ per_tx_cap: 100n });
+    assert.throws(() => {
+      (policy as { per_tx_cap: bigint }).per_tx_cap = 1n;
+    }, TypeError);
+  });
+
+  it("rejects unknown keys at runtime", () => {
+    assert.throws(
+      () => definePolicy({ window_cap2: 1n } as unknown as Partial<PolicyConfig>),
+      /unknown key/i,
+    );
+  });
+
+  it("rejects unknown keys at the type level", () => {
+    // @ts-expect-error — window_cap2 is not a PolicyConfig field
+    assert.throws(() => definePolicy({ window_cap2: 1n }));
+  });
+
+  it("validates the merged policy before returning", () => {
+    assert.throws(() => definePolicy({ per_tx_cap: -1n }), /per_tx_cap/);
+  });
+});
 
 /**
  * Keys of an `ScVal::Map`, decoded to strings, in encoded order.
