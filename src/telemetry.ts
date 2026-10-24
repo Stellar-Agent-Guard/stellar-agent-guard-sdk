@@ -42,7 +42,6 @@ import {
 } from "./events.ts";
 import { bytesToHex, sha256Hex, utf8Length } from "./hash.ts";
 import { topicSymbols } from "./invoke.ts";
-import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 
 /** The event name topics this SDK knows how to interpret. */
@@ -686,17 +685,19 @@ export class GuardEventRingBuffer {
 }
 
 export interface GuardTelemetryConfig {
-  /**
-   * The RPC transport, used verbatim. Inject your own instance to route RPC
-   * through a proxy (auth headers, mTLS) or to mock it in tests. Mutually
-   * exclusive with `url`.
-   */
   server: rpc.Server;
   /** The guard contract to follow. */
   guard: string;
-  /** Opt in to scanning failed transaction diagnostics as a third stream. */
+  /**
+   * Opt in to scanning failed transaction diagnostics as a third stream.
+   * Default: `false`.
+   */
   failedTx?: boolean;
-  /** RPC URL, only used for error messages. */
+  /**
+   * RPC URL used, ahead of the server's own URL, as the network identity (its
+   * host) that scopes cursor-store slots. Default: none (the server's URL is
+   * used).
+   */
   rpcUrl?: string;
   /**
    * Optional log sink for this listener's diagnostics: a summary of every page
@@ -713,7 +714,8 @@ export interface GuardTelemetryConfig {
   counters?: GuardTelemetryCountersOptions;
   /**
    * Clock the counters consult for `windowMs` eviction. Defaults to
-   * `Date.now`; injectable so tests need no wall-clock waits.
+   * `Date.now`; injectable so tests need no wall-clock waits. When set, it
+   * replaces `counters.clock`.
    */
   clock?: (() => number) | undefined;
   /**
@@ -743,6 +745,8 @@ export interface GuardTelemetryConfig {
    * (issue #282), so one backing store can safely serve several listeners
    * without cursor cross-talk. A pre-#282 two-method store still works — it
    * simply keeps a single slot, as it always did.
+   *
+   * Default: a process-local `InMemoryCursorStore` (not durable).
    */
   cursorStore?: CursorStore;
   /**
@@ -1518,13 +1522,20 @@ export interface GuardTelemetryWatchParams {
  *   one the acceptance criteria exercise.
  */
 export interface GuardTelemetryCountersOptions {
-  /** Keep the last N decisions. Mutually exclusive with `windowMs`. */
+  /**
+   * Keep the last N decisions. Mutually exclusive with `windowMs`; exactly one
+   * of the two is required. Default: none.
+   */
   windowEvents?: number;
-  /** Keep decisions observed within the last `windowMs` milliseconds. */
+  /**
+   * Keep decisions observed within the last `windowMs` milliseconds.
+   * Default: none.
+   */
   windowMs?: number;
   /**
    * Clock used for `windowMs` eviction and for `windowStart`. Defaults to
-   * `Date.now`. Injected so tests need no wall-clock waits.
+   * `Date.now`. Injected so tests need no wall-clock waits. A listener-level
+   * `GuardTelemetryConfig.clock` overrides it.
    */
   clock?: () => number;
 }
@@ -2095,26 +2106,19 @@ function cursorNetworkIdentity(config: GuardTelemetryConfig): string {
 }
 
 /**
- * What a transport-backed `GuardTelemetryListener` accepts: `GuardTelemetryConfig`
- * with the shared `{ server? | url? }` transport (issue #117).
- */
-export type GuardTelemetryInputConfig = WithRpcTransport<GuardTelemetryConfig>;
-
-/**
  * Config for a listener used purely for local state (counters, `recent()`),
  * with no RPC transport. A host that only wants `observe()`/`stats()` does not
  * need a `server` and should not have to fabricate one.
  */
 export interface GuardTelemetryLocalConfig {
-  /** A local listener has no transport. */
-  server?: never;
-  /** A local listener has no transport. */
-  url?: never;
-  /** Opt-in sliding-window counters over allowed/blocked decisions. */
+  /**
+   * Opt-in sliding-window counters over allowed/blocked decisions.
+   * Default: none (`stats()` returns `null`).
+   */
   counters?: GuardTelemetryCountersOptions;
-  /** Clock the counters consult for `windowMs` eviction. */
+  /** Clock the counters consult for `windowMs` eviction. Default: `Date.now`. */
   clock?: (() => number) | undefined;
-  /** Optional log sink. */
+  /** Optional log sink. Default: none (silent). */
   logger?: GuardLoggerInput | undefined;
 }
 
@@ -2296,23 +2300,8 @@ export class GuardTelemetryListener {
    */
   private readonly counters: GuardDecisionCounters | null;
 
-  constructor(config: GuardTelemetryInputConfig | GuardTelemetryLocalConfig = {}) {
-    // Shared transport (issue #117): exactly one of `server` (used verbatim)
-    // or `url` (the SDK builds the `rpc.Server`). A purely local listener (no
-    // `guard`, see `GuardTelemetryLocalConfig`) has no transport at all.
-    const supplied = config as { server?: unknown; url?: unknown; guard?: unknown };
-    const isLocal =
-      supplied.guard === undefined && supplied.server === undefined && supplied.url === undefined;
-    const resolved = (
-      isLocal
-        ? config
-        : {
-            ...withResolvedServer<GuardTelemetryConfig>(config as GuardTelemetryInputConfig),
-            rpcUrl:
-              (config as { rpcUrl?: string }).rpcUrl ??
-              (typeof supplied.url === "string" ? supplied.url : undefined),
-          }
-    ) as GuardTelemetryConfig;
+  constructor(config: GuardTelemetryConfig | GuardTelemetryLocalConfig = {}) {
+    const resolved = config as GuardTelemetryConfig;
     this.config = resolved;
     this.guardContractId = canonicalContractId(resolved.guard) ?? resolved.guard ?? "";
     this.cursorNetwork = cursorNetworkIdentity(resolved);
@@ -3151,7 +3140,11 @@ export class GuardTelemetryListener {
   }
 }
 
-/** Options accepted by `GuardTelemetryListener`. */
+/**
+ * The `counters` subset of the listener's options. The constructor itself
+ * takes `GuardTelemetryConfig | GuardTelemetryLocalConfig`, which carry every
+ * listener option; this interface is not re-exported from the package entry.
+ */
 export interface GuardTelemetryListenerOptions {
   /**
    * Opt-in sliding-window counters over allowed/blocked decisions. Absent →

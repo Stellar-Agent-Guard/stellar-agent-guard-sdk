@@ -10,12 +10,30 @@ constructor(options: CostPreCheckConfig)
 
 ### Options
 
-- `interceptor: Pick<PreFlightInterceptor, "check">` — Configured interceptor instance whose simulation prices execution
-- `maxFeeStroops?: bigint` — Maximum allowable total fee in stroops (omitted means price it, never object). Must be a non-negative `bigint`; a negative value or any non-`bigint` throws `InvalidFeeCeilingError` at construction. `0n` is a real ceiling, not the same as omission.
-- `policySource?: string | PolicyConfig | null` — Opt-in policy source (contract address or `GuardPolicy`/`PolicyConfig`) enabling additive `policyContext`
-- `policy?: string | PolicyConfig | null` — Alias for `policySource`
-- `windowSnapshot?: WindowSpendSnapshot | null` — Opt-in ledger-tied window-spend snapshot used to compute `policyContext.windowRemainingEstimate` (issue #311). Purely informational: it never changes the cost decision. Invalid snapshots (fractional/negative ledger, or a cap/spent that is not a non-negative `bigint`) throw `TypeError` at construction.
-- `windowSnapshotMaxAgeLedgers?: number` — How many ledgers a snapshot may predate the priced check's own ledger and still be used. Default `0`: only a snapshot observed at the same ledger is trusted. Must be a non-negative safe integer.
+#### `CostPreCheckConfig` (`new CostPreChecker(config)`)
+
+The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `CostPreCheckConfig`. Every value is validated at construction.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `interceptor` | `Pick<PreFlightInterceptor, "check">` | required | Its `check()` supplies both the verdict and the price, from one enforced simulation. ⚠️ If that interceptor has `cache` enabled, the price can come from a cached verdict (up to one ledger / 5 s old). |
+| `maxFeeStroops` | `bigint` | none — no ceiling; the price is reported, never objected to | Ceiling on the estimated **total** fee (resource + inclusion). Must be a non-negative `bigint`, otherwise `InvalidFeeCeilingError` at construction. `0n` is a real ceiling (every quote is then `over_budget`). ⚠️ Omitting it disables the fee check entirely. |
+| `policySource` | `string \| PolicyConfig \| null` | none — `policyContext` is `null` | Contract address or policy enabling the additive `policyContext`. Informational only: it never changes the cost decision. |
+| `policy` | `string \| PolicyConfig \| null` | none | Alias for `policySource`. Per-call values win over constructor values; `policySource` wins over `policy` at each level. |
+| `logger` | `GuardLoggerInput` | none — silent | Log sink for the priced verdict and ceiling breaches. Never changes the decision. |
+| `windowSnapshot` | `WindowSpendSnapshot \| null` | none — `policyContext.windowRemainingEstimate` is `null` | Ledger-tied window-spend snapshot for the remaining-window estimate. Informational only. An invalid snapshot throws `TypeError` at construction. ⚠️ A `null` estimate means unknown, never "zero budget left". |
+| `windowSnapshotMaxAgeLedgers` | `number` | `0` | How many ledgers the snapshot may predate the priced check and still be used. Non-negative safe integer, otherwise `TypeError`. ⚠️ Raising it lets an older snapshot feed the estimate. |
+
+#### `CostPreCheckOptions` (`check(call, options)` / `checkWithCost(call, options)`)
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `policySource` | `string \| PolicyConfig \| null` | the constructor's `policySource` / `policy` | Per-call policy source for `policyContext`. |
+| `policy` | `string \| PolicyConfig \| null` | as above | Alias for `policySource`. |
+| `maxFeeStroops` | `bigint` | the constructor's `maxFeeStroops` | Per-call ceiling, validated before the interceptor runs (`InvalidFeeCeilingError`). `0n` is kept, not treated as omission. |
+| `windowSnapshot` | `WindowSpendSnapshot \| null` | the constructor's `windowSnapshot` | Per-call snapshot; an explicit `null` clears the configured one for this check. |
+| `signal` | `AbortSignal` | none | ⚠️ Forwarded to the interceptor: a fired signal yields an `undetermined` verdict and therefore an `undetermined` cost decision carrying `RpcTimeoutError`. |
+| `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is reported exactly like an abort, never as `within_budget`. `0` disables it. |
 
 Malformed ceilings are rejected before the interceptor runs, so a bad budget policy cannot spend an RPC call or be hidden behind a guard verdict. `InvalidFeeCeilingError` extends `InvalidInputError` (itself a `TypeError`) and exposes `field`, `rule: "non_negative_bigint"` and the rejected `value`.
 

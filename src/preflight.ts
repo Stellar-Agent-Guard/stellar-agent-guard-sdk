@@ -221,26 +221,35 @@ function provenanceFromSimulation(simulation: unknown): CostProvenance | undefin
 export interface CheckBatchOptions {
   /**
    * Policy configuration to enforce against during batch staging.
-   * If omitted, the interceptor attempts to fetch it from the guard's ledger storage.
+   *
+   * Default: the interceptor's own `PreFlightConfig.policy`; when that is also
+   * omitted, a live read of the guard's `Policy` ledger entry. A failed or
+   * malformed read is never treated as "no cap": a positive SAC transfer that
+   * needs it is reported as `undetermined`.
    */
   policy?: ReadonlyPolicyConfig | null;
 
   /**
    * Initial committed amount already spent in the current rolling window.
-   * If omitted, attempts to fetch it from the guard's `Window` ledger entry (defaults to 0n).
+   * An explicit value (including `0n`) is a trusted caller snapshot.
+   *
+   * Default: a live read of the guard's `Window` ledger entry; `0n` only when
+   * that entry does not exist. A failed read is not treated as zero.
    */
   initialWindowSpent?: bigint;
 
   /**
    * Optional per-call observability, forwarded to each call's `check()`:
-   * one event per enforcement-stage attempt, in call order.
+   * one event per enforcement-stage attempt, in call order. Default: none.
    */
   onStep?: (step: InvokeStepEvent) => void;
 
   /**
-   * Caller-owned cancellation for the whole batch. Once it fires, no further
-   * call is started; every unfinished call is reported as a fail-closed
-   * `undetermined` verdict carrying a typed `RpcTimeoutError`.
+   * Caller-owned cancellation for the whole batch, forwarded to each call's
+   * `check()`. Once it fires, every remaining call returns a fail-closed
+   * `undetermined` verdict carrying a typed `RpcTimeoutError` without issuing
+   * an RPC. It does not bound the initial `Policy`/`Window` ledger reads.
+   * Default: none.
    */
   signal?: AbortSignal | undefined;
 
@@ -248,6 +257,7 @@ export interface CheckBatchOptions {
    * Per-call timeout, forwarded to each `check()`. Independent of
    * `deadlineMs`: a fired per-call timeout leaves the rest of the batch free to
    * continue, while a spent batch deadline stops it.
+   * Default: `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call.
    */
   timeoutMs?: number | undefined;
 
@@ -259,6 +269,11 @@ export interface CheckBatchOptions {
    * fail-closed `undetermined` results carrying an `RpcTimeoutError` with
    * `deadline: true`. The budget also caps each individual check's timeout, so
    * a single long RPC cannot overrun it. Omit for the per-call default.
+   *
+   * Note: `checkBatch()` currently validates this value (positive and finite,
+   * otherwise `RangeError`) but does not yet enforce the budget described
+   * above. Bound a batch with `signal` and `timeoutMs` until it does.
+   * Default: none.
    */
   deadlineMs?: number | undefined;
 }
@@ -357,15 +372,20 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  * `DEFAULT_RPC_TIMEOUT_MS` for the timeout.
  */
 export interface PreFlightCheckOptions {
+  /**
+   * Per-stage observability for this check. Supplying it opts the check out
+   * of in-flight coalescing. Default: none.
+   */
   onStep?: (step: InvokeStepEvent) => void;
   /**
    * Caller-owned cancellation; aborts the RPC calls the check makes. A fired
-   * signal yields an `undetermined` verdict, never a throw.
+   * signal yields an `undetermined` verdict, never a throw. Default: none.
    */
   signal?: AbortSignal | undefined;
   /**
    * Bound on each RPC call, in milliseconds; `0` disables the timeout. A fired
    * timeout yields the same `undetermined` verdict as an abort.
+   * Default: `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms).
    */
   timeoutMs?: number | undefined;
 }
@@ -374,14 +394,20 @@ export interface PreFlightCacheOptions {
   /**
    * Maximum cache age in milliseconds. The effective value is capped at one
    * approximate ledger-close interval (5 seconds), so a cache hit can never
-   * cross a ledger boundary.
+   * cross a ledger boundary. Takes precedence over `ttlLedgers` when both are
+   * set. Default: none; one of `ttlMs` / `ttlLedgers` is required.
    */
   ttlMs?: number;
-  /** Ledger-based spelling of `ttlMs`; one ledger is approximately 5 seconds. */
+  /**
+   * Ledger-based spelling of `ttlMs`; one ledger is approximately 5 seconds.
+   * Same 5-second cap. Default: none.
+   */
   ttlLedgers?: number;
   /**
    * Optional policy revision, or a getter for it. Supplying this makes a policy
    * change invalidate the entry even if the wall-clock TTL has not elapsed.
+   * A getter that throws or returns `undefined` bypasses the cache for that
+   * check. Default: none (the revision is not part of the cache key).
    */
   policyRevision?: PolicyRevision | (() => PolicyRevision | Promise<PolicyRevision>);
   /**
@@ -402,6 +428,8 @@ export interface PreFlightCacheOptions {
    *
    * Must be a positive integer. `invalidate()` clears the entries; the bound
    * applies again to whatever refills the cache afterwards.
+   *
+   * Default: none (unbounded).
    */
   maxEntries?: number;
 }
@@ -425,9 +453,15 @@ export interface PreFlightConfig {
   agent: AgentSigner | Keypair;
   /** Classic account that pays fees and supplies the sequence number. */
   source: Keypair;
-  /** Authorizers for non-guard requirements (e.g. an admin on a policy call). */
+  /**
+   * Authorizers for non-guard requirements (e.g. an admin on a policy call).
+   * Default: none.
+   */
   accountSigners?: Keypair[];
-  /** Optional policy to use for batch staging (otherwise fetched from ledger). */
+  /**
+   * Optional policy to use for `checkBatch()` staging only; `check()` always
+   * enforces through simulation. Default: none (fetched from the ledger).
+   */
   policy?: ReadonlyPolicyConfig | null;
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
@@ -437,6 +471,8 @@ export interface PreFlightConfig {
    * carries the check's `signal`/`timeoutMs` bound like every other one: an
    * already-aborted signal issues no RPC at all, and a stalled lookup fails the
    * check closed with an `undetermined` verdict instead of hanging it.
+   *
+   * Default: none (no cache; every check simulates fresh).
    */
   cache?: PreFlightCacheOptions;
   /**
@@ -461,9 +497,9 @@ export interface PreFlightConfig {
    */
   coalesceInFlight?: boolean;
   /**
-   * Inject a custom clock for time-dependent operations (cache TTL, batch
-   * deadlines, etc.). Defaults to the system clock; use a FakeClock in tests
-   * for deterministic timing.
+   * Inject a custom clock for time-dependent operations (currently the cache
+   * TTL). Default: `systemClock`; use a FakeClock in tests for deterministic
+   * timing.
    */
   clock?: Clock;
 }
