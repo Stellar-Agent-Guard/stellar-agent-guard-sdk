@@ -494,6 +494,7 @@ const POLICY_OPTIONAL_FIELDS = [
 ] as const;
 const PROTOCOL_RULE_FIELDS = ["contract", "fns", "paused"] as const;
 const PROTOCOL_RULE_OPTIONAL_FIELDS = ["paused"] as const;
+const RECIPIENT_WINDOW_CAP_FIELDS = ["cap", "recipient"] as const;
 const I128_MIN = -(2n ** 127n);
 const I128_MAX = 2n ** 127n - 1n;
 const U64_MAX = 2n ** 64n - 1n;
