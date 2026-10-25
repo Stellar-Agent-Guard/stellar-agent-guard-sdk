@@ -533,3 +533,75 @@ describe("account-state reasons", () => {
     assert.ok(!ACCOUNT_STATE_REASONS.includes("per_tx_cap_exceeded"));
   });
 });
+
+/**
+ * Quality ratchet over `explainReason` (issue #54).
+ *
+ * The loop is driven by the vendored contract glossary, the same single source of
+ * truth the lockstep test above uses (no second hand-kept list). Presence is not
+ * enough: an operator reads this text at the moment of a refusal, so a blank, a
+ * placeholder, or a restated code is a defect that must fail here, not render in
+ * production. Floors are set just under the shortest current entry, so they catch
+ * a gutted entry without freezing the wording (the golden snapshot does that).
+ */
+describe("explainReason guidance quality (issue #54)", () => {
+  const MIN_BODY_CHARS = 25;
+  const MIN_REMEDIATION_CHARS = 20;
+  const PLACEHOLDER = /\b(todo|tbd|fixme|xxx|lorem|placeholder|n\/a)\b/i;
+
+  const symbols = (): string[] => Object.keys(loadVendoredGlossary().reasonGlossary.reasons);
+
+  it("returns real, non-placeholder prose for every reason", () => {
+    for (const symbol of symbols()) {
+      const text = explainReason(symbol);
+      const humanised = symbol.replaceAll("_", " ");
+      assert.ok(
+        text.trim().length >= MIN_BODY_CHARS,
+        `${symbol}: explanation too short: "${text}"`,
+      );
+      assert.match(text, /[A-Za-z]{3,}\s+[A-Za-z]{2,}/, `${symbol}: no words in "${text}"`);
+      assert.doesNotMatch(text, PLACEHOLDER, `${symbol}: placeholder text in "${text}"`);
+      assert.doesNotMatch(text, /^\d+$/, `${symbol}: numeric-only explanation`);
+      for (const raw of [symbol, humanised, String(GUARD_REASON_CODES[symbol as GuardReason])]) {
+        assert.notEqual(
+          text.toLowerCase(),
+          raw.toLowerCase(),
+          `${symbol}: explanation is just the raw code "${raw}"`,
+        );
+      }
+    }
+  });
+
+  it("is the same text for the symbol and for its numeric code", () => {
+    for (const symbol of symbols()) {
+      assert.equal(explainReason(GUARD_REASON_CODES[symbol as GuardReason]), explainReason(symbol));
+    }
+  });
+
+  it("carries a title and an actionable remediation distinct from the body", () => {
+    for (const symbol of symbols()) {
+      const entry = reasonMessagesEn[symbol as GuardReason];
+      assert.ok(entry.title.trim().length > 0, `${symbol}: empty title`);
+      assert.ok(
+        entry.remediation.trim().length >= MIN_REMEDIATION_CHARS,
+        `${symbol}: remediation too short: "${entry.remediation}"`,
+      );
+      assert.doesNotMatch(entry.remediation, PLACEHOLDER, `${symbol}: placeholder remediation`);
+      assert.notEqual(entry.remediation, entry.body, `${symbol}: remediation repeats the body`);
+      // Actionable means it tells the reader what to do: a sentence that does not
+      // open by describing the failure ("The ...", "This ...", "No ...").
+      assert.match(entry.remediation, /^[A-Z][a-z]+\b.*\.$/s, `${symbol}: not a sentence`);
+      assert.doesNotMatch(
+        entry.remediation,
+        /^(The|This|That|A|An|No|It|There|Your)\b/,
+        `${symbol}: remediation describes instead of instructing: "${entry.remediation}"`,
+      );
+    }
+  });
+
+  it("documents the unrecognised-reason fallback with a stable format and never throws", () => {
+    assert.equal(explainReason("brand_new_reason"), "Unrecognised guard reason: brand_new_reason");
+    assert.equal(explainReason(999), "Unrecognised guard reason: 999");
+    assert.equal(explainReason(""), "Unrecognised guard reason: ");
+  });
+});
