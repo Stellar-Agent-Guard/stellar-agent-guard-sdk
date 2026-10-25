@@ -47,6 +47,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
+- **Running an agent 24/7**: the complete runtime loop — heartbeat, pre-flight every transfer, telemetry alerts and DMS countdown monitoring, with a fail-closed failure-mode table — is in [`docs/agent-runtime.md`](docs/agent-runtime.md).
 - **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes. Opt-in sliding-window counters expose agent self-monitoring via `stats()`.
 
 > ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
@@ -818,6 +819,31 @@ const middleware = createLangChainGuardMiddleware({
 
 > **ElizaOS note (0.2.x):** the ElizaOS adapter previously passed the raw `PreFlightDecision` to `onBlocked`; it now receives this structured payload, matching LangChain and MCP. Read `info.reason` / `info.explanation` (or `info.kind`) instead of `decision.reason` / `decision.explanation`.
 
+### Start from the safe baseline (`DEFAULT_GUARD_POLICY`)
+
+Rather than re-typing a policy literal, start from the SDK's frozen, deny-all baseline and add only what your agent needs:
+
+```ts
+import { DEFAULT_GUARD_POLICY, policyToScVal, validateGuardPolicy, type ReadonlyPolicyConfig } from "stellar-agent-guard-sdk";
+
+const policy: ReadonlyPolicyConfig = {
+  ...DEFAULT_GUARD_POLICY,
+  assets: [TOKEN],         // the one SAC token the agent may move
+  recipients: [RECIPIENT], // the one destination it may pay
+};
+validateGuardPolicy(policy); // []
+const scVal = policyToScVal(policy);
+```
+
+| Field | Baseline | Rationale |
+| --- | --- | --- |
+| `assets` / `recipients` / `protocols` | empty | deny-all: nothing is admissible until you name an asset and a recipient |
+| `per_tx_cap` | `100n` | small single-transfer ceiling (the contracts `max-security` template's value) |
+| `window_secs` / `window_cap` | `3600n` / `500n` | one hour, at most five full-size transfers (same template) |
+| `dms_grace_secs` | `604800n` (7 days) | dead-man switch **on**; SPEC §5 production guidance is "≥ several days", and 7 days is the `watch-only` template's grace |
+
+The constant is deep-frozen (mutating it throws), and a unit test asserts its values still match the vendored contracts templates. On its own it reports exactly two `empty_vector_noop` findings (`assets`, `recipients`) — the deny-all intent made visible, cleared as soon as you add one of each. The numbers are a starting point, not a recommendation for your risk limits. The inline policy literals in the validation and encode sections below are deliberate: they demonstrate *invalid* or *edge-case* drafts, which a safe baseline cannot.
+
 ### Policy validation before broadcast (validateGuardPolicy)
 
 Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
@@ -996,6 +1022,23 @@ function signerMatches(
 the helper verifies those bytes without re-hashing and is not SEP-53 message signing. A
 successful result proves only the key/payload/signature relationship—it does not validate
 network ID, invocation, nonce, expiration ledger, or transaction freshness.
+
+### Agent halted with an `undetermined` storm (rate-limited RPC)
+
+An agent firing dozens of tool calls at once used to open dozens of simultaneous simulations, trip the RPC provider's rate limit (HTTP 429) and turn the whole burst into `undetermined` verdicts — safe (fail-closed) but useless. `PreFlightInterceptor` now bounds this:
+
+- `maxConcurrentSimulations` (default **4**) caps simulations in flight; the rest queue first-in first-out, and the queue wait counts toward each check's `signal` / `timeoutMs`.
+- A 429 waits **once** (the server's `Retry-After` when sent, else `rateLimit.backoffMs`, default 500 ms, never more than `rateLimit.maxBackoffMs`, default 5 s) and retries once. If it is limited again the verdict is `undetermined` with `cause: "rate_limited"` and a `RateLimitedError`.
+
+```ts
+const interceptor = new PreFlightInterceptor({
+  // …
+  maxConcurrentSimulations: 2, // public RPC with a tight limit: lower it
+  rateLimit: { backoffMs: 1_000, maxBackoffMs: 5_000 },
+});
+```
+
+If you still see `cause: "rate_limited"`, **lower** `maxConcurrentSimulations`. On a self-hosted RPC with generous limits, **raise** it (e.g. 16) for lower latency under bursts. The limit is per interceptor, so several interceptors against one RPC multiply it. The cache's ledger read is not counted as a simulation.
 
 ### Typed errors and 0.1.x migration
 
