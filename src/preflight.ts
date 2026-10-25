@@ -26,7 +26,14 @@
  */
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { concatBytes, sha256Hex, utf8Bytes } from "./hash.ts";
-import { GuardError, InvalidInputError, SimulationError } from "./errors.ts";
+import {
+  GuardError,
+  GuardUndeterminedError,
+  InvalidInputError,
+  RateLimitedError,
+  SimulationError,
+} from "./errors.ts";
+import { Semaphore } from "./semaphore.ts";
 import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
 import {
   DEFAULT_RPC_TIMEOUT_MS,
@@ -48,14 +55,12 @@ import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger
 import { parseSimulationResourceFee, toAgentSigner } from "./tx.ts";
 import type { AgentSigner, ContractCall } from "./tx.ts";
 import { systemClock, type Clock } from "./clock.ts";
+import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 
 /**
- * Re-exported from `errors.ts` for the existing import path. Thrown
- * synchronously when a ContractCall has invalid shape or types before any RPC
- * round-trip is attempted, distinguishing programmer errors from policy
- * outcomes (blocked decisions).
+ * Re-exported from `errors.ts` for the existing import path.
  */
-export { InvalidInputError };
+export { GuardUndeterminedError, InvalidInputError };
 
 /**
  * Validate a ContractCall's input shape before RPC dispatch.
@@ -154,22 +159,10 @@ export function validateContractCall(call: ContractCall): void {
 /**
  * Thrown when enforcement could not reach a decision.
  *
- * Deliberately not a `GuardBlockedError`: reporting "the guard refused this"
- * when the guard never ruled would be a false claim about the security
- * boundary, which is the one thing an operator must be able to trust.
+ * @deprecated Use `GuardUndeterminedError`. Kept as an alias for backward compatibility.
  */
-export class PreFlightUndeterminedError extends SimulationError {
-  readonly detail: string;
-
-  constructor(detail: string, options: { cause?: unknown } = {}) {
-    super(`stellar-agent-guard could not determine this action's status\n${detail}`, {
-      stage: "preflight",
-      ...(options.cause === undefined ? {} : { cause: options.cause }),
-    });
-    this.name = "PreFlightUndeterminedError";
-    this.detail = detail;
-  }
-}
+export const PreFlightUndeterminedError = GuardUndeterminedError;
+export type PreFlightUndeterminedError = GuardUndeterminedError;
 
 export type PreFlightDecision =
   | {
@@ -205,7 +198,16 @@ export type PreFlightDecision =
       detail: string;
       /** Machine-readable cause; use `instanceof` instead of matching `detail`. */
       error?: GuardError;
+      /**
+       * Coarse cause, set only when the failure has an operational remedy a
+       * caller can branch on: `"rate_limited"` means the RPC kept answering
+       * HTTP 429 (see `maxConcurrentSimulations`). Absent otherwise.
+       */
+      cause?: PreFlightUndeterminedCause;
     };
+
+/** Causes an `undetermined` pre-flight verdict can carry (additive). */
+export type PreFlightUndeterminedCause = "rate_limited";
 
 /**
  * Read the ledger marker out of the simulation that produced the quote.
@@ -420,6 +422,12 @@ export interface PreFlightCacheOptions {
   maxEntries?: number;
 }
 
+/**
+ * What `new PreFlightInterceptor()` accepts: `PreFlightConfig` with the shared
+ * `{ server? | url? }` transport (issue #117) in place of a mandatory `server`.
+ */
+export type PreFlightConfigInput = WithRpcTransport<PreFlightConfig>;
+
 export interface PreFlightConfig {
   server: rpc.Server;
   networkPassphrase: string;
@@ -440,6 +448,11 @@ export interface PreFlightConfig {
   /**
    * Opt-in short-lived cache. Omit this property to preserve uncached behavior.
    * A cached verdict can be staler than one admitted transfer.
+   *
+   * The cache's ledger lookup is one of the RPC calls the check makes, so it
+   * carries the check's `signal`/`timeoutMs` bound like every other one: an
+   * already-aborted signal issues no RPC at all, and a stalled lookup fails the
+   * check closed with an `undetermined` verdict instead of hanging it.
    */
   cache?: PreFlightCacheOptions;
   /**
@@ -464,11 +477,76 @@ export interface PreFlightConfig {
    */
   coalesceInFlight?: boolean;
   /**
+   * Most simulations this interceptor keeps in flight at once (default
+   * {@link DEFAULT_MAX_CONCURRENT_SIMULATIONS}). The rest queue first-in
+   * first-out, and the queue wait counts toward each check's `signal` /
+   * `timeoutMs`.
+   *
+   * An agent firing dozens of tool calls at once would otherwise open dozens of
+   * simultaneous RPC simulations, trip the provider's rate limit and turn the
+   * whole burst into `undetermined` verdicts. Raise it for a self-hosted RPC
+   * with generous limits; it must be a positive integer.
+   */
+  maxConcurrentSimulations?: number;
+  /**
+   * Handling of an HTTP 429 from the RPC. A rate-limited simulation waits once
+   * (the server's `Retry-After` when sent, else `backoffMs`, never more than
+   * `maxBackoffMs`) and is retried once; if it is limited again the verdict is
+   * `undetermined` with `cause: "rate_limited"`. Bounded by construction.
+   */
+  rateLimit?: {
+    /** Wait when the 429 carries no `Retry-After`. Default 500. */
+    backoffMs?: number;
+    /** Upper bound on any wait, including a long `Retry-After`. Default 5000. */
+    maxBackoffMs?: number;
+  };
+  /**
    * Inject a custom clock for time-dependent operations (cache TTL, batch
    * deadlines, etc.). Defaults to the system clock; use a FakeClock in tests
    * for deterministic timing.
    */
   clock?: Clock;
+}
+
+/** Default for `maxConcurrentSimulations`. */
+export const DEFAULT_MAX_CONCURRENT_SIMULATIONS = 4;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 500;
+const DEFAULT_RATE_LIMIT_MAX_BACKOFF_MS = 5_000;
+
+/**
+ * Read an HTTP 429 out of an error chain (axios-style `response.status`, or a
+ * bare `status` / `statusCode`), with the server's `Retry-After` in ms when it
+ * sent a delay in seconds or an HTTP date.
+ */
+function rateLimitOf(error: unknown, now: number): { retryAfterMs: number | null } | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && typeof current === "object" && current !== null; depth++) {
+    const e = current as {
+      status?: unknown;
+      statusCode?: unknown;
+      response?: { status?: unknown; headers?: unknown };
+      cause?: unknown;
+    };
+    if (e.response?.status === 429 || e.status === 429 || e.statusCode === 429) {
+      const headers = e.response?.headers as
+        | { get?: (name: string) => unknown; [k: string]: unknown }
+        | undefined;
+      const raw =
+        typeof headers?.get === "function" ? headers.get("retry-after") : headers?.["retry-after"];
+      let retryAfterMs: number | null = null;
+      if (typeof raw === "string" || typeof raw === "number") {
+        const seconds = Number(raw);
+        if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = Math.round(seconds * 1000);
+        else {
+          const at = Date.parse(String(raw));
+          if (Number.isFinite(at)) retryAfterMs = Math.max(0, at - now);
+        }
+      }
+      return { retryAfterMs };
+    }
+    current = e.cause;
+  }
+  return null;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -488,6 +566,24 @@ interface CacheContext {
   ledger: number;
   expiresAt: number;
 }
+
+/**
+ * The outcome of a cache-context lookup.
+ *
+ * - `context` — the cache could be consulted: the ledger marker is known and
+ *   the entry key is derived from it.
+ * - `unavailable` — the cache could *not* be consulted (an unreadable policy
+ *   revision, or a ledger read that failed for a reason that is not the
+ *   caller's bound). That is not a security decision: the check falls back to
+ *   the uncached enforcement path, which runs under the same bound.
+ * - `bounded` — the caller's own signal or timeout fired during the lookup.
+ *   There is no budget left to run the uncached path within, so the check
+ *   fails closed with an `undetermined` verdict.
+ */
+type CacheLookup =
+  | { kind: "context"; context: CacheContext }
+  | { kind: "unavailable" }
+  | { kind: "bounded"; error: RpcTimeoutError };
 
 /** The fail-closed verdict for a caller bound that fired. */
 function timeoutDecision(error: RpcTimeoutError): PreFlightDecision {
@@ -540,18 +636,38 @@ export class PreFlightInterceptor {
   private readonly inFlight = new Map<string, Promise<PreFlightDecision>>();
   private readonly namespace: string;
   private readonly coalesceInFlight: boolean;
+  private readonly simulations: Semaphore;
+  private readonly rateLimitBackoffMs: number;
+  private readonly rateLimitMaxBackoffMs: number;
   private readonly logger: GuardLogger;
   private readonly clock: Clock;
   private _hits = 0;
   private _misses = 0;
   private _invalidations = 0;
 
-  constructor(config: PreFlightConfig) {
+  constructor(input: PreFlightConfigInput) {
+    // Shared transport (issue #117): exactly one of `server` or `url`.
+    const config = withResolvedServer<PreFlightConfig>(input);
     this.config = config;
     this.cacheOptions = config.cache;
     this.clock = config.clock ?? systemClock;
     this.coalesceInFlight = config.coalesceInFlight !== false;
     this.validateCacheOptions();
+    const maxConcurrent = config.maxConcurrentSimulations ?? DEFAULT_MAX_CONCURRENT_SIMULATIONS;
+    if (!Number.isInteger(maxConcurrent) || maxConcurrent <= 0) {
+      throw new TypeError("preflight maxConcurrentSimulations must be a positive integer");
+    }
+    this.simulations = new Semaphore(maxConcurrent);
+    this.rateLimitBackoffMs = config.rateLimit?.backoffMs ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
+    this.rateLimitMaxBackoffMs = config.rateLimit?.maxBackoffMs ?? DEFAULT_RATE_LIMIT_MAX_BACKOFF_MS;
+    for (const [name, value] of [
+      ["rateLimit.backoffMs", this.rateLimitBackoffMs],
+      ["rateLimit.maxBackoffMs", this.rateLimitMaxBackoffMs],
+    ] as const) {
+      if (!Number.isFinite(value) || value < 0) {
+        throw new TypeError(`preflight ${name} must be a non-negative finite number`);
+      }
+    }
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
     this.logger = resolveLogger(config.logger);
   }
@@ -624,30 +740,58 @@ export class PreFlightInterceptor {
     return Math.min(requested, MAX_CACHE_TTL_MS);
   }
 
-  private async cacheContext(call: ContractCall): Promise<CacheContext | null> {
-    if (!this.cacheOptions) return null;
+  /**
+   * Resolve the cache context for `call`: the ledger marker the cached verdict
+   * must belong to, and the key it is stored under.
+   *
+   * The ledger read is one of the RPC calls the check makes, so it carries the
+   * same abort/timeout semantics as the enforcement pipeline: an already-aborted
+   * signal issues no RPC at all, and a stalled read is bounded by the caller's
+   * `timeoutMs` instead of leaving the check pending indefinitely.
+   *
+   * A failed read is not a security decision. Without a trustworthy ledger
+   * marker no cached verdict may be reused, so the lookup reports
+   * `unavailable` and the caller falls back to the uncached enforcement path.
+   * That fallback is only allowed while it remains inside the caller's bound:
+   * a lookup whose own bound fired reports `bounded`, and the check fails
+   * closed rather than spending a budget the caller never granted.
+   */
+  private async cacheContext(
+    call: ContractCall,
+    bound: { signal?: AbortSignal | undefined; timeoutMs?: number | undefined },
+  ): Promise<CacheLookup> {
+    if (!this.cacheOptions) return { kind: "unavailable" };
 
     let revision: PolicyRevision;
     try {
       if (typeof this.cacheOptions.policyRevision === "function") {
         revision = await this.cacheOptions.policyRevision();
-        if (revision === undefined) return null;
+        if (revision === undefined) return { kind: "unavailable" };
       } else {
         revision = this.cacheOptions.policyRevision;
       }
     } catch {
       // A revision read failure must not turn a cache lookup into a security
       // decision. Fall through to the uncached path instead.
-      return null;
+      return { kind: "unavailable" };
     }
 
     let ledger: number;
     try {
-      const latest = await this.config.server.getLatestLedger();
+      const latest = await withRpcAbort(
+        { stage: "pre-flight", signal: bound.signal, timeoutMs: bound.timeoutMs },
+        () => this.config.server.getLatestLedger(),
+      );
       ledger = latest.sequence;
-    } catch {
+    } catch (error) {
+      if (error instanceof RpcTimeoutError) {
+        // The caller's bound fired while the ledger read was in flight. The
+        // uncached path would need a budget the caller has not granted, so the
+        // check fails closed instead of running on.
+        return { kind: "bounded", error };
+      }
       // Without a trustworthy ledger marker, do not reuse a cached verdict.
-      return null;
+      return { kind: "unavailable" };
     }
 
     const now = this.clock.now();
@@ -656,9 +800,12 @@ export class PreFlightInterceptor {
     }
 
     return {
-      key: `${this.namespace}:${callFingerprint(call)}:${policyRevisionToken(revision)}`,
-      ledger,
-      expiresAt: now + this.cacheTtlMs(),
+      kind: "context",
+      context: {
+        key: `${this.namespace}:${callFingerprint(call)}:${policyRevisionToken(revision)}`,
+        ledger,
+        expiresAt: now + this.cacheTtlMs(),
+      },
     };
   }
 
@@ -691,6 +838,12 @@ export class PreFlightInterceptor {
    * effect on the verdict itself; existing single-argument callers are
    * unaffected.
    *
+   * With the cache enabled, the cache's ledger lookup is one of the RPC calls
+   * the check makes, so it carries the same `signal`/`timeoutMs` bound as the
+   * enforcement pipeline: an already-aborted signal issues no RPC at all, and a
+   * stalled lookup returns the fail-closed `undetermined` verdict instead of
+   * leaving the check pending forever.
+   *
    * Concurrent checks for the same call and config share a single in-flight
    * discovery/enforcement run by default. The shared run is not bound by any
    * one caller's signal or timeout — one caller giving up must not cancel a
@@ -706,7 +859,24 @@ export class PreFlightInterceptor {
       return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
     }
 
-    const context = await this.cacheContext(call);
+    const lookup = await this.cacheContext(call, {
+      signal: options?.signal,
+      timeoutMs: options?.timeoutMs,
+    });
+    if (lookup.kind === "bounded") {
+      // The caller's bound fired while the cache's ledger read was in flight.
+      // The check fails closed: a stalled RPC must never leave a guardrail
+      // call pending indefinitely, and the uncached path would need a budget
+      // the caller has not granted.
+      return timeoutDecision(lookup.error);
+    }
+    if (lookup.kind === "unavailable" && options?.signal?.aborted) {
+      // The cache could not be consulted and the caller has already given up:
+      // the uncached path is no longer within the caller's bound, so the check
+      // fails closed instead of starting work nobody is waiting for.
+      return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+    }
+    const context = lookup.kind === "context" ? lookup.context : null;
     if (context) {
       const cached = this.cache.get(context.key);
       if (cached) {
@@ -782,6 +952,77 @@ export class PreFlightInterceptor {
     }
   }
 
+  /**
+   * Run one enforced simulation inside a concurrency slot, with one bounded
+   * retry when the RPC answers HTTP 429.
+   *
+   * The slot is held across the 429 backoff on purpose: a rate-limited RPC is
+   * asking every caller to slow down, so the pause throttles the whole queue.
+   */
+  private async simulateLimited(
+    call: ContractCall,
+    onStep: ((step: InvokeStepEvent) => void) | undefined,
+    abandoned: AbortSignal,
+  ): Promise<EnforcementOutcome> {
+    const release = await this.simulations.acquire(abandoned);
+    // Withdrawn while queued: the caller already got its verdict from its bound.
+    if (release === null) return timeoutOutcome(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+    try {
+      const run = async (): Promise<EnforcementOutcome | { limited: { retryAfterMs: number | null }; cause: unknown }> => {
+        let outcome: EnforcementOutcome;
+        try {
+          outcome = await enforceCall({
+            server: this.config.server,
+            source: this.config.source,
+            call,
+            networkPassphrase: this.config.networkPassphrase,
+            guardAuth: { guard: this.config.guard, agent: this.config.agent },
+            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+            ...(onStep ? { onStep } : {}),
+            ...(this.config.logger ? { logger: this.config.logger } : {}),
+          });
+        } catch (error) {
+          const limited = rateLimitOf(error, this.clock.now());
+          if (limited) return { limited, cause: error };
+          throw error;
+        }
+        if (outcome.kind === "error") {
+          const limited = rateLimitOf(outcome.error, this.clock.now());
+          if (limited) return { limited, cause: outcome.error };
+        }
+        return outcome;
+      };
+
+      let result = await run();
+      if (!("limited" in result)) return result;
+
+      const wait = Math.min(
+        result.limited.retryAfterMs ?? this.rateLimitBackoffMs,
+        this.rateLimitMaxBackoffMs,
+      );
+      this.logger.warn("RPC rate-limited the simulation (429); backing off once", {
+        guard: this.config.guard,
+        waitMs: wait,
+      });
+      await this.clock.sleep(wait);
+      if (abandoned.aborted) {
+        return timeoutOutcome(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+      }
+      result = await run();
+      if (!("limited" in result)) return result;
+
+      const error = new RateLimitedError({
+        stage: "simulate",
+        retryAfterMs: result.limited.retryAfterMs,
+        attempts: 2,
+        cause: result.cause,
+      });
+      return { kind: "error", detail: error.message, error, diagnosticEvents: [] };
+    } finally {
+      release();
+    }
+  }
+
   private async computeDecision(
     call: ContractCall,
     context: CacheContext | null,
@@ -794,6 +1035,9 @@ export class PreFlightInterceptor {
     // `RpcTimeoutError`. `invoke()` reports the same error through its own
     // `error` outcome instead — a verdict question versus a pipeline question.
     let outcome: EnforcementOutcome;
+    // Cancels a still-queued slot request when the caller's bound fires, so an
+    // abandoned check never takes capacity later.
+    const abandoned = new AbortController();
     try {
       outcome = await withRpcAbort(
         {
@@ -801,22 +1045,15 @@ export class PreFlightInterceptor {
           signal: bound.signal,
           timeoutMs: bound.timeoutMs,
         },
-        () =>
-          enforceCall({
-            server: this.config.server,
-            source: this.config.source,
-            call,
-            networkPassphrase: this.config.networkPassphrase,
-            guardAuth: { guard: this.config.guard, agent: this.config.agent },
-            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-            ...(onStep ? { onStep } : {}),
-            ...(this.config.logger ? { logger: this.config.logger } : {}),
-          }),
+        () => this.simulateLimited(call, onStep, abandoned.signal),
       );
     } catch (error) {
+      abandoned.abort();
       if (!(error instanceof RpcTimeoutError)) throw error;
       outcome = timeoutOutcome(error);
     }
+    const rateLimited =
+      outcome.kind === "error" && outcome.error instanceof RateLimitedError;
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
@@ -825,6 +1062,7 @@ export class PreFlightInterceptor {
         kind: "undetermined",
         detail: outcome.detail,
         error: outcome.error,
+        ...(rateLimited ? { cause: "rate_limited" as const } : {}),
       };
     } else if (outcome.kind === "blocked") {
       decision = {
@@ -1173,12 +1411,30 @@ export class PreFlightInterceptor {
   /**
    * Convenience for adapters that want a throw-on-refusal shape.
    *
-   * Throws `GuardBlockedError` for both `blocked` and `undetermined` — an
-   * interceptor that returned happily on `undetermined` would hand an agent a
-   * green light the chain never gave.
+   * Throws `GuardBlockedError` on `blocked`, and `GuardUndeterminedError` on
+   * `undetermined` or transport failures — an interceptor that returned happily
+   * on `undetermined` would hand an agent a green light the chain never gave.
+   * Never lets a raw non-Guard error escape.
    */
   async assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }> {
-    const decision = await this.check(call);
+    let decision: PreFlightDecision;
+    try {
+      decision = await this.check(call);
+    } catch (cause) {
+      if (cause instanceof InvalidInputError) {
+        throw cause;
+      }
+      if (cause instanceof GuardBlockedError || cause instanceof GuardUndeterminedError) {
+        throw cause;
+      }
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new GuardUndeterminedError(message, {
+        stage: "preflight",
+        cause,
+        detail: message,
+      });
+    }
+
     if (decision.allowed) return decision;
     if (decision.kind === "blocked") {
       const rawEvent = decision.diagnosticEvents?.[0];
@@ -1190,20 +1446,42 @@ export class PreFlightInterceptor {
         rawEvent,
       });
     }
-    throw new PreFlightUndeterminedError(decision.detail, { cause: decision.error });
+    throw new GuardUndeterminedError(decision.detail, {
+      stage: "preflight",
+      cause: decision.error,
+      detail: decision.detail,
+    });
   }
 
   /**
    * Convenience for adapters that want a throw-on-refusal shape for batches.
    *
    * Throws `GuardBlockedError` if any call in the batch is blocked, or
-   * `PreFlightUndeterminedError` if any call is undetermined.
+   * `GuardUndeterminedError` if any call is undetermined or a transport error occurs.
+   * Never lets a raw non-Guard error escape.
    */
   async assertBatchAllowed(
     calls: ContractCall[],
     options?: CheckBatchOptions,
   ): Promise<PreFlightBatchDecision & { admissible: true }> {
-    const decision = await this.checkBatch(calls, options);
+    let decision: PreFlightBatchDecision;
+    try {
+      decision = await this.checkBatch(calls, options);
+    } catch (cause) {
+      if (cause instanceof InvalidInputError) {
+        throw cause;
+      }
+      if (cause instanceof GuardBlockedError || cause instanceof GuardUndeterminedError) {
+        throw cause;
+      }
+      const message = cause instanceof Error ? cause.message : String(cause);
+      throw new GuardUndeterminedError(message, {
+        stage: "preflight",
+        cause,
+        detail: message,
+      });
+    }
+
     if (decision.admissible) return decision as PreFlightBatchDecision & { admissible: true };
     for (const verdict of decision.verdicts) {
       if (verdict.kind === "blocked") {
@@ -1214,15 +1492,18 @@ export class PreFlightInterceptor {
         });
       }
       if (verdict.kind === "undetermined") {
-        throw new PreFlightUndeterminedError(verdict.detail, {
+        throw new GuardUndeterminedError(verdict.detail, {
+          stage: "preflight",
           ...(verdict.error === undefined ? {} : { cause: verdict.error }),
+          detail: verdict.detail,
         });
       }
     }
-    throw new PreFlightUndeterminedError(
+    throw new GuardUndeterminedError(
       decision.kind === "undetermined" && decision.detail !== undefined
         ? decision.detail
         : "batch refused by guardrails",
+      { stage: "preflight" },
     );
   }
 
@@ -1241,13 +1522,13 @@ export class PreFlightInterceptor {
 }
 
 /** One-shot form, for callers that do not want to hold an interceptor. */
-export function preflight(config: PreFlightConfig, call: ContractCall): Promise<PreFlightDecision> {
+export function preflight(config: PreFlightConfigInput, call: ContractCall): Promise<PreFlightDecision> {
   return new PreFlightInterceptor(config).check(call);
 }
 
 /** One-shot form for batch pre-flight checks. */
 export function preflightBatch(
-  config: PreFlightConfig,
+  config: PreFlightConfigInput,
   calls: ContractCall[],
   options?: CheckBatchOptions,
 ): Promise<PreFlightBatchDecision> {

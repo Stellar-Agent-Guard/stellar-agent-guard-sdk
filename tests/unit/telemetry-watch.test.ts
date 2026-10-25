@@ -24,6 +24,7 @@ import { describe, it } from "node:test";
 import { rpc, xdr } from "@stellar/stellar-sdk";
 import {
   ConcurrentTelemetryStreamError,
+  DEFAULT_MAX_BUFFERED_PAGES,
   DEFAULT_TELEMETRY_RETRY_OPTIONS,
   GuardTelemetryListener,
   InMemoryCursorStore,
@@ -155,17 +156,41 @@ function recordingCursorStore(initial: string | null = null) {
 async function take(
   listener: GuardTelemetryListener,
   count: number,
-  params: { startLedger?: number } = {},
+  params: { startLedger?: number; maxBufferedPages?: number } = {},
 ): Promise<GuardEvent[][]> {
   const pages: GuardEvent[][] = [];
   for await (const events of listener.watch({
     pollIntervalMs: 1,
     ...(params.startLedger !== undefined ? { startLedger: params.startLedger } : {}),
+    ...(params.maxBufferedPages !== undefined ? { maxBufferedPages: params.maxBufferedPages } : {}),
   })) {
     pages.push(events);
     if (pages.length >= count) break;
   }
   return pages;
+}
+
+/** Let pending timers, grace macrotasks, and speculative pulls run to quiescence. */
+function settle(ms = 30): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * A promise whose settlement the test controls: an RPC request that stays in
+ * flight until the test resolves or rejects it.
+ */
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (error: unknown) => void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe("watch(signal) cursor persistence", () => {
@@ -1119,5 +1144,696 @@ describe("configurable bounded poll retry (issue #285)", () => {
       );
       assert.equal(calls(), 0, "validation happens before the first poll");
     }
+  });
+});
+
+describe("bounded look-ahead pump (issue #36)", () => {
+  /** `count` scripted pages with distinct ledgers and cursors. */
+  function scriptedLedgerPages(count: number): ScriptedPage[] {
+    return Array.from({ length: count }, (_, index) => ({
+      events: [rawLedgerEvent(501 + index)],
+      cursor: `cursor-${index + 2}`,
+    }));
+  }
+
+  it("exposes the documented default bound", () => {
+    assert.equal(DEFAULT_MAX_BUFFERED_PAGES, 2);
+  });
+
+  it("rejects an unusable bound before issuing any RPC, without leaking the stream lease", async () => {
+    for (const maxBufferedPages of [
+      -1,
+      2.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      "2",
+    ] as unknown as number[]) {
+      const { server, requests } = scriptedServer(scriptedLedgerPages(1));
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      await assert.rejects(
+        async () => {
+          for await (const _events of listener.watch({ pollIntervalMs: 1, maxBufferedPages })) {
+            // no pages expected: validation fails first
+          }
+        },
+        TypeError,
+        `must reject ${JSON.stringify(maxBufferedPages)}`,
+      );
+      assert.equal(requests.length, 0, "validation happens before the first poll");
+    }
+
+    // A rejected validation must not hold the stream lease: a valid stream
+    // on the same listener still starts.
+    const { server, requests } = scriptedServer(scriptedLedgerPages(1));
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    await assert.rejects(async () => {
+      for await (const _events of listener.watch({ pollIntervalMs: 1, maxBufferedPages: -1 })) {
+        // rejected above
+      }
+    }, TypeError);
+    const [page] = await take(listener, 1);
+    assert.deepEqual(
+      page?.map((event) => event.ledger),
+      [501],
+      "the listener is reusable after a rejected option",
+    );
+    assert.equal(requests.length, 1, "and the valid stream polls exactly once");
+  });
+
+  it("delivers the same pages in the same order with and without look-ahead", async () => {
+    const pages = scriptedLedgerPages(3);
+    const withLookahead = await take(
+      new GuardTelemetryListener({
+        server: scriptedServer([...pages, pages[2]!]).server,
+        guard: GUARD,
+      }),
+      3,
+    );
+    const strict = await take(
+      new GuardTelemetryListener({
+        server: scriptedServer([...pages, pages[2]!]).server,
+        guard: GUARD,
+      }),
+      3,
+      { maxBufferedPages: 0 },
+    );
+
+    const shape = (batches: GuardEvent[][]) =>
+      batches.map((batch) => batch.map((event) => event.ledger));
+    assert.deepEqual(shape(withLookahead), [[501], [502], [503]]);
+    assert.deepEqual(
+      shape(strict),
+      shape(withLookahead),
+      "the bound changes pacing, never the delivered sequence",
+    );
+  });
+
+  it("maxBufferedPages: 0 restores strict consumer-paced polling", async () => {
+    const pages = scriptedLedgerPages(2);
+    const { server, requests } = scriptedServer([...pages, pages[1]!]);
+    const rec = recordingCursorStore(null);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
+    const stream = listener.watch({ pollIntervalMs: 1, maxBufferedPages: 0 });
+
+    const first = await stream.next();
+    assert.deepEqual(
+      first.value?.map((event) => event.ledger),
+      [501],
+      "one pull delivers exactly one page",
+    );
+    assert.equal(requests.length, 1, "one fetch per pull — nothing runs ahead");
+    assert.deepEqual(
+      rec.saves,
+      ["cursor-2"],
+      "the eager path still saves each poll's cursor before delivery",
+    );
+
+    await settle();
+    assert.equal(requests.length, 1, "an idle consumer keeps the loop idle: no look-ahead");
+
+    const second = await stream.next();
+    assert.deepEqual(
+      second.value?.map((event) => event.ledger),
+      [502],
+    );
+    assert.equal(requests.length, 2, "the next pull performs the next fetch, and only it");
+    await stream.return?.();
+  });
+
+  it("bounds look-ahead to maxBufferedPages and stops fetching when the consumer stops", async () => {
+    const { server, requests } = scriptedServer(scriptedLedgerPages(8));
+    const rec = recordingCursorStore(null);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
+    const stream = listener.watch({ pollIntervalMs: 1, maxBufferedPages: 2 });
+
+    // A slow consumer: between pulls it "works", and the pump may run ahead
+    // — but never past its bound of buffered + one in-flight pages.
+    for (let pulled = 1; pulled <= 2; pulled += 1) {
+      const page = await stream.next();
+      assert.deepEqual(
+        page.value?.map((event) => event.ledger),
+        [500 + pulled],
+      );
+      assert.ok(
+        requests.length - pulled <= 2,
+        `after delivery ${pulled}: fetched (${requests.length}) minus delivered (${pulled}) must stay within the bound`,
+      );
+      await settle(20);
+      assert.equal(
+        requests.length - pulled,
+        2,
+        `the pump fills its look-ahead exactly to the bound while the consumer works (pull ${pulled})`,
+      );
+    }
+    assert.deepEqual(
+      rec.saves,
+      ["cursor-2", "cursor-3"],
+      "only delivered pages advance the stored cursor; buffered pages stay unsaved",
+    );
+    assert.equal(
+      rec.lastStored(),
+      "cursor-3",
+      "the stored cursor never leads the consumer's confirmed position",
+    );
+
+    // The consumer stops. Teardown must drop the buffered pages and issue no
+    // further request — a stopped consumer stops the poll loop.
+    const requestsAtStop = requests.length;
+    await stream.return?.();
+    await settle();
+    assert.equal(requests.length, requestsAtStop, "no zombie fetch after teardown");
+
+    // A restart resumes from the last *delivered* cursor, re-reading the
+    // dropped pages — at-least-once, never lose-the-tail.
+    const restarted = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
+    const resumeRequestIndex = requests.length;
+    await take(restarted, 1);
+    assert.equal(
+      requests[resumeRequestIndex]?.cursor,
+      "cursor-3",
+      "the restart re-reads from the consumer's confirmed position",
+    );
+  });
+
+  it("a consumer that stops after one page drags no extra fetch past its own stop", async () => {
+    const { server, requests } = scriptedServer(scriptedLedgerPages(4));
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    await take(listener, 1);
+    await settle();
+
+    assert.equal(
+      requests.length,
+      1,
+      "the break lands before the pump's speculative pull: one demanded fetch, no more",
+    );
+  });
+
+  it("the same clean stop holds when the stream runs under an AbortSignal", async () => {
+    // With a signal present, the consumer's wake travels the race's extra
+    // microtask hop, so the pump must clear its demand flag at notification
+    // time — otherwise it misclassifies its next pull as demanded, skips the
+    // grace, and races the inter-poll sleep past the consumer's own stop.
+    const { server, requests } = scriptedServer(scriptedLedgerPages(4));
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const controller = new AbortController();
+    const stream = listener.watch({ pollIntervalMs: 1, signal: controller.signal });
+
+    const first = await stream.next();
+    assert.deepEqual(
+      first.value?.map((event) => event.ledger),
+      [501],
+      "the first demanded pull delivers the first page",
+    );
+    await stream.return?.(); // the consumer stops after this one page
+    await settle();
+
+    assert.equal(
+      requests.length,
+      1,
+      "no fetch may be dragged past the consumer's stop, signal or not",
+    );
+  });
+
+  it("delivers a page fetched before an abort, then ends", async () => {
+    const { server, requests } = scriptedServer(scriptedLedgerPages(4));
+    const rec = recordingCursorStore(null);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
+    const controller = new AbortController();
+    const seen: GuardEvent[][] = [];
+
+    for await (const events of listener.watch({
+      pollIntervalMs: 1,
+      signal: controller.signal,
+      // The caller aborts during the first inter-poll delay — after the first
+      // page was fetched, as in the pre-pump stream.
+      sleep: async () => {
+        controller.abort();
+      },
+    })) {
+      seen.push(events);
+    }
+
+    assert.deepEqual(
+      seen.map((batch) => batch.map((event) => event.ledger)),
+      [[501]],
+      "a page fetched before the abort is still delivered, as the pre-pump stream did",
+    );
+    assert.deepEqual(rec.saves, ["cursor-2"], "and its cursor is persisted at delivery");
+    assert.equal(requests.length, 1, "the abort stops the loop at the next boundary");
+    assert.equal(listener.health().state, "aborted");
+  });
+
+  it("an abort while the consumer is busy still delivers the pages already fetched", async () => {
+    const { server, requests } = scriptedServer(scriptedLedgerPages(6));
+    const rec = recordingCursorStore(null);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD, cursorStore: rec.store });
+    const controller = new AbortController();
+    const stream = listener.watch({
+      pollIntervalMs: 1,
+      maxBufferedPages: 2,
+      signal: controller.signal,
+    });
+
+    const first = await stream.next();
+    assert.deepEqual(
+      first.value?.map((event) => event.ledger),
+      [501],
+    );
+    await settle(20); // the consumer is off processing; the pump fills its bound
+    assert.equal(requests.length, 3, "one delivered plus two buffered — the look-ahead is full");
+
+    controller.abort(); // an external stop while pages sit in the buffer
+
+    const seen: number[] = [];
+    while (true) {
+      const step = await stream.next();
+      if (step.done === true) break;
+      seen.push(
+        ...step.value
+          .map((event) => event.ledger)
+          .filter((ledger): ledger is number => ledger !== null),
+      );
+    }
+
+    assert.deepEqual(
+      seen,
+      [502, 503],
+      "pages fetched before the abort are delivered, never silently dropped",
+    );
+    assert.deepEqual(
+      rec.saves,
+      ["cursor-2", "cursor-3", "cursor-4"],
+      "each delivered page advances the stored cursor to its own position",
+    );
+    assert.equal(requests.length, 3, "the abort stops any further fetch");
+    assert.equal(listener.health().state, "aborted");
+  });
+
+  it("delivers 100 events exactly once, in order, across random backpressure", async () => {
+    // The gap/dup contract: pacing must never reorder, lose, or repeat an
+    // event, no matter where a slow consumer's pulls land relative to the
+    // pump's speculative fetches. 20 pages of 5 events, consumed at a
+    // pseudo-random cadence — deterministic so a failure is reproducible.
+    const TOTAL = 100;
+    const PAGE_SIZE = 5;
+    const pages = Array.from({ length: TOTAL / PAGE_SIZE }, (_, pageIndex) => ({
+      events: Array.from({ length: PAGE_SIZE }, (_, offset) =>
+        rawLedgerEvent(501 + pageIndex * PAGE_SIZE + offset),
+      ),
+      cursor: `cursor-${pageIndex + 2}`,
+    }));
+
+    const requests: rpc.Api.GetEventsRequest[] = [];
+    let served = 0;
+    const server = {
+      async getLatestLedger() {
+        return { sequence: 500 };
+      },
+      async getEvents(request: rpc.Api.GetEventsRequest) {
+        requests.push(request);
+        served += 1;
+        const page = pages[served - 1];
+        // Past the script the chain is merely quiet: an empty page, so a
+        // pump that ran ahead during the final pull ends cleanly.
+        return {
+          events: page?.events ?? [],
+          cursor: page?.cursor ?? `cursor-${served + 1}`,
+          latestLedger: 500,
+        };
+      },
+    } as unknown as rpc.Server;
+
+    let seed = 0x2f6e2b1;
+    const random = (): number => {
+      seed = (seed * 1_664_525 + 1_013_904_223) >>> 0;
+      return seed / 2 ** 32;
+    };
+
+    const seen: GuardEvent[] = [];
+    const stream = new GuardTelemetryListener({ server, guard: GUARD }).watch({
+      pollIntervalMs: 1,
+    });
+    for await (const page of stream) {
+      // The artificially slow consumer: "render" or "log" before pulling again.
+      await settle(Math.floor(random() * 4));
+      seen.push(...page);
+      if (seen.length >= TOTAL) break;
+    }
+
+    assert.deepEqual(
+      seen.map((event) => event.ledger),
+      Array.from({ length: TOTAL }, (_, index) => 501 + index),
+      "every event exactly once, in emission order",
+    );
+    assert.equal(seen.length, TOTAL, "100 events in, 100 events out — no loss, no duplicates");
+    assert.equal(new Set(seen.map((event) => event.id)).size, TOTAL, "stable ids are unique");
+    assert.ok(
+      requests.length <= pages.length + DEFAULT_MAX_BUFFERED_PAGES + 1,
+      `fetches stay bounded by the delivered pages plus look-ahead (fetched ${requests.length})`,
+    );
+  });
+
+  it("cancels promptly on abort while a fetch is pending", async () => {
+    // Under backpressure the consumer can be parked on an empty buffer while a
+    // speculative fetch hangs. Abort must end the iterator then and there, not
+    // wait for that request to settle — `getEvents` takes no AbortSignal.
+    const requests: rpc.Api.GetEventsRequest[] = [];
+    const secondFetch = deferred<unknown>();
+    const server = {
+      async getLatestLedger() {
+        return { sequence: 500 };
+      },
+      getEvents(request: rpc.Api.GetEventsRequest) {
+        requests.push(request);
+        if (requests.length === 1) {
+          return Promise.resolve({
+            events: [rawLedgerEvent(501)],
+            cursor: "cursor-2",
+            latestLedger: 500,
+          });
+        }
+        // Never settles until the test says so.
+        return secondFetch.promise;
+      },
+    } as unknown as rpc.Server;
+
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const controller = new AbortController();
+    const stream = listener.watch({ pollIntervalMs: 1, signal: controller.signal });
+
+    const first = await stream.next();
+    assert.deepEqual(
+      first.value?.map((event) => event.ledger),
+      [501],
+    );
+    await settle(); // the pump's speculative pull is now hanging
+    assert.equal(requests.length, 2, "a second fetch is in flight and unresolved");
+
+    const parked = stream.next(); // buffer empty: the consumer is waiting
+    await settle();
+
+    const abortedAt = Date.now();
+    controller.abort();
+    const step = await Promise.race([parked, settle(1_000).then(() => "timeout" as const)]);
+    assert.notEqual(step, "timeout", "abort must not wait for the pending fetch");
+    assert.equal((step as IteratorResult<GuardEvent[]>).done, true);
+    assert.ok(
+      Date.now() - abortedAt < 250,
+      `abort ended the stream promptly (${Date.now() - abortedAt}ms)`,
+    );
+    assert.equal(listener.health().state, "aborted");
+
+    // A fetch that settles after teardown is dropped, not delivered.
+    secondFetch.resolve({
+      events: [rawLedgerEvent(502)],
+      cursor: "cursor-3",
+      latestLedger: 500,
+    });
+    await settle();
+    assert.equal((await stream.next()).done, true, "no post-teardown delivery");
+    assert.equal(requests.length, 2, "teardown issues no further fetch");
+  });
+
+  it("swallows a pending fetch that rejects after teardown", async () => {
+    // The pump must not turn a request abandoned by teardown into an
+    // unhandled rejection — that would crash a Node host on a normal stop.
+    const rejections: unknown[] = [];
+    const onRejection = (error: unknown): void => {
+      rejections.push(error);
+    };
+    process.on("unhandledRejection", onRejection);
+    try {
+      const requests: rpc.Api.GetEventsRequest[] = [];
+      const secondFetch = deferred<unknown>();
+      const server = {
+        async getLatestLedger() {
+          return { sequence: 500 };
+        },
+        getEvents(request: rpc.Api.GetEventsRequest) {
+          requests.push(request);
+          if (requests.length === 1) {
+            return Promise.resolve({
+              events: [rawLedgerEvent(501)],
+              cursor: "cursor-2",
+              latestLedger: 500,
+            });
+          }
+          return secondFetch.promise;
+        },
+      } as unknown as rpc.Server;
+
+      const controller = new AbortController();
+      const stream = new GuardTelemetryListener({ server, guard: GUARD }).watch({
+        pollIntervalMs: 1,
+        signal: controller.signal,
+      });
+      await stream.next();
+      await settle();
+      assert.equal(requests.length, 2);
+
+      controller.abort();
+      assert.equal((await stream.next()).done, true);
+
+      secondFetch.reject(new Error("request abandoned by teardown"));
+      await settle();
+      assert.deepEqual(rejections, [], "a dropped request's rejection is swallowed");
+    } finally {
+      process.off("unhandledRejection", onRejection);
+    }
+  });
+
+  describe("watch() startup latest-ledger resolution (issue #281)", () => {
+    it("honors a pre-aborted signal before any startup RPC", async () => {
+      let getLatestLedgerCalls = 0;
+      let loadCursorCalls = 0;
+      const server = {
+        async getLatestLedger() {
+          getLatestLedgerCalls += 1;
+          return { sequence: 500 };
+        },
+        async getEvents() {
+          return { events: [], cursor: "cursor-1", latestLedger: 500 };
+        },
+      } as unknown as rpc.Server;
+      const store: CursorStore = {
+        async load() {
+          loadCursorCalls += 1;
+          return null;
+        },
+        async save() {},
+      };
+
+      const controller = new AbortController();
+      controller.abort();
+
+      const listener = new GuardTelemetryListener({
+        server,
+        guard: GUARD,
+        cursorStore: store,
+      });
+
+      const pages: GuardEvent[][] = [];
+      for await (const events of listener.watch({ signal: controller.signal })) {
+        pages.push(events);
+      }
+
+      assert.equal(pages.length, 0, "no pages are yielded on pre-aborted signal");
+      assert.equal(
+        loadCursorCalls,
+        0,
+        "cursorStore.load is not called when signal is already aborted",
+      );
+      assert.equal(
+        getLatestLedgerCalls,
+        0,
+        "getLatestLedger is not called when signal is already aborted",
+      );
+      assert.equal(listener.health().state, "aborted");
+    });
+
+    it("retries startup latest-ledger failure with backoff and recovers without wall-clock sleeps", async () => {
+      let ledgerCalls = 0;
+      const delays: number[] = [];
+      const server = {
+        async getLatestLedger() {
+          ledgerCalls += 1;
+          if (ledgerCalls < 3) {
+            throw new Error(`rpc temporary failure attempt ${ledgerCalls}`);
+          }
+          return { sequence: 500 };
+        },
+        async getEvents() {
+          return {
+            events: [rawLedgerEvent(501)],
+            cursor: "cursor-2",
+            latestLedger: 501,
+          };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      const pages = await takeFrom(
+        listener.watch({
+          pollIntervalMs: 1,
+          sleep: async (ms) => {
+            delays.push(ms);
+          },
+          retry: { maxRetries: 3, baseDelayMs: 100, maxDelayMs: 1_000 },
+        }),
+        1,
+      );
+
+      assert.deepEqual(pages, [[decodedEvent(501)]], "the recovered stream delivers events");
+      assert.equal(ledgerCalls, 3, "2 failed attempts + 1 successful recovery");
+      assert.deepEqual(delays, [100, 200], "startup backoff delays matched exponential schedule");
+      const health = listener.health();
+      assert.equal(health.state, "stopped");
+      assert.equal(health.consecutiveFailures, 0, "recovery resets consecutive failure counter");
+    });
+
+    it("reports terminal error via onStreamError and healthState=failed when startup latest-ledger retries are exhausted", async () => {
+      let ledgerCalls = 0;
+      const delays: number[] = [];
+      let streamErrors = 0;
+      let streamError: unknown = null;
+
+      const server = {
+        async getLatestLedger() {
+          ledgerCalls += 1;
+          throw new Error(`rpc down attempt ${ledgerCalls}`);
+        },
+        async getEvents() {
+          return { events: [], cursor: "cursor-1", latestLedger: 500 };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      for await (const _events of listener.watch({
+        pollIntervalMs: 1,
+        sleep: async (ms) => {
+          delays.push(ms);
+        },
+        retry: { maxRetries: 2, baseDelayMs: 50, maxDelayMs: 200 },
+        onStreamError: (err) => {
+          streamErrors += 1;
+          streamError = err;
+        },
+      })) {
+        assert.fail("a terminal stream must not yield");
+      }
+
+      assert.equal(ledgerCalls, 3, "1 initial attempt + 2 retries");
+      assert.deepEqual(delays, [50, 100], "backoff delays taken before exhaustion");
+      assert.equal(streamErrors, 1, "onStreamError fired exactly once at exhaustion");
+      assert.ok(streamError instanceof Error);
+      assert.match((streamError as Error).message, /rpc down attempt 3/);
+      const health = listener.health();
+      assert.equal(health.state, "failed");
+      assert.equal(health.consecutiveFailures, 3);
+    });
+
+    it("an abort during startup retry backoff ends the stream promptly without stream error", async () => {
+      const controller = new AbortController();
+      let streamErrors = 0;
+      const server = {
+        async getLatestLedger() {
+          throw new Error("rpc down");
+        },
+        async getEvents() {
+          return { events: [], cursor: "cursor-1", latestLedger: 500 };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      for await (const _events of listener.watch({
+        pollIntervalMs: 1,
+        signal: controller.signal,
+        sleep: async () => {
+          controller.abort();
+        },
+        retry: { maxRetries: 5, baseDelayMs: 100 },
+        onStreamError: () => {
+          streamErrors += 1;
+        },
+      })) {
+        assert.fail("stream should not yield");
+      }
+
+      assert.equal(streamErrors, 0, "abort during startup backoff does not fire onStreamError");
+      assert.equal(listener.health().state, "aborted");
+    });
+  });
+
+  describe("watch() malformed committed event isolation (issue #284)", () => {
+    it("isolates malformed topic/data XDR between valid events, preserves valid neighbors and advances cursor", async () => {
+      const malformedEvent = {
+        contractId: GUARD,
+        type: "contract" as const,
+        topic: [
+          {
+            type: "scvSymbol",
+            sym: {
+              asStringOrBytes() {
+                throw new Error("corrupted topic XDR");
+              },
+            },
+          } as unknown as xdr.ScVal,
+        ],
+        value: xdr.ScVal.scvMap([]),
+        ledger: 502,
+        ledgerClosedAt: null,
+        txHash: "tx-502-malformed",
+      };
+
+      const server = {
+        async getLatestLedger() {
+          return { sequence: 500 };
+        },
+        async getEvents() {
+          return {
+            events: [rawLedgerEvent(501), malformedEvent, rawLedgerEvent(503)],
+            cursor: "cursor-page-1",
+            latestLedger: 503,
+          };
+        },
+      } as unknown as rpc.Server;
+
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+      const malformedCounts: number[] = [];
+      const malformedDiagnostics: Array<{ ledger: number; transactionHash: string | null }> = [];
+
+      const page = await listener.poll({
+        startLedger: 500,
+        onMalformedEvent: (diag) => malformedDiagnostics.push(diag),
+      });
+
+      assert.equal(page.events.length, 2, "the two valid events are preserved");
+      assert.equal(page.events[0]!.ledger, 501);
+      assert.equal(page.events[1]!.ledger, 503);
+      assert.equal(page.cursor, "cursor-page-1", "cursor advances normally");
+      assert.equal(
+        page.dropped.malformedEvent,
+        1,
+        "malformedEvent is counted in dropped breakdown",
+      );
+      assert.equal(page.malformedEvents, 1, "malformedEvents summary count matches");
+      assert.deepEqual(malformedDiagnostics, [
+        { ledger: 502, transactionHash: "tx-502-malformed" },
+      ]);
+
+      // Also verify through watch() stream
+      const pages = await takeFrom(
+        listener.watch({
+          startLedger: 500,
+          onMalformed: (count) => malformedCounts.push(count),
+        }),
+        1,
+      );
+
+      assert.equal(pages.length, 1);
+      assert.equal(pages[0]!.length, 2);
+      assert.deepEqual(malformedCounts, [1], "onMalformed callback was notified with the count");
+    });
   });
 });

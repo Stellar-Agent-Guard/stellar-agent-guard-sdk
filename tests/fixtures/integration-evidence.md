@@ -24,6 +24,10 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Note** (feat/sdk-260-282-285-311 — deployment prerequisite, verified 2026-10-21): Reproducing `npm run test:integration` **from this branch requires redeploying the Phase-2 instance first** (`phase2-instance.json` is part of the evidence record, not a lockstep with an old deployment). This note simply records the maintenance requirement; the policy behavior below is unchanged.
 
+**Note** (feat(preflight)/preflight-verify-assertallowed-throws-guardblockederror-only-never-transport-errors, PR for #90): Formalizes and pins the `assertAllowed` and `assertBatchAllowed` throw-on-refusal contract, ensuring policy blocks throw `GuardBlockedError` and undetermined / transport errors throw `GuardUndeterminedError` with root cause preserved. The underlying on-chain simulation and policy enforcement evaluation remain unchanged; live Phase 2 integration evidence remains valid.
+
+**Note** (security/issue-117-feat-telemetry-injectable-transport-custom-rpc, PR #373 for #117): `src/preflight.ts` and `src/invoke.ts` now take the shared `{ server? | url? }` transport config (`src/transport.ts`). The only new code on the enforcement path runs at the public boundary: it resolves the `rpc.Server` (an injected instance verbatim, or `new rpc.Server(url, rpcOptions)`) and throws `InvalidInputError` when both or neither are supplied, before any RPC. Simulation, signing, broadcast and the guard's block/admit decision are unchanged, so the scenario evidence below remains valid. A live re-run was attempted on 2026-10-24 against a freshly deployed instance (`npm run deploy:phase2`). It stopped at `set_policy` with `HostError: Error(Object, UnexpectedSize)`: the Phase-1 WASM does not decode the current `policyToScVal` ABI, which is the redeploy prerequisite recorded above. That deploy also showed `initialize` failing with `txBadAuthExtra` when the same key is both `source` and an `accountSigners` entry, reproduced on `main`; that is out of scope for this PR and is not fixed here. No scenario output from that attempt is recorded here.
+
 ## Instance under test
 
 | | |
@@ -33,6 +37,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 | Network | Test SDF Network ; September 2015 |
 | Deployed WASM SHA-256 | `f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63` |
 | Same artifact as Phase 1 | yes — verified against the ledger's `ContractExecutable` and the SHA-256 of the fetched bytecode |
+
+**Note** (fix/policy-293-avoid-freezing-caller-owned-policy-objects, PR for #293): `freezePolicy()` no longer freezes the caller's policy object in place; it returns a deeply frozen **copy** — the policy object, `assets`, `recipients`, `protocols` (each rule and its `fns` array), `recipient_window_caps` (each entry) and `blocked_recipients` are copied before freezing. The change is confined to an ownership/immutability helper on the policy model: it copies and freezes, it does not add, drop, normalise or validate any field, and the `ScVal` produced by `policyToScVal` is byte-identical to the one produced for the same policy before this change. The five scenarios recorded below are enforced by the contract during simulation and are unchanged; the new ownership semantics are covered by unit tests in `tests/unit/policy.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
 
 This is **not** the Phase 1 instance. Phase 1's guard (`CAYJZT4X…`) is left frozen
 by its own dead-man switch as Phase 1's evidence, and is never touched by this
@@ -227,3 +233,118 @@ output if desired.
 
 No credentials, deployment, or policy change are needed beyond what the suite
 already does.
+
+## Addendum — 2026-10-22 (PR: pending invoke outcome + telemetry observability on `src/invoke.ts`)
+
+Recorded because this PR touches the enforcement path (`src/invoke.ts`) and CI's
+`enforcement-path evidence gate` therefore requires this file in the diff.
+
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this contributor checkout, so `npm run test:integration` cannot execute here.
+No fresh Phase-2 transcript is claimed below. The CI gate verifies only that this
+file was touched — not the numbers — and the same limitation stated in the addenda
+above applies here unchanged.
+
+### What the PR changes on the enforcement path
+
+- `src/invoke.ts`: adds a `pending` outcome (`InvokePendingOutcome`) for a
+  transaction the network accepted but did not confirm within the polling
+  budget. It is reported as neither success nor failure: it carries the
+  transaction hash, the `SubmissionResult`, and explicit guidance not to
+  rebroadcast without first querying status, so an in-flight transaction can no
+  longer be mistaken for a failed one and accidentally executed twice.
+- `src/heartbeat.ts`: classifies that same `pending` outcome once through
+  `onError` as a typed non-beat, without advancing `lastBeatAt` or the
+  same-second dedupe marker — the same treatment already given to `blocked`,
+  `error` and `dry_run`.
+- `src/telemetry.ts`: isolates a committed event whose topic/data XDR fails to
+  decode to that single event (counted, never delivered), and makes the count
+  observable through `onMalformed`/`onMalformedEvent`. Also honors a pre-aborted
+  `signal` before every startup request and retries a failed startup
+  `getLatestLedger` inside the existing bounded, abort-aware envelope.
+
+### What did not change
+
+- No guard-policy decision path, authorization-entry construction, signing, or
+  `__check_auth` classification logic was modified. `blocked` and `admissible`
+  verdicts, and the enforced-simulation invariant, are untouched.
+- `src/tx.ts`, `src/policy.ts` and the pre-flight enforcement pipeline are
+  unchanged by this PR.
+- The new `pending` arm is reached only after the enforced simulation has
+  already passed and the transaction has been broadcast — it cannot turn a
+  refusal into a pass, and it never reports `allowed`.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run check:strict-ratchet
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+npm run test:browser
+npm run check:secrets
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+As above, these are valuable but are not a substitute for the Phase-2 live
+suite. A maintainer with `.env.phase2` should run `npm run test:integration`
+against this branch before merge.
+
+## Addendum — 2026-10-22 (PR: policy validation and comparison, issues #306–#308)
+
+This PR touches `src/policy.ts`, so the enforcement-path evidence file is included
+as required. The policy validator now rejects values beyond the contract's
+`i128`/`u64` wire maxima; the address comparison key and duplicate-tolerant diff
+are client-side validation/display behavior and do not alter the contract's
+authorization decision.
+
+**The live suite did not reach its enforcement scenarios.** `npm run test:integration`
+used the documented default ephemeral deployment, deployed a SAC and guard, then
+failed during `initialize` with `txBadAuthExtra`. No fresh live enforcement
+result is claimed. The generated ephemeral environment file was removed after
+the failure. A maintainer should rerun the live suite successfully before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm test
+node --import tsx --test tests/unit/policy.test.ts tests/unit/policy-schema.test.ts tests/unit/policy-diff.test.ts
+```
+
+The full unit suite passed; these offline checks do not substitute for the
+missing live-testnet scenarios above.
+
+## Addendum — 2026-10-25 (PR: agent-runtime guide, default policy, reason tests, simulation concurrency; issues #74, #59, #54, #40)
+
+This PR touches `src/policy.ts` (adds the frozen `DEFAULT_GUARD_POLICY` constant;
+no validation, encoding or decision logic changes) and `src/preflight.ts` (a
+concurrency limit and a bounded HTTP 429 retry around the existing
+`enforceCall` — the verdict classification itself is unchanged), so the
+enforcement-path evidence file is included as required.
+
+**The live suite was not run for this change.** The author has no funded
+`.env.phase2` testnet credentials, so `npm run test:integration` was not executed
+and no fresh live enforcement result is claimed. The one behavioural change
+reachable live is that at most four simulations per interceptor are in flight at
+once (default), which can only delay a verdict, never alter it. A maintainer with
+`.env.phase2` should run the live suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm test
+npm run test:types
+npm run build && npm run test:exports && npm run test:pack
+node scripts/check-doc-links.ts
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.

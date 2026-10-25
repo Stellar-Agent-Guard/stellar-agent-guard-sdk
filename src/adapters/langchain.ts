@@ -36,7 +36,11 @@
  * rather than failing mid-loop on the first tool call.
  */
 import type { InvokeStepEvent } from "../invoke.ts";
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
 import {
   throwAdapterConfigError,
@@ -49,10 +53,12 @@ import {
   validateOptionalTimeout,
   type AdapterConfigIssue,
 } from "./validate.ts";
+import { GuardError } from "../errors.ts";
 import {
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
+  decisionFromGuardError,
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
@@ -226,7 +232,16 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       );
 
       if (calls.length === 1) {
-        const decision = await options.interceptor.check(calls[0]!, checkOptions);
+        let decision: PreFlightDecision;
+        try {
+          decision = await options.interceptor.check(calls[0]!, checkOptions);
+        } catch (error) {
+          if (error instanceof GuardError) {
+            decision = decisionFromGuardError(error);
+          } else {
+            throw error;
+          }
+        }
         runDecisionHook(
           options.onDecision,
           [request, decision],
@@ -256,7 +271,25 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       // Batch mapping: check every call before entering the tool. The interceptor
       // reports one verdict per call in order; a single non-admissible verdict
       // refuses the whole action (all-or-nothing).
-      const batch = await options.interceptor.checkBatch(calls, checkOptions);
+      let batch: PreFlightBatchDecision;
+      try {
+        batch = await options.interceptor.checkBatch(calls, checkOptions);
+      } catch (error) {
+        if (error instanceof GuardError) {
+          const dec = decisionFromGuardError(error);
+          batch = {
+            admissible: false,
+            overallAdmissible: false,
+            kind: dec.kind,
+            detail: dec.detail,
+            verdicts: calls.map(() => dec),
+            calls: calls.map(() => dec),
+            totalEstimatedResourceFee: 0n,
+          };
+        } else {
+          throw error;
+        }
+      }
       for (const verdict of batch.verdicts) {
         runDecisionHook(
           options.onDecision,

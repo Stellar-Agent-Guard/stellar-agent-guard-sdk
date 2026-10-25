@@ -18,8 +18,8 @@
  * |----------------|-----------------------------------------------------------------|
  * | `admissible`   | the wrapped `execute` runs and its result is returned untouched |
  * | `blocked`      | throws `GuardBlockedError` before `execute` is entered          |
- * | `undetermined` | throws `PreFlightUndeterminedError` before `execute` is entered |
- * | mapper failure | throws `PreFlightUndeterminedError` (cause: `AdapterMappingError`) before `execute` is entered |
+ * | `undetermined` | throws `GuardUndeterminedError` before `execute` is entered     |
+ * | mapper failure | throws `GuardUndeterminedError` (cause: `AdapterMappingError`) before `execute` is entered |
  *
  * Throwing (rather than returning a marker like the LangChain `ToolMessage`) is
  * the harness's documented contract for this adapter: the AI SDK renders a
@@ -29,12 +29,17 @@
  * Written structurally against the `Tool` shape, so `ai` is not a dependency of
  * this package.
  */
+import { GuardError, GuardUndeterminedError } from "../errors.ts";
 import { GuardBlockedError } from "../reasons.ts";
-import { PreFlightUndeterminedError } from "../preflight.ts";
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
 import {
   checkOptionsFor,
+  decisionFromGuardError,
   mapContractCalls,
   mappingFailureFor,
   runDecisionHook,
@@ -125,10 +130,10 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
         contractCalls = mapContractCalls(request, options);
       } catch (error) {
         // Fail closed on a mapper failure (issue #316). This adapter documents
-        // `undetermined` as a thrown PreFlightUndeterminedError, so the mapping
+        // `undetermined` as a thrown GuardUndeterminedError, so the mapping
         // failure keeps that shape with the AdapterMappingError as its cause.
         const failure = mappingFailureFor("vercelai", error);
-        throw new PreFlightUndeterminedError(failure.info.explanation, {
+        throw new GuardUndeterminedError(failure.info.explanation, {
           cause: failure.decision.error,
         });
       }
@@ -137,7 +142,16 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
       const checkOptions = checkOptionsFor(options);
 
       if (contractCalls.length === 1) {
-        const decision = await options.interceptor.check(contractCalls[0]!, checkOptions);
+        let decision: PreFlightDecision;
+        try {
+          decision = await options.interceptor.check(contractCalls[0]!, checkOptions);
+        } catch (error) {
+          if (error instanceof GuardError) {
+            decision = decisionFromGuardError(error);
+          } else {
+            throw error;
+          }
+        }
         runDecisionHook(
           options.onDecision,
           [request, decision],
@@ -149,7 +163,25 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
       }
 
       // Batch mapping: only an all-admissible batch reaches `execute`.
-      const batch = await options.interceptor.checkBatch(contractCalls, checkOptions);
+      let batch: PreFlightBatchDecision;
+      try {
+        batch = await options.interceptor.checkBatch(contractCalls, checkOptions);
+      } catch (error) {
+        if (error instanceof GuardError) {
+          const dec = decisionFromGuardError(error);
+          batch = {
+            admissible: false,
+            overallAdmissible: false,
+            kind: dec.kind,
+            detail: dec.detail,
+            verdicts: contractCalls.map(() => dec),
+            calls: contractCalls.map(() => dec),
+            totalEstimatedResourceFee: 0n,
+          };
+        } else {
+          throw error;
+        }
+      }
       for (const verdict of batch.verdicts) {
         runDecisionHook(
           options.onDecision,
@@ -182,7 +214,7 @@ function refusalFor(
       rawEvent: decision.diagnosticEvents?.[0],
     });
   }
-  return new PreFlightUndeterminedError(decision.detail, { cause: decision.error });
+  return new GuardUndeterminedError(decision.detail, { cause: decision.error });
 }
 
 /**

@@ -6,8 +6,10 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Account, Keypair, nativeToScVal, type rpc } from "@stellar/stellar-sdk";
 import {
+  heartbeat,
+  readGuardStatus,
   HeartbeatBlockedError,
   HeartbeatDryRunError,
   HeartbeatIntervalError,
@@ -1133,5 +1135,259 @@ describe("startHeartbeat outcome classification (issue #292)", () => {
     assert.equal(handle.lastBeatAt, 1_200);
 
     await handle.stop();
+  });
+});
+
+/**
+ * A submitted-but-unconfirmed heartbeat (issue #299).
+ *
+ * The transaction was broadcast and the guard may well have accepted it — only
+ * the confirmation polling ran out of budget. Counting it as a beat would claim
+ * success for an unconfirmed heartbeat; retrying it would risk beating twice.
+ * It is therefore reported once, as a `BroadcastError` carrying the hash so an
+ * operator can reconcile it out of band, and it is never counted and never
+ * retried within the same beat.
+ */
+describe("startHeartbeat pending outcome (issue #299)", () => {
+  const HASH = "d".repeat(64);
+
+  const pendingOutcome: InvokeOutcome = {
+    kind: "pending",
+    transactionHash: HASH,
+    submission: {
+      hash: HASH,
+      status: "TIMEOUT",
+      ledger: null,
+      failure: null,
+      events: [],
+    },
+    detail: `transaction ${HASH} submitted but unconfirmed after 2 poll attempt(s)`,
+    guidance: "Do not rebroadcast without querying transaction status.",
+  };
+
+  it("reports a pending beat once and does not count it", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    const beats: HeartbeatBeat[] = [];
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => ({ outcome: pendingOutcome }),
+        onBeat: (beat) => beats.push(beat),
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+
+    assert.equal(beats.length, 0, "an unconfirmed heartbeat is not a beat");
+    assert.equal(handle.lastBeatAt, null, "lastBeatAt must not advance");
+    assert.equal(errors.length, 1, "the pending outcome is reported exactly once");
+    // A `BroadcastError` carrying the hash: the operator's handle for
+    // reconciling the transaction that may still land.
+    assert.ok(errors[0] instanceof BroadcastError);
+    assert.equal((errors[0] as BroadcastError).transactionHash, HASH);
+    assert.match((errors[0] as BroadcastError).message, /submitted but unconfirmed/);
+
+    await handle.stop();
+  });
+
+  it("does not retry a pending beat within the same submission", async () => {
+    const clock = fakeClock();
+    const errors: unknown[] = [];
+    let submissions = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        graceSecs: 30,
+        submit: async () => {
+          submissions += 1;
+          return { outcome: pendingOutcome };
+        },
+        onError: (error) => errors.push(error),
+      }),
+    );
+
+    await clock.tick();
+
+    assert.equal(submissions, 1, "pending is not retryable: no rebroadcast");
+    assert.equal(errors.length, 1);
+    assert.ok(errors[0] instanceof BroadcastError);
+
+    await handle.stop();
+  });
+});
+
+describe("heartbeat() one-shot (issue #75)", () => {
+  const allowed = (hash: string, ledger: number | null = 42): InvokeOutcome =>
+    ({
+      kind: "allowed",
+      submission: { hash, status: "SUCCESS", ledger, failure: null, events: [] },
+    }) as InvokeOutcome;
+
+  /** A mock RPC server: `status()` simulates to a native map, nothing else is needed. */
+  function statusServer(status: Record<string, unknown> | "error" | "empty") {
+    const agent = Keypair.random();
+    const server = {
+      getAccount: async () => new Account(agent.publicKey(), "1"),
+      simulateTransaction: async () => {
+        if (status === "error") return { error: "HostError: boom", events: [] };
+        if (status === "empty") return { result: {}, events: [] };
+        return { result: { retval: nativeToScVal(status) }, events: [] };
+      },
+    } as unknown as rpc.Server;
+    return { agent, server };
+  }
+
+  /** Run `heartbeat()` with the submission step resolved to a canned outcome. */
+  const heartbeatWith = (
+    outcome: InvokeOutcome,
+    agent: Keypair,
+    server: rpc.Server,
+    extra: { verify?: boolean } = {},
+  ) =>
+    heartbeat({
+      server,
+      guard: GUARD,
+      signer: agent,
+      submit: async () => ({ outcome }),
+      ...extra,
+    });
+
+  const liveStatus = {
+    has_policy: true,
+    admin_frozen: false,
+    heartbeat_expired: false,
+    last_heartbeat: 1_700_000_000n,
+    now: 1_700_000_005n,
+  };
+
+  it("reads status() through the simulation path and decodes it", async () => {
+    const { agent, server } = statusServer(liveStatus);
+    const status = await readGuardStatus({ server, guard: GUARD, source: agent.publicKey() });
+    assert.equal(status.has_policy, true);
+    assert.equal(BigInt(status.last_heartbeat), 1_700_000_000n);
+  });
+
+  it("surfaces a failed status simulation as a SimulationError", async () => {
+    const { agent, server } = statusServer("error");
+    await assert.rejects(
+      readGuardStatus({ server, guard: GUARD, source: agent.publicKey() }),
+      SimulationError,
+    );
+    const empty = statusServer("empty");
+    await assert.rejects(
+      readGuardStatus({ server: empty.server, guard: GUARD, source: empty.agent.publicKey() }),
+      SimulationError,
+    );
+  });
+
+  it("reports the transaction hash and verifies LastHeartbeat from the status re-read", async () => {
+    const { agent, server } = statusServer(liveStatus);
+    const result = await heartbeatWith(allowed("abc123"), agent, server);
+    assert.equal(result.transactionHash, "abc123");
+    assert.equal(result.ledger, 42);
+    assert.equal(result.verified, true);
+    assert.equal(result.lastHeartbeat, 1_700_000_000n);
+  });
+
+  it("reports an unconfirmed (not failed) heartbeat when the status re-read fails", async () => {
+    const { agent, server } = statusServer("error");
+    const result = await heartbeatWith(allowed("def456"), agent, server);
+    assert.equal(result.transactionHash, "def456");
+    assert.equal(result.status, null);
+    assert.equal(result.verified, false);
+  });
+
+  it("does not verify a zero LastHeartbeat or an expired switch", async () => {
+    const zero = statusServer({ ...liveStatus, last_heartbeat: 0n });
+    assert.equal((await heartbeatWith(allowed("a"), zero.agent, zero.server)).verified, false);
+    const expired = statusServer({ ...liveStatus, heartbeat_expired: true });
+    assert.equal(
+      (await heartbeatWith(allowed("b"), expired.agent, expired.server)).verified,
+      false,
+    );
+  });
+
+  it("drives the real submit path: build -> invoke, surfacing a pipeline failure", async () => {
+    const agent = Keypair.random();
+    const server = {
+      getAccount: async () => {
+        throw new Error("rpc unreachable");
+      },
+    } as unknown as rpc.Server;
+    await assert.rejects(heartbeat({ server, guard: GUARD, signer: agent }));
+  });
+
+  it("requires a source for an AgentSigner, which cannot pay fees", async () => {
+    const signer = { signDigest: async () => new Uint8Array(64) } as never;
+    await assert.rejects(
+      heartbeat({ server: {} as rpc.Server, guard: GUARD, signer }),
+      /requires `source`/,
+    );
+  });
+
+  it("skips the re-read when verify is false", async () => {
+    const { agent, server } = statusServer("error");
+    const result = await heartbeatWith(allowed("c"), agent, server, { verify: false });
+    assert.equal(result.status, null);
+    assert.equal(result.lastHeartbeat, null);
+  });
+
+  it("maps heartbeat_expired to a HeartbeatBlockedError with the contract's guidance", async () => {
+    const { agent, server } = statusServer(liveStatus);
+    const blocked = {
+      kind: "blocked",
+      reason: "heartbeat_expired",
+      detail: "late",
+      diagnosticEvents: [],
+    } as InvokeOutcome;
+    await assert.rejects(heartbeatWith(blocked, agent, server), (error: unknown) => {
+      assert.ok(error instanceof HeartbeatBlockedError);
+      assert.equal(error.reason, "heartbeat_expired");
+      assert.match(error.message, /dead-man switch fired/);
+      assert.match(error.message, /unfreeze/);
+      return true;
+    });
+  });
+
+  it("maps admin_frozen to a HeartbeatBlockedError", async () => {
+    const { agent, server } = statusServer(liveStatus);
+    const blocked = {
+      kind: "blocked",
+      reason: "admin_frozen",
+      detail: "frozen",
+      diagnosticEvents: [],
+    } as InvokeOutcome;
+    await assert.rejects(heartbeatWith(blocked, agent, server), (error: unknown) => {
+      assert.ok(error instanceof HeartbeatBlockedError);
+      assert.equal(error.reason, "admin_frozen");
+      return true;
+    });
+  });
+
+  it("throws for dry-run, pending and error outcomes instead of returning a result", async () => {
+    const { agent, server } = statusServer(liveStatus);
+    const dry = {
+      kind: "dry_run",
+      verdict: "admissible",
+      reason: null,
+      detail: null,
+    } as unknown as InvokeOutcome;
+    await assert.rejects(heartbeatWith(dry, agent, server), HeartbeatDryRunError);
+    const pending = {
+      kind: "pending",
+      transactionHash: "p1",
+      detail: "unconfirmed",
+    } as unknown as InvokeOutcome;
+    await assert.rejects(heartbeatWith(pending, agent, server), BroadcastError);
+    const failed = new SimulationError("rpc down", { stage: "simulate" });
+    const errored = { kind: "error", error: failed } as unknown as InvokeOutcome;
+    await assert.rejects(heartbeatWith(errored, agent, server), (e: unknown) => e === failed);
   });
 });

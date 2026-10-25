@@ -5,16 +5,49 @@
 ## Constructor
 
 ```ts
-constructor(options: GuardTelemetryListenerOptions)
+constructor(config?: GuardTelemetryInputConfig | GuardTelemetryLocalConfig)
 ```
 
 ### Options
 
-- `server: rpc.Server` — soroban RPC server
-- `guard: string` — Guard contract address
-- `failedTx?: boolean` — opt in to failed-transaction diagnostics as a third event stream; defaults to `false`.
-- `failedTxCursorStore?: CursorStore` — a **separate** durable store for the failed-transaction scan (issue #279). Never shares state with `cursorStore`; omitted → the scan's cursor is process-local.
-- `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
+#### `GuardTelemetryConfig` (`new GuardTelemetryListener(config)`)
+
+The constructor's parameter is `GuardTelemetryInputConfig | GuardTelemetryLocalConfig` (default `{}`). `GuardTelemetryListenerOptions` in `src/telemetry.ts` declares only `counters` and is not exported from the package entry; use `GuardTelemetryConfig` (`GuardTelemetryInputConfig` is that config with the shared `server` or `url` transport).
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | one of `server` / `url` required for `poll()` / `watch()` / `watchAll()` | Soroban RPC the listener reads events from, used verbatim. Mutually exclusive with `url`. |
+| `url` | `string` | — | Soroban RPC URL; the SDK builds the `rpc.Server` (see [Injectable transport](../../README.md#injectable-transport-server-or-url)). Mutually exclusive with `server`. Also used as `rpcUrl` when `rpcUrl` is not set. |
+| `guard` | `string` (`C…`) | required for `poll()` / `watch()` / `watchAll()` | Guard contract to follow. Events from any other contract are dropped and counted, never decoded. |
+| `failedTx` | `boolean` | `false` | Scan failed-transaction diagnostics as a third stream. ⚠️ Off means refusals that only appear in failed transactions are not seen by this listener. |
+| `rpcUrl` | `string` | none — `url` when given, else the server's own URL | Network identity (host) that scopes cursor-store slots; checked before `server.serverUrl`. ⚠️ Pointing it at a different host than `server` makes the listener load and save a different cursor slot. |
+| `logger` | `GuardLoggerInput` | none — silent | Page summaries, coverage gaps, failed or aborted polls. |
+| `counters` | `GuardTelemetryCountersOptions` | none — no counter state; `stats()` returns `null` | Opt-in sliding-window allowed/blocked counters (see below). |
+| `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction. When set, it replaces `counters.clock`. |
+| `buffer` | `GuardEventBufferOptions` (`{ max: number }`) | none — no buffer; `recent()` returns `[]` | Retain the last `max` decoded events in memory for `recent()` / `recentJsonLines()`. `max` must be a positive integer, otherwise `RangeError`. Non-durable: a restart empties it. |
+| `includeRaw` | `boolean` | `false` | Attach the raw `rpc.Api.EventResponse` to every committed event. Memory cost per event; leave off in long-running fleets. |
+| `cursorStore` | `CursorStore` | a process-local `InMemoryCursorStore` | Persists the committed-stream cursor. ⚠️ Without a durable store, a restart resumes from the head and skips events emitted while the process was down (or replays history when `startLedger` is used). |
+| `failedTxCursorStore` | `CursorStore` | a separate process-local `InMemoryCursorStore` | Cursor store for the failed-transaction scan. Never falls back to `cursorStore`; sharing would replay or skip failed transactions. |
+
+#### `GuardTelemetryLocalConfig` (local-only listener, no RPC)
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `counters` | `GuardTelemetryCountersOptions` | none — `stats()` returns `null` | Counters fed through `observe(event)`. |
+| `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction; replaces `counters.clock` when set. |
+| `logger` | `GuardLoggerInput` | none — silent | Optional log sink. |
+
+#### `GuardTelemetryCountersOptions` (`config.counters`)
+
+Exactly one of `windowEvents` / `windowMs` is required; both, neither, or a non-positive value throws at construction.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `windowEvents` | `number` (positive integer) | none | Keep the last N decisions. Deterministic: no clock is consulted. |
+| `windowMs` | `number` (positive) | none | Keep decisions observed in the last `windowMs` ms, using `clock`. |
+| `clock` | `() => number` | `Date.now` | Clock for `windowMs` eviction and `windowStart`. Overridden by the listener-level `clock` when that is set. |
+
+Counters only count what this listener observed: ⚠️ `blocked: 0` is not proof that nothing was refused (check `stats().coverage`).
 
 ## Methods
 
@@ -76,7 +109,8 @@ Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
-`jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`, and `signal`.
+`maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`,
+`onMalformed`, `onMalformedEvent`, and `signal`.
 
 #### Unknown topics
 
@@ -88,6 +122,49 @@ page that contains at least one unrecognised event. Each entry is
 are exposed — never raw XDR or the source payload. The callback is isolated like
 `onGap`, so a throwing sink cannot stop the stream. See
 [`docs/event-schema.md`](../event-schema.md#unknown-event-topics--observability-without-payloads).
+
+#### Malformed events (issue #284)
+
+An event whose topic or data XDR cannot be decoded is **isolated to that
+event**: the listener skips it, counts it, and keeps decoding the rest of the
+page. One corrupt event never fails a page, never discards its valid
+neighbours, and never stops the stream.
+
+`poll()` reports the count in two places — `dropped.malformedEvent` in the
+drop breakdown and `malformedEvents` as a top-level summary on `PollResult` —
+and `watch()`/`watchAll()` accept two opt-in callbacks:
+
+```ts
+watch({
+  // Once per page that contains at least one malformed committed event.
+  onMalformed: (count) => metrics.increment("guard.events.malformed", { count }),
+  // Per malformed event, with safe diagnostics only.
+  onMalformedEvent: ({ ledger, transactionHash }) => {
+    reportSuspiciousLedger(ledger, transactionHash);
+  },
+});
+```
+
+Only the count and the safe metadata (ledger, transaction hash) are exposed —
+never the malformed payload or its raw XDR, so an observability sink cannot
+become an exfiltration path. Both callbacks are isolated like `onGap`: a
+throwing sink is swallowed and cannot stop the stream.
+
+#### Startup: resolving the first ledger (issue #281)
+
+When neither `startLedger` nor `cursor` is supplied, `watch()` must resolve a
+starting point before its first poll. That startup read now follows the same
+contract as every later poll:
+
+- A `signal` that is **already aborted** short-circuits before *any* startup
+  work — no cursor load, no `getLatestLedger` — so teardown issues zero RPCs.
+  Additional abort checks guard each subsequent startup request.
+- A `getLatestLedger` that fails is retried inside the same bounded, abort-aware
+  backoff envelope (`retry`) as a mid-watch poll failure. Recovery resumes
+  normally; exhaustion reports through `onStreamError` exactly once and leaves
+  `health().state === "failed"`.
+- An abort during the backoff wait ends the stream promptly, with no
+  `onStreamError` — an abort is not a failure.
 
 #### One active stream per listener
 
@@ -145,25 +222,58 @@ If the callback itself throws, that throw **propagates** out of the `for await`
 loop — the consumer asked for halt-on-first-error semantics by supplying a
 throwing callback, so it is not swallowed.
 
+#### Bounded look-ahead (backpressure, issue #36)
+
+`watch()` fetches through a bounded look-ahead pump: at most
+`maxBufferedPages` pages (`DEFAULT_MAX_BUFFERED_PAGES`, `2`, by default) are
+prefetched between the pump and the consumer, plus at most one request in
+flight, and the pump pulls sequentially — never more than one `getEvents` at a
+time. A consumer that processes slower than the poll cadence (a dashboard
+render loop, a file logger) therefore **throttles the fetches** once the bound
+is reached, instead of letting the stream race ahead with pages nobody has
+consumed (memory growth, rate-limit burn):
+
+```ts
+watch({
+  maxBufferedPages: 2, // pages buffered ahead of the consumer; integer >= 0
+});
+```
+
+The bound changes pacing, never the delivered sequence: same order, no loss,
+no duplicates — and `maxBufferedPages: 0` disables look-ahead entirely,
+restoring strict consumer-paced polling (one page fetched per pull), exactly
+the stream this option pre-dates.
+
+The stored cursor never leads the consumer's position: each page's cursors
+are saved **at delivery**, before the batch is yielded, so pages that were
+fetched but not delivered when a consumer stops are re-read after a restart
+(at-least-once, never lose-the-tail). A consumer that stops pulling stops the
+fetches once the bound is reached; a `break` after N pages drags no extra
+fetch past its own stop.
+
+The bound is validated **before the first poll**: a non-integer or negative
+value throws a `TypeError` when the stream starts, the same fail-loudly
+contract as `retry`.
+
 #### Aborting (`signal`)
 
 Aborting ends the stream as a normal exit, never a throw:
 
 - an abort before the first pull issues no RPC call at all — not even the
-  `getLatestLedger` probe that resolves a default `startLedger;
--
-  an abort between pages prevents the next poll and does not serve out the
+  `getLatestLedger` probe that resolves a default `startLedger`;
+- an abort between pages prevents the next poll and does not serve out the
   remaining poll delay (the default delay's timer is cleared, so no handle is
   left open);
-- an abort while a request is in flight lets that request's rejection go 
-  quietly as teardown instead of surfacing an `AbortError` or an unhandled
-  rejection.
+- an abort while a request is in flight ends the iterator without waiting for
+  that request, and the late response is discarded; its rejection goes quietly
+  as teardown instead of surfacing an `AbortError` or an unhandled rejection.
 
 **In-flight requests are not cancelled.** `@stellar/stellar-sdk` ^17 exposes
 `getEvents(request: Api.GetEventsRequest)` with no `AbortSignal` parameter, so
-there is no supported way to cancel a request that has already been sent. The
-worst case between `signal.abort()` and the iterator ending is therefore **one
-request duration**, never a full poll interval. The README's
+there is no supported way to cancel a request that has already been sent. It is
+not awaited either: `signal.abort()` ends the iterator immediately, even with a
+`getEvents` call pending, so a stop never waits out a request duration. The
+README's
 [“Aborting a watch”](../../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover)
 section states the same boundary for consumers.
 
@@ -283,8 +393,11 @@ interface GuardTelemetryHealthSnapshot {
 `poll()` re-checks the emitting `contractId` before decoding rather than
 trusting the RPC's contract filter. `PollResult.dropped` reports every rejection
 by reason — `unknownTopic`, `foreignContract`, `missingContractId`,
-`malformedContractId` — and the same breakdown is logged with the page summary.
-Events with missing or malformed identity fail closed. See
+`malformedContractId`, `malformedEvent` — and the same breakdown is logged with
+the page summary. `malformedEvent` counts committed events whose XDR failed to
+decode; they are skipped individually rather than failing the page (issue
+#284), and `PollResult.malformedEvents` repeats the count as a top-level
+summary. Events with missing or malformed identity fail closed. See
 [`event-schema.md`](../event-schema.md#emitting-identity-validation-before-decode-issue-322).
 
 ## Event identity

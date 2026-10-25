@@ -24,6 +24,31 @@ export class GuardError extends Error {
 }
 
 /**
+ * Thrown by `assertAllowed` (or an adapter's pre-execution interceptor) when the guard
+ * could not reach a decision (e.g. transport failure, simulation error, missing state).
+ *
+ * Distinct from `GuardBlockedError`: an action that is undetermined was never ruled on
+ * by policy, but must fail closed so an agent is not given an unverified green light.
+ */
+export class GuardUndeterminedError extends GuardError {
+  readonly stage: "preflight" | "submission";
+  readonly detail: string;
+
+  constructor(
+    detailOrMessage: string,
+    options: { stage?: "preflight" | "submission"; detail?: string; cause?: unknown } = {},
+  ) {
+    const message = detailOrMessage.startsWith("stellar-agent-guard could not determine")
+      ? detailOrMessage
+      : `stellar-agent-guard could not determine this action's status\n${detailOrMessage}`;
+    super(message, causeOptions(options.cause));
+    this.name = "GuardUndeterminedError";
+    this.stage = options.stage ?? "preflight";
+    this.detail = options.detail ?? detailOrMessage;
+  }
+}
+
+/**
  * A caller-supplied value had the wrong shape or type.
  *
  * This is an `InputError` in the platform sense: it is thrown before the SDK
@@ -94,6 +119,39 @@ export class SimulationError extends GuardError {
     super(message, causeOptions(options.cause));
     this.stage = options.stage;
     this.diagnosticEvents = [...(options.diagnosticEvents ?? [])];
+  }
+}
+
+/**
+ * The RPC kept answering HTTP 429 (rate limited) after the bounded retry, so no
+ * simulation ran (issue #40).
+ *
+ * Still fail-closed: it is the `error` of an `undetermined` pre-flight verdict
+ * whose `cause` is `"rate_limited"`, never a refusal and never an approval. The
+ * remedy is operational, not a policy change: lower `maxConcurrentSimulations`,
+ * or raise the RPC's limit (self-hosted RPC).
+ */
+export class RateLimitedError extends SimulationError {
+  /** Machine-readable discriminant; mirrors the verdict's `cause`. */
+  readonly kind = "rate_limited" as const;
+  /** The server's `Retry-After`, in milliseconds, when it sent one. */
+  readonly retryAfterMs: number | null;
+  /** Simulation attempts made, including the first. */
+  readonly attempts: number;
+
+  constructor(options: {
+    stage: SimulationError["stage"];
+    retryAfterMs: number | null;
+    attempts: number;
+    cause?: unknown;
+  }) {
+    super(
+      `the RPC rate-limited the simulation (HTTP 429) on ${options.attempts} attempt(s)` +
+        (options.retryAfterMs !== null ? `; Retry-After ${options.retryAfterMs}ms` : ""),
+      { stage: options.stage, cause: options.cause },
+    );
+    this.retryAfterMs = options.retryAfterMs;
+    this.attempts = options.attempts;
   }
 }
 

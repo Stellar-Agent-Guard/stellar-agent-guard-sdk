@@ -49,8 +49,12 @@
  *   self-reference rules (need the caller-supplied `guardAddress`), and the
  *   §8 bullet 5 shape-valid advisories the contract no-ops.
  */
-import { Address } from "@stellar/stellar-sdk";
-import { POLICY_RULE_IDS, type PolicyFailure, type PolicyRuleId } from "./policy.ts";
+import {
+  POLICY_RULE_IDS,
+  policyAddressComparisonKey,
+  type PolicyFailure,
+  type PolicyRuleId,
+} from "./policy.ts";
 
 /** The single source of validation rules for this module. */
 export const POLICY_SCHEMA_PATH = "tests/fixtures/vendor/policy.schema.json";
@@ -147,6 +151,10 @@ export const SCHEMA_VS_CODE_RULES = {
       why: "§8 bullet 6: uniqueItems compares raw values, not normalized addresses; per-list rule ids differ",
     },
     {
+      rule: "integer_out_of_range",
+      why: "The schema dialect has no maximum keyword; code enforces the i128/u64 wire ceilings",
+    },
+    {
       rule: "empty_protocol_functions",
       why: "schema-valid shape ([] ) the contract rejects; null means any",
     },
@@ -173,6 +181,9 @@ function toIntegerLike(value: unknown): bigint | null {
   if (typeof value === "string" && /^[+-]?\d+$/.test(value.trim())) return BigInt(value.trim());
   return null;
 }
+
+const I128_MAX = 2n ** 127n - 1n;
+const U64_MAX = 2n ** 64n - 1n;
 
 /**
  * Instance paths are rooted at "": the failure surface renders the root as
@@ -391,17 +402,6 @@ function conditionHolds(condition: unknown, value: unknown, options: ResolvedOpt
 
 /** ── The §8 rules code enforces (the other half of the split table) ──────── */
 
-function normalizeStellarAddress(addr: string): string | null {
-  try {
-    // The same normalization `validateGuardPolicy` uses: decode + re-encode via
-    // the Stellar SDK, so validity and checksum are the SDK's judgment, not a
-    // hand-rolled regex (the reason this rule stays in the code column).
-    return new Address(addr).toString();
-  } catch {
-    return null;
-  }
-}
-
 function arrayAt(record: Record<string, unknown>, key: string): readonly unknown[] | null {
   const value = record[key];
   return Array.isArray(value) ? value : null;
@@ -425,7 +425,7 @@ function checkAddressList(
   const seen = new Set<string>();
   for (const [index, entry] of list.entries()) {
     const path = entryPath(name, index);
-    if (typeof entry !== "string" || normalizeStellarAddress(entry) === null) {
+    if (typeof entry !== "string" || policyAddressComparisonKey(entry) === null) {
       out.push(
         path,
         "invalid_address",
@@ -435,7 +435,7 @@ function checkAddressList(
       );
       continue;
     }
-    const norm = normalizeStellarAddress(entry)!;
+    const norm = policyAddressComparisonKey(entry)!;
     if (seen.has(norm)) {
       out.push(path, "code", `/code/${name}`, `duplicate address "${entry}"`, duplicateRule);
     }
@@ -467,6 +467,41 @@ function enforceCodeRules(
   const blocked = arrayAt(record, "blocked_recipients");
   const caps = arrayAt(record, "recipient_window_caps");
   const protocols = arrayAt(record, "protocols");
+
+  const numericFields = [
+    ["per_tx_cap", "i128"],
+    ["window_secs", "u64"],
+    ["window_cap", "i128"],
+    ["active_from", "u64"],
+    ["active_until", "u64"],
+    ["dms_grace_secs", "u64"],
+  ] as const;
+  for (const [name, wireType] of numericFields) {
+    const integer = toIntegerLike(record[name]);
+    const maximum = wireType === "i128" ? I128_MAX : U64_MAX;
+    if (integer !== null && integer > maximum) {
+      out.push(
+        name,
+        "code",
+        `/code/${name}`,
+        `${name} must be within ${wireType} range [0, ${maximum}]`,
+        "integer_out_of_range",
+      );
+    }
+  }
+  for (const [index, cap] of (caps ?? []).entries()) {
+    const integer = toIntegerLike(objectAt(cap, "cap"));
+    if (integer !== null && integer > I128_MAX) {
+      const path = `recipient_window_caps[${index}].cap`;
+      out.push(
+        path,
+        "code",
+        `/code/${path}`,
+        `${path} must be within i128 range [0, ${I128_MAX}]`,
+        "integer_out_of_range",
+      );
+    }
+  }
 
   // §8 bullet 8: entry caps (the bound is a caller option, not schema state).
   for (const [list, name] of [
@@ -518,8 +553,8 @@ function enforceCodeRules(
     const seenProtocols = new Set<string>();
     for (const [index, rule] of protocols.entries()) {
       const contract = objectAt(rule, "contract");
-      if (typeof contract === "string" && normalizeStellarAddress(contract) !== null) {
-        const norm = normalizeStellarAddress(contract)!;
+      if (typeof contract === "string" && policyAddressComparisonKey(contract) !== null) {
+        const norm = policyAddressComparisonKey(contract)!;
         if (seenProtocols.has(norm)) {
           out.push(
             `protocols[${index}].contract`,
@@ -591,12 +626,12 @@ function enforceCodeRules(
     const recipientSet = new Set(
       recipients
         .filter((entry): entry is string => typeof entry === "string")
-        .map((entry) => normalizeStellarAddress(entry))
+        .map((entry) => policyAddressComparisonKey(entry))
         .filter((entry): entry is string => entry !== null),
     );
     for (const [index, entry] of blocked.entries()) {
       if (typeof entry !== "string") continue;
-      const norm = normalizeStellarAddress(entry);
+      const norm = policyAddressComparisonKey(entry);
       if (norm !== null && recipientSet.has(norm)) {
         out.push(
           `blocked_recipients[${index}]`,
@@ -673,7 +708,7 @@ export function validateGuardPolicyAgainstSchema(
       : (optionsOrGuardAddress ?? {});
 
   const resolved: ResolvedOptions = {
-    guardAddress: options.guardAddress ? normalizeStellarAddress(options.guardAddress) : null,
+    guardAddress: options.guardAddress ? policyAddressComparisonKey(options.guardAddress) : null,
     maxRecipientEntries: options.maxRecipientEntries ?? 256,
   };
 
@@ -725,6 +760,6 @@ export function ruleForKeyword(keyword: string): PolicyRuleId {
 /** Resolve an `x-policy-rule-id` annotation to the shared vocabulary. */
 export function ruleFromAnnotation(annotation: string): PolicyRuleId {
   return POLICY_RULE_IDS.includes(annotation as PolicyRuleId)
-    ? (annotation as PolicyRuleId)
+    ? (annotation as (typeof POLICY_RULE_IDS)[number])
     : "invalid_type";
 }
