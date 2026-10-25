@@ -5,21 +5,22 @@
 ## Constructor
 
 ```ts
-constructor(config?: GuardTelemetryConfig | GuardTelemetryLocalConfig)
+constructor(config?: GuardTelemetryInputConfig | GuardTelemetryLocalConfig)
 ```
 
 ### Options
 
 #### `GuardTelemetryConfig` (`new GuardTelemetryListener(config)`)
 
-The constructor's parameter is `GuardTelemetryConfig | GuardTelemetryLocalConfig` (default `{}`). `GuardTelemetryListenerOptions` in `src/telemetry.ts` declares only `counters` and is not exported from the package entry; use `GuardTelemetryConfig`.
+The constructor's parameter is `GuardTelemetryInputConfig | GuardTelemetryLocalConfig` (default `{}`). `GuardTelemetryListenerOptions` in `src/telemetry.ts` declares only `counters` and is not exported from the package entry; use `GuardTelemetryConfig` (`GuardTelemetryInputConfig` is that config with the shared `server` or `url` transport).
 
 | Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `server` | `rpc.Server` | required for `poll()` / `watch()` / `watchAll()` | Soroban RPC the listener reads events from. |
+| `server` | `rpc.Server` | one of `server` / `url` required for `poll()` / `watch()` / `watchAll()` | Soroban RPC the listener reads events from, used verbatim. Mutually exclusive with `url`. |
+| `url` | `string` | — | Soroban RPC URL; the SDK builds the `rpc.Server` (see [Injectable transport](../../README.md#injectable-transport-server-or-url)). Mutually exclusive with `server`. Also used as `rpcUrl` when `rpcUrl` is not set. |
 | `guard` | `string` (`C…`) | required for `poll()` / `watch()` / `watchAll()` | Guard contract to follow. Events from any other contract are dropped and counted, never decoded. |
 | `failedTx` | `boolean` | `false` | Scan failed-transaction diagnostics as a third stream. ⚠️ Off means refusals that only appear in failed transactions are not seen by this listener. |
-| `rpcUrl` | `string` | none — the server's own URL is used | Network identity (host) that scopes cursor-store slots; checked before `server.serverUrl`. ⚠️ Pointing it at a different host than `server` makes the listener load and save a different cursor slot. |
+| `rpcUrl` | `string` | none — `url` when given, else the server's own URL | Network identity (host) that scopes cursor-store slots; checked before `server.serverUrl`. ⚠️ Pointing it at a different host than `server` makes the listener load and save a different cursor slot. |
 | `logger` | `GuardLoggerInput` | none — silent | Page summaries, coverage gaps, failed or aborted polls. |
 | `counters` | `GuardTelemetryCountersOptions` | none — no counter state; `stats()` returns `null` | Opt-in sliding-window allowed/blocked counters (see below). |
 | `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction. When set, it replaces `counters.clock`. |

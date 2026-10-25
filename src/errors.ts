@@ -122,6 +122,39 @@ export class SimulationError extends GuardError {
   }
 }
 
+/**
+ * The RPC kept answering HTTP 429 (rate limited) after the bounded retry, so no
+ * simulation ran (issue #40).
+ *
+ * Still fail-closed: it is the `error` of an `undetermined` pre-flight verdict
+ * whose `cause` is `"rate_limited"`, never a refusal and never an approval. The
+ * remedy is operational, not a policy change: lower `maxConcurrentSimulations`,
+ * or raise the RPC's limit (self-hosted RPC).
+ */
+export class RateLimitedError extends SimulationError {
+  /** Machine-readable discriminant; mirrors the verdict's `cause`. */
+  readonly kind = "rate_limited" as const;
+  /** The server's `Retry-After`, in milliseconds, when it sent one. */
+  readonly retryAfterMs: number | null;
+  /** Simulation attempts made, including the first. */
+  readonly attempts: number;
+
+  constructor(options: {
+    stage: SimulationError["stage"];
+    retryAfterMs: number | null;
+    attempts: number;
+    cause?: unknown;
+  }) {
+    super(
+      `the RPC rate-limited the simulation (HTTP 429) on ${options.attempts} attempt(s)` +
+        (options.retryAfterMs !== null ? `; Retry-After ${options.retryAfterMs}ms` : ""),
+      { stage: options.stage, cause: options.cause },
+    );
+    this.retryAfterMs = options.retryAfterMs;
+    this.attempts = options.attempts;
+  }
+}
+
 /** A transaction could not be signed for submission. */
 export class SigningError extends GuardError {
   /** Account/contract whose authorization could not be produced, when known. */

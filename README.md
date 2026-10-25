@@ -47,6 +47,7 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
   - `createLangChainGuardMiddleware`: Halts tool execution if the interceptor blocks the planned action.
   - `createGuardValidator`: ElizaOS action validator returning boolean verdicts before actions run.
   - `createVercelAIGuard`: Vercel AI SDK tool wrapper asking the guard before a tool's `execute` runs.
+- **Running an agent 24/7**: the complete runtime loop — heartbeat, pre-flight every transfer, telemetry alerts and DMS countdown monitoring, with a fail-closed failure-mode table — is in [`docs/agent-runtime.md`](docs/agent-runtime.md).
 - **Telemetry listener (`GuardTelemetryListener`)**: Tails both committed events and diagnostic streams, decoding contract topics and reason codes. Opt-in sliding-window counters expose agent self-monitoring via `stats()`.
 
 > ⚠️ **Trust & limitations:** pre-flight is an **advisory**, zero-broadcast
@@ -819,6 +820,31 @@ const middleware = createLangChainGuardMiddleware({
 
 > **ElizaOS note (0.2.x):** the ElizaOS adapter previously passed the raw `PreFlightDecision` to `onBlocked`; it now receives this structured payload, matching LangChain and MCP. Read `info.reason` / `info.explanation` (or `info.kind`) instead of `decision.reason` / `decision.explanation`.
 
+### Start from the safe baseline (`DEFAULT_GUARD_POLICY`)
+
+Rather than re-typing a policy literal, start from the SDK's frozen, deny-all baseline and add only what your agent needs:
+
+```ts
+import { DEFAULT_GUARD_POLICY, policyToScVal, validateGuardPolicy, type ReadonlyPolicyConfig } from "stellar-agent-guard-sdk";
+
+const policy: ReadonlyPolicyConfig = {
+  ...DEFAULT_GUARD_POLICY,
+  assets: [TOKEN],         // the one SAC token the agent may move
+  recipients: [RECIPIENT], // the one destination it may pay
+};
+validateGuardPolicy(policy); // []
+const scVal = policyToScVal(policy);
+```
+
+| Field | Baseline | Rationale |
+| --- | --- | --- |
+| `assets` / `recipients` / `protocols` | empty | deny-all: nothing is admissible until you name an asset and a recipient |
+| `per_tx_cap` | `100n` | small single-transfer ceiling (the contracts `max-security` template's value) |
+| `window_secs` / `window_cap` | `3600n` / `500n` | one hour, at most five full-size transfers (same template) |
+| `dms_grace_secs` | `604800n` (7 days) | dead-man switch **on**; SPEC §5 production guidance is "≥ several days", and 7 days is the `watch-only` template's grace |
+
+The constant is deep-frozen (mutating it throws), and a unit test asserts its values still match the vendored contracts templates. On its own it reports exactly two `empty_vector_noop` findings (`assets`, `recipients`) — the deny-all intent made visible, cleared as soon as you add one of each. The numbers are a starting point, not a recommendation for your risk limits. The inline policy literals in the validation and encode sections below are deliberate: they demonstrate *invalid* or *edge-case* drafts, which a safe baseline cannot.
+
 ### Policy validation before broadcast (validateGuardPolicy)
 
 Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
@@ -998,6 +1024,23 @@ the helper verifies those bytes without re-hashing and is not SEP-53 message sig
 successful result proves only the key/payload/signature relationship—it does not validate
 network ID, invocation, nonce, expiration ledger, or transaction freshness.
 
+### Agent halted with an `undetermined` storm (rate-limited RPC)
+
+An agent firing dozens of tool calls at once used to open dozens of simultaneous simulations, trip the RPC provider's rate limit (HTTP 429) and turn the whole burst into `undetermined` verdicts — safe (fail-closed) but useless. `PreFlightInterceptor` now bounds this:
+
+- `maxConcurrentSimulations` (default **4**) caps simulations in flight; the rest queue first-in first-out, and the queue wait counts toward each check's `signal` / `timeoutMs`.
+- A 429 waits **once** (the server's `Retry-After` when sent, else `rateLimit.backoffMs`, default 500 ms, never more than `rateLimit.maxBackoffMs`, default 5 s) and retries once. If it is limited again the verdict is `undetermined` with `cause: "rate_limited"` and a `RateLimitedError`.
+
+```ts
+const interceptor = new PreFlightInterceptor({
+  // …
+  maxConcurrentSimulations: 2, // public RPC with a tight limit: lower it
+  rateLimit: { backoffMs: 1_000, maxBackoffMs: 5_000 },
+});
+```
+
+If you still see `cause: "rate_limited"`, **lower** `maxConcurrentSimulations`. On a self-hosted RPC with generous limits, **raise** it (e.g. 16) for lower latency under bursts. The limit is per interceptor, so several interceptors against one RPC multiply it. The cache's ledger read is not counted as a simulation.
+
 ### Typed errors and 0.1.x migration
 
 All operational SDK errors share a `GuardError` base. Invalid caller input is the
@@ -1043,6 +1086,27 @@ The hierarchy, `decodePolicy`, and `verifyAgentSignature` are additive to 0.1.x 
 The one intentional behavior change is for callers already using `dryRun: true`: the old
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
 documented above. Non-dry-run callers keep their existing outcome shapes.
+
+### Send one heartbeat (`heartbeat`)
+
+The SDK signs and submits the guard's `heartbeat()` itself — the same custom-account authorization path `invoke()` uses — so a TypeScript agent needs no separate tool for its one routine action. This is the primary path; the contracts repo's `agent-tx` Rust binary remains a CLI alternative.
+
+```ts
+import { heartbeat, HeartbeatBlockedError } from "stellar-agent-guard-sdk";
+
+try {
+  const beat = await heartbeat({ server, guard: GUARD, signer: agentKeypair });
+  console.log(beat.transactionHash, beat.ledger, beat.lastHeartbeat, beat.verified);
+} catch (error) {
+  if (error instanceof HeartbeatBlockedError) {
+    // error.reason is "heartbeat_expired" (the switch already fired; an admin must
+    // unfreeze) or "admin_frozen"; the message carries the remediation.
+  }
+  throw error;
+}
+```
+
+`heartbeat()` resolves only for an accepted heartbeat. It then re-reads `status()` and reports `lastHeartbeat` and `verified` (a non-zero `LastHeartbeat` on a switch that is not expired); a failed re-read yields `verified: false`, never a failure — the transaction already landed. Pass `verify: false` to skip the re-read. Every other outcome throws: `HeartbeatBlockedError` (a refusal), `HeartbeatDryRunError`, or `BroadcastError` for a submitted-but-unconfirmed transaction (check its hash before rebroadcasting). For a long-running agent use `startHeartbeat` below, which schedules these calls.
 
 ### Keep the dead-man switch alive (`startHeartbeat`)
 
@@ -1184,14 +1248,15 @@ The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `Cos
 
 #### `GuardTelemetryConfig` (`new GuardTelemetryListener(config)`)
 
-The constructor's parameter is `GuardTelemetryConfig | GuardTelemetryLocalConfig` (default `{}`). `GuardTelemetryListenerOptions` in `src/telemetry.ts` declares only `counters` and is not exported from the package entry; use `GuardTelemetryConfig`.
+The constructor's parameter is `GuardTelemetryInputConfig | GuardTelemetryLocalConfig` (default `{}`). `GuardTelemetryListenerOptions` in `src/telemetry.ts` declares only `counters` and is not exported from the package entry; use `GuardTelemetryConfig` (`GuardTelemetryInputConfig` is that config with the shared `server` or `url` transport).
 
 | Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `server` | `rpc.Server` | required for `poll()` / `watch()` / `watchAll()` | Soroban RPC the listener reads events from. |
+| `server` | `rpc.Server` | one of `server` / `url` required for `poll()` / `watch()` / `watchAll()` | Soroban RPC the listener reads events from, used verbatim. Mutually exclusive with `url`. |
+| `url` | `string` | — | Soroban RPC URL; the SDK builds the `rpc.Server` (see [Injectable transport](#injectable-transport-server-or-url)). Mutually exclusive with `server`. Also used as `rpcUrl` when `rpcUrl` is not set. |
 | `guard` | `string` (`C…`) | required for `poll()` / `watch()` / `watchAll()` | Guard contract to follow. Events from any other contract are dropped and counted, never decoded. |
 | `failedTx` | `boolean` | `false` | Scan failed-transaction diagnostics as a third stream. ⚠️ Off means refusals that only appear in failed transactions are not seen by this listener. |
-| `rpcUrl` | `string` | none — the server's own URL is used | Network identity (host) that scopes cursor-store slots; checked before `server.serverUrl`. ⚠️ Pointing it at a different host than `server` makes the listener load and save a different cursor slot. |
+| `rpcUrl` | `string` | none — `url` when given, else the server's own URL | Network identity (host) that scopes cursor-store slots; checked before `server.serverUrl`. ⚠️ Pointing it at a different host than `server` makes the listener load and save a different cursor slot. |
 | `logger` | `GuardLoggerInput` | none — silent | Page summaries, coverage gaps, failed or aborted polls. |
 | `counters` | `GuardTelemetryCountersOptions` | none — no counter state; `stats()` returns `null` | Opt-in sliding-window allowed/blocked counters (see below). |
 | `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction. When set, it replaces `counters.clock`. |
@@ -1262,6 +1327,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
   - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.  - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run; `options.deadlineMs` bounds the whole action including retries and polling. Either bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`. Terminal outcomes also carry additive `retry` metadata (attempt count, retryable classes, delays and exhaustion) with no payloads or XDR.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
+- `heartbeat(params): Promise<HeartbeatResult>` — Signs, submits and confirms a single `heartbeat()`: returns the transaction hash, ledger and a `status()` re-read (`lastHeartbeat`, `verified`), and throws `HeartbeatBlockedError` (`heartbeat_expired`, `admin_frozen`, …) instead of returning on a refusal. `readGuardStatus()` is the underlying `status()` read. See “Send one heartbeat”.
 - `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 - `HeartbeatBlockedError` / `isRetryableHeartbeatFailure(error)` — The typed refusal of a blocked heartbeat, and the classifier that decides whether a failure is a transport failure (retryable) or a decision (never retried). See [Bounded retry for a transient outage](#bounded-retry-for-a-transient-outage).
 
@@ -1340,7 +1406,7 @@ one-shot form.
 
 - [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
-  - `constructor(config?: GuardTelemetryConfig | GuardTelemetryLocalConfig)` — Full table: [`GuardTelemetryConfig`](#guardtelemetryconfig-new-guardtelemetrylistenerconfig).
+  - `constructor(config?: GuardTelemetryInputConfig | GuardTelemetryLocalConfig)` — Full table: [`GuardTelemetryConfig`](#guardtelemetryconfig-new-guardtelemetrylistenerconfig).
   - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover). `params.maxBufferedPages?: number` bounds the look-ahead in front of the consumer (default `DEFAULT_MAX_BUFFERED_PAGES` = 2, `0` = strict consumer pacing); cursors are saved at delivery, so the stored cursor never leads the consumer (issue #36).
   - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
   - `health(): GuardTelemetryHealthSnapshot` — Read-only operational snapshot: stream state (`idle`/`running`/`recovering`/`stopped`/`aborted`/`failed`), last successful poll, consecutive failures, per-stream cursors, failed-tx degradation, and known coverage gaps. Every field is a copy. Contract: [`docs/api/telemetry-listener.md`](docs/api/telemetry-listener.md#health-guardtelemetryhealthsnapshot).
@@ -1519,7 +1585,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **Enforcement boundary for arbitrary calls**: Full amount/recipient limits are native to SAC token transfers. Arbitrary Soroban contract calls are enforced via protocol/function allowlists, active window, pause, and dead-man switches; per-call amount limits are not available generically from host auth contexts (tracked as v2).
 - **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
-- **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
+- **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**; which PRs must run it, and the exact enforcement-path file list, are defined once in [`CONTRIBUTING.md` § Which tests does my PR need?](CONTRIBUTING.md#which-tests-does-my-pr-need-canonical-matrix). It also runs on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift, with the committed evidence in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
 
 ## Enforcement scope — read this before relying on the caps
