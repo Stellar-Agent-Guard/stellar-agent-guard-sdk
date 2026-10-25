@@ -245,6 +245,46 @@ export function freezePolicy(policy: PolicyConfig): ReadonlyPolicyConfig {
 }
 
 /**
+ * The SDK's canonical "safe start" policy: a deep-frozen, deny-all baseline
+ * (issue #59).
+ *
+ * Start every integration from this instead of re-typing a policy literal, so a
+ * wrong field in one example never teaches a wrong deployment. Extend it, don't
+ * mutate it (it is frozen): copy the fields you need and add your own allowlists.
+ *
+ * | Field | Value | Why |
+ * | --- | --- | --- |
+ * | `assets`, `recipients`, `protocols` | empty | Deny-all: no transfer is admissible until the operator names an asset and a recipient. |
+ * | `allow_any_recipient` | `false` | A recipient must be allowlisted explicitly. |
+ * | `per_tx_cap` | `100n` | Small single-transfer ceiling (the contracts `max-security` template's value). |
+ * | `window_secs` / `window_cap` | `3600n` / `500n` | One hour, at most five full-size transfers (same template). |
+ * | `dms_grace_secs` | `604800n` (7 days) | Dead-man switch **on**. SPEC §5 production guidance is "≥ several days"; 7 days is the contracts `watch-only` template's grace, and survives a weekend outage while a heartbeat every `grace / 3` is still cheap. |
+ * | `paused`, `active_from`, `active_until` | `false`, `0n`, `0n` | Not paused; no activity window. |
+ *
+ * The numbers are not a recommendation for your risk limits — raise them
+ * deliberately. Values are drawn from the contracts policy templates
+ * (`tests/fixtures/vendor/policy-presets.json`) and a unit test asserts they
+ * still match, rather than this comment being the only link.
+ *
+ * `validateGuardPolicy` reports exactly two `empty_vector_noop` failures for this
+ * baseline (empty `assets`, empty `recipients`). That is the deny-all intent made
+ * visible, not a defect: add one asset and one recipient and it validates clean.
+ */
+export const DEFAULT_GUARD_POLICY: ReadonlyPolicyConfig = freezePolicy({
+  per_tx_cap: 100n,
+  window_secs: 3600n,
+  window_cap: 500n,
+  assets: [],
+  protocols: [],
+  recipients: [],
+  allow_any_recipient: false,
+  active_from: 0n,
+  active_until: 0n,
+  paused: false,
+  dms_grace_secs: 604800n,
+});
+
+/**
  * Rule identifiers for granular policy validation failures.
  *
  * The SPEC §8 identifiers mirror the contract fixture; integer_out_of_range is
