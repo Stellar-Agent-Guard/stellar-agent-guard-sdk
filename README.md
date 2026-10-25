@@ -1043,6 +1043,27 @@ The one intentional behavior change is for callers already using `dryRun: true`:
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
 documented above. Non-dry-run callers keep their existing outcome shapes.
 
+### Send one heartbeat (`heartbeat`)
+
+The SDK signs and submits the guard's `heartbeat()` itself — the same custom-account authorization path `invoke()` uses — so a TypeScript agent needs no separate tool for its one routine action. This is the primary path; the contracts repo's `agent-tx` Rust binary remains a CLI alternative.
+
+```ts
+import { heartbeat, HeartbeatBlockedError } from "stellar-agent-guard-sdk";
+
+try {
+  const beat = await heartbeat({ server, guard: GUARD, signer: agentKeypair });
+  console.log(beat.transactionHash, beat.ledger, beat.lastHeartbeat, beat.verified);
+} catch (error) {
+  if (error instanceof HeartbeatBlockedError) {
+    // error.reason is "heartbeat_expired" (the switch already fired; an admin must
+    // unfreeze) or "admin_frozen"; the message carries the remediation.
+  }
+  throw error;
+}
+```
+
+`heartbeat()` resolves only for an accepted heartbeat. It then re-reads `status()` and reports `lastHeartbeat` and `verified` (a non-zero `LastHeartbeat` on a switch that is not expired); a failed re-read yields `verified: false`, never a failure — the transaction already landed. Pass `verify: false` to skip the re-read. Every other outcome throws: `HeartbeatBlockedError` (a refusal), `HeartbeatDryRunError`, or `BroadcastError` for a submitted-but-unconfirmed transaction (check its hash before rebroadcasting). For a long-running agent use `startHeartbeat` below, which schedules these calls.
+
 ### Keep the dead-man switch alive (`startHeartbeat`)
 
 An agent that stops heartbeating freezes. `startHeartbeat` schedules the `heartbeat()` calls and makes the failure modes visible instead of silent — an ad-hoc `setTimeout` loop drops a beat on an event-loop stall and turns an RPC blip into an unhandled rejection.
@@ -1118,6 +1139,7 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
   - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.  - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run; `options.deadlineMs` bounds the whole action including retries and polling. Either bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`. Terminal outcomes also carry additive `retry` metadata (attempt count, retryable classes, delays and exhaustion) with no payloads or XDR.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
+- `heartbeat(params): Promise<HeartbeatResult>` — Signs, submits and confirms a single `heartbeat()`: returns the transaction hash, ledger and a `status()` re-read (`lastHeartbeat`, `verified`), and throws `HeartbeatBlockedError` (`heartbeat_expired`, `admin_frozen`, …) instead of returning on a refusal. `readGuardStatus()` is the underlying `status()` read. See “Send one heartbeat”.
 - `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
 - `HeartbeatBlockedError` / `isRetryableHeartbeatFailure(error)` — The typed refusal of a blocked heartbeat, and the classifier that decides whether a failure is a transport failure (retryable) or a decision (never retried). See [Bounded retry for a transient outage](#bounded-retry-for-a-transient-outage).
 
@@ -1375,7 +1397,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **Enforcement boundary for arbitrary calls**: Full amount/recipient limits are native to SAC token transfers. Arbitrary Soroban contract calls are enforced via protocol/function allowlists, active window, pause, and dead-man switches; per-call amount limits are not available generically from host auth contexts (tracked as v2).
 - **Single-key agent signing today, multi-key prepared**: A guard account registers one Ed25519 agent key, and `buildGuardAuthEntry` signs the authorization digest with it. The signing path is now a seam (`AgentSigner`: sign a 32-byte digest, return signature bytes) and every public config accepts either an `AgentSigner` or a plain `Keypair` — so the current single-key behaviour is unchanged, and threshold/multi-key agent signing lands behind the same interface when the contracts repo's v2 decision does. Research, the recommended wire shape, and the revisit trigger: [`docs/concepts/multi-key-agent-signing.md`](docs/concepts/multi-key-agent-signing.md).
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
-- **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**: it is (a) required locally before any PR that touches the enforcement path (`src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, `src/preflight.ts`), with fresh evidence committed to [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md) and CI-verified as present, and (b) run automatically on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift. A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
+- **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**; which PRs must run it, and the exact enforcement-path file list, are defined once in [`CONTRIBUTING.md` § Which tests does my PR need?](CONTRIBUTING.md#which-tests-does-my-pr-need-canonical-matrix). It also runs on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift, with the committed evidence in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
 
 ## Enforcement scope — read this before relying on the caps
