@@ -34,6 +34,7 @@ export {
   PolicyFileReadError,
   PolicyValidationError,
   SigningError,
+  RateLimitedError,
   SimulationError,
 } from "./errors.ts";
 
@@ -66,6 +67,7 @@ export type {
 } from "./reasons.ts";
 
 export {
+  DEFAULT_GUARD_POLICY,
   POLICY_RULE_IDS,
   deadManRemaining,
   decodeCheckResult,
@@ -211,6 +213,7 @@ export type { TraceStepName, TraceStepStatus } from "./trace.ts";
 
 export {
   GuardUndeterminedError as PreFlightUndeterminedError,
+  DEFAULT_MAX_CONCURRENT_SIMULATIONS,
   PreFlightInterceptor,
   preflight,
   preflightBatch,
@@ -229,6 +232,7 @@ export type {
   PreFlightConfigInput,
   PreFlightDecision,
   PreFlightInterceptorOptions,
+  PreFlightUndeterminedCause,
 } from "./preflight.ts";
 
 export {
