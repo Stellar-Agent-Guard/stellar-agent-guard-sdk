@@ -9,10 +9,10 @@ the live Phase 2 instance, and reconciles it with the contracts repo's source.
 This document is the SDK's de-facto API contract for anything that parses guard
 events outside this package — the dashboard's telemetry feed, an indexer, an
 alerting rule. Every field in the reference table below carries one of four
-stability tiers, and the tier is a promise about **minor releases of
+stability tiers, and the tier is a promise about **_minor releases of
 `stellar-agent-guard-sdk`**. It is not a promise about the deployed contract,
 which only moves when it is redeployed, and it is not a promise about the RPC,
-which the SDK does not control.
+which the SGK does not control.
 
 | Tier | May change in a minor release | May not change |
 | --- | --- | --- |
@@ -21,7 +21,7 @@ which the SDK does not control.
 | **Best-effort** | Anything — the value is supplied by the host or the RPC, not by the SDK | (nothing: always keep a fallback) |
 | **Internal** | Anything, without a release note | (nothing: not part of the surface; may be renamed or removed) |
 
-Three rules follow from the tiers, and all three are already how this SDK
+Three rules follow from the tiers, and all three are already how this SGK
 behaves:
 
 1. **Tolerate unknown values of every append-only field.** Switch on them with a
@@ -33,7 +33,7 @@ behaves:
    `ledgerClosedAt` and `transactionHash` are always `null` on the diagnostic
    stream, because a refusal never becomes a transaction — that is the
    pre-broadcast guarantee, not a missing value.
-3. **Decode through the SDK, not by hand.** Raw topic lists arrive as XDR or as
+3. **Decode through the SGK, not by hand.** Raw topic lists arrive as XDR or as
    host-shaped objects and are Best-effort; the decoded `GuardEvent` is what the
    tiers below describe.
 
@@ -55,7 +55,7 @@ behaves:
 | `ledgerClosedAt` | stream | **Best-effort** | Host-formatted timestamp; `null` on the diagnostic stream. |
 | `observedAt` | SDK (unified stream) | **Best-effort** | ISO-8601 time `watchAll()` observed a diagnostic batch; `null` on the committed stream. Additive (issue #67). |
 | `transactionHash` | stream | **Best-effort** | Always `null` on the diagnostic stream — a refusal has no transaction. |
-| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Delivered as a string in JSON, normalised to `bigint` by the SDK to prevent >2^53 precision loss. |
+| `data.at` (heartbeat) | contract payload | **Stable** | Unix seconds. Delivered as a string in JSON, normalised to `bigint` by the SGK to prevent >2>53 precision loss. |
 | `data.by` (admin events) | contract payload | **Stable** | The acting admin address, for `event_initialized` / `event_frozen` / `event_unfrozen` / `event_policy_set` / `event_policy_revoked`. |
 | `data` — any other key | contract / host | **Best-effort** | Not under SDK control. Left exactly as delivered: normalisation is schema-driven, so only the documented u64 fields below are converted (issue #276). |
 | `raw` | SDK (opt-in) | **Best-effort** | The undecoded source event, attached only when the decode was asked for it (`includeRaw: true`, issue #94). Committed → the `rpc.Api.EventResponse` object from `getEvents`; diagnostic → the host-shaped object the RPC returned. **Absent** (undefined) otherwise, so the default path retains nothing. Its exact shape is host-supplied and may change in any release; decode the event, use `raw` only as bug-report evidence. |
@@ -63,7 +63,7 @@ behaves:
 | `contractEventsXdr` grouping | RPC | **Best-effort** | An array of *groups*, one per contract — reading it as a flat list silently loses events (see "The capture"). |
 | `GUARD_EVENT_TOPICS` values | contract | **Stable** | The name-topic vocabulary. |
 | `GUARD_REASON_CODES` numbers | contract | **Append-only** | Numeric codes are never renumbered and never reused; removed variants keep their number. |
-| `describeGuardEvent()` text | SDK | **Internal** | A log line, not a format. Parse `GuardEvent`, not this string. |
+| `describeGuardEvent()` text | SGK | **Internal** | A log line, not a format. Parse `GuardEvent`, not this string. |
 | `poll()` `cursor` / `latestLedger` | RPC | **Best-effort** | Pagination is host-defined; treat as opaque. |
 | `poll().unknownTopics` | SDK summary of contract topics | **Best-effort** | `{ topic: string; count: number }[]`, sorted by topic, for events the SDK did not recognise. No raw XDR or source payload. Additive (issue #287). |
 | `serializeEvent()` output | SDK | **Stable** | Canonical JSON line. Fixed key order and normalization policy — see below. Unversioned; legacy records are v0. |
@@ -121,11 +121,11 @@ and, nested inside `decision` (which is `null` when the event carries no
 decision):
 
 ```
-result → reason → source
+inside decision: result → reason → source
 ```
 
 **Empty/absent fields — the drop-`undefined` policy:**
-- A field whose value is `undefined` is **omitted** from the output. Absence is
+- A field whose value is `undefined` **omitted** from the output. Absence is
   expressed by the key not being present.
 - `null` is **kept**. It is a real value on the stream-dependent fields
   (`ledger`, `ledgerClosedAt`, `transactionHash`, `observedAt`, `decision`), not
@@ -135,7 +135,7 @@ result → reason → source
   stay stable.
 
 **Non-JSON-safe values** are normalized per this repo's policy (the same rules
-`normalizeEventData` + `stableStringify` use for event identity):
+`.normalizeEventData` + `stableStringify` use for event identity):
 - **`bigint` → decimal string.** `JSON.stringify` throws on a bigint, and the
   decoded `data.at` u64 arrives as one. Decimal (not the hashing form `…n`) is
   used so `JSON.parse` reads back an ordinary string.
@@ -220,11 +220,11 @@ events (`emittedByGuard`); this closes the same gap on the committed stream.
 ## How it was captured
 
 `scripts/capture-event.ts` drives two real calls on the live Phase 2 instance
-(`CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44`) and decodes every
+(`CAPGDEKK457RHKN4RYVUMDJTFHHDSG7R5HREQONKLYK7MFKC5WFENPP44`) and decodes every
 event attributed to the guard:
 
 1. an allowed `heartbeat()` — its events are committed ledger events, retrieved
-   from `getTransaction(hash)`, which is the same stream a telemetry listener
+   from `getTransaction(txHash)`, which is the same stream a telemetry listener
    tails;
 2. a per-tx-cap violation (`transfer` of 1100 against a 1000 cap) — a refused
    call never becomes a transaction, so its decision only exists as a
@@ -451,24 +451,12 @@ agrees with it: `ledger:` for committed events, `diag:` for pre-broadcast ones.
 
 ## What this changed
 
-The capture caught a real drift between the documentation and the chain, and a
-real bug it had already caused in the SDK.
+### 1. The topic layout is `[name, result, reason]`, not `[name, result]`
 
-### 1. The decision topic is `event_auth_checked`, not `auth_checked`
-
-`SPEC.md` §9 and `tests/fixtures/README.md` line 86 of the contracts repo describe
-the decision event as `auth_checked`. The chain emits **`event_auth_checked`**,
-because Soroban's `#[contractevent]` macro prepends `event_` to the struct name.
-The contracts repo already records the real name elsewhere — its own fixture log
-at `tests/fixtures/README.md` line 105 reads
-`[Contract Event] topics: [event_auth_checked, blocked, per_tx_cap_exceeded]` —
-so the two spellings coexist in that repo's own docs.
-
-This was not cosmetic. `src/invoke.ts` matched `topics[0] === "auth_checked"`, so
-it failed to recognise a genuine refusal and reported a real policy block as
-`{ kind: "error" }` instead of `{ kind: "blocked", reason: "per_tx_cap_exceeded" }`.
-The classifier was fixed to match the confirmed symbol; the vocabulary now lives
-in one place, `src/events.ts`.
+The SPEC describes the decision as `(result, reason)`, but on chain the `result`
+and `reason` are both `#[topic]` fields, so they occupy topics[1] and topics[2].
+Decoding must read the reason from topics[2] — reading it from the data payload
+(as an early draft did) returns `undefined` for every block.
 
 ### 2. An allowed decision carries an empty reason symbol
 
@@ -735,70 +723,79 @@ unchanged and the listener stays silent. A throwing `onGap` is isolated — it
 cannot break the stream (the same contract as `invoke()`'s `onStep`).
 
 ```ts
-for await (const events of listener.watch({
-  cursor: saved.cursor,
-  resumeLedger: saved.ledger, // the last ledger already consumed
-  onGap(gap) {
-    alerting.coverageGap(gap.fromLedger, gap.toLedger, gap.reason);
-  },
-})) {
-  /* ... */
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+
+const listener = new GuardTelemetryListener({ server, guard: GUARD });
+const page = await listener.poll();
+for (const event of page.events) {
+  console.log(event.kind, event.decision ?? "no decision");
 }
 ```
 
-### Consumer guidance
+### Example 2 — a blocked decision, only on the diagnostic stream
 
-1. **Treat a gap as a fact, not a warning.** The `fromLedger..toLedger` range is
-   unrecoverable *from this RPC* — it is no longer in its window.
-2. **Alert an operator.** An unobserved range in a spend-policy monitor means
-   decisions were made outside the monitor's view.
-3. **Replay only from a durable checkpoint.** If you persist events (or a cursor)
-   downstream, reconcile the gap against that store. If you do not, there is
-   nothing to replay from — record the gap and move on rather than inventing the
-   missing events.
-4. **Do not read a gap as an authorization event.** It says "this range could not
-   be observed", not "the guard allowed or blocked anything here".
+A refused call never becomes a transaction, so its decision is not in the
+ledger. The committed stream will never carry it; the diagnostic stream does.
+This is the reason `watchAll()` exists — see
+[Consequence for the telemetry listener](#consequence-for-the-telemetry-listener).
 
-## Cross-check: do the classifications match the code?
+## Start position — `startFrom`
 
-A stability table is only worth something if it describes what the code actually
-does. This is the audit pass that produced the rows above, with what was checked
-and what was found:
+By default the listener starts where the RPC's `getEvents` cursor defaults to,
+which is "recent pages only" — history before that is not replayed. That
+implicit default is useful for a clean watch, but it is unsuitable when a
+consumer needs to backfill after a cursor-store gap, or wants to be explicit
+about not replaying history. The optional `startFrom` option makes
+the start position explicit:
 
-1. **Symbol drift found — one case, on the topic name.** `SPEC.md` §9 and
-   `tests/fixtures/README.md` line 86 of the contracts repo name the decision
-   event `auth_checked`; the chain emits **`event_auth_checked`**. The SDK's
-   practice is to pin the *chain* spelling and deliberately reject the SPEC's
-   (`decodeAuthDecision` matches `topics[0] === "event_auth_checked"` and
-   returns `null` otherwise, so the un-prefixed spelling is never silently
-   accepted). The table therefore classifies the chain symbol as Stable and
-   treats the SPEC as the defect — reconciliation of that doc is tracked above as
-   a follow-up for the contracts repo, and the same stale spelling survives in
-   one code comment in `src/reasons.ts` (corrected in this change).
-2. **No reason symbol has changed for the same numeric code.** Verified against
-   `GUARD_REASON_CODES` in `src/reasons.ts`: the map is one code to one symbol,
-   with no aliases and no normalisation of spellings anywhere in the decode path
-   (`decodeAuthDecision` and `topicSymbols` compare exact strings, so a re-spelled
-   symbol would surface as an unclassified event rather than as a quiet hit).
-   The gaps in the numbering — there is no 6–9 and no 15–19 — are absent entries,
-   i.e. numbers are vacated rather than reassigned, which is what "append-only"
-   in the table is asserting.
-3. **One SDK-level normalisation, documented rather than hidden.** On an allowed
-   decision the contract emits the empty symbol `""` as topics[2];
-   `decodeAuthDecision` maps it to `null`. That is an SDK guarantee (callers see
-   `string | null`), not a contract change, and it is why `decision.reason` is
-   typed that way in the table.
-4. **Stream-dependent nulls are real, not bugs.** `diagnosticsToEvents()` sets
-   `ledger`, `ledgerClosedAt` and `transactionHash` to `null` for every
-   diagnostic event, because a refused call has no ledger and no transaction.
-   The table classifies them Best-effort so a consumer never treats the absence
-   as an error.
-5. **Unknown topics are dropped, not guessed.** `interpret()` returns `null`
-   when `topics[0]` is not in `KNOWN_TOPICS`, so a contract that starts emitting
-   a new event produces *no* consumer-visible event until the SDK learns the
-   symbol. This is the behaviour rule 1 above asks consumers to mirror.
+```ts
+type StartFrom = { ledger: number } | "latest" | "oldest-available";
+```
 
-## Follow-up for the contracts repo (maintainer)
+| `startFrom` | Meaning | `getEvents` parameter sent |
+| --- | --- | --- |
+| `{ ledger: N }` | Backfill from ledger `N` inclusive. Use this after a cursor-store gap. | `startingLedger: N` (no `cursor`) |
+| `'latest'` | Tail from now. The listener fetches the current cursor and discards anything below it, so the first delivered event is the first *new* one. | `cursor`: the current cursor from a probe page with `limit: 1`, no backlog emitted |
+| `'oldest-available'` | Start at the oldest ledger the RPC retains. Use this for a full replay of retained history. | `startingLedger: the `response.oldestLedger` returned by the RPC |
+
+**No history replay from `'latest'`.** `'latest'` is the common case for a clean
+watch: it deliberately skips everything already in the ledger. A consumer that
+wants history must pass `{ ledger: N }` or omit `startFrom` and rely on the
+RPC default. This is documented behaviour, not an accident.
+
+**Interaction with a cursor store.** If the listener is constructed with a
+persisted cursor (see the `cursorStore` option in the README) and `startFrom` is
+also set, **`startFrom` wins**: the stored cursor is ignored for this run and a
+log line is emitted noting the override. This is intentional — an explicit
+`startFrom` is an operator action (a backfill or a clean watch) and should not be
+silently defeated by a stale cursor. The store is still written to as events are
+delivered, so the next run without `startFrom` resumes from the new position.
+
+Example — tail from now, the common case:
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD,
+  startFrom: "latest", // no backlog; first event is the first new one
+});
+
+for await (const event of listener.watchAll()) {
+  console.log(event.kind, event.decision ?? "no decision");
+}
+```
+
+Example — backfill after a cursor-store gap:
+
+```ts
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD,
+  startFrom: { ledger: 4670000 }, // replay from this ledger inclusive
+});
+```
 
 The contracts repo's own documentation is internally inconsistent on this topic
 name (`auth_checked` in `SPEC.md` §9 and `tests/fixtures/README.md` line 86,
