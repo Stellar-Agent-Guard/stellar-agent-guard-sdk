@@ -729,12 +729,13 @@ two optional caller-owned bounds on the RPC calls they make:
   `DEFAULT_RPC_TIMEOUT_MS` (**30s**), because a network partition that leaves a
   guardrail call pending forever is a hang, not a fail-closed decision. Pass
   `timeoutMs: 0` to opt out and rely on `signal` alone.
-- `deadlineMs?: number` — **`invoke()` and `checkBatch()`**: one overall budget
-  for the whole action (for a batch: policy read plus every staged call). Expiry
-  is fail-closed and reported as an `RpcTimeoutError` with `deadline: true`; it
-  can never become an `allowed` outcome. On a batch, calls that never started are
-  `undetermined` rather than skipped. Pass `clock` to make the accounting
-  deterministic in tests. See `docs/api/invoke-pipeline.md`.
+- `deadlineMs?: number` — **`invoke()`**: one overall budget for the whole
+  action. Expiry is fail-closed and reported as an `RpcTimeoutError` with
+  `deadline: true`; it can never become an `allowed` outcome. Pass `clock` to
+  make the accounting deterministic in tests. See `docs/api/invoke-pipeline.md`.
+  ⚠️ `checkBatch()` accepts and validates `deadlineMs` but does not currently
+  enforce it; bound a batch with `signal` (for example `AbortSignal.timeout(ms)`)
+  and `timeoutMs`.
 
 **Concurrent identical checks are coalesced.** `PreFlightInterceptor` shares one
 in-flight discovery/enforcement run when the same call and config are checked at
@@ -1168,17 +1169,161 @@ The combined heartbeat-loop + pre-flight pattern is tracked as an integration gu
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`docs/deprecations.md`](docs/deprecations.md). Release process and versioning checklist: [`docs/releasing.md`](docs/releasing.md).
 
+### Constructor options
+
+One table per options object a public constructor (or `invoke()`) takes. Every default below is the value the code in `src/` applies when the option is omitted; "none" means the feature is off or the value is simply absent. ⚠️ marks options whose setting changes what a verdict can be trusted for: staleness, fail-closed bounds, or a check that is switched off.
+
+#### `PreFlightInterceptorOptions` (alias of `PreFlightConfig`)
+
+`new PreFlightInterceptor(options)`. Validated at construction: a `cache` without `ttlMs`/`ttlLedgers`, or with a non-positive value, throws a `TypeError`.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC used for every ledger read and simulation. |
+| `networkPassphrase` | `string` | required | Network the probe and enforced envelopes are built and signed for. Part of the cache and coalescing key. |
+| `guard` | `ContractAddress` (`C…`) | required | The guarded smart account whose policy is enforced. |
+| `agent` | `AgentSigner \| Keypair` | required | The key registered as the account's agent; signs the guard auth entry. A plain `Keypair` is the single-key default. |
+| `source` | `Keypair` | required | Classic account that pays fees and supplies the sequence number. |
+| `accountSigners` | `Keypair[]` | none | Authorizers for non-guard auth requirements (e.g. an admin on a policy call). |
+| `policy` | `ReadonlyPolicyConfig \| null` | none — `checkBatch()` reads the `Policy` ledger entry | Used **only** for `checkBatch()` staging; `check()` always enforces through simulation. ⚠️ A supplied policy is trusted as-is: a stale snapshot makes batch window staging use outdated caps. An explicit `null` means "no policy to stage against", not a failed read. |
+| `cache` | `PreFlightCacheOptions` | none — no cache; every `check()` simulates fresh | ⚠️ Opt-in. A cached verdict can be staler than one admitted transfer, so a hit can report `admissible` for a call the next simulation would block. See the cache table below. |
+| `coalesceInFlight` | `boolean` | `true` | Concurrent identical `check()` calls share one in-flight run; the shared run keeps `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) and each waiter still applies its own `signal`/`timeoutMs`. The entry is dropped as soon as the run settles (it is not a cache). Checks that pass `onStep` are never coalesced. `false`: every call runs its own simulation (more RPC load, same verdicts). |
+| `logger` | `GuardLoggerInput` | none — silent (`SILENT_LOGGER`) | Log sink for verdicts and cache hits/stores/invalidations. A logger never changes a verdict. |
+| `clock` | `Clock` | `systemClock` | Time source for cache TTL expiry. ⚠️ A fake or skewed clock outside tests changes when cached verdicts expire. |
+
+#### `PreFlightCacheOptions` (`options.cache`)
+
+Present only when you opt in. Entries are also discarded whenever the observed ledger advances, so a hit never crosses a ledger boundary. Call `invalidate(call?)` after a policy or account-state change.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `ttlMs` | `number` | none — one of `ttlMs` / `ttlLedgers` is required | Maximum cache age in ms; positive and finite. Capped at 5 000 ms (one approximate ledger close). Takes precedence over `ttlLedgers` when both are set. ⚠️ Any TTL means a verdict may be up to that old. |
+| `ttlLedgers` | `number` | none | Ledger spelling of `ttlMs` (× 5 000 ms), same 5 000 ms cap; positive and finite. |
+| `policyRevision` | `PolicyRevision \| () => PolicyRevision \| Promise<PolicyRevision>` | none — the revision is not part of the key | Value or getter mixed into the cache key, so a policy change invalidates entries before the TTL elapses. ⚠️ Without it, a policy change inside the TTL is not seen until expiry, the next ledger, or `invalidate()`. A getter that throws or returns `undefined` bypasses the cache for that check (fresh simulation), never a reused verdict. |
+| `maxEntries` | `number` (positive integer) | none — unbounded | Least-recently-used eviction once full. Eviction only removes entries, so it can never return an expired or cross-ledger verdict. Unbounded means memory grows with the number of distinct calls. |
+
+#### `PreFlightCheckOptions` (`check(call, options)`)
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `onStep` | `(step: InvokeStepEvent) => void` | none | One event per enforcement-stage attempt (probe → sign → simulate). Supplying it opts this check out of coalescing. |
+| `signal` | `AbortSignal` | none | ⚠️ Caller cancellation. An already-aborted signal returns before any RPC; a fired signal returns the fail-closed `undetermined` verdict carrying `RpcTimeoutError`, never a throw and never `admissible`. |
+| `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout returns the same fail-closed `undetermined` verdict as an abort. `0` disables the per-call timeout: with no `signal`, a stalled RPC can then hold the check open. |
+
+#### `CheckBatchOptions` (`checkBatch()` / `assertBatchAllowed()`)
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `policy` | `ReadonlyPolicyConfig \| null` | the constructor's `policy`; if that is absent too, a live read of the `Policy` ledger entry | Policy the batch is staged against. ⚠️ A failed or malformed read is never treated as "no cap": any positive SAC transfer in the batch becomes `undetermined`. |
+| `initialWindowSpent` | `bigint` | a live read of the `Window` ledger entry; `0n` only when that entry does not exist | Committed spend already in the window. An explicit value (including `0n`) is a trusted caller snapshot. ⚠️ A failed read is not treated as zero: transfers that need it become `undetermined`. |
+| `onStep` | `(step: InvokeStepEvent) => void` | none | Forwarded to each call's `check()`. |
+| `signal` | `AbortSignal` | none | ⚠️ Forwarded to each call's `check()`: once it fires, every remaining call returns a fail-closed `undetermined` verdict without issuing an RPC. It does **not** bound the initial `Policy`/`Window` ledger reads; supply `policy` and `initialWindowSpent` to avoid them. |
+| `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms), per call | Forwarded to each `check()`; a fired timeout makes that call `undetermined` and the batch continues. |
+| `deadlineMs` | `number` | none | Validated (must be positive and finite, otherwise `RangeError`). ⚠️ **Not currently enforced** in `checkBatch()`: the value is checked but no overall budget is applied. Bound a batch with `signal` (e.g. `AbortSignal.timeout(ms)`) and `timeoutMs` until it is. |
+
+#### `CostPreCheckConfig` (`new CostPreChecker(config)`)
+
+The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `CostPreCheckConfig`. Every value is validated at construction.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `interceptor` | `Pick<PreFlightInterceptor, "check">` | required | Its `check()` supplies both the verdict and the price, from one enforced simulation. ⚠️ If that interceptor has `cache` enabled, the price can come from a cached verdict (up to one ledger / 5 s old). |
+| `maxFeeStroops` | `bigint` | none — no ceiling; the price is reported, never objected to | Ceiling on the estimated **total** fee (resource + inclusion). Must be a non-negative `bigint`, otherwise `InvalidFeeCeilingError` at construction. `0n` is a real ceiling (every quote is then `over_budget`). ⚠️ Omitting it disables the fee check entirely. |
+| `policySource` | `string \| PolicyConfig \| null` | none — `policyContext` is `null` | Contract address or policy enabling the additive `policyContext`. Informational only: it never changes the cost decision. |
+| `policy` | `string \| PolicyConfig \| null` | none | Alias for `policySource`. Per-call values win over constructor values; `policySource` wins over `policy` at each level. |
+| `logger` | `GuardLoggerInput` | none — silent | Log sink for the priced verdict and ceiling breaches. Never changes the decision. |
+| `windowSnapshot` | `WindowSpendSnapshot \| null` | none — `policyContext.windowRemainingEstimate` is `null` | Ledger-tied window-spend snapshot for the remaining-window estimate. Informational only. An invalid snapshot throws `TypeError` at construction. ⚠️ A `null` estimate means unknown, never "zero budget left". |
+| `windowSnapshotMaxAgeLedgers` | `number` | `0` | How many ledgers the snapshot may predate the priced check and still be used. Non-negative safe integer, otherwise `TypeError`. ⚠️ Raising it lets an older snapshot feed the estimate. |
+
+#### `CostPreCheckOptions` (`check(call, options)` / `checkWithCost(call, options)`)
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `policySource` | `string \| PolicyConfig \| null` | the constructor's `policySource` / `policy` | Per-call policy source for `policyContext`. |
+| `policy` | `string \| PolicyConfig \| null` | as above | Alias for `policySource`. |
+| `maxFeeStroops` | `bigint` | the constructor's `maxFeeStroops` | Per-call ceiling, validated before the interceptor runs (`InvalidFeeCeilingError`). `0n` is kept, not treated as omission. |
+| `windowSnapshot` | `WindowSpendSnapshot \| null` | the constructor's `windowSnapshot` | Per-call snapshot; an explicit `null` clears the configured one for this check. |
+| `signal` | `AbortSignal` | none | ⚠️ Forwarded to the interceptor: a fired signal yields an `undetermined` verdict and therefore an `undetermined` cost decision carrying `RpcTimeoutError`. |
+| `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is reported exactly like an abort, never as `within_budget`. `0` disables it. |
+
+#### `GuardTelemetryConfig` (`new GuardTelemetryListener(config)`)
+
+The constructor's parameter is `GuardTelemetryInputConfig | GuardTelemetryLocalConfig` (default `{}`). `GuardTelemetryListenerOptions` in `src/telemetry.ts` declares only `counters` and is not exported from the package entry; use `GuardTelemetryConfig` (`GuardTelemetryInputConfig` is that config with the shared `server` or `url` transport).
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | one of `server` / `url` required for `poll()` / `watch()` / `watchAll()` | Soroban RPC the listener reads events from, used verbatim. Mutually exclusive with `url`. |
+| `url` | `string` | — | Soroban RPC URL; the SDK builds the `rpc.Server` (see [Injectable transport](#injectable-transport-server-or-url)). Mutually exclusive with `server`. Also used as `rpcUrl` when `rpcUrl` is not set. |
+| `guard` | `string` (`C…`) | required for `poll()` / `watch()` / `watchAll()` | Guard contract to follow. Events from any other contract are dropped and counted, never decoded. |
+| `failedTx` | `boolean` | `false` | Scan failed-transaction diagnostics as a third stream. ⚠️ Off means refusals that only appear in failed transactions are not seen by this listener. |
+| `rpcUrl` | `string` | none — `url` when given, else the server's own URL | Network identity (host) that scopes cursor-store slots; checked before `server.serverUrl`. ⚠️ Pointing it at a different host than `server` makes the listener load and save a different cursor slot. |
+| `logger` | `GuardLoggerInput` | none — silent | Page summaries, coverage gaps, failed or aborted polls. |
+| `counters` | `GuardTelemetryCountersOptions` | none — no counter state; `stats()` returns `null` | Opt-in sliding-window allowed/blocked counters (see below). |
+| `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction. When set, it replaces `counters.clock`. |
+| `buffer` | `GuardEventBufferOptions` (`{ max: number }`) | none — no buffer; `recent()` returns `[]` | Retain the last `max` decoded events in memory for `recent()` / `recentJsonLines()`. `max` must be a positive integer, otherwise `RangeError`. Non-durable: a restart empties it. |
+| `includeRaw` | `boolean` | `false` | Attach the raw `rpc.Api.EventResponse` to every committed event. Memory cost per event; leave off in long-running fleets. |
+| `cursorStore` | `CursorStore` | a process-local `InMemoryCursorStore` | Persists the committed-stream cursor. ⚠️ Without a durable store, a restart resumes from the head and skips events emitted while the process was down (or replays history when `startLedger` is used). |
+| `failedTxCursorStore` | `CursorStore` | a separate process-local `InMemoryCursorStore` | Cursor store for the failed-transaction scan. Never falls back to `cursorStore`; sharing would replay or skip failed transactions. |
+
+#### `GuardTelemetryLocalConfig` (local-only listener, no RPC)
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `counters` | `GuardTelemetryCountersOptions` | none — `stats()` returns `null` | Counters fed through `observe(event)`. |
+| `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction; replaces `counters.clock` when set. |
+| `logger` | `GuardLoggerInput` | none — silent | Optional log sink. |
+
+#### `GuardTelemetryCountersOptions` (`config.counters`)
+
+Exactly one of `windowEvents` / `windowMs` is required; both, neither, or a non-positive value throws at construction.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `windowEvents` | `number` (positive integer) | none | Keep the last N decisions. Deterministic: no clock is consulted. |
+| `windowMs` | `number` (positive) | none | Keep decisions observed in the last `windowMs` ms, using `clock`. |
+| `clock` | `() => number` | `Date.now` | Clock for `windowMs` eviction and `windowStart`. Overridden by the listener-level `clock` when that is set. |
+
+Counters only count what this listener observed: ⚠️ `blocked: 0` is not proof that nothing was refused (check `stats().coverage`).
+
+#### `InvokeOptions` (alias of `InvokeParams`; `invoke(options)`)
+
+Every caller-controlled option is validated before any signing or RPC; a bad value throws a field-specific `RangeError`.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC for simulation, submission and polling. |
+| `source` | `Keypair \| AdminSigner` | required | Classic account that pays the fee and supplies the sequence number. |
+| `call` | `ContractCall` | required | The contract call to run. |
+| `networkPassphrase` | `string` | required | Network the envelope is built and signed for. |
+| `guardAuth` | `GuardAuthorization \| null` | none — no smart-account authorization is signed | Present when the call needs the guarded account's own authorization (guard address plus agent signer). |
+| `accountSigners` | `Array<Keypair \| AdminSigner>` | none | Extra classic-account authorizers (e.g. an admin). |
+| `dryRun` | `boolean` | `false` | Stop before broadcast and return the full pre-broadcast trace. A dry run never submits. |
+| `retry` | `InvokeRetryOptions` | `DEFAULT_INVOKE_RETRY_OPTIONS`: `maxAttempts: 3`, `baseDelayMs: 100`, `maxDelayMs: 2000` | Bounded full-jitter retry for stale-ledger resource-limit failures. Also accepts `random` / `jitter` (not both), `sleep`, and `initialDelayMs` (alias of `baseDelayMs`; must match it when both are set). `maxAttempts` counts the first attempt. |
+| `pollAttempts` | `number` (integer ≥ 1) | `20` | Status polls after a broadcast. ⚠️ Exhausting them returns the `pending` outcome: the transaction was accepted but not confirmed. Do not rebroadcast without `server.getTransaction(hash)`. |
+| `pollIntervalMs` | `number` (≥ 0) | `3000` | Delay between status polls. |
+| `pollOptions` | `{ pollAttempts?, pollIntervalMs? }` | none — the top-level values apply | Nested spelling of the two poll options; must agree with the top-level values when both are set. |
+| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, `initialInclusionFee` is a positive `bigint` in stroops. |
+| `maxRetries` | `number` (integer ≥ 0) | none — each retry class keeps its own budget | Overall cap across retry classes; `0` means a single attempt. The tighter of this and a per-class budget wins. |
+| `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
+| `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
+| `timeoutMs` | `number` (≥ 0) | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is the same fail-closed `error` outcome as an abort. `0` disables the per-call timeout (a `deadlineMs` still applies). |
+| `deadlineMs` | `number` (> 0) | none — only the per-call `timeoutMs` applies | ⚠️ One budget for discovery, signing, simulation, retry backoff, broadcast and polling. Expiry is fail-closed (`RpcTimeoutError` with `deadline: true`), even after the guard approved the call; a dry run reports `undetermined`. |
+| `clock` | `Clock` | `systemClock` | Time source for deadline accounting and poll/backoff delays. Must have `now()` and `sleep()`. |
+| `onStep` | `(step: InvokeStepEvent) => void` | none | One event per stage attempt (probe → sign → simulate → broadcast). Exceptions are isolated. |
+| `onSubmitted` | `(event: SubmissionAcceptedEvent) => void` | none | Called once with the network's answer to the broadcast, before polling, so the transaction hash survives a failed poll. |
+| `logger` | `GuardLoggerInput` | none — silent | Stage attempts and retries at `debug`, a refusal at `info`, no-verdict outcomes at `warn`. Never changes behaviour. |
+
 ### Interception & Execution
 
 - `PreFlightInterceptor`
-  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Concurrent identical `check()` calls share one in-flight run by default; pass `coalesceInFlight: false` to disable that.
+  - `constructor(options: PreFlightInterceptorOptions)` — Every option, default and safety note: [Constructor options](#preflightinterceptoroptions-alias-of-preflightconfig). Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Concurrent identical `check()` calls share one in-flight run by default; pass `coalesceInFlight: false` to disable that.
   - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
-  - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Returns one verdict per call with all-or-nothing `admissible` semantics. `options.signal` bounds the whole batch, `options.deadlineMs` sets one overall budget, and `options.timeoutMs` stays per-call. A cancelled or over-budget batch stops before the next call and reports every unfinished call as `undetermined`.
+  - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Returns one verdict per call with all-or-nothing `admissible` semantics. `options.signal` is forwarded to every call, so once it fires each remaining call is reported as `undetermined` without an RPC; `options.timeoutMs` stays per-call. `options.deadlineMs` is validated but not currently enforced — see [`CheckBatchOptions`](#checkbatchoptions-checkbatch--assertbatchallowed).
   - `assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }>` — Evaluates a call and returns the admissible decision, or throws `GuardBlockedError` (on policy block) or `GuardUndeterminedError` (on undetermined/transport failure). Never lets a raw transport error escape.
   - `assertBatchAllowed(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision & { admissible: true }>` — Batch throw-on-refusal form. Returns the batch decision if all calls are admissible, or throws `GuardBlockedError` on the first blocked call or `GuardUndeterminedError` on an undetermined call or transport failure.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
-  - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`).
+  - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`). Full table: [`CostPreCheckConfig`](#costprecheckconfig-new-costprecheckerconfig).
   - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.  - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run; `options.deadlineMs` bounds the whole action including retries and polling. Either bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`. Terminal outcomes also carry additive `retry` metadata (attempt count, retryable classes, delays and exhaustion) with no payloads or XDR.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
@@ -1261,7 +1406,7 @@ one-shot form.
 
 - [`docs/event-schema.md`](docs/event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
-  - `constructor(options: GuardTelemetryListenerOptions)`
+  - `constructor(config?: GuardTelemetryInputConfig | GuardTelemetryLocalConfig)` — Full table: [`GuardTelemetryConfig`](#guardtelemetryconfig-new-guardtelemetrylistenerconfig).
   - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](#aborting-a-watch-what-cancellation-does-and-does-not-cover). `params.maxBufferedPages?: number` bounds the look-ahead in front of the consumer (default `DEFAULT_MAX_BUFFERED_PAGES` = 2, `0` = strict consumer pacing); cursors are saved at delivery, so the stored cursor never leads the consumer (issue #36).
   - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`docs/event-schema.md`](docs/event-schema.md).
   - `health(): GuardTelemetryHealthSnapshot` — Read-only operational snapshot: stream state (`idle`/`running`/`recovering`/`stopped`/`aborted`/`failed`), last successful poll, consecutive failures, per-stream cursors, failed-tx degradation, and known coverage gaps. Every field is a copy. Contract: [`docs/api/telemetry-listener.md`](docs/api/telemetry-listener.md#health-guardtelemetryhealthsnapshot).

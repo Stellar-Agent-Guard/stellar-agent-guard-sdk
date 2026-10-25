@@ -339,6 +339,8 @@ export interface CostPreCheckConfig {
    * Omitted means "price it, never object to the price". `0n` is a real
    * ceiling, distinct from omission: every quoted total (which includes the
    * inclusion fee) is then over budget.
+   *
+   * Default: none (no ceiling).
    */
   maxFeeStroops?: bigint | undefined;
   /**
@@ -353,11 +355,13 @@ export interface CostPreCheckConfig {
   /**
    * Opt-in policy source (contract address string or PolicyConfig/GuardPolicy).
    * When provided, `policyContext` is populated with policy-relative context.
-   * When omitted or null, `policyContext` is `null`.
+   * When omitted or null, `policyContext` is `null`. Informational only: it
+   * never changes the cost decision. Default: none.
    */
   policySource?: string | PolicyConfig | null | undefined;
   /**
-   * Optional policy or contract address. Alias for `policySource`.
+   * Optional policy or contract address. Alias for `policySource`, which wins
+   * when both are set. Default: none.
    */
   policy?: string | PolicyConfig | null | undefined;
   /**
@@ -368,6 +372,8 @@ export interface CostPreCheckConfig {
    * changes the cost decision itself. An invalid snapshot (negative ledger, or
    * cap/spent that is not a non-negative `bigint`) throws a `TypeError` at
    * construction, mirroring the fee-ceiling validation boundary.
+   *
+   * Default: none (`windowRemainingEstimate` is `null`, meaning unknown).
    */
   windowSnapshot?: WindowSpendSnapshot | null | undefined;
   /**
@@ -467,14 +473,21 @@ export type CostPreCheckResult = CostDecision;
  * Per-call options for cost checking, including fee ceilings and opt-in policy context.
  */
 export interface CostPreCheckOptions {
-  /** Opt-in policy source (contract address or PolicyConfig/GuardPolicy). */
+  /**
+   * Opt-in policy source (contract address or PolicyConfig/GuardPolicy).
+   * Default: the configured `CostPreCheckConfig.policySource` / `policy`.
+   */
   policySource?: string | PolicyConfig | null | undefined;
-  /** Optional policy or contract address. Alias for `policySource`. */
+  /**
+   * Optional policy or contract address. Alias for `policySource`, which wins
+   * when both are set. Default: as `policySource`.
+   */
   policy?: string | PolicyConfig | null | undefined;
   /**
    * Override the fee ceiling in stroops for this check. Must be a non-negative
    * `bigint`; invalid values throw `InvalidFeeCeilingError` before the
    * interceptor is called. `0n` is a real ceiling, distinct from omission.
+   * Default: the configured `CostPreCheckConfig.maxFeeStroops`.
    */
   maxFeeStroops?: bigint | undefined;
   /**
@@ -489,11 +502,13 @@ export interface CostPreCheckOptions {
    * already-aborted signal returns before any RPC call; a mid-flight abort or a
    * fired timeout yields a fail-closed `undetermined` verdict (and therefore an
    * `undetermined` cost decision) carrying the typed `RpcTimeoutError`.
+   * Default: none.
    */
   signal?: AbortSignal | undefined;
   /**
    * Bound on the underlying RPC call, in milliseconds; `0` disables it. A fired
    * timeout is reported exactly like an abort — never as an admissible verdict.
+   * Default: `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms), applied by the interceptor.
    */
   timeoutMs?: number | undefined;
 }

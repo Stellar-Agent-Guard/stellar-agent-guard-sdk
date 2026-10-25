@@ -5,16 +5,49 @@
 ## Constructor
 
 ```ts
-constructor(options: GuardTelemetryListenerOptions)
+constructor(config?: GuardTelemetryInputConfig | GuardTelemetryLocalConfig)
 ```
 
 ### Options
 
-- `server: rpc.Server` — soroban RPC server
-- `guard: string` — Guard contract address
-- `failedTx?: boolean` — opt in to failed-transaction diagnostics as a third event stream; defaults to `false`.
-- `failedTxCursorStore?: CursorStore` — a **separate** durable store for the failed-transaction scan (issue #279). Never shares state with `cursorStore`; omitted → the scan's cursor is process-local.
-- `buffer?: { max: number }` — opt in to retaining the most recent `max` events for `recent()` snapshots (issue #68). Omitted → no buffer is allocated and `recent()` always returns `[]`.
+#### `GuardTelemetryConfig` (`new GuardTelemetryListener(config)`)
+
+The constructor's parameter is `GuardTelemetryInputConfig | GuardTelemetryLocalConfig` (default `{}`). `GuardTelemetryListenerOptions` in `src/telemetry.ts` declares only `counters` and is not exported from the package entry; use `GuardTelemetryConfig` (`GuardTelemetryInputConfig` is that config with the shared `server` or `url` transport).
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | one of `server` / `url` required for `poll()` / `watch()` / `watchAll()` | Soroban RPC the listener reads events from, used verbatim. Mutually exclusive with `url`. |
+| `url` | `string` | — | Soroban RPC URL; the SDK builds the `rpc.Server` (see [Injectable transport](../../README.md#injectable-transport-server-or-url)). Mutually exclusive with `server`. Also used as `rpcUrl` when `rpcUrl` is not set. |
+| `guard` | `string` (`C…`) | required for `poll()` / `watch()` / `watchAll()` | Guard contract to follow. Events from any other contract are dropped and counted, never decoded. |
+| `failedTx` | `boolean` | `false` | Scan failed-transaction diagnostics as a third stream. ⚠️ Off means refusals that only appear in failed transactions are not seen by this listener. |
+| `rpcUrl` | `string` | none — `url` when given, else the server's own URL | Network identity (host) that scopes cursor-store slots; checked before `server.serverUrl`. ⚠️ Pointing it at a different host than `server` makes the listener load and save a different cursor slot. |
+| `logger` | `GuardLoggerInput` | none — silent | Page summaries, coverage gaps, failed or aborted polls. |
+| `counters` | `GuardTelemetryCountersOptions` | none — no counter state; `stats()` returns `null` | Opt-in sliding-window allowed/blocked counters (see below). |
+| `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction. When set, it replaces `counters.clock`. |
+| `buffer` | `GuardEventBufferOptions` (`{ max: number }`) | none — no buffer; `recent()` returns `[]` | Retain the last `max` decoded events in memory for `recent()` / `recentJsonLines()`. `max` must be a positive integer, otherwise `RangeError`. Non-durable: a restart empties it. |
+| `includeRaw` | `boolean` | `false` | Attach the raw `rpc.Api.EventResponse` to every committed event. Memory cost per event; leave off in long-running fleets. |
+| `cursorStore` | `CursorStore` | a process-local `InMemoryCursorStore` | Persists the committed-stream cursor. ⚠️ Without a durable store, a restart resumes from the head and skips events emitted while the process was down (or replays history when `startLedger` is used). |
+| `failedTxCursorStore` | `CursorStore` | a separate process-local `InMemoryCursorStore` | Cursor store for the failed-transaction scan. Never falls back to `cursorStore`; sharing would replay or skip failed transactions. |
+
+#### `GuardTelemetryLocalConfig` (local-only listener, no RPC)
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `counters` | `GuardTelemetryCountersOptions` | none — `stats()` returns `null` | Counters fed through `observe(event)`. |
+| `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction; replaces `counters.clock` when set. |
+| `logger` | `GuardLoggerInput` | none — silent | Optional log sink. |
+
+#### `GuardTelemetryCountersOptions` (`config.counters`)
+
+Exactly one of `windowEvents` / `windowMs` is required; both, neither, or a non-positive value throws at construction.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `windowEvents` | `number` (positive integer) | none | Keep the last N decisions. Deterministic: no clock is consulted. |
+| `windowMs` | `number` (positive) | none | Keep decisions observed in the last `windowMs` ms, using `clock`. |
+| `clock` | `() => number` | `Date.now` | Clock for `windowMs` eviction and `windowStart`. Overridden by the listener-level `clock` when that is set. |
+
+Counters only count what this listener observed: ⚠️ `blocked: 0` is not proof that nothing was refused (check `stats().coverage`).
 
 ## Methods
 
