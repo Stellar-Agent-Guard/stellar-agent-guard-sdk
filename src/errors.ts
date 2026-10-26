@@ -238,7 +238,9 @@ export class BroadcastError extends GuardError {
   get error(): BroadcastError {
     return this;
   }
-}/** A caller's `maxFeeCap` would be exceeded by the transaction `invoke()` is
+}
+
+/** A caller's `maxFeeCap` would be exceeded by the transaction `invoke()` is
  * about to broadcast.
  *
  * Raised as a fail-closed `error` outcome **before** `sendTransaction`, never as
@@ -281,34 +283,9 @@ export class FeeCapExceededError extends GuardError {
   }
 }
 
-/**
- * A candidate policy was rejected by the contract's `validate_policy` read.
- *
- * `rule` is the contract's own `PolicyRuleId` name (for example
- * `"RecipientAllowAndBlocked"`), and `ruleMessage` is the human-readable
- * translation from the SDK's SPEC §8.1 table. `submitSetPolicy({ preflight:
- * true })` reports this as its `error` outcome *before* paying for a transaction
- * the contract would reject; the on-chain rejection code stays the single
- * stable `invalid_config`, so this is the identifiable off-chain counterpart.
- */
-export class PolicyValidationError extends GuardError {
-  /** Stable code for consumers that branch on the failure. */
-  readonly code = "policy.invalid_config" as const;
-  /** The contract's `PolicyRuleId` variant name exactly as it decoded. */
-  readonly rule: string;
-  /** Human-readable explanation of `rule`, per the SPEC §8.1 table. */
-  readonly ruleMessage: string;
-
-  constructor(params: { rule: string; ruleMessage: string }) {
-    super(`policy would be rejected by validate_policy: ${params.rule} — ${params.ruleMessage}`);
-    this.rule = params.rule;
-    this.ruleMessage = params.ruleMessage;
-  }
-}
-
- /** A contract response did not match the API shape the SDK understands. */
- export class ContractResponseError extends GuardError {
-   /** The exact field of the contract response that did not match. */
+/** A contract response did not match the API shape the SDK understands. */
+export class ContractResponseError extends GuardError {
+  /** The exact field of the contract response that did not match. */
   readonly field: string;
   /**
    * The pipeline stage that read the field, when the failure has one
