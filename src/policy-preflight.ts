@@ -42,17 +42,9 @@
  */
 
 import { Keypair, Operation, rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
-import {
-  ContractResponseError,
-  PolicyDecodeError,
-  SimulationError,
-} from "./errors.ts";
+import { ContractResponseError, PolicyDecodeError, SimulationError } from "./errors.ts";
 import { DEFAULT_RPC_TIMEOUT_MS, RpcTimeoutError, withRpcAbort } from "./invoke.ts";
-import {
-  policyToScVal,
-  type ContractAddress,
-  type ReadonlyPolicyConfig,
-} from "./policy.ts";
+import { policyToScVal, type ContractAddress, type ReadonlyPolicyConfig } from "./policy.ts";
 import { buildInitialEnvelope, type AdminSigner } from "./tx.ts";
 
 /** The default network passphrase used by the administrative helpers.
@@ -95,31 +87,28 @@ export type ContractPolicyRuleId = (typeof CONTRACT_POLICY_RULE_IDS)[number];
  * back to a generic message that names the rule and tells the caller the SDK
  * has not translated it yet — never a fabricated explanation.
  */
-export const POLICY_RULE_MESSAGES: Readonly<Record<ContractPolicyRuleId, string>> =
-  Object.freeze({
-    AmountSign:
-      "per_tx_cap, window_cap, or an asset/per-recipient cap is negative; caps must be non-negative.",
-    WindowRequiresWidth:
-      "a non-zero window_cap (or a positive per-recipient cap) requires a non-zero window_secs.",
-    ActiveWindowOrder:
-      "active_until is set but is not greater than active_from; it must be 0 (no expiry) or later than active_from.",
-    SelfAddressInList:
-      "the guard contract's own address appears in assets, protocols, recipients, blocked_recipients, or recipient_window_caps.",
-    DuplicateAddressInList:
-      "a duplicate address appears in assets, recipients, or blocked_recipients, or a protocol rule repeats a function name.",
-    DuplicateRecipientCap:
-      "the same recipient appears more than once in recipient_window_caps.",
-    RecipientListTooLong:
-      "recipients, recipient_window_caps, or blocked_recipients exceeds the maximum number of entries (256).",
-    RecipientCapSign:
-      "a recipient_window_caps cap is negative; per-recipient caps must be non-negative.",
-    RecipientAllowAndBlocked:
-      "a recipient appears in both recipients and blocked_recipients; a destination cannot be allowed and denied at once.",
-    ProtocolContractDuplicate:
-      "the same contract appears in more than one protocol rule.",
-    ProtocolFnListInvalid:
-      "a protocol rule's fns list is empty or contains duplicate names; use null to allow every function.",
-  });
+export const POLICY_RULE_MESSAGES: Readonly<Record<ContractPolicyRuleId, string>> = Object.freeze({
+  AmountSign:
+    "per_tx_cap, window_cap, or an asset/per-recipient cap is negative; caps must be non-negative.",
+  WindowRequiresWidth:
+    "a non-zero window_cap (or a positive per-recipient cap) requires a non-zero window_secs.",
+  ActiveWindowOrder:
+    "active_until is set but is not greater than active_from; it must be 0 (no expiry) or later than active_from.",
+  SelfAddressInList:
+    "the guard contract's own address appears in assets, protocols, recipients, blocked_recipients, or recipient_window_caps.",
+  DuplicateAddressInList:
+    "a duplicate address appears in assets, recipients, or blocked_recipients, or a protocol rule repeats a function name.",
+  DuplicateRecipientCap: "the same recipient appears more than once in recipient_window_caps.",
+  RecipientListTooLong:
+    "recipients, recipient_window_caps, or blocked_recipients exceeds the maximum number of entries (256).",
+  RecipientCapSign:
+    "a recipient_window_caps cap is negative; per-recipient caps must be non-negative.",
+  RecipientAllowAndBlocked:
+    "a recipient appears in both recipients and blocked_recipients; a destination cannot be allowed and denied at once.",
+  ProtocolContractDuplicate: "the same contract appears in more than one protocol rule.",
+  ProtocolFnListInvalid:
+    "a protocol rule's fns list is empty or contains duplicate names; use null to allow every function.",
+});
 
 /** The decoded `ValidationOutcome`.
  *
@@ -181,12 +170,7 @@ export function decodeValidationOutcome(raw: unknown): PolicyValidationResult {
     }
   } else if (typeof raw === "object" && raw !== null) {
     try {
-      native = scValToNative(
-        xdr.ScVal.fromXDR(
-          JSON.stringify(raw),
-          "base64",
-        ) as xdr.ScVal,
-      );
+      native = scValToNative(xdr.ScVal.fromXDR(JSON.stringify(raw), "base64") as xdr.ScVal);
     } catch (cause) {
       throw new PolicyDecodeError("validate_policy returned an undecodable JSON payload", {
         path: "ValidationOutcome",
@@ -204,7 +188,7 @@ export function decodeValidationOutcome(raw: unknown): PolicyValidationResult {
     return validResult();
   }
 
-  if (native === "Invalid" && typeof native === "object" && native !== null && 'reason' in native) {
+  if (native === "Invalid" && typeof native === "object" && native !== null && "reason" in native) {
     return invalidResult((native as { reason: string }).reason);
   }
 
@@ -217,10 +201,9 @@ export function decodeValidationOutcome(raw: unknown): PolicyValidationResult {
   }
 
   // Fallback: try to extract a rule name from any other shape
-  throw new PolicyDecodeError(
-    `validate_policy returned an unrecognised Invalid form`,
-    { path: "ValidationOutcome" },
-  );
+  throw new PolicyDecodeError(`validate_policy returned an unrecognised Invalid form`, {
+    path: "ValidationOutcome",
+  });
 }
 
 /** Parameters for {@link buildValidatePolicyCall}. */
@@ -304,10 +287,10 @@ export async function validatePolicyOnChain(
     );
   } catch (cause) {
     if (cause instanceof RpcTimeoutError) throw cause;
-    throw new SimulationError(
-      "validate_policy preflight could not read the source account",
-      { stage: "preflight", cause },
-    );
+    throw new SimulationError("validate_policy preflight could not read the source account", {
+      stage: "preflight",
+      cause,
+    });
   }
 
   const operation = Operation.invokeContractFunction({
@@ -328,18 +311,18 @@ export async function validatePolicyOnChain(
   );
 
   if (rpc.Api.isSimulationError(response)) {
-    throw new SimulationError(
-      "validate_policy simulation failed",
-      { stage: "preflight", diagnosticEvents: response.events },
-    );
+    throw new SimulationError("validate_policy simulation failed", {
+      stage: "preflight",
+      diagnosticEvents: response.events,
+    });
   }
 
   const retval = response.result?.retval;
   if (retval === undefined) {
-    throw new ContractResponseError(
-      "validate_policy simulation returned no result.retval",
-      { field: "result.retval", stage: "preflight" },
-    );
+    throw new ContractResponseError("validate_policy simulation returned no result.retval", {
+      field: "result.retval",
+      stage: "preflight",
+    });
   }
   return decodeValidationOutcome(retval);
 }
