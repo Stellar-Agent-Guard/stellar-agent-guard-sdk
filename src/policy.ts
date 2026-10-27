@@ -177,39 +177,125 @@ export type DeepReadonly<T> = T extends string | number | bigint | boolean | sym
 export type ReadonlyPolicyConfig = DeepReadonly<PolicyConfig>;
 
 /**
- * Freeze a policy object at the boundary so any later mutation throws in strict
- * mode (ESM modules are always strict) rather than silently producing a wrong
- * verdict. Cheap: one freeze per array, no copies.
+ * Return a deeply frozen **copy** of a policy: the SDK's immutable boundary.
+ *
+ * ## Ownership
+ *
+ * `freezePolicy` never takes ownership of the argument. The returned policy is a
+ * new object, and every nested collection in it is copied too — `assets`,
+ * `recipients`, `protocols` (each rule and its `fns` array),
+ * `recipient_window_caps` (each entry) and `blocked_recipients`. The input and
+ * the returned copy therefore share no mutable state: a caller can keep a
+ * reusable configuration object, edit it, and pass it to another call without
+ * the earlier {@link ReadonlyPolicyConfig} changing underneath it.
+ *
+ * The earlier version froze the caller's object in place and returned the same
+ * reference. Freezing a value the caller still owns is a surprising side effect
+ * — a reusable config became un-editable the moment it was handed to the SDK —
+ * and it is not what an "SDK-owned immutable boundary" should mean.
+ *
+ * ## Why deep
+ *
+ * Every nested collection is copied and frozen, not just the top-level object.
+ * A partially frozen policy would still let a caller mutate a rule's `fns`
+ * array or a `recipient_window_caps` entry after the SDK accepted it, which is
+ * exactly how a passing pre-flight check turns into a wrong verdict. Attempts to
+ * mutate the returned copy throw in strict mode (ESM modules are always strict)
+ * instead of silently succeeding.
+ *
+ * Copying is per policy entry and keeps the values themselves (addresses,
+ * `bigint` caps, booleans) by reference — they are immutable primitives, so the
+ * copy is one array/object allocation per collection, not a deep value copy.
  *
  * Call this once when a policy first enters the SDK — not on every read.
  */
 export function freezePolicy(policy: PolicyConfig): ReadonlyPolicyConfig {
-  for (const rule of policy.protocols) {
+  const copy: PolicyConfig = {
+    ...policy,
+    assets: [...policy.assets],
+    protocols: policy.protocols.map((rule) => ({
+      contract: rule.contract,
+      fns: rule.fns === null ? null : [...rule.fns],
+    })),
+    recipients: [...policy.recipients],
+  };
+  if (policy.recipient_window_caps !== undefined) {
+    copy.recipient_window_caps = policy.recipient_window_caps.map((cap) => ({
+      recipient: cap.recipient,
+      cap: cap.cap,
+    }));
+  }
+  if (policy.blocked_recipients !== undefined) {
+    copy.blocked_recipients = [...policy.blocked_recipients];
+  }
+
+  for (const rule of copy.protocols) {
     if (rule.fns !== null) Object.freeze(rule.fns);
     Object.freeze(rule);
   }
-  Object.freeze(policy.assets);
-  Object.freeze(policy.protocols);
-  Object.freeze(policy.recipients);
-  if (policy.recipient_window_caps) {
-    for (const cap of policy.recipient_window_caps) Object.freeze(cap);
-    Object.freeze(policy.recipient_window_caps);
+  Object.freeze(copy.assets);
+  Object.freeze(copy.protocols);
+  Object.freeze(copy.recipients);
+  if (copy.recipient_window_caps) {
+    for (const cap of copy.recipient_window_caps) Object.freeze(cap);
+    Object.freeze(copy.recipient_window_caps);
   }
-  if (policy.blocked_recipients) Object.freeze(policy.blocked_recipients);
-  return Object.freeze(policy) as ReadonlyPolicyConfig;
+  if (copy.blocked_recipients) Object.freeze(copy.blocked_recipients);
+  return Object.freeze(copy) as ReadonlyPolicyConfig;
 }
 
 /**
- * SPEC §8 rule identifiers for granular policy validation failures.
+ * The SDK's canonical "safe start" policy: a deep-frozen, deny-all baseline
+ * (issue #59).
  *
- * Hand-listed SPEC §8 rule IDs pending contract-level granular validation issue.
- * Swap-in point for contract-level vocabulary once available across repos.
+ * Start every integration from this instead of re-typing a policy literal, so a
+ * wrong field in one example never teaches a wrong deployment. Extend it, don't
+ * mutate it (it is frozen): copy the fields you need and add your own allowlists.
+ *
+ * | Field | Value | Why |
+ * | --- | --- | --- |
+ * | `assets`, `recipients`, `protocols` | empty | Deny-all: no transfer is admissible until the operator names an asset and a recipient. |
+ * | `allow_any_recipient` | `false` | A recipient must be allowlisted explicitly. |
+ * | `per_tx_cap` | `100n` | Small single-transfer ceiling (the contracts `max-security` template's value). |
+ * | `window_secs` / `window_cap` | `3600n` / `500n` | One hour, at most five full-size transfers (same template). |
+ * | `dms_grace_secs` | `604800n` (7 days) | Dead-man switch **on**. SPEC §5 production guidance is "≥ several days"; 7 days is the contracts `watch-only` template's grace, and survives a weekend outage while a heartbeat every `grace / 3` is still cheap. |
+ * | `paused`, `active_from`, `active_until` | `false`, `0n`, `0n` | Not paused; no activity window. |
+ *
+ * The numbers are not a recommendation for your risk limits — raise them
+ * deliberately. Values are drawn from the contracts policy templates
+ * (`tests/fixtures/vendor/policy-presets.json`) and a unit test asserts they
+ * still match, rather than this comment being the only link.
+ *
+ * `validateGuardPolicy` reports exactly two `empty_vector_noop` failures for this
+ * baseline (empty `assets`, empty `recipients`). That is the deny-all intent made
+ * visible, not a defect: add one asset and one recipient and it validates clean.
+ */
+export const DEFAULT_GUARD_POLICY: ReadonlyPolicyConfig = freezePolicy({
+  per_tx_cap: 100n,
+  window_secs: 3600n,
+  window_cap: 500n,
+  assets: [],
+  protocols: [],
+  recipients: [],
+  allow_any_recipient: false,
+  active_from: 0n,
+  active_until: 0n,
+  paused: false,
+  dms_grace_secs: 604800n,
+});
+
+/**
+ * Rule identifiers for granular policy validation failures.
+ *
+ * The SPEC §8 identifiers mirror the contract fixture; integer_out_of_range is
+ * SDK-specific because wire representability is stricter than policy semantics.
  */
 export const POLICY_RULE_IDS = [
   "invalid_type",
   "missing_field",
   "invalid_address",
   "negative_amount",
+  "integer_out_of_range",
   "window_requires_secs",
   "recipient_cap_requires_window",
   "active_window_inverted",
@@ -1208,9 +1294,15 @@ function isValidStellarAddress(addr: unknown): addr is string {
   }
 }
 
-function normalizeStellarAddress(addr: string): string | null {
+/**
+ * Return the Stellar SDK's canonical string key for a valid account or contract
+ * address. Invalid values return null; they are never case-folded or otherwise
+ * normalized into a possible match.
+ */
+export function policyAddressComparisonKey(value: unknown): string | null {
+  if (typeof value !== "string") return null;
   try {
-    return new Address(addr).toString();
+    return new Address(value).toString();
   } catch {
     return null;
   }
@@ -1228,6 +1320,22 @@ function toBigInt(val: unknown): bigint {
   if (typeof val === "number") return BigInt(val);
   if (typeof val === "string") return BigInt(val.trim());
   return 0n;
+}
+
+function checkIntegerMaximum(
+  value: unknown,
+  path: string,
+  wireType: "i128" | "u64",
+  failures: PolicyFailure[],
+): void {
+  const maximum = wireType === "i128" ? I128_MAX : U64_MAX;
+  if (toBigInt(value) > maximum) {
+    failures.push({
+      path,
+      rule: "integer_out_of_range",
+      message: `${path} must be within ${wireType} range [0, ${maximum}]`,
+    });
+  }
 }
 
 /** Soroban symbol grammar: 1–32 ASCII letters, digits, or underscores. */
@@ -1573,7 +1681,9 @@ export function validateGuardPolicy(
   const raw = policy as Record<string, unknown>;
   const failures: PolicyFailure[] = [];
   const maxRecipientEntries = options.maxRecipientEntries ?? 256;
-  const guardAddress = options.guardAddress ? normalizeStellarAddress(options.guardAddress) : null;
+  const guardAddress = options.guardAddress
+    ? policyAddressComparisonKey(options.guardAddress)
+    : null;
 
   // 1. per_tx_cap (SPEC §8 bullet 1)
   if (raw.per_tx_cap === undefined || raw.per_tx_cap === null) {
@@ -1594,6 +1704,8 @@ export function validateGuardPolicy(
       rule: "negative_amount",
       message: "per_tx_cap must be non-negative (>= 0)",
     });
+  } else {
+    checkIntegerMaximum(raw.per_tx_cap, "per_tx_cap", "i128", failures);
   }
 
   // 2. window_secs (SPEC §8 bullet 1)
@@ -1618,6 +1730,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "window_secs must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.window_secs, "window_secs", "u64", failures);
     }
   }
 
@@ -1642,6 +1756,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "window_cap must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.window_cap, "window_cap", "i128", failures);
     }
     // SPEC §8 bullet 2: window_cap != 0 requires window_secs != 0
     if (windowCap > 0n && windowSecs !== null && windowSecs === 0n) {
@@ -1679,7 +1795,7 @@ export function validateGuardPolicy(
         });
         continue;
       }
-      const norm = normalizeStellarAddress(a)!;
+      const norm = policyAddressComparisonKey(a)!;
       if (seenAssets.has(norm)) {
         failures.push({
           path: `assets[${i}]`,
@@ -1725,7 +1841,7 @@ export function validateGuardPolicy(
           message: `"${ruleObj.contract}" is not a valid Stellar address`,
         });
       } else {
-        const norm = normalizeStellarAddress(ruleObj.contract)!;
+        const norm = policyAddressComparisonKey(ruleObj.contract)!;
         if (seenProtocols.has(norm)) {
           failures.push({
             path: `protocols[${i}].contract`,
@@ -1824,7 +1940,7 @@ export function validateGuardPolicy(
         });
         continue;
       }
-      const norm = normalizeStellarAddress(r)!;
+      const norm = policyAddressComparisonKey(r)!;
       if (seenRecipients.has(norm)) {
         failures.push({
           path: `recipients[${i}]`,
@@ -1870,7 +1986,7 @@ export function validateGuardPolicy(
           });
           continue;
         }
-        const norm = normalizeStellarAddress(b)!;
+        const norm = policyAddressComparisonKey(b)!;
         if (seenBlocked.has(norm)) {
           failures.push({
             path: `blocked_recipients[${i}]`,
@@ -1933,7 +2049,7 @@ export function validateGuardPolicy(
             message: `"${rcObj.recipient}" is not a valid Stellar address`,
           });
         } else {
-          const norm = normalizeStellarAddress(rcObj.recipient)!;
+          const norm = policyAddressComparisonKey(rcObj.recipient)!;
           if (seenCapRecipients.has(norm)) {
             failures.push({
               path: `recipient_window_caps[${i}].recipient`,
@@ -1971,6 +2087,13 @@ export function validateGuardPolicy(
               rule: "negative_amount",
               message: "recipient window cap must be non-negative (>= 0)",
             });
+          } else {
+            checkIntegerMaximum(
+              rcObj.cap,
+              `recipient_window_caps[${i}].cap`,
+              "i128",
+              failures,
+            );
           }
           // SPEC §8 bullet 3: A per-recipient cap > 0 requires window_secs != 0
           if (capVal > 0n && windowSecs !== null && windowSecs === 0n) {
@@ -2007,6 +2130,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "active_from must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.active_from, "active_from", "u64", failures);
     }
   }
 
@@ -2031,6 +2156,8 @@ export function validateGuardPolicy(
         rule: "negative_amount",
         message: "active_until must be non-negative (>= 0)",
       });
+    } else {
+      checkIntegerMaximum(raw.active_until, "active_until", "u64", failures);
     }
   }
 
@@ -2073,6 +2200,8 @@ export function validateGuardPolicy(
       rule: "negative_amount",
       message: "dms_grace_secs must be non-negative (>= 0)",
     });
+  } else {
+    checkIntegerMaximum(raw.dms_grace_secs, "dms_grace_secs", "u64", failures);
   }
 
   return failures;

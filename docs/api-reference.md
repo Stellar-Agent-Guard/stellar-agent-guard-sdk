@@ -4,20 +4,24 @@ The Stellar Agent Guard SDK exposes the following public surface. For the narrat
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`deprecations.md`](deprecations.md). Release process and versioning checklist: [`releasing.md`](releasing.md).
 
+### Constructor options
+
+Every constructor options object has a table (Option | Type | Default | Meaning) with source-verified defaults and ⚠️ safety notes: [`PreFlightInterceptorOptions` and its nested cache/check/batch options](api/interceptor.md#options), [`CostPreCheckConfig` / `CostPreCheckOptions`](api/cost-checker.md#options), [`GuardTelemetryConfig`](api/telemetry-listener.md#options), and [`InvokeOptions`](api/invoke-pipeline.md#options). The same tables appear in the README's [Constructor options](../README.md#constructor-options).
+
 ### Interception & Execution
 
 - `PreFlightInterceptor`
-  - `constructor(options: PreFlightInterceptorOptions)` — Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Add `maxEntries` to bound the cache's cardinality with least-recently-used eviction.
+  - `constructor(options: PreFlightInterceptorOptions)` — [Options table](api/interceptor.md#options). Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Add `maxEntries` to bound the cache's cardinality with least-recently-used eviction.
   - `check(call: ContractCall): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting.
   - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Stages SAC transfer amounts against the committed window, with an `undetermined` batch verdict when a required policy/window read fails. An explicit `initialWindowSpent: 0n` is a trusted snapshot; a failed read is not treated as zero. `staging.source` reports `provided | ledger | absent | unavailable`.
   - `assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }>` — Evaluates a call and returns the decision, or throws `GuardBlockedError` on policy block or `GuardUndeterminedError` on undetermined/transport failures. Never lets raw transport errors escape.
   - `assertBatchAllowed(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision & { admissible: true }>` — Batch throw-on-refusal form. Returns the batch decision if all calls are admissible, or throws `GuardBlockedError` on the first blocked call or `GuardUndeterminedError` on an undetermined call or transport failure.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.
 - `CostPreChecker`
-  - `constructor(options: CostPreCheckerOptions)`
+  - `constructor(config: CostPreCheckConfig)` — [Options table](api/cost-checker.md#options). There is no separate `CostPreCheckerOptions` type.
   - `check(call: ContractCall): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined`.
   - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
-- `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
+- `invoke(options: InvokeOptions): Promise<InvokeResult>` — [Options table](api/invoke-pipeline.md#options). End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 - `invoke(options)` / `invoke({ ...options, dryRun: true })` — Broadcasts an admissible result, or returns the full pre-broadcast dry-run trace.
 - `invoke({ ...options, onSubmitted })` — An optional `onSubmitted(event: SubmissionAcceptedEvent)` hook, called once as soon as the network accepts the broadcast and **before** any confirmation polling, carrying the transaction hash (`hash: null` when the broadcast response named no transaction — that submission fails closed). Every outcome that happened after a broadcast carries the same hash as `transactionHash`, so a failed poll or a spent deadline never costs the caller its recovery handle. See [the invoke pipeline](api/invoke-pipeline.md#the-transaction-hash-as-soon-as-the-server-accepts-the-submission).
 - `submitSetPolicy(params)` / `submitFreeze(params)` / `submitUnfreeze(params)` / `submitRotateAgentKey(params)` — The administrative submissions (`set_policy`, `freeze`, `unfreeze`, `rotate_agent_key`), each running the full `invoke()` pipeline with the admin signer as the authorizer. Besides `server`, `guard`, `admin` and `source`, they accept `dryRun`, `pollAttempts`, `pollIntervalMs`, and — like a normal invocation — `signal` and `timeoutMs`. An already-aborted signal short-circuits before any RPC and returns the documented typed outcome (the `error` arm carrying an `RpcTimeoutError` with `aborted: true`); a fired per-call timeout is reported the same way. Neither option relaxes the administrative authorization behaviour.
@@ -163,15 +167,16 @@ one-shot form.
 
 - [`event-schema.md`](event-schema.md) — every telemetry event and field, each labelled with its stability tier: **Stable** (relied on), **Append-only** (new values may appear, existing ones will not be removed or renamed), **Best-effort** (may change in any release), **Internal** (implementation detail, not a contract).
 - `GuardTelemetryListener`
-  - `constructor(options: GuardTelemetryListenerOptions)`
+  - `constructor(config?: GuardTelemetryInputConfig | GuardTelemetryLocalConfig)` — [Options table](api/telemetry-listener.md#options).
   - `watch(params?: GuardTelemetryWatchParams): AsyncIterable<GuardEventPage>` — Tails on-chain and uncommitted events. `params.signal` aborts at loop boundaries: no RPC call before the first pull, no poll after an abort, and the delay between polls is cut short. A request already in flight cannot be cancelled — see [Aborting a watch](../README.md#aborting-a-watch-what-cancellation-does-and-does-not-cover). `params.retry?: TelemetryRetryOptions` tunes the bounded poll-retry envelope (`{ maxRetries?, baseDelayMs?, maxDelayMs? }`); the defaults (`DEFAULT_TELEMETRY_RETRY_OPTIONS` = `{ maxRetries: 5, baseDelayMs: 100 }`, backoff capped at `pollIntervalMs`) match the historical behavior, every value is validated before the first poll, and every backoff delay is abort-aware (issue #285). `params.maxBufferedPages?: number` bounds the look-ahead pump in front of the consumer (`DEFAULT_MAX_BUFFERED_PAGES` = `2`): at most that many pages are prefetched plus one request in flight, a slow consumer throttles the fetches instead of growing an unconsumed backlog, each page's cursor is saved at delivery so the stored cursor never leads the consumer, and `0` restores strict consumer-paced polling (issue #36). A non-integer or negative bound throws a `TypeError` before the first poll.
   - `watchAll(params?: GuardTelemetryUnifiedParams): AsyncIterable<GuardEvent>` — Merges the committed ledger stream with the `diagnostics` batches you feed it into **one ordered, de-duplicated stream**, so a single loop sees blocked decisions too. Each event carries `stream: 'committed' | 'diagnostic'` and, for diagnostics, `observedAt`. Ordering and de-duplication rules: [`event-schema.md`](event-schema.md).
   - `serializeEvent(event: GuardEvent): string` — Canonical single-line JSON for deterministic JSON-lines log shipping. Fixed key order, drops `undefined`, keeps `null`, renders `bigint` as a decimal string. Unversioned legacy (v0) format. Contract: [`event-schema.md`](event-schema.md#canonical-json-serialization--serializeevent).
   - `serializeEventRecord(event: GuardEvent): string` — Persisted-record envelope `{ "v": 1, "event": { … } }` with the same event projection as `serializeEvent()`; `v` is explicit so a reader can tell a record written by a newer SDK. See [Versioned event records](event-schema.md#versioned-event-records--serializeeventrecord-issue-323).
   - `parseEventRecord(line: string): { version, event }` — Reads either a versioned envelope or a legacy bare line (reported as `version: 0`).
-- `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX.
+- `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]` — Validates policy configuration against SPEC §8 rules prior to broadcast, accumulating all failures for complete form UX. Also checks every `i128` and `u64` field against its wire maximum, reporting `integer_out_of_range` before encoding.
+- `policyAddressComparisonKey(address: unknown): string | null` — Returns the canonical comparison key produced by Stellar SDK address parsing for a valid account or contract address. Invalid inputs return `null`; they are not case-folded or normalized into a match.
 - `validatePolicyForEncoding(policy: unknown): PolicyEncodingFailure[]` — Checks that a draft can be represented as the contract's `PolicyConfig` `ScVal` at all, without encoding it or throwing. Each failure carries a dotted `path` into the draft (for example `protocols[1].contract` or `recipient_window_caps[0].cap`), a stable `rule`, and a human-readable `message`; an empty array means `policyToScVal` will accept the draft. This is the form-validation counterpart to `validateGuardPolicy`: it checks wire representability (types, address and symbol syntax, `u64`/`i128` bounds), while `validateGuardPolicy` checks SPEC §8 policy semantics. Use `validateGuardPolicy` before broadcasting and `validatePolicyForEncoding` when the editor needs to explain why encoding itself would fail.
-- `POLICY_RULE_IDS` — Canonical array of SPEC §8 validation rule identifiers.
+- `POLICY_RULE_IDS` — Canonical array of policy validation rule identifiers: SPEC §8 rules plus the SDK-specific `integer_out_of_range` wire-representability rule.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct. The draft is validated **before** any partial `ScVal` is constructed: a field that cannot be represented throws `PolicyEncodeError` carrying every actionable failure path, rather than leaking a low-level `nativeToScVal`/`Address` exception. A `number` is accepted only when it is a safe integer; an unsafe `number` and every numeric string are rejected instead of being silently rounded or coerced, because the contract's caps are `i128`/`u64` and the SDK refuses to narrow them. Valid policies encode byte-for-byte as before.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct. Emits the contract `PolicyConfig` struct's full field set, including `recipient_window_caps`, `blocked_recipients`, the `u32` `protocol_calls_per_window` and the empty `asset_caps` vector, byte-aligned with the contracts repo's shared encode-parity vectors (issue #260); `ProtocolRule` maps carry the per-rule `paused` flag.
 - `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
@@ -190,7 +195,7 @@ one-shot form.
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 - `dmsUrgency(status: GuardStatus, policy: PolicyConfig | null, nowSecs?: bigint, warnRatio = DMS_WARN_RATIO_DEFAULT): 'ok' | 'warn' | 'expired' | 'unknown'` — Dead-man countdown urgency for dashboards: `warn` from `warnRatio` (default `DMS_WARN_RATIO_DEFAULT` = 0.8) of the grace period, `expired` once the grace has elapsed. `unknown` exactly where `deadManRemaining` is `null` (no policy, switch disabled, never heartbeated — never ≠ expired).
-- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; protocols match by contract and report `fns` changes at paths like `protocols[0].fns[1]`.
+- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; valid addresses compare through `policyAddressComparisonKey`, and protocols match by contract. Duplicate members in malformed drafts collapse by set membership; the first duplicate protocol or recipient cap wins. The helper is deterministic but does not replace validation before encoding or submission.
 
 #### Dashboard-style snapshot (issue #68)
 
@@ -312,3 +317,23 @@ describePolicy(policy);
 ```ts
 describePolicy(policy, { detail: true, nowSecs: 1_700_000_000 });
 ```
+
+#### Freezing a policy without taking ownership (issue #293)
+
+`freezePolicy(policy)` is the immutable boundary helper: it returns a policy whose properties and every nested collection are frozen, so a later mutation throws in strict mode (ESM modules are always strict) instead of silently producing a wrong verdict. It returns `ReadonlyPolicyConfig`, the type the SDK's internal consumers use.
+
+**It copies; it does not freeze its input.** The policy object, `assets`, `recipients`, `protocols` (each rule and its `fns` array), `recipient_window_caps` (each entry) and `blocked_recipients` are all copied before they are frozen. The caller's object shares no mutable state with the returned one and can still be edited or reused:
+
+```ts
+import { freezePolicy, policyToScVal } from "stellar-agent-guard-sdk";
+
+const config = { /* a reusable configuration object */ } satisfies PolicyConfig;
+const policy = freezePolicy(config);
+
+policyToScVal(policy);        // encodes the frozen copy
+config.per_tx_cap = 2_000n;   // still legal: the caller owns `config`
+```
+
+- **Ownership is explicit.** An SDK-owned immutable value never implies a side effect on the caller's value, so the copy is a fix for the earlier behaviour where the input was frozen in place and the same reference was returned. An address, a `bigint` cap or a boolean is an immutable primitive and is kept by value, so the copy costs one array/object per collection — not a deep value copy — and is still cheap enough to call once when a policy first enters the SDK.
+- **Deep, not shallow.** A partially frozen policy would let a caller mutate a rule's `fns` array or a `recipient_window_caps` entry after the SDK accepted it, which is exactly how a passing pre-flight check turns into a wrong verdict.
+- **Contents are unchanged.** Copying and freezing do not add, drop, normalise or validate fields, so the fail-closed policy behaviour and `policyToScVal` output are identical to the policy passed in. Optional collections the caller omitted stay omitted.

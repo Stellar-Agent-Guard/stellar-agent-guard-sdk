@@ -122,6 +122,39 @@ export class SimulationError extends GuardError {
   }
 }
 
+/**
+ * The RPC kept answering HTTP 429 (rate limited) after the bounded retry, so no
+ * simulation ran (issue #40).
+ *
+ * Still fail-closed: it is the `error` of an `undetermined` pre-flight verdict
+ * whose `cause` is `"rate_limited"`, never a refusal and never an approval. The
+ * remedy is operational, not a policy change: lower `maxConcurrentSimulations`,
+ * or raise the RPC's limit (self-hosted RPC).
+ */
+export class RateLimitedError extends SimulationError {
+  /** Machine-readable discriminant; mirrors the verdict's `cause`. */
+  readonly kind = "rate_limited" as const;
+  /** The server's `Retry-After`, in milliseconds, when it sent one. */
+  readonly retryAfterMs: number | null;
+  /** Simulation attempts made, including the first. */
+  readonly attempts: number;
+
+  constructor(options: {
+    stage: SimulationError["stage"];
+    retryAfterMs: number | null;
+    attempts: number;
+    cause?: unknown;
+  }) {
+    super(
+      `the RPC rate-limited the simulation (HTTP 429) on ${options.attempts} attempt(s)` +
+        (options.retryAfterMs !== null ? `; Retry-After ${options.retryAfterMs}ms` : ""),
+      { stage: options.stage, cause: options.cause },
+    );
+    this.retryAfterMs = options.retryAfterMs;
+    this.attempts = options.attempts;
+  }
+}
+
 /** A transaction could not be signed for submission. */
 export class SigningError extends GuardError {
   /** Account/contract whose authorization could not be produced, when known. */
@@ -204,6 +237,49 @@ export class BroadcastError extends GuardError {
 
   get error(): BroadcastError {
     return this;
+  }
+}
+
+/** A caller's `maxFeeCap` would be exceeded by the transaction `invoke()` is
+ * about to broadcast.
+ *
+ * Raised as a fail-closed `error` outcome **before** `sendTransaction`, never as
+ * a guard refusal: the guard approved the call and the network priced it, the
+ * caller's own spend ceiling is what stopped it. The breakdown is carried as
+ * exact stroop `bigint`s so an operator can see *which* half grew — a resource
+ * fee spike versus a fee-bump retry's inclusion fee — without parsing text.
+ */
+export class FeeCapExceededError extends GuardError {
+  /** Stable code for consumers that branch on the failure. */
+  readonly code = "fee_cap_exceeded" as const;
+  /** The ceiling supplied as `maxFeeCap`. */
+  readonly maxFeeCap: bigint;
+  /** Simulated resource fee, in stroops. */
+  readonly resourceFeeStroops: bigint;
+  /** Inclusion fee the attempt would have declared, in stroops. */
+  readonly inclusionFeeStroops: bigint;
+  /** `resourceFeeStroops + inclusionFeeStroops`, in stroops. */
+  readonly totalFeeStroops: bigint;
+  /** 0-based pipeline attempt whose price breached the cap. */
+  readonly attempt: number;
+
+  constructor(params: {
+    maxFeeCap: bigint;
+    resourceFeeStroops: bigint;
+    inclusionFeeStroops: bigint;
+    attempt: number;
+  }) {
+    const totalFeeStroops = params.resourceFeeStroops + params.inclusionFeeStroops;
+    super(
+      `fee cap exceeded: total ${totalFeeStroops} stroops ` +
+        `(resource ${params.resourceFeeStroops} + inclusion ${params.inclusionFeeStroops}) ` +
+        `exceeds maxFeeCap ${params.maxFeeCap} stroops; nothing was broadcast`,
+    );
+    this.maxFeeCap = params.maxFeeCap;
+    this.resourceFeeStroops = params.resourceFeeStroops;
+    this.inclusionFeeStroops = params.inclusionFeeStroops;
+    this.totalFeeStroops = totalFeeStroops;
+    this.attempt = params.attempt;
   }
 }
 

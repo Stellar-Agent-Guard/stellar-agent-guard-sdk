@@ -173,6 +173,43 @@ Contributors use diverse operating systems and editors. To prevent cross-platfor
 
 ## Test tiers and fixtures
 
+### Which tests does my PR need? (canonical matrix)
+
+This is the one canonical table; the README links here rather than repeating it.
+
+| Tier | Command | Needs network | Needs env file | Required when |
+| --- | --- | --- | --- | --- |
+| Unit | `npm test` | no | no | **Every PR.** Run by the required `ci` check. |
+| Type-level | `npm run test:types` | no | no | Every PR that changes an exported type or options interface. |
+| Coverage floor | `npm run test:coverage:floor` | no | no | Every PR touching `src/preflight.ts`, `src/policy.ts` or `src/invoke.ts` (the `ci` coverage gate). |
+| Packaging | `npm run build && npm run test:exports && npm run test:pack` | no | no | A PR that adds or moves an export, or changes `package.json` / the build. |
+| Live (integration) | `npm run test:integration` | **yes** (Stellar testnet) | `.env.phase2` (template `.env.phase2.example`), or an ephemeral instance the runner provisions when `GUARD_FIXTURE` is unset | **Only** a PR that touches the enforcement path (below). Also run weekly by `live-suite`; never on a PR. |
+
+**The enforcement path** is exactly these four files, and it is the list `ci`'s
+`enforcement-path evidence gate` enforces (`scripts/check-enforcement-evidence.ts`):
+
+- `src/tx.ts`
+- `src/invoke.ts`
+- `src/policy.ts`
+- `src/preflight.ts`
+
+A PR touching any of them must run `npm run test:integration` and commit the fresh
+output to `tests/fixtures/integration-evidence.md` **in the same PR**, or `ci` fails.
+Reconciliation with the wider surface: `src/admin.ts` and `src/heartbeat.ts` (admin
+operations and the dead-man heartbeat) are **not** in the gate's list today. Changes
+there are covered by unit tests, and by the live suite on its weekly run; if either is
+added to the gate, change `scripts/check-enforcement-evidence.ts` and this list in the
+same PR.
+
+**Escape hatch.** There is none: no PR label or flag skips the evidence gate, and
+`ci` has no label-driven bypass. A PR that cannot supply evidence (for example, a
+contributor without testnet credentials) does not get a waiver by label — raise it on
+the PR, where a maintainer records a decision and applies `tier:maintainer-decision`
+(see "Issues and labels"). If a label-based bypass is added to `ci` later, it must be
+documented here, identically to the workflow.
+
+### Tier details
+
 - **Unit** (`npm test`) — no network, no secrets, deterministic.
 - **Type-level** (`npm run test:types`) — offline; type-level compile-time tests (`expect-type` against `tsconfig.test-d.json`).
 - **Live** (`npm run test:integration`) — real testnet; needs `.env.phase2`
@@ -249,6 +286,16 @@ code or the SDK beneath them changes:
 
 - `tests/fixtures/contract-fixtures.json` — the guard's event vocabulary. Refresh
   with `npm run sync:fixtures` when the contracts repo's schema moves.
+- `tests/fixtures/vendor/*.json` — hash-pinned cross-repo artifacts (policy
+  schema, auth-checked vocabulary, policy vectors, reason glossary), each
+  carrying a `_provenance` header with its source URL and pinned commit.
+  Refresh with `npm run vendor:refresh` after bumping the pinned `repoCommit`
+  in `scripts/vendor-fixtures.ts`, and commit the artifact together with its
+  refreshed digest. `tests/fixtures/vendor/reasons.fixture.json` (issue #38) is
+  the contract's reason glossary that `tests/unit/reasons.test.ts` asserts
+  `explainReason` against in both directions, so a contract-added reason fails
+  this repo's tests until the SDK's guidance is extended. CI never fetches
+  these files — they are vendored so the suite stays hermetic.
 - `tests/fixtures/rpc/*.json` — real RPC payloads decoded by
   `tests/unit/rpc-fixtures.test.ts`. Refresh with `npm run capture:rpc-fixtures`
   after touching `src/telemetry.ts` or `src/invoke.ts`, or after upgrading

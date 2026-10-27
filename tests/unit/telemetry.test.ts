@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { StrKey, xdr } from "@stellar/stellar-sdk";
+import { rpc, StrKey, xdr } from "@stellar/stellar-sdk";
 import {
   DEFAULT_JITTER_FRACTION,
   GuardEventRingBuffer,
@@ -1905,5 +1905,73 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
     const page = await listener.poll({ startLedger: 100 });
     assert.equal(page.events.length, 1);
     assert.equal(page.events[0]!.contractId, GUARD);
+  });
+});
+
+/**
+ * Injectable transport (issue: custom rpc Server instance or fetch function).
+ *
+ * Enterprise/agent deployments route RPC through proxies (auth headers, mTLS,
+ * latency shielding) or mock it entirely in tests. The SDK used to construct
+ * its own `SorobanRpc.Server` from a URL, forcing URL-only config. These tests
+ * pin the shared `{ server? | url? }` config shape: an injected instance is
+ * used verbatim (never replaced by a fresh one built from a URL), and the
+ * mutual-exclusion rules fail closed with typed errors.
+ * See README "Injectable transport" for what sdk 17 actually supports.
+ */
+describe("injectable transport config (shared { server? | url? })", () => {
+  it("uses an injected Server instance verbatim instead of constructing one from a URL", async () => {
+    let getEventsCalls = 0;
+    let getLatestLedgerCalls = 0;
+    const injected = {
+      getLatestLedger: async () => {
+        getLatestLedgerCalls += 1;
+        return { sequence: 100 };
+      },
+      getEvents: async () => {
+        getEventsCalls += 1;
+        return { events: [], cursor: "c", latestLedger: 100 };
+      },
+    };
+
+    const listener = new GuardTelemetryListener({ server: injected as never, guard: GUARD });
+    await listener.poll({ startLedger: 100 });
+
+    assert.equal(getEventsCalls, 1, "calls must land on the injected instance");
+    assert.equal(
+      getLatestLedgerCalls,
+      0,
+      "poll() with an explicit startLedger does not probe the head",
+    );
+  });
+
+  it("rejects a config that supplies both server and url with a typed error", () => {
+    assert.throws(
+      () =>
+        new GuardTelemetryListener({
+          server: {
+            getEvents: async () => ({ events: [], cursor: "c", latestLedger: 1 }),
+          } as unknown as rpc.Server,
+          // @ts-expect-error intentionally passing both server and url
+          url: "https://soroban-testnet.stellar.org",
+          guard: GUARD,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /server.*url|url.*server/i);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a config that supplies neither server nor url with a typed error", () => {
+    assert.throws(
+      () => new GuardTelemetryListener({ guard: GUARD } as never),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /server|url/i);
+        return true;
+      },
+    );
   });
 });
