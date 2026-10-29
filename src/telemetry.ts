@@ -86,7 +86,9 @@ export interface GuardEvent {
   /**
    * Stable identity for this event, non-null on both streams.
    *
-   * `ledger:<txHash>:<topic>` for a committed event; `diag:<sha256>` for a
+   * `ledger:<txHash>:<topic>` for a committed event — plus the RPC's own event
+   * id as a fourth segment when the response reported one, so two same-topic
+   * events in one transaction stay distinct; `diag:<sha256>` for a
    * diagnostic one, which has no transaction to anchor on. Derived by
    * `guardEventId`; see `docs/event-schema.md` for the format and collisions.
    */
@@ -192,6 +194,17 @@ export interface GuardEventIdentityInput {
    * blocks within one simulation from colliding.
    */
   simulationIndex: number | null;
+  /**
+   * The RPC's own identity for this committed event
+   * (`Api.EventResponse.id`), when the response reported one; absent otherwise.
+   *
+   * This is the component that keeps two events with the *same* name topic in
+   * the *same* transaction apart (issue #275): the transaction and topic
+   * identify the pair only jointly. The RPC id is assigned per event and is
+   * stable across page boundaries and repeated reads, so it does not move an
+   * event's derived id between polls.
+   */
+  rpcEventId?: string | null;
 }
 
 /**
@@ -199,13 +212,19 @@ export interface GuardEventIdentityInput {
  *
  * One format per stream, because the two fail identity in opposite ways:
  *
- * - `ledger:<txHash>:<topic>` — a committed event is anchored on the
- *   transaction that emitted it, plus its name topic. The topic is part of the
- *   id because a single transaction emits several guard events: a `heartbeat`
- *   call commits both `event_auth_checked` and `event_heartbeat` (see the live
- *   capture in `docs/event-schema.md`), so `ledger:<txHash>` alone is not
- *   unique. If an RPC response ever omits the hash, the ledger sequence
- *   anchors instead — an id is always produced.
+ * - `ledger:<txHash>:<topic>[:<rpcEventId>]` — a committed event is anchored on
+ *   the transaction that emitted it, plus its name topic. The topic is part of
+ *   the id because a single transaction emits several guard events: a
+ *   `heartbeat` call commits both `event_auth_checked` and `event_heartbeat`
+ *   (see the live capture in `docs/event-schema.md`), so `ledger:<txHash>`
+ *   alone is not unique. When the RPC reports its own id for the event, that
+ *   id is appended as a fourth segment: a transaction can emit the same name
+ *   topic *twice*, and topic alone cannot tell those two events apart, so
+ *   without the position `watchAll()`'s de-duplication would drop the second
+ *   one as a duplicate of the first. The RPC id is stable across page
+ *   boundaries and repeated reads of the same event, so an id derived from it
+ *   does not move when a page is re-read. If an RPC response ever omits the
+ *   hash, the ledger sequence anchors instead — an id is always produced.
  *
  * - `diag:<sha256>` — a blocked decision never reaches a ledger (the guard
  *   returns `Err`, the host rolls the event back), so there is nothing to
@@ -226,7 +245,9 @@ export function guardEventId(event: GuardEventIdentityInput): string {
   if (event.source === "ledger") {
     const anchor =
       event.transactionHash ?? (event.ledger !== null ? String(event.ledger) : "unknown");
-    return `ledger:${anchor}:${event.topics[0] ?? ""}`;
+    const base = `ledger:${anchor}:${event.topics[0] ?? ""}`;
+    const position = event.rpcEventId;
+    return position ? `${base}:${position}` : base;
   }
   return `diag:${sha256Hex(diagnosticIdMaterial(event))}`;
 }
@@ -288,6 +309,12 @@ export type GuardEventContext = Omit<
   /** Position within the diagnostic batch; null on the ledger stream. */
   simulationIndex: number | null;
   /**
+   * The RPC's own event id on the ledger stream; absent otherwise. Kept out of
+   * the emitted `GuardEvent` — it is identity material, not a field a
+   * consumer reads (the derived `id` already carries it).
+   */
+  rpcEventId?: string | null;
+  /**
    * Observation time for a diagnostic event; omitted (→ `null`) on the
    * committed stream, which anchors on `ledgerClosedAt` instead.
    */
@@ -298,7 +325,7 @@ export type GuardEventContext = Omit<
 function interpret(topics: string[], data: unknown, context: GuardEventContext): GuardEvent | null {
   const topic = topics[0];
   if (!topic || !KNOWN_TOPICS.has(topic)) return null;
-  const { simulationIndex, observedAt, ...streamFacts } = context;
+  const { simulationIndex, observedAt, rpcEventId, ...streamFacts } = context;
   const kind = KIND_BY_TOPIC[topic] ?? "unknown";
   return {
     kind,
@@ -311,6 +338,7 @@ function interpret(topics: string[], data: unknown, context: GuardEventContext):
       topics,
       data,
       simulationIndex,
+      ...(rpcEventId !== undefined ? { rpcEventId } : {}),
     }),
     ...streamFacts,
     stream: streamFacts.stream,
@@ -945,6 +973,17 @@ export interface FailedTxPollResult {
   events: GuardEvent[];
   /** Cursor to resume the failed-transaction scan from. */
   cursor: string;
+  /**
+   * Present only when this page's scan **failed** (issue #280): the RPC
+   * rejected the read, so `events` is empty and `cursor` is the caller's own
+   * unchanged value — a failed page cannot fabricate progress, and the next
+   * scan re-reads exactly the transactions this one never got to.
+   *
+   * Reported here rather than swallowed, so a direct caller of
+   * `pollFailedTransactions()` and `watch()` see the same failure; `watch()`
+   * forwards it to `GuardTelemetryWatchParams.onFailedTxError`.
+   */
+  error?: unknown;
 }
 
 /**
@@ -2570,6 +2609,7 @@ export class GuardTelemetryListener {
   async pollFailedTransactions(
     params: { cursor?: string; startLedger?: number; limit?: number } = {},
   ): Promise<FailedTxPollResult> {
+    validatePollParams(params, "pollFailedTransactions()");
     if (params.cursor === undefined && params.startLedger === undefined) {
       const latest = await this.config.server.getLatestLedger();
       const cursor = String(latest.sequence);
@@ -2602,9 +2642,14 @@ export class GuardTelemetryListener {
       this.record(events);
       this.recordHealthyFailedTxPoll(response.cursor);
       return { events, cursor: response.cursor };
-    } catch {
+    } catch (error) {
       this.recordFailedTxPoll();
-      return { events: [], cursor: params.cursor ?? String(params.startLedger) };
+      // A failed page must not fabricate progress: the cursor that comes back
+      // is the caller's own, so the next scan re-reads exactly the transactions
+      // this one never got to. The failure is reported on the result rather
+      // than swallowed (#280), so `watch()` can surface it through
+      // `onFailedTxError` while the committed stream carries on.
+      return { events: [], cursor: params.cursor ?? String(params.startLedger), error };
     }
   }
 
@@ -2701,6 +2746,11 @@ export class GuardTelemetryListener {
           // Committed events anchor on the transaction hash, not on a position
           // within a page: a page boundary would otherwise change an event's id.
           simulationIndex: null,
+          // …but the RPC's own per-event id is stable across pages and repeat
+          // reads, so it can still separate two same-topic events emitted by
+          // one transaction (#275). Absent on responses that omit it, in which
+          // case the historical three-segment id is produced unchanged.
+          rpcEventId: event.id ?? null,
           // `includeRaw` is off unless the listener was constructed with it, so
           // the default path keeps discarding the RPC object (issue #94).
           ...(this.config.includeRaw ? { raw: event } : {}),
@@ -2765,6 +2815,27 @@ export class GuardTelemetryListener {
       oldestLedger,
       unknownTopics,
     };
+  }
+
+  /**
+   * Surface a failed-transaction scan failure without letting it touch the
+   * committed stream (issue #280).
+   *
+   * Always logged when a logger is configured — reduced coverage is a fact a
+   * host should be able to see without wiring a callback — then delivered to
+   * `onFailedTxError` when one was supplied. The callback is isolated: an
+   * observability sink that throws cannot stop telemetry, the same contract as
+   * `onGap` and `onUnknownTopics`.
+   */
+  private reportFailedTxError(params: GuardTelemetryWatchParams, error: unknown): void {
+    const detail = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`failed-transaction scan failed: ${detail}`, { guard: this.config.guard });
+    if (!params.onFailedTxError) return;
+    try {
+      params.onFailedTxError(error);
+    } catch {
+      // Reporting reduced coverage must not reduce it any further.
+    }
   }
 
   /** Claim the single active-stream lease, or reject concurrent use. */
@@ -3067,8 +3138,14 @@ export class GuardTelemetryListener {
           if (!this.failedTxScanFailed) {
             scannedFailedTxCursor = failedTxPage.cursor;
           }
-        } catch {
+        } catch (error) {
           // This optional stream must not interrupt committed event polling.
+          // A rejection that got that far (the head probe that seeds the
+          // scan's cursor) is reported the same way a failed page is; the
+          // cursor it never returned stays unset, so the scan restarts from
+          // the head rather than from a position that was not read.
+          if (signal?.aborted) return;
+          this.reportFailedTxError(params, error);
         }
       }
 

@@ -617,6 +617,66 @@ function callFingerprint(call: ContractCall): string {
   return sha256Hex(concatBytes(parts));
 }
 
+/**
+ * A structural copy of a value, so a caller cannot reach back into what the
+ * cache still retains (issue #273).
+ *
+ * Arrays and objects are rebuilt, byte arrays and dates are copied, and a class
+ * instance keeps its prototype — so an XDR value inside `diagnosticEvents` still
+ * answers its methods and a `GuardError` still passes `instanceof`. Cycles are
+ * handled through `seen`, and primitives (`bigint` included) are returned as
+ * they are: there is nothing to detach.
+ */
+function detachDecisionValue<T>(value: T, seen: WeakMap<object, unknown>): T {
+  if (value === null || typeof value !== "object") return value;
+  const source = value as unknown as object;
+  const existing = seen.get(source);
+  if (existing !== undefined) return existing as T;
+
+  if (Array.isArray(value)) {
+    const copy: unknown[] = [];
+    seen.set(source, copy);
+    for (const item of value) copy.push(detachDecisionValue(item, seen));
+    return copy as unknown as T;
+  }
+  if (value instanceof Date) {
+    const copy = new Date(value.getTime());
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  if (value instanceof Uint8Array) {
+    const copy = new Uint8Array(value);
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  if (value instanceof ArrayBuffer) {
+    const copy = value.slice(0);
+    seen.set(source, copy);
+    return copy as unknown as T;
+  }
+  const copy = Object.create(Object.getPrototypeOf(value)) as Record<string, unknown>;
+  seen.set(source, copy);
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    copy[key] = detachDecisionValue(item, seen);
+  }
+  return copy as unknown as T;
+}
+
+/**
+ * An independent snapshot of a verdict for the cache (issue #273).
+ *
+ * The cache stores one copy and hands out one copy per hit, so no caller ever
+ * holds the object the cache retains: editing the returned decision — the
+ * top-level `allowed`/`kind` discriminant, a scalar such as
+ * `estimatedResourceFee`, or a nested entry of `diagnosticEvents` — cannot
+ * change what a later cache hit receives. Verdicts are snapshots, never shared
+ * mutable objects and never frozen ones: a caller that edits what it was handed
+ * still gets no error, it simply edits its own copy.
+ */
+function snapshotDecision(decision: PreFlightDecision): PreFlightDecision {
+  return detachDecisionValue(decision, new WeakMap<object, unknown>());
+}
+
 function configFingerprint(config: PreFlightConfig): string {
   const parts: Uint8Array[] = [];
   hashPart(parts, config.networkPassphrase);

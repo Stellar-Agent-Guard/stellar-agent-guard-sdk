@@ -28,6 +28,7 @@ import {
   DEFAULT_TELEMETRY_RETRY_OPTIONS,
   GuardTelemetryListener,
   InMemoryCursorStore,
+  mergeGuardEventStreams,
   type CursorStore,
   type GuardEvent,
   type GuardTelemetryHealthSnapshot,
@@ -58,6 +59,7 @@ function rawLedgerEvent(
   ledger: number,
   txHash: string = `tx-${ledger}`,
   topic = "event_heartbeat",
+  eventId?: string,
 ) {
   return {
     contractId: GUARD,
@@ -69,6 +71,9 @@ function rawLedgerEvent(
     ledger,
     ledgerClosedAt: null,
     txHash,
+    // The RPC's own per-event id, exactly as `Api.EventResponse` carries it.
+    // Omitted by default so the historical three-segment id stays exercised.
+    ...(eventId !== undefined ? { id: eventId } : {}),
   };
 }
 
@@ -77,11 +82,13 @@ function decodedEvent(
   ledger: number,
   txHash: string = `tx-${ledger}`,
   topic = "event_heartbeat",
+  eventId?: string,
 ): GuardEvent {
   return {
-    // Format from `guardEventId`: `ledger:<txHash>:<topic>` — the raw event
-    // below carries txHash `tx-<ledger>`, so the decoded id is derivable here.
-    id: `ledger:${txHash}:${topic}`,
+    // Format from `guardEventId`: `ledger:<txHash>:<topic>`, plus `:<rpc id>`
+    // when the raw event below reported one — the raw event carries txHash
+    // `tx-<ledger>`, so the decoded id is derivable here.
+    id: eventId !== undefined ? `ledger:${txHash}:${topic}:${eventId}` : `ledger:${txHash}:${topic}`,
     kind: "heartbeat",
     topic,
     source: "ledger",
@@ -429,6 +436,56 @@ describe("committed-page ordering (issue #289)", () => {
   });
 });
 
+describe("repeated same-topic events in one transaction (issue #275)", () => {
+  /** One transaction, two events with the same name topic, distinct RPC ids. */
+  const doublePage: ScriptedPage = {
+    events: [
+      rawLedgerEvent(501, "tx-double", "event_heartbeat", "0000000501-000000001"),
+      rawLedgerEvent(501, "tx-double", "event_heartbeat", "0000000501-000000002"),
+    ],
+    cursor: "cursor-1",
+  };
+
+  it("decodes both events with distinct ids anchored on the RPC's event identity", async () => {
+    const { server } = scriptedServer([doublePage, doublePage]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    const page = await listener.poll({ startLedger: 500 });
+
+    assert.deepEqual(
+      page.events.map((event) => event.id),
+      [
+        "ledger:tx-double:event_heartbeat:0000000501-000000001",
+        "ledger:tx-double:event_heartbeat:0000000501-000000002",
+      ],
+      "same tx, same topic: the RPC event id is what keeps them apart",
+    );
+
+    const reread = await listener.poll({ startLedger: 500 });
+    assert.deepEqual(
+      reread.events.map((event) => event.id),
+      page.events.map((event) => event.id),
+      "repeated reads of the same event yield the same id",
+    );
+  });
+
+  it("lets both survive the merge's de-duplication instead of dropping one", async () => {
+    const { server } = scriptedServer([doublePage]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+    const page = await listener.poll({ startLedger: 500 });
+
+    // The same page delivered twice (an overlapping re-read) must neither
+    // drop a distinct event nor emit either one twice.
+    const seen: GuardEvent[] = [];
+    for await (const event of mergeGuardEventStreams([page.events, page.events])) {
+      seen.push(event);
+    }
+
+    assert.equal(seen.length, 2, "both same-topic events survive de-duplication, each exactly once");
+    assert.notEqual(seen[0]!.id, seen[1]!.id);
+  });
+});
+
 describe("unknown event topics (issue #287)", () => {
   it("poll() reports unknown names and counts without exposing payloads", async () => {
     const rawEvents = [
@@ -763,6 +820,99 @@ describe("listener health snapshot (issue #286)", () => {
     assert.deepEqual(health.gaps, [gaps[0]]);
     health.gaps[0]!.fromLedger = 999;
     assert.notEqual(listener.health().gaps[0]!.fromLedger, 999);
+  });
+});
+
+describe("option validation before any RPC (issue #283)", () => {
+  type PollParams = Parameters<GuardTelemetryListener["poll"]>[0];
+  type WatchParams = Parameters<GuardTelemetryListener["watch"]>[0];
+
+  /** Table-driven: every entry names a field and the message it must carry. */
+  const invalidPolls: { name: string; params: PollParams; message: RegExp }[] = [
+    { name: "limit is zero", params: { limit: 0 }, message: /telemetry: limit must be a positive integer/ },
+    { name: "limit is a fraction", params: { limit: 2.5 }, message: /telemetry: limit must be a positive integer/ },
+    { name: "limit is negative", params: { limit: -10 }, message: /telemetry: limit must be a positive integer/ },
+    { name: "limit is NaN", params: { limit: Number.NaN }, message: /telemetry: limit must be a positive integer \(received NaN\)/ },
+    { name: "limit is infinite", params: { limit: Number.POSITIVE_INFINITY }, message: /telemetry: limit must be a positive integer/ },
+    { name: "startLedger is zero", params: { startLedger: 0 }, message: /telemetry: startLedger must be a positive integer/ },
+    { name: "startLedger is negative", params: { startLedger: -5 }, message: /telemetry: startLedger must be a positive integer/ },
+    { name: "startLedger is a fraction", params: { startLedger: 12.5 }, message: /telemetry: startLedger must be a positive integer/ },
+    {
+      name: "cursor combined with startLedger",
+      params: { cursor: "cursor-1", startLedger: 100 },
+      message: /telemetry: poll\(\) accepts either cursor or startLedger, not both/,
+    },
+  ];
+
+  const invalidWatches: { name: string; params: WatchParams; message: RegExp }[] = [
+    { name: "limit is negative", params: { limit: -1 }, message: /telemetry: limit must be a positive integer/ },
+    { name: "limit is a fraction", params: { limit: 0.5 }, message: /telemetry: limit must be a positive integer/ },
+    { name: "startLedger is zero", params: { startLedger: 0 }, message: /telemetry: startLedger must be a positive integer/ },
+    { name: "resumeLedger is negative", params: { resumeLedger: -1 }, message: /telemetry: resumeLedger must be a positive integer/ },
+    { name: "resumeLedger is a fraction", params: { resumeLedger: 3.5 }, message: /telemetry: resumeLedger must be a positive integer/ },
+    { name: "pollIntervalMs is negative", params: { pollIntervalMs: -1 }, message: /telemetry: pollIntervalMs must be a non-negative integer/ },
+    { name: "pollIntervalMs is a fraction", params: { pollIntervalMs: 1.5 }, message: /telemetry: pollIntervalMs must be a non-negative integer/ },
+    { name: "pollIntervalMs is NaN", params: { pollIntervalMs: Number.NaN }, message: /telemetry: pollIntervalMs must be a non-negative integer \(received NaN\)/ },
+    { name: "pollIntervalMs is infinite", params: { pollIntervalMs: Number.POSITIVE_INFINITY }, message: /telemetry: pollIntervalMs must be a non-negative integer/ },
+    {
+      name: "jitter is an unknown mode",
+      // Deliberately untyped: the runtime check is what a JS caller gets.
+      params: { jitter: "half" } as unknown as WatchParams,
+      message: /telemetry: jitter must be "none" or "full"/,
+    },
+    {
+      name: "cursor combined with startLedger",
+      params: { cursor: "cursor-1", startLedger: 100 },
+      message: /telemetry: watch\(\) accepts either cursor or startLedger, not both/,
+    },
+    {
+      name: "resumeLedger combined with startLedger",
+      params: { resumeLedger: 100, startLedger: 50 },
+      message: /telemetry: watch\(\) accepts either resumeLedger or startLedger, not both/,
+    },
+  ];
+
+  it("rejects each invalid poll() option with zero requests", async () => {
+    for (const testCase of invalidPolls) {
+      const { server, requests, latestLedgerCalls } = scriptedServer([]);
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+      await assert.rejects(listener.poll(testCase.params), testCase.message, testCase.name);
+      assert.equal(requests.length, 0, `${testCase.name}: no getEvents request may be issued`);
+      assert.equal(latestLedgerCalls(), 0, `${testCase.name}: not even the default-head probe runs`);
+    }
+  });
+
+  it("rejects each invalid watch() option with zero requests", async () => {
+    for (const testCase of invalidWatches) {
+      const { server, requests, latestLedgerCalls } = scriptedServer([]);
+      const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+      await assert.rejects(listener.watch(testCase.params).next(), testCase.message, testCase.name);
+      assert.equal(requests.length, 0, `${testCase.name}: no getEvents request may be issued`);
+      assert.equal(latestLedgerCalls(), 0, `${testCase.name}: not even the default-head probe runs`);
+    }
+  });
+
+  it("rejects invalid pollFailedTransactions() pagination before the scan", async () => {
+    const { server, requests, latestLedgerCalls } = scriptedServer([]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    await assert.rejects(
+      listener.pollFailedTransactions({ startLedger: -1 }),
+      /telemetry: startLedger must be a positive integer/,
+    );
+    assert.equal(requests.length, 0, "the failed-transaction scan validates too");
+    assert.equal(latestLedgerCalls(), 0);
+  });
+
+  it("still issues the request when the same options are valid", async () => {
+    const { server, requests } = scriptedServer([{ events: [], cursor: "cursor-1" }]);
+    const listener = new GuardTelemetryListener({ server, guard: GUARD });
+
+    await listener.poll({ startLedger: 1, limit: 10 });
+
+    assert.equal(requests.length, 1, "validation rejects only unusable values, never valid pagination");
   });
 });
 
