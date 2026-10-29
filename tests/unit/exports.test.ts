@@ -67,11 +67,14 @@ describe("package module format and export-map", () => {
       // change that introduced it, so losing one to a merge would be a silent
       // breaking change for a consumer rather than a compile error here.
       "GuardError",
+      "GuardUndeterminedError",
       "SimulationError",
       "SigningError",
       "BroadcastError",
       "ContractResponseError",
       "PolicyDecodeError",
+      "PolicyEncodeError",
+      "validatePolicyForEncoding",
       "decodePolicy",
       "policyFromScVal",
       "InvokeRetryError",

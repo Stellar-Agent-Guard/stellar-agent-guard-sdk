@@ -10,13 +10,7 @@
  *       returns a `LangChainToolMessage` carrying the contract reason & explanation.
  *  4. Fail-closed handling for undetermined simulation results.
  */
-import {
-  Address,
-  Keypair,
-  nativeToScVal,
-  rpc,
-  xdr,
-} from "@stellar/stellar-sdk";
+import { Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
   PreFlightInterceptor,
   createLangChainGuardMiddleware,
@@ -28,10 +22,18 @@ import {
   type PreFlightDecision,
 } from "../src/index.ts";
 
-export const EXAMPLE_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
-export const EXAMPLE_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
-export const ALLOWED_RECIPIENT = unsafeAccountAddress("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ");
-export const BLOCKED_RECIPIENT = unsafeAccountAddress("GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM");
+export const EXAMPLE_GUARD = unsafeContractAddress(
+  "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+);
+export const EXAMPLE_TOKEN = unsafeContractAddress(
+  "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+);
+export const ALLOWED_RECIPIENT = unsafeAccountAddress(
+  "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+);
+export const BLOCKED_RECIPIENT = unsafeAccountAddress(
+  "GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM",
+);
 
 export interface FakeTransferToolArgs {
   from?: string;
@@ -201,6 +203,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log("[Run 1: Allowed] Tool ran:", res.allowedToolRan);
     console.log("[Run 1: Allowed] Result:", res.allowedResult);
     console.log("[Run 2: Blocked] Tool ran:", res.blockedToolRan);
-    console.log("[Run 2: Blocked] Message content:\n", (res.blockedResult as { content: string }).content);
+    console.log(
+      "[Run 2: Blocked] Message content:\n",
+      (res.blockedResult as { content: string }).content,
+    );
   });
 }

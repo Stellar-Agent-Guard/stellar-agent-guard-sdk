@@ -11,12 +11,7 @@ import assert from "node:assert/strict";
 import { readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
-import {
-  ALL_PROJECTS,
-  DEFAULT_PROJECT,
-  SHARED_IMPORTS,
-  TEST_PROJECTS,
-} from "../test.config.ts";
+import { ALL_PROJECTS, DEFAULT_PROJECT, SHARED_IMPORTS, TEST_PROJECTS } from "../test.config.ts";
 import {
   DEPLOY_COMMAND,
   ENV_EXAMPLE_FILE,
@@ -101,8 +96,12 @@ describe("integration harness env-missing entry check parity", () => {
 
   it("lists only the specific missing keys when env is partially populated", () => {
     const partial = {
-      PHASE2_GUARD: unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44"),
-      PHASE2_TOKEN: unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"),
+      PHASE2_GUARD: unsafeContractAddress(
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      ),
+      PHASE2_TOKEN: unsafeContractAddress(
+        "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      ),
     };
     const result = validatePhase2Env(partial);
     assert.equal(result.ok, false);
@@ -136,8 +135,14 @@ PHASE2_TOKEN=CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB
 PHASE2_EXTRA=some=complex=value
 `;
     const parsed = parseEnvContent(raw);
-    assert.equal(parsed["PHASE2_GUARD"], "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
-    assert.equal(parsed["PHASE2_TOKEN"], "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+    assert.equal(
+      parsed["PHASE2_GUARD"],
+      "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+    );
+    assert.equal(
+      parsed["PHASE2_TOKEN"],
+      "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+    );
     assert.equal(parsed["PHASE2_EXTRA"], "some=complex=value");
     assert.equal(parsed["# This is a comment"], undefined);
   });

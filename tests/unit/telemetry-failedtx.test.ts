@@ -27,6 +27,7 @@ import {
   describeGuardEvent,
   guardEventsFromFailedTransaction,
   GuardTelemetryListener,
+  type CursorStore,
   type GuardEvent,
 } from "../../src/telemetry.ts";
 
@@ -55,11 +56,16 @@ function diagnostic(contract: Buffer | null, topics: string[]): xdr.DiagnosticEv
   });
 }
 
-const blockedAuthChecked = () => diagnostic(GUARD_BYTES, ["event_auth_checked", "blocked", "per_tx_cap_exceeded"]);
+const blockedAuthChecked = () =>
+  diagnostic(GUARD_BYTES, ["event_auth_checked", "blocked", "per_tx_cap_exceeded"]);
 const allowedAuthChecked = () => diagnostic(GUARD_BYTES, ["event_auth_checked", "allowed", ""]);
 const hostNoise = () => diagnostic(null, ["fn_call", "transfer"]);
 const otherContractAuthChecked = () =>
-  diagnostic(Buffer.from(StrKey.decodeContract(OTHER)), ["event_auth_checked", "blocked", "recipient_not_allowed"]);
+  diagnostic(Buffer.from(StrKey.decodeContract(OTHER)), [
+    "event_auth_checked",
+    "blocked",
+    "recipient_not_allowed",
+  ]);
 
 /** A real envelope whose single operation invokes `contract`. */
 function invokeEnvelope(contract: string): xdr.TransactionEnvelope {
@@ -68,9 +74,7 @@ function invokeEnvelope(contract: string): xdr.TransactionEnvelope {
     fee: "100",
     networkPassphrase: Networks.TESTNET,
   })
-    .addOperation(
-      Operation.invokeContractFunction({ contract, function: "transfer", args: [] }),
-    )
+    .addOperation(Operation.invokeContractFunction({ contract, function: "transfer", args: [] }))
     .setTimeout(30)
     .build()
     .toEnvelope();
@@ -114,12 +118,30 @@ interface FakePage {
  * the failed-tx scanner never dereferences them. Pages repeat their last entry
  * once exhausted, like an RPC whose head has not advanced.
  */
+/** A `CursorStore` that records what it is asked, for restart assertions. */
+function recordingCursorStore(initial: string | null = null) {
+  let stored: string | null = initial;
+  const saves: string[] = [];
+  const store: CursorStore = {
+    async load() {
+      return stored;
+    },
+    async save(cursor) {
+      saves.push(cursor);
+      stored = cursor;
+    },
+  };
+  return { store, saves, lastStored: () => stored };
+}
+
 function harness(options: {
   txPages: FakePage[];
   eventsPages?: { events: unknown[]; cursor: string; latestLedger: number }[];
   latestLedger?: number;
   failGetTransactions?: boolean;
   failedTx?: boolean;
+  cursorStore?: CursorStore;
+  failedTxCursorStore?: CursorStore;
 }) {
   const requests = {
     getEvents: [] as Record<string, unknown>[],
@@ -127,7 +149,9 @@ function harness(options: {
   };
   let eventsPage = 0;
   let txPage = 0;
-  const pages = options.eventsPages ?? [{ events: [], cursor: "events-cursor-0", latestLedger: 501 }];
+  const pages = options.eventsPages ?? [
+    { events: [], cursor: "events-cursor-0", latestLedger: 501 },
+  ];
   const server = {
     getLatestLedger: async () => ({ sequence: options.latestLedger ?? 500 }),
     getEvents: async (request: Record<string, unknown>) => {
@@ -144,6 +168,8 @@ function harness(options: {
     server,
     guard: GUARD,
     ...(options.failedTx === undefined ? {} : { failedTx: options.failedTx }),
+    ...(options.cursorStore ? { cursorStore: options.cursorStore } : {}),
+    ...(options.failedTxCursorStore ? { failedTxCursorStore: options.failedTxCursorStore } : {}),
   });
   return { listener, requests };
 }
@@ -203,7 +229,12 @@ describe("guardEventsFromFailedTransaction", () => {
 
   it("normalises an allowed decision's empty reason symbol like every other stream", () => {
     const events = guardEventsFromFailedTransaction(
-      { txHash: HASH, ledger: 4_675_000, createdAt: 1_789_400_000, diagnosticEventsXdr: [allowedAuthChecked()] },
+      {
+        txHash: HASH,
+        ledger: 4_675_000,
+        createdAt: 1_789_400_000,
+        diagnosticEventsXdr: [allowedAuthChecked()],
+      },
       GUARD,
     );
     assert.equal(events[0]!.decision?.result, "allowed");
@@ -216,7 +247,11 @@ describe("guardEventsFromFailedTransaction", () => {
         txHash: HASH,
         ledger: 4_675_000,
         createdAt: 1_789_400_000,
-        diagnosticEventsXdr: [hostNoise(), diagnostic(null, ["core_metrics", "cpu_insn"]), blockedAuthChecked()],
+        diagnosticEventsXdr: [
+          hostNoise(),
+          diagnostic(null, ["core_metrics", "cpu_insn"]),
+          blockedAuthChecked(),
+        ],
       },
       GUARD,
     );
@@ -331,7 +366,11 @@ describe("pollFailedTransactions", () => {
   it("starts at the head when no cursor is given, delivering nothing retroactively", async () => {
     const { listener } = harness({
       txPages: [
-        { transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })], latestLedger: 501, cursor: "tx-cursor-1" },
+        {
+          transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })],
+          latestLedger: 501,
+          cursor: "tx-cursor-1",
+        },
       ],
       latestLedger: 501,
     });
@@ -344,7 +383,13 @@ describe("pollFailedTransactions", () => {
 describe("watch with failedTx (cursor interaction)", () => {
   it("is opt-out by default: the transaction stream is never queried", async () => {
     const { listener, requests } = harness({
-      txPages: [{ transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })], latestLedger: 501, cursor: "tx-cursor-1" }],
+      txPages: [
+        {
+          transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })],
+          latestLedger: 501,
+          cursor: "tx-cursor-1",
+        },
+      ],
       failedTx: false,
     });
     await collectAfterPolls(listener, requests, 3);
@@ -374,14 +419,18 @@ describe("watch with failedTx (cursor interaction)", () => {
     // own cursors (or a startLedger), the transaction stream only its own.
     const eventCursors = requests.getEvents.map((request) => request.cursor);
     assert.equal(
-      eventCursors.filter((cursor) => typeof cursor === "string" && (cursor as string).startsWith("tx-cursor")).length,
+      eventCursors.filter(
+        (cursor) => typeof cursor === "string" && (cursor as string).startsWith("tx-cursor"),
+      ).length,
       0,
     );
     const txCursors = requests.getTransactions.map(
       (request) => (request.pagination as { cursor?: string } | undefined)?.cursor,
     );
     assert.equal(
-      txCursors.filter((cursor) => typeof cursor === "string" && (cursor as string).startsWith("events-cursor")).length,
+      txCursors.filter(
+        (cursor) => typeof cursor === "string" && (cursor as string).startsWith("events-cursor"),
+      ).length,
       0,
     );
     // And the transaction stream really was queried repeatedly with its own
@@ -398,7 +447,9 @@ describe("watch with failedTx (cursor interaction)", () => {
       eventsPages: [{ events: [], cursor: "events-cursor-1", latestLedger: 502 }],
       txPages: [
         {
-          transactions: [failedTx({ ledger: 4_675_000, diagnosticEventsXdr: [blockedAuthChecked()] })],
+          transactions: [
+            failedTx({ ledger: 4_675_000, diagnosticEventsXdr: [blockedAuthChecked()] }),
+          ],
           latestLedger: 502,
           cursor: "tx-cursor-1",
         },
@@ -420,7 +471,12 @@ describe("watch with failedTx (cursor interaction)", () => {
             {
               contractId: GUARD,
               topic: [xdr.ScVal.scvSymbol("event_heartbeat")],
-              value: xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(1_789_393_232n) })]),
+              value: xdr.ScVal.scvMap([
+                new xdr.ScMapEntry({
+                  key: xdr.ScVal.scvSymbol("at"),
+                  val: xdr.ScVal.scvU64(1_789_393_232n),
+                }),
+              ]),
               ledger: 4_675_001,
               ledgerClosedAt: "2026-09-14T00:00:00Z",
               txHash: HASH,
@@ -434,6 +490,129 @@ describe("watch with failedTx (cursor interaction)", () => {
     const events = await collectAfterPolls(listener, requests, 4);
     assert.ok(events.filter((event) => event.stream === "committed").length >= 1);
     assert.equal(events.filter((event) => event.stream === "failed_tx").length, 0);
+  });
+});
+
+describe("durable failed-tx cursor (issue #279)", () => {
+  const txPage = {
+    transactions: [failedTx({ diagnosticEventsXdr: [blockedAuthChecked()] })],
+    latestLedger: 501,
+    cursor: "tx-cursor-1",
+  };
+  const eventsPage = { events: [], cursor: "events-cursor-1", latestLedger: 501 };
+
+  it("persists the failed-tx cursor to its own store, never the events store", async () => {
+    const committed = recordingCursorStore(null);
+    const failed = recordingCursorStore(null);
+    const { listener, requests } = harness({
+      txPages: [txPage],
+      eventsPages: [eventsPage],
+      failedTx: true,
+      cursorStore: committed.store,
+      failedTxCursorStore: failed.store,
+    });
+
+    await collectAfterPolls(listener, requests, 2);
+
+    assert.deepEqual(
+      failed.saves,
+      ["500", "tx-cursor-1"],
+      "the tx stream persists its head bootstrap and then its own cursor",
+    );
+    assert.deepEqual(
+      committed.saves,
+      ["events-cursor-1", "events-cursor-1"],
+      "the committed store advances once per poll and is untouched by the tx scan",
+    );
+    assert.equal(
+      committed.saves.includes("tx-cursor-1"),
+      false,
+      "a failed-tx cursor must never leak into the events store",
+    );
+    assert.equal(
+      failed.saves.includes("events-cursor-1"),
+      false,
+      "an events cursor must never leak into the tx store",
+    );
+  });
+
+  it("resumes both streams from their saved cursors after a restart", async () => {
+    const committed = recordingCursorStore(null);
+    const failed = recordingCursorStore(null);
+    const first = harness({
+      txPages: [txPage],
+      eventsPages: [eventsPage],
+      failedTx: true,
+      cursorStore: committed.store,
+      failedTxCursorStore: failed.store,
+    });
+    await collectAfterPolls(first.listener, first.requests, 2);
+
+    // A fresh listener, the same two stores: a redeploy.
+    const committed2 = recordingCursorStore(committed.lastStored());
+    const failed2 = recordingCursorStore(failed.lastStored());
+    const second = harness({
+      txPages: [{ ...txPage, cursor: "tx-cursor-2" }],
+      eventsPages: [{ ...eventsPage, cursor: "events-cursor-2" }],
+      failedTx: true,
+      cursorStore: committed2.store,
+      failedTxCursorStore: failed2.store,
+    });
+    await collectAfterPolls(second.listener, second.requests, 1);
+
+    assert.equal(second.requests.getEvents[0]?.cursor, "events-cursor-1");
+    assert.equal(second.requests.getEvents[0]?.startLedger, undefined);
+    assert.equal(
+      (second.requests.getTransactions[0]?.pagination as { cursor?: string } | undefined)?.cursor,
+      "tx-cursor-1",
+      "the restart resumes the tx scan from its own persisted cursor",
+    );
+  });
+
+  it("keeps the streams independent when one fails: the other still advances", async () => {
+    const committed = recordingCursorStore(null);
+    const failed = recordingCursorStore(null);
+    const { listener, requests } = harness({
+      txPages: [],
+      failGetTransactions: true,
+      eventsPages: [eventsPage],
+      failedTx: true,
+      cursorStore: committed.store,
+      failedTxCursorStore: failed.store,
+    });
+
+    await collectAfterPolls(listener, requests, 2);
+
+    assert.deepEqual(
+      failed.saves,
+      ["500"],
+      "after the head bootstrap, a failing scan never advances its cursor",
+    );
+    assert.deepEqual(
+      committed.saves,
+      ["events-cursor-1", "events-cursor-1"],
+      "the committed stream keeps advancing",
+    );
+    assert.equal(listener.health().state, "aborted");
+    assert.equal(listener.health().failedTx.degraded, true);
+  });
+
+  it("without a failed-tx store, a restart starts the scan at the head", async () => {
+    const failed = recordingCursorStore(null);
+    const first = harness({ txPages: [txPage], failedTx: true, failedTxCursorStore: failed.store });
+    await collectAfterPolls(first.listener, first.requests, 3);
+    assert.equal(failed.lastStored(), "tx-cursor-1");
+
+    // Same options minus `failedTxCursorStore`: the persisted position is gone.
+    const restarted = harness({ txPages: [txPage], failedTx: true });
+    await collectAfterPolls(restarted.listener, restarted.requests, 2);
+
+    assert.equal(
+      (restarted.requests.getTransactions[0]?.pagination as { cursor?: string } | undefined)
+        ?.cursor,
+      "500",
+      "no persisted cursor means the scan starts at the current head",
+    );
   });
 });
 

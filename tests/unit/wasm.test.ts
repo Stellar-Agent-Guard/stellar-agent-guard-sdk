@@ -11,8 +11,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { GUARD_WASM_HASH, sha256Hex, toHex, verifyGuardWasm } from "../../src/wasm.ts";
 
-const nodeSha256 = (bytes: Uint8Array): string =>
-  createHash("sha256").update(bytes).digest("hex");
+const nodeSha256 = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
 
 describe("GUARD_WASM_HASH", () => {
   it("is a 64-character lower-case hex digest", () => {
@@ -79,15 +78,19 @@ describe("verifyGuardWasm", () => {
   // committed to this repo. It runs only when a deployer points at a built
   // artifact, so the default suite stays dependency-free:
   //   GUARD_WASM_FIXTURE=/path/to/stellar_agent_guard.wasm npm test
-  it("verifies the real contract artifact when GUARD_WASM_FIXTURE is set", {
-    skip: !process.env.GUARD_WASM_FIXTURE,
-  }, async () => {
-    const bytes = new Uint8Array(readFileSync(process.env.GUARD_WASM_FIXTURE!));
-    const result = await verifyGuardWasm(bytes);
-    assert.equal(
-      result.ok,
-      true,
-      `fixture hashed to ${result.actual}, not the pinned ${result.expected}`,
-    );
-  });
+  it(
+    "verifies the real contract artifact when GUARD_WASM_FIXTURE is set",
+    {
+      skip: !process.env.GUARD_WASM_FIXTURE,
+    },
+    async () => {
+      const bytes = new Uint8Array(readFileSync(process.env.GUARD_WASM_FIXTURE!));
+      const result = await verifyGuardWasm(bytes);
+      assert.equal(
+        result.ok,
+        true,
+        `fixture hashed to ${result.actual}, not the pinned ${result.expected}`,
+      );
+    },
+  );
 });

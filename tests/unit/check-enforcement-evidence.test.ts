@@ -32,11 +32,10 @@ const MALFORMED_FIXTURE = resolve(ROOT, "tests/fixtures/integration-evidence.mal
 
 /** Run the script as CI does, with the given CLI arguments. */
 function runScript(args: string[]): { status: number | null; stdout: string; stderr: string } {
-  const result = spawnSync(
-    process.execPath,
-    ["--import", "tsx", SCRIPT, ...args],
-    { cwd: ROOT, encoding: "utf8" },
-  );
+  const result = spawnSync(process.execPath, ["--import", "tsx", SCRIPT, ...args], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
   return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
 }
 

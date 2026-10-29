@@ -1,0 +1,230 @@
+{
+  "_provenance": {
+    "sourceRepo": "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+    "sourceCommit": "730611d2f52e3be4b0fa2ecd3decd712ca964179",
+    "sourcePath": "docs/reason-glossary.md",
+    "sourceUrl": "https://raw.githubusercontent.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/730611d2f52e3be4b0fa2ecd3decd712ca964179/docs/reason-glossary.md",
+    "digest": "sha256:fa20bd0ba23465d32fa7d359d00b01755ace0a8f0d8d745153934f389a99e59a",
+    "digestAlgorithm": "sha256 over the vendored content bytes (the `reasonGlossary` value re-serialized)",
+    "refreshCommand": "npm run vendor:refresh",
+    "refreshProtocol": "bump scripts/vendor-fixtures.ts <artifact>.repoCommit to the pinned upstream SHA, then rerun; commit artifact + digest together",
+    "upstreamLanded": true,
+    "upstreamIssue": "Stellar-Agent-Guard/stellar-agent-guard-contracts#143",
+    "note": "machine-readable extraction of the landed contracts reason-glossary table (symbol, code, what-was-attempted, per-observer guidance, SPEC ref); the SDK's explainReason parity test consumes it as the reason-vocabulary source (SDK issue #38)",
+    "updatedAt": "2026-10-21T00:00:00.000Z"
+  },
+  "reasonGlossary": {
+    "schema_version": 1,
+    "description": "Machine-readable extraction of the guard contract's reason glossary (docs/reason-glossary.md): one entry per blocked reason with its Error code, what was attempted, and per-observer guidance. Consumed by the SDK's explainReason parity test (SDK issue #38).",
+    "columns": [
+      "code",
+      "what_was_attempted",
+      "agent_guidance",
+      "operator_action",
+      "auditor_note",
+      "spec_ref"
+    ],
+    "reasons": {
+      "unauthorized": {
+        "code": 1,
+        "what_was_attempted": "A transaction signed by a key that does not match the registered `AgentPubkey`, or an admin call not authenticated as the admin.",
+        "agent_guidance": "Stop: signing key or host payload does not match registration. Re-derive, verify nonce/expiry, escalate. Never try alternate keys to force a pass.",
+        "operator_action": "Re-register the intended key via `rotate_agent_key`, or re-provision credentials. If intermittent, inspect node time and reserved-nonce handling.",
+        "auditor_note": "Records a key/signature mismatch at the account; investigate any recurrence.",
+        "spec_ref": "§7 (`__check_auth` step 1)"
+      },
+      "already_initialized": {
+        "code": 2,
+        "what_was_attempted": "`initialize` called a second time (admin path).",
+        "agent_guidance": "Not agent-facing; if tooling surfaces it, treat as an idempotency note, not an error.",
+        "operator_action": "None; the account is already initialized.",
+        "auditor_note": "Documents a double-init attempt (usually benign automation).",
+        "spec_ref": "§7"
+      },
+      "not_initialized": {
+        "code": 3,
+        "what_was_attempted": "A call before `initialize` ran.",
+        "agent_guidance": "Not agent-facing.",
+        "operator_action": "Run `initialize` with the admin and the registered agent key.",
+        "auditor_note": "Marks the pre-activation window where all calls were default-denied.",
+        "spec_ref": "§7"
+      },
+      "invalid_config": {
+        "code": 4,
+        "what_was_attempted": "`set_policy` given a config that fails §8 validation.",
+        "agent_guidance": "Not agent-facing (admin op refused).",
+        "operator_action": "Correct the config per §8 (e.g. `window_cap != 0` requires `window_secs != 0`; no self-address in `assets`/`protocols`; no duplicate addresses) and re-apply.",
+        "auditor_note": "The proposed policy was refused; the on-chain policy is unchanged (fail-closed).",
+        "spec_ref": "§8"
+      },
+      "invalid_amount": {
+        "code": 5,
+        "what_was_attempted": "SAC transfer parsed with amount ≤ 0.",
+        "agent_guidance": "Fix the caller: zero/negative amounts are a client bug, not a policy limit.",
+        "operator_action": "Check the agent's code path is not emitting non-positive amounts; high frequency = noisy client.",
+        "auditor_note": "Attests the account never admits a non-positive transfer.",
+        "spec_ref": "§6.2"
+      },
+      "no_pending_admin": {
+        "code": 6,
+        "what_was_attempted": "`confirm_admin_rotation` / `cancel_admin_rotation` with no rotation pending.",
+        "agent_guidance": "Not agent-facing.",
+        "operator_action": "Propose first (`propose_admin_rotation`), or check whether a concurrent operator already confirmed/cancelled.",
+        "auditor_note": "Records an out-of-order rotation attempt; admin, policy, and revision are unchanged.",
+        "spec_ref": "§6.6, §7.2"
+      },
+      "admin_frozen": {
+        "code": 10,
+        "what_was_attempted": "Any spend or heartbeat while the admin kill switch is set.",
+        "agent_guidance": "Halt immediately; do not retry until the operator clears. Heartbeat is blocked too — escalate.",
+        "operator_action": "Establish why the freeze was set, then `unfreeze()` (also re-arms `LastHeartbeat`).",
+        "auditor_note": "A hard stop; the later `unfrozen` event is the admin's recovery attestation.",
+        "spec_ref": "§4 rule 1, §5"
+      },
+      "heartbeat_expired": {
+        "code": 11,
+        "what_was_attempted": "Any call after the dead-man grace elapsed (agent silent longer than `dms_grace_secs`).",
+        "agent_guidance": "Cannot self-recover; notify the operator immediately and stop operations.",
+        "operator_action": "Verify agent liveness, then `unfreeze()` to re-arm `LastHeartbeat`; consider raising `dms_grace_secs`.",
+        "auditor_note": "Proves the dead-man switch fired for the recorded silence window; reconcile with policy.",
+        "spec_ref": "§4 rule 2, §5"
+      },
+      "no_policy": {
+        "code": 12,
+        "what_was_attempted": "Any spend while no policy is installed (revoked or never set).",
+        "agent_guidance": "Cease — default-deny is by design; request a policy from the operator.",
+        "operator_action": "Install a policy with `set_policy`.",
+        "auditor_note": "At revoke time default-deny held; the later `policy_set` event is the record.",
+        "spec_ref": "§4 rule 3"
+      },
+      "paused": {
+        "code": 13,
+        "what_was_attempted": "Any call while `paused` (momentary admin halt).",
+        "agent_guidance": "Suspend activity and poll `status()` at a reasonable interval until `paused` clears; do not route around.",
+        "operator_action": "Resume via `set_policy` with `paused = false` after maintenance.",
+        "auditor_note": "Operator kill-switch usage; pairs with the re-open event.",
+        "spec_ref": "§4 rule 4"
+      },
+      "outside_active_window": {
+        "code": 14,
+        "what_was_attempted": "A spend outside `active_from`/`active_until`.",
+        "agent_guidance": "Wait for the activity window; schedule operations inside it.",
+        "operator_action": "Correct the window bounds via `set_policy` if the timetable changed.",
+        "auditor_note": "Attests spend stays within the declared activity window at T.",
+        "spec_ref": "§4 rule 5"
+      },
+      "asset_not_allowed": {
+        "code": 20,
+        "what_was_attempted": "SAC transfer on an asset not in `assets`.",
+        "agent_guidance": "Only operate on policy-listed assets; read `policy()` before choosing.",
+        "operator_action": "Add the asset to `assets` if it is intended (admin-attested change).",
+        "auditor_note": "Asset allowlist compliance at T.",
+        "spec_ref": "§6.2"
+      },
+      "recipient_not_allowed": {
+        "code": 21,
+        "what_was_attempted": "SAC transfer to a recipient not in `recipients` (and not covered by `allow_any_recipient`).",
+        "agent_guidance": "Only send to allowlisted recipients.",
+        "operator_action": "Add the recipient, or consciously enable `allow_any_recipient`.",
+        "auditor_note": "Recipient allowlist compliance at T.",
+        "spec_ref": "§6.2"
+      },
+      "per_tx_cap_exceeded": {
+        "code": 22,
+        "what_was_attempted": "A single transfer above `per_tx_cap`.",
+        "agent_guidance": "Halt and escalate; do not retry immediately. Never split one intended payment into multiple smaller ones to dodge the cap — that is evasion and unsupported.",
+        "operator_action": "Raise `per_tx_cap` if the business need genuinely grew, or restate the limit.",
+        "auditor_note": "Per-tx bound held at T (event + tx reference).",
+        "spec_ref": "§3, §6.2"
+      },
+      "window_cap_exceeded": {
+        "code": 23,
+        "what_was_attempted": "A transfer that would push the rolling-window total over `window_cap`.",
+        "agent_guidance": "Wait for window entries to expire (`window_secs`) before retrying; escalate. Do not re-route spend outside the accounting path to evade the window.",
+        "operator_action": "Raise `window_cap` if legitimately needed, or reset cadence expectations.",
+        "auditor_note": "Rolling cap held over the [T − `window_secs`, T] span (invariant, §3.1).",
+        "spec_ref": "§3.1, §6.2"
+      },
+      "protocol_not_allowed": {
+        "code": 24,
+        "what_was_attempted": "A call to a contract not in `protocols`.",
+        "agent_guidance": "Only call allowlisted protocol contracts.",
+        "operator_action": "Add the protocol to the allowlist if intended.",
+        "auditor_note": "Protocol allowlist compliance at T.",
+        "spec_ref": "§6.3"
+      },
+      "function_not_allowed": {
+        "code": 25,
+        "what_was_attempted": "A call to a function not in the protocol's `fns` list.",
+        "agent_guidance": "Only call allowlisted functions.",
+        "operator_action": "Extend the per-protocol `fns` list if intended.",
+        "auditor_note": "Function-level allowlist compliance at T.",
+        "spec_ref": "§6.3"
+      },
+      "asset_fn_not_allowed": {
+        "code": 32,
+        "what_was_attempted": "A call to a listed SAC function other than `transfer` or `transfer_from`.",
+        "agent_guidance": "Use only the SAC transfer functions supported by the policy; do not attempt a different asset operation.",
+        "operator_action": "Use an admin-approved path if the asset operation is intended; the guard does not authorize SAC minting or burning.",
+        "auditor_note": "Records that a non-transfer function on a listed asset was denied.",
+        "spec_ref": "§6.2"
+      },
+      "unknown_contract": {
+        "code": 26,
+        "what_was_attempted": "A call to a contract that is neither this account, an allowlisted asset, nor an allowlisted protocol.",
+        "agent_guidance": "Unknown contracts are default-deny in v1; consult `policy()` and do not attempt workarounds.",
+        "operator_action": "Allowlist the contract if it should be callable under v1 intent.",
+        "auditor_note": "Default-deny held at T.",
+        "spec_ref": "§6.4"
+      },
+      "self_function_not_allowed": {
+        "code": 27,
+        "what_was_attempted": "A call to one of the account's own functions outside the agent-allowed path (only `heartbeat` — and the `check` pre-flight — are agent-facing).",
+        "agent_guidance": "The agent may only call its own `heartbeat`; management functions belong to the admin seat.",
+        "operator_action": "Use the admin path for management; align tooling, no contract change needed.",
+        "auditor_note": "Records the self-call surface being contained to the heartbeat/check path.",
+        "spec_ref": "§6.1, §7"
+      },
+      "create_contract_not_allowed": {
+        "code": 28,
+        "what_was_attempted": "Authorizing a host `CreateContract` context.",
+        "agent_guidance": "The account never authorizes contract creation in v1 — route creation to a dedicated operator-owned account.",
+        "operator_action": "Create contracts from a non-guarded account.",
+        "auditor_note": "Proves the account never authorizes creation.",
+        "spec_ref": "§6.4, §7 (enum)"
+      },
+      "recipient_blocked": {
+        "code": 29,
+        "what_was_attempted": "SAC transfer to an explicitly blocked recipient.",
+        "agent_guidance": "Do not retry to disguise the destination; stop and escalate.",
+        "operator_action": "Remove the denylist entry only if policy intent changed.",
+        "auditor_note": "The explicit recipient denylist blocked this destination.",
+        "spec_ref": "§6.2"
+      },
+      "protocol_call_rate_exceeded": {
+        "code": 30,
+        "what_was_attempted": "An allowlisted protocol call exceeds its rolling-window call limit.",
+        "agent_guidance": "Wait for calls in the rolling window to expire; do not route around the configured protocol limit.",
+        "operator_action": "Raise `protocol_calls_per_window` only if justified by policy.",
+        "auditor_note": "Records the configured auth-context protocol call limit enforcing the rate bound.",
+        "spec_ref": "§3, §6.3, §7"
+      },
+      "decision_invariant_violation": {
+        "code": 31,
+        "what_was_attempted": "Internal verdict data was inconsistent (empty result for a submitted preflight call, invalid context index, or a blocked result without a reason).",
+        "agent_guidance": "Stop and escalate; do not retry around the contract error.",
+        "operator_action": "Report the contract version and transaction details to maintainers.",
+        "auditor_note": "Signals an enforcement implementation invariant failure; preserve the failed transaction diagnostics.",
+        "spec_ref": "§7"
+      },
+      "too_many_auth_contexts": {
+        "code": 33,
+        "what_was_attempted": "One authorization contains more than the fixed 64-context engine bound.",
+        "agent_guidance": "Do not split or reroute the batch to evade the bound; reduce the intended authorization only if its policy meaning is unchanged, otherwise escalate.",
+        "operator_action": "Review the router batch size and transaction design; the contract limit is fixed, not policy-configurable.",
+        "auditor_note": "The engine rejected the whole authorization before parsing contexts or staging window admissions.",
+        "spec_ref": "§4, §6, §7.1"
+      }
+    }
+  }
+}
