@@ -27,7 +27,8 @@
  * `reason: null` and no `call` (there is no mapped call to name). A mapper
  * returning `null` is still "not fund-moving" and passes through untouched.
  */
-import { AdapterMappingError } from "../errors.ts";
+import { AdapterMappingError, GuardError, GuardUndeterminedError } from "../errors.ts";
+import { GuardBlockedError } from "../reasons.ts";
 import type { InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightCheckOptions, PreFlightDecision } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
@@ -137,9 +138,12 @@ export function normalizeMappedCall(
 ): ContractCall[] {
   if (value === null || value === undefined) return [];
   if (!isContractCall(value)) {
-    throw new AdapterMappingError(`\`${field}\` returned a malformed contract call: ${MALFORMED_CALL}.`, {
-      field,
-    });
+    throw new AdapterMappingError(
+      `\`${field}\` returned a malformed contract call: ${MALFORMED_CALL}.`,
+      {
+        field,
+      },
+    );
   }
   return [value];
 }
@@ -212,6 +216,31 @@ export function mappingFailureFor(
   return {
     decision: { allowed: false, kind: "undetermined", detail, error: mappingError },
     info: { adapter, kind: "undetermined", reason: null, explanation: detail },
+  };
+}
+
+/**
+ * Convert a thrown GuardError (e.g. from assertAllowed or an interceptor check)
+ * into a structured PreFlightDecision & { allowed: false }.
+ */
+export function decisionFromGuardError(error: GuardError): PreFlightDecision & { allowed: false } {
+  if (error instanceof GuardBlockedError) {
+    return {
+      allowed: false,
+      kind: "blocked",
+      reason: error.reason,
+      explanation: error.explanation,
+      detail: error.detail ?? error.message,
+      diagnosticEvents: error.rawEvent ? [error.rawEvent] : [],
+    };
+  }
+  const detail =
+    error instanceof GuardUndeterminedError && error.detail ? error.detail : error.message;
+  return {
+    allowed: false,
+    kind: "undetermined",
+    detail,
+    error,
   };
 }
 
@@ -313,11 +342,7 @@ export function hostAbortSignal(value: unknown): AbortSignal | undefined {
  * supplied a sink). The hook is never awaited, so a slow sink cannot delay —
  * or resume — the halt path (issue #313).
  */
-function isolateHookRun(
-  run: () => unknown,
-  describe: string,
-  logger?: BlockedHookLogger,
-): void {
+function isolateHookRun(run: () => unknown, describe: string, logger?: BlockedHookLogger): void {
   let result: unknown;
   try {
     result = run();
