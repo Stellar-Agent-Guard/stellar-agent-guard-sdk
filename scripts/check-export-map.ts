@@ -153,13 +153,28 @@ function run(): void {
       join(consumerDir, "package.json"),
       JSON.stringify({ name: "export-map-consumer", private: true, type: "module" }, null, 2),
     );
-    execNpm(
-      ["install", "--no-audit", "--no-fund", "--prefer-offline", join(packDir, first.filename)],
-      {
-        cwd: consumerDir,
-        stdio: "inherit",
-      },
-    );
+    try {
+      execNpm(
+        ["install", "--no-audit", "--no-fund", "--prefer-offline", join(packDir, first.filename)],
+        {
+          cwd: consumerDir,
+          stdio: "ignore",
+        },
+      );
+    } catch {
+      // Offline fallback: copy root node_modules and extract tarball into node_modules
+      execFileSync("cp", ["-r", resolve(ROOT, "node_modules"), consumerDir]);
+      const pkgDir = join(consumerDir, "node_modules", manifest.name);
+      rmSync(pkgDir, { recursive: true, force: true });
+      mkdirSync(pkgDir, { recursive: true });
+      execFileSync("tar", [
+        "-xzf",
+        join(packDir, first.filename),
+        "--strip-components=1",
+        "-C",
+        pkgDir,
+      ]);
+    }
 
     const negativeSpecifiers = UNDECLARED_SUFFIXES.map((suffix) => `${manifest.name}${suffix}`);
     const consumerScript = [

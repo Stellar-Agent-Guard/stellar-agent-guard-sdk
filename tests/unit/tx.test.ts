@@ -24,17 +24,20 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { ContractResponseError, SigningError } from "../../src/errors.ts";
+import { ContractResponseError, InvalidInputError, SigningError } from "../../src/errors.ts";
 import {
+  DEFAULT_INCLUSION_FEE_STROOPS,
   BroadcastError,
   assembleFromSimulation,
   buildGuardAuthEntry,
+  buildInitialEnvelope,
   describeSimulationResources,
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isValidAgentPublicKey,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
+  parseInclusionFee,
   parseSimulationResourceFee,
   submitAndPoll,
   toAgentSigner,
@@ -86,6 +89,74 @@ const guardBlockFailure = {
     },
   ],
 };
+
+describe("parseInclusionFee (#310)", () => {
+  it("defaults to DEFAULT_INCLUSION_FEE_STROOPS (100n) for undefined or null", () => {
+    assert.equal(parseInclusionFee(undefined), 100n);
+    assert.equal(parseInclusionFee(null), 100n);
+    assert.equal(DEFAULT_INCLUSION_FEE_STROOPS, 100n);
+  });
+
+  it("accepts valid bigint, number, and string inputs", () => {
+    assert.equal(parseInclusionFee(0n), 0n);
+    assert.equal(parseInclusionFee(250n), 250n);
+    assert.equal(parseInclusionFee(500), 500n);
+    assert.equal(parseInclusionFee("1000"), 1000n);
+    assert.equal(parseInclusionFee("  200  "), 200n);
+  });
+
+  it("rejects negative, non-integer, and malformed inputs", () => {
+    assert.throws(() => parseInclusionFee(-1n), InvalidInputError);
+    assert.throws(() => parseInclusionFee(-50), InvalidInputError);
+    assert.throws(() => parseInclusionFee(1.5), InvalidInputError);
+    assert.throws(() => parseInclusionFee("invalid"), InvalidInputError);
+    assert.throws(() => parseInclusionFee("-100"), InvalidInputError);
+    assert.throws(() => parseInclusionFee({} as unknown as bigint), InvalidInputError);
+  });
+});
+
+describe("assembleFromSimulation custom inclusion fee (#310)", () => {
+  const operation = Operation.invokeContractFunction({
+    contract: CALL.contract,
+    function: CALL.fn,
+    args: [],
+  });
+
+  it("uses provided custom inclusion fee in assembled transaction and output", () => {
+    const res = assembleFromSimulation({
+      simulation: simulationWithFee("50"),
+      source: new Account(Keypair.random().publicKey(), "100"),
+      operation,
+      networkPassphrase: PASSPHRASE,
+      guard: null,
+      inclusionFee: 300n,
+    });
+
+    assert.equal(res.inclusionFee, 300n);
+    // TransactionBuilder folds resource fee (50) + inclusion fee (300) into transaction.fee (350)
+    assert.equal(res.transaction.fee, "350");
+  });
+});
+
+describe("buildInitialEnvelope custom inclusion fee (#310)", () => {
+  const operation = Operation.invokeContractFunction({
+    contract: CALL.contract,
+    function: CALL.fn,
+    args: [],
+  });
+
+  it("sets custom inclusion fee in envelope", () => {
+    const tx = buildInitialEnvelope({
+      source: new Account(Keypair.random().publicKey(), "100"),
+      operation,
+      networkPassphrase: PASSPHRASE,
+      guard: null,
+      inclusionFee: "500",
+    });
+
+    assert.equal(tx.fee, "500");
+  });
+});
 
 describe("isSequenceNumberFailure", () => {
   it("recognises tx_bad_seq from the RPC error result", () => {

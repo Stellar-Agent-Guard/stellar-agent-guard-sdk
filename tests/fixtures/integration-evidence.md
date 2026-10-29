@@ -28,6 +28,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Note** (security/issue-117-feat-telemetry-injectable-transport-custom-rpc, PR #373 for #117): `src/preflight.ts` and `src/invoke.ts` now take the shared `{ server? | url? }` transport config (`src/transport.ts`). The only new code on the enforcement path runs at the public boundary: it resolves the `rpc.Server` (an injected instance verbatim, or `new rpc.Server(url, rpcOptions)`) and throws `InvalidInputError` when both or neither are supplied, before any RPC. Simulation, signing, broadcast and the guard's block/admit decision are unchanged, so the scenario evidence below remains valid. A live re-run was attempted on 2026-10-24 against a freshly deployed instance (`npm run deploy:phase2`). It stopped at `set_policy` with `HostError: Error(Object, UnexpectedSize)`: the Phase-1 WASM does not decode the current `policyToScVal` ABI, which is the redeploy prerequisite recorded above. That deploy also showed `initialize` failing with `txBadAuthExtra` when the same key is both `source` and an `accountSigners` entry, reproduced on `main`; that is out of scope for this PR and is not fixed here. No scenario output from that attempt is recorded here.
 
+**Note** (feat/cost-309-310-fee-ceiling-and-inclusion-fee, PR #393): Adds configurable inclusion fees across `feeBreakdown()`, `CostPreCheckConfig`, `CostPreChecker`, `assembleFromSimulation()`, `buildInitialEnvelope()`, and `invoke()`, plus a pure `evaluateFeeCeiling()` helper. The changes touch `src/tx.ts` and `src/invoke.ts` but only fee estimation/assembly behavior; guard block decisions and enforced simulation outcomes are unchanged. Evidence remains valid.
+
 ## Instance under test
 
 | | |

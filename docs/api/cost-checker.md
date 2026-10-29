@@ -10,6 +10,14 @@ constructor(options: CostPreCheckConfig)
 
 ### Options
 
+- `interceptor: Pick<PreFlightInterceptor, "check">` — Configured interceptor instance whose simulation prices execution
+- `maxFeeStroops?: bigint` — Maximum allowable total fee in stroops (omitted means price it, never object). Must be a non-negative `bigint`; a negative value or any non-`bigint` throws `InvalidFeeCeilingError` at construction. `0n` is a real ceiling, not the same as omission.
+- `policySource?: string | PolicyConfig | null` — Opt-in policy source (contract address or `GuardPolicy`/`PolicyConfig`) enabling additive `policyContext`
+- `policy?: string | PolicyConfig | null` — Alias for `policySource`
+- `windowSnapshot?: WindowSpendSnapshot | null` — Opt-in ledger-tied window-spend snapshot used to compute `policyContext.windowRemainingEstimate` (issue #311). Purely informational: it never changes the cost decision. Invalid snapshots (fractional/negative ledger, or a cap/spent that is not a non-negative `bigint`) throw `TypeError` at construction.
+- `windowSnapshotMaxAgeLedgers?: number` — How many ledgers a snapshot may predate the priced check's own ledger and still be used. Default `0`: only a snapshot observed at the same ledger is trusted. Must be a non-negative safe integer.
+- `inclusionFeeStroops?: bigint | string | number | null` — Custom inclusion fee floor in stroops (defaults to `100n` / `DEFAULT_INCLUSION_FEE_STROOPS`).
+- `inclusionFee?: bigint | string | number | null` — Alias for `inclusionFeeStroops`.
 #### `CostPreCheckConfig` (`new CostPreChecker(config)`)
 
 The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `CostPreCheckConfig`. Every value is validated at construction.
@@ -39,7 +47,7 @@ Malformed ceilings are rejected before the interceptor runs, so a bad budget pol
 
 ## Methods
 
-### `check(call: ContractCall, options?: { policySource?: string | PolicyConfig | null; maxFeeStroops?: bigint; windowSnapshot?: WindowSpendSnapshot | null }): Promise<CostPreCheckResult>`
+### `check(call: ContractCall, options?: { policySource?: string | PolicyConfig | null; maxFeeStroops?: bigint; windowSnapshot?: WindowSpendSnapshot | null; inclusionFeeStroops?: bigint | string | number | null; inclusionFee?: bigint | string | number | null }): Promise<CostPreCheckResult>`
 
 Returns `CostPreCheckResult` (`CostDecision`), a discriminated union:
 - `{ kind: "within_budget", allowed: true, totalFeeStroops, resourceFeeStroops, inclusionFeeStroops, footprintKeys, feeCeilingStroops, policyContext, provenance }`
@@ -131,3 +139,23 @@ The arithmetic is `cap − spent − amount`, clamped at zero, and reported as
 present, absent, or stale, and the decision is identical either way. Blocked
 and undetermined outcomes always report `null`: they carry no priced ledger to
 tie a snapshot to.
+
+## Pure Fee Ceiling Evaluation (`evaluateFeeCeiling`)
+
+```ts
+evaluateFeeCeiling(
+  fees: FeeBreakdown,
+  ceilingStroops?: bigint | null,
+  options?: { policyOutcome?: "admissible" | "blocked" | "undetermined" | "allowed" } | "admissible" | "blocked" | "undetermined" | "allowed"
+): FeeCeilingVerdict
+```
+
+Evaluates a complete `FeeBreakdown` against an optional fee ceiling without network access or rerunning interceptors.
+
+Returns `FeeCeilingVerdict`:
+- `{ kind: "within_budget", allowed: true, totalFeeStroops, feeCeilingStroops, exceeded: false }`
+- `{ kind: "over_budget", allowed: false, totalFeeStroops, feeCeilingStroops, exceeded: true }`
+- `{ kind: "blocked", allowed: false, totalFeeStroops: 0n, feeCeilingStroops, exceeded: false }`
+- `{ kind: "undetermined", allowed: false, totalFeeStroops: 0n, feeCeilingStroops, exceeded: false }`
+
+Distinguishes over-budget fees from blocked or undetermined policy outcomes, preserving exact comparison logic (`totalFeeStroops > ceilingStroops`).

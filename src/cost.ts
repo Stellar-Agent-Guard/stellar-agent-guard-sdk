@@ -37,7 +37,7 @@
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
 import { SorobanDataBuilder, scValToNative, type xdr } from "@stellar/stellar-sdk";
 import { InvalidFeeCeilingError } from "./errors.ts";
-import { INCLUSION_FEE } from "./tx.ts";
+import { parseInclusionFee } from "./tx.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
 import type { PolicyConfig } from "./policy.ts";
@@ -383,6 +383,14 @@ export interface CostPreCheckConfig {
    * safe integer; invalid values throw a `TypeError` at construction.
    */
   windowSnapshotMaxAgeLedgers?: number | undefined;
+  /**
+   * Configurable inclusion fee in stroops. Defaults to 100 stroops (`DEFAULT_INCLUSION_FEE_STROOPS`).
+   */
+  inclusionFeeStroops?: bigint | string | number | null | undefined;
+  /**
+   * Alias for `inclusionFeeStroops`.
+   */
+  inclusionFee?: bigint | string | number | null | undefined;
 }
 
 /** The two fee components, kept separate so they are never conflated. */
@@ -511,6 +519,14 @@ export interface CostPreCheckOptions {
    * Default: `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms), applied by the interceptor.
    */
   timeoutMs?: number | undefined;
+  /**
+   * Override the inclusion fee in stroops for this check.
+   */
+  inclusionFeeStroops?: bigint | string | number | null | undefined;
+  /**
+   * Alias for `inclusionFeeStroops`.
+   */
+  inclusionFee?: bigint | string | number | null | undefined;
 }
 
 /**
@@ -529,17 +545,94 @@ export interface CostWithDecision {
 /**
  * Split a simulation's resource fee into the two components a caller is charged.
  *
- * Pure: no network, no configuration. The inclusion fee is the SDK's own
- * declared floor for a single-operation transaction (`INCLUSION_FEE` in `tx.ts`),
- * which is the same value the built envelope uses, so this cannot drift from what
- * is actually submitted.
+ * Pure: no network. The inclusion fee defaults to the SDK's own declared floor for
+ * a single-operation transaction (`DEFAULT_INCLUSION_FEE_STROOPS` in `tx.ts`), or
+ * can be customized by the caller.
  */
-export function feeBreakdown(resourceFeeStroops: bigint): FeeBreakdown {
-  const inclusionFeeStroops = BigInt(INCLUSION_FEE);
+export function feeBreakdown(
+  resourceFeeStroops: bigint,
+  inclusionFeeStroops?: bigint | string | number | null,
+): FeeBreakdown {
+  const inclusionFee = parseInclusionFee(inclusionFeeStroops);
   return {
     resourceFeeStroops,
-    inclusionFeeStroops,
-    totalFeeStroops: resourceFeeStroops + inclusionFeeStroops,
+    inclusionFeeStroops: inclusionFee,
+    totalFeeStroops: resourceFeeStroops + inclusionFee,
+  };
+}
+
+export type FeeCeilingVerdictKind = "within_budget" | "over_budget" | "blocked" | "undetermined";
+
+export interface FeeCeilingVerdict {
+  kind: FeeCeilingVerdictKind;
+  allowed: boolean;
+  totalFeeStroops: bigint;
+  feeCeilingStroops: bigint | null;
+  exceeded: boolean;
+}
+
+/**
+ * Pure helper that evaluates a complete `FeeBreakdown` against a fee ceiling
+ * without network access or rerunning interceptors.
+ *
+ * Distinguishes over-budget fees from blocked or undetermined policy outcomes,
+ * preserving existing `exceedsCeiling` comparison logic.
+ */
+export function evaluateFeeCeiling(
+  fees: FeeBreakdown,
+  ceilingStroops?: bigint | null | undefined,
+  options?:
+    | {
+        policyOutcome?: "admissible" | "blocked" | "undetermined" | "allowed" | undefined;
+      }
+    | "admissible"
+    | "blocked"
+    | "undetermined"
+    | "allowed",
+): FeeCeilingVerdict {
+  const policyOutcome = typeof options === "string" ? options : options?.policyOutcome;
+  const ceiling =
+    ceilingStroops === null || ceilingStroops === undefined
+      ? null
+      : validateFeeCeiling(ceilingStroops);
+
+  if (policyOutcome === "blocked") {
+    return {
+      kind: "blocked",
+      allowed: false,
+      totalFeeStroops: 0n,
+      feeCeilingStroops: ceiling,
+      exceeded: false,
+    };
+  }
+
+  if (policyOutcome === "undetermined") {
+    return {
+      kind: "undetermined",
+      allowed: false,
+      totalFeeStroops: 0n,
+      feeCeilingStroops: ceiling,
+      exceeded: false,
+    };
+  }
+
+  const exceeded = exceedsCeiling(fees.totalFeeStroops, ceiling);
+  if (exceeded) {
+    return {
+      kind: "over_budget",
+      allowed: false,
+      totalFeeStroops: fees.totalFeeStroops,
+      feeCeilingStroops: ceiling as bigint,
+      exceeded: true,
+    };
+  }
+
+  return {
+    kind: "within_budget",
+    allowed: true,
+    totalFeeStroops: fees.totalFeeStroops,
+    feeCeilingStroops: ceiling,
+    exceeded: false,
   };
 }
 
@@ -787,6 +880,7 @@ export class CostPreChecker {
   private readonly config: CostPreCheckConfig;
   private readonly logger: GuardLogger;
   private readonly maxFeeStroops: bigint | undefined;
+  private readonly inclusionFeeStroops: bigint;
   /** Validated configuration snapshot, or `null` when none was configured. */
   private readonly windowSnapshot: WindowSpendSnapshot | null;
   /** How far a snapshot may predate the check's ledger and still be used. */
@@ -798,6 +892,7 @@ export class CostPreChecker {
     // every later quote into a fabricated over-budget answer.
     this.maxFeeStroops =
       config.maxFeeStroops === undefined ? undefined : validateFeeCeiling(config.maxFeeStroops);
+    this.inclusionFeeStroops = parseInclusionFee(config.inclusionFeeStroops ?? config.inclusionFee);
     this.windowSnapshot =
       config.windowSnapshot === undefined || config.windowSnapshot === null
         ? null
@@ -843,6 +938,12 @@ export class CostPreChecker {
       options?.maxFeeStroops !== undefined
         ? validateFeeCeiling(options.maxFeeStroops)
         : (this.maxFeeStroops ?? null);
+    const inclusionFee =
+      options?.inclusionFeeStroops !== undefined
+        ? parseInclusionFee(options.inclusionFeeStroops)
+        : options?.inclusionFee !== undefined
+          ? parseInclusionFee(options.inclusionFee)
+          : this.inclusionFeeStroops;
     // Same boundary for the window snapshot: an unusable snapshot is a
     // configuration error, checked before any RPC, and `null` explicitly
     // clears a configured snapshot for this one check.
@@ -866,7 +967,7 @@ export class CostPreChecker {
       windowSnapshot,
       this.snapshotMaxAgeLedgers,
     );
-    const cost = this.costOf(decision, policyContext, ceiling);
+    const cost = this.costOf(decision, policyContext, ceiling, inclusionFee);
     // The one place a cost decision is produced, so the one place it is logged:
     // `check()` and both one-shot helpers funnel through here, and a second log
     // site would mean a caller could see the same decision twice.
@@ -888,6 +989,7 @@ export class CostPreChecker {
     decision: PreFlightDecision,
     policyContext: PolicyContext | null,
     ceiling: bigint | null,
+    inclusionFeeStroops: bigint = this.inclusionFeeStroops,
   ): CostDecision {
     // Provenance travels with the verdict from the same simulation. A block or
     // an undetermined run has no priced snapshot, so it is explicitly null
@@ -920,7 +1022,7 @@ export class CostPreChecker {
       };
     }
 
-    const fees = feeBreakdown(decision.estimatedResourceFee);
+    const fees = feeBreakdown(decision.estimatedResourceFee, inclusionFeeStroops);
     if (exceedsCeiling(fees.totalFeeStroops, ceiling)) {
       return {
         kind: "over_budget",

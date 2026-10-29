@@ -15,6 +15,7 @@ import {
   CostPreChecker,
   STROOPS_PER_XLM,
   describeCostDecision,
+  evaluateFeeCeiling,
   exceedsCeiling,
   feeBreakdown,
   formatFee,
@@ -146,6 +147,120 @@ describe("feeBreakdown", () => {
 
   it("prices a zero-resource call as exactly the inclusion fee", () => {
     assert.equal(feeBreakdown(0n).totalFeeStroops, BigInt(INCLUSION_FEE));
+  });
+});
+
+describe("feeBreakdown with custom inclusion fee (#310)", () => {
+  it("defaults to 100 stroops when unspecified", () => {
+    const fees = feeBreakdown(500n);
+    assert.equal(fees.resourceFeeStroops, 500n);
+    assert.equal(fees.inclusionFeeStroops, 100n);
+    assert.equal(fees.totalFeeStroops, 600n);
+  });
+
+  it("accepts custom bigint, string, and number inclusion fees", () => {
+    assert.equal(feeBreakdown(500n, 250n).inclusionFeeStroops, 250n);
+    assert.equal(feeBreakdown(500n, "300").inclusionFeeStroops, 300n);
+    assert.equal(feeBreakdown(500n, 400).inclusionFeeStroops, 400n);
+  });
+
+  it("rejects invalid inclusion fee inputs", () => {
+    assert.throws(() => feeBreakdown(500n, -1n), InvalidInputError);
+    assert.throws(() => feeBreakdown(500n, "invalid"), InvalidInputError);
+    assert.throws(() => feeBreakdown(500n, 1.5), InvalidInputError);
+  });
+});
+
+describe("evaluateFeeCeiling (#309)", () => {
+  it("returns within_budget on exact ceiling equality", () => {
+    const fees = feeBreakdown(1_000n, 100n); // total = 1100n
+    const verdict = evaluateFeeCeiling(fees, 1_100n);
+    assert.equal(verdict.kind, "within_budget");
+    assert.equal(verdict.allowed, true);
+    assert.equal(verdict.exceeded, false);
+    assert.equal(verdict.totalFeeStroops, 1_100n);
+    assert.equal(verdict.feeCeilingStroops, 1_100n);
+  });
+
+  it("returns over_budget for one stroop over ceiling", () => {
+    const fees = feeBreakdown(1_001n, 100n); // total = 1101n
+    const verdict = evaluateFeeCeiling(fees, 1_100n);
+    assert.equal(verdict.kind, "over_budget");
+    assert.equal(verdict.allowed, false);
+    assert.equal(verdict.exceeded, true);
+    assert.equal(verdict.totalFeeStroops, 1_101n);
+    assert.equal(verdict.feeCeilingStroops, 1_100n);
+  });
+
+  it("handles absent ceilings (null and undefined) as within_budget", () => {
+    const fees = feeBreakdown(1_000n, 100n);
+    const vNull = evaluateFeeCeiling(fees, null);
+    assert.equal(vNull.kind, "within_budget");
+    assert.equal(vNull.allowed, true);
+    assert.equal(vNull.exceeded, false);
+    assert.equal(vNull.feeCeilingStroops, null);
+
+    const vUndef = evaluateFeeCeiling(fees, undefined);
+    assert.equal(vUndef.kind, "within_budget");
+    assert.equal(vUndef.allowed, true);
+    assert.equal(vUndef.exceeded, false);
+    assert.equal(vUndef.feeCeilingStroops, null);
+  });
+
+  it("handles large bigint values without precision loss", () => {
+    const huge = 2n ** 60n;
+    const fees = feeBreakdown(huge, 100n);
+    const verdict = evaluateFeeCeiling(fees, huge + 100n);
+    assert.equal(verdict.kind, "within_budget");
+    assert.equal(verdict.totalFeeStroops, huge + 100n);
+
+    const verdictOver = evaluateFeeCeiling(fees, huge + 99n);
+    assert.equal(verdictOver.kind, "over_budget");
+    assert.equal(verdictOver.exceeded, true);
+  });
+
+  it("returns distinct policy verdicts for blocked, undetermined, and admissible outcomes", () => {
+    const fees = feeBreakdown(1_000n, 100n);
+
+    const vBlocked = evaluateFeeCeiling(fees, 500n, "blocked");
+    assert.equal(vBlocked.kind, "blocked");
+    assert.equal(vBlocked.allowed, false);
+    assert.equal(vBlocked.totalFeeStroops, 0n);
+    assert.equal(vBlocked.exceeded, false);
+    assert.equal(vBlocked.feeCeilingStroops, 500n);
+
+    const vUndetermined = evaluateFeeCeiling(fees, 500n, { policyOutcome: "undetermined" });
+    assert.equal(vUndetermined.kind, "undetermined");
+    assert.equal(vUndetermined.allowed, false);
+    assert.equal(vUndetermined.totalFeeStroops, 0n);
+    assert.equal(vUndetermined.exceeded, false);
+
+    const vAdmissible = evaluateFeeCeiling(fees, 500n, "admissible");
+    assert.equal(vAdmissible.kind, "over_budget");
+    assert.equal(vAdmissible.allowed, false);
+    assert.equal(vAdmissible.exceeded, true);
+  });
+});
+
+describe("CostPreChecker with custom inclusion fee (#310)", () => {
+  it("uses configured inclusionFeeStroops", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissible(1_000n)),
+      inclusionFeeStroops: 250n,
+    });
+    const decision = await checker.check(CALL);
+    assert.equal(decision.inclusionFeeStroops, 250n);
+    assert.equal(decision.totalFeeStroops, 1_250n);
+  });
+
+  it("supports per-call inclusionFee override", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissible(1_000n)),
+      inclusionFeeStroops: 250n,
+    });
+    const decision = await checker.check(CALL, { inclusionFee: "500" });
+    assert.equal(decision.inclusionFeeStroops, 500n);
+    assert.equal(decision.totalFeeStroops, 1_500n);
   });
 });
 

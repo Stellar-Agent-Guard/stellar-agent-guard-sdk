@@ -15,6 +15,9 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Added
 
+- `evaluateFeeCeiling()` pure helper and `FeeCeilingVerdict` / `FeeCeilingVerdictKind` types: evaluate a complete `FeeBreakdown` against a fee ceiling without network access or rerunning interceptors, distinguishing over-budget fees from blocked or undetermined policy outcomes (#309).
+- Configurable inclusion fees in cost estimates and transaction assembly: `inclusionFeeStroops` / `inclusionFee` options on `feeBreakdown()`, `CostPreCheckConfig`, `CostPreCheckOptions`, `CostPreChecker`, and `invoke()` parameters, backed by `DEFAULT_INCLUSION_FEE_STROOPS` and `parseInclusionFee()`, keeping cost estimates and assembled transaction envelopes consistent (#310).
+
 - `DEFAULT_GUARD_POLICY`: a deep-frozen, deny-all safe-start policy (empty allowlists, `per_tx_cap` 100, 500 per hour, 7-day dead-man grace) with values pinned to the contracts policy templates by a unit test; README now has a "Start from the safe baseline" section (#59).
 - `maxConcurrentSimulations` (default 4) and `rateLimit: { backoffMs, maxBackoffMs }` on `PreFlightInterceptor`, plus `DEFAULT_MAX_CONCURRENT_SIMULATIONS`, `RateLimitedError` and `PreFlightUndeterminedCause`: simulations queue FIFO behind a concurrency limit, an HTTP 429 gets one bounded `Retry-After`-aware backoff and retry, and a persistent 429 yields `undetermined` with `cause: "rate_limited"`. Behaviour change: bursts above 4 simultaneous checks now queue instead of all hitting the RPC at once; set `maxConcurrentSimulations` higher to restore wider fan-out (#40).
 - `docs/agent-runtime.md` and `examples/agent-runtime.ts`: the complete 24/7 agent loop (heartbeat, pre-flight, telemetry alerts, DMS countdown) with a fail-closed failure-mode table (#74).

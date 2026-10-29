@@ -248,6 +248,7 @@ export {
   CostPreChecker,
   STROOPS_PER_XLM,
   describeCostDecision,
+  evaluateFeeCeiling,
   exceedsCeiling,
   feeBreakdown,
   formatFee,
@@ -264,6 +265,8 @@ export type {
   CostProvenance,
   CostWithDecision,
   FeeBreakdown,
+  FeeCeilingVerdict,
+  FeeCeilingVerdictKind,
   PolicyContext,
   ResourceBreakdown,
   WindowSpendSnapshot,
@@ -325,6 +328,7 @@ export {
 } from "./telemetry.ts";
 
 export {
+  DEFAULT_INCLUSION_FEE_STROOPS,
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
@@ -339,6 +343,7 @@ export {
   isStaleLedgerResourceFailure,
   isValidAgentPublicKey,
   keypairAgentSigner,
+  parseInclusionFee,
   toAgentSigner,
   validateAgentPublicKey,
   verifyAgentSignature,
