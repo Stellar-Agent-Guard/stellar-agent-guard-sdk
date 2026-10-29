@@ -682,15 +682,21 @@ fields, and nothing else about it moves).
   drained at or before T. Diagnostic batches are never re-sorted; their
   observation order is preserved exactly as supplied.
 
-### De-duplication rule
+### De-duplication rule (bounded strategy, issue #278)
 
-`GuardEvent.id` (above) is the SDK's delivery key, and the merged stream emits
-each id **at most once** — first observation wins. A guard decision is
-single-homed: a blocked decision is rolled back and never committed, and an
-allowed decision has no diagnostic, so one decision cannot arrive under two ids.
-The duplicate the merge actually guards against is the *same id* delivered twice
-— a re-fed diagnostic batch, or an overlapping committed page — which the
-emitted-id set suppresses.
+`GuardEvent.id` (above) is the SDK's delivery key, and the merged stream suppresses
+duplicates across overlapping pages and re-fed diagnostic batches within a
+**bounded de-duplication horizon**.
+
+- **Bounded Memory Horizon:** Instead of unbounded lifetime ID retention, `mergeGuardEventStreams()` uses `BoundedEventDeduplicator` capped at `DEFAULT_DEDUP_CAPACITY` (10,000 entries by default, or configurable via `dedupCapacity`). Oldest IDs are evicted in FIFO order past capacity.
+- **Delivery Guarantees & Duplicate Delivery:** Within the deduplication horizon (up to 10,000 recent event IDs), duplicate delivery across re-fed diagnostic batches or overlapping committed pages is suppressed. If a duplicate event arrives after its ID has aged out of the 10,000-entry horizon, it may be re-emitted. Callers should implement idempotent event processing handlers.
+
+### Safe Telemetry Checkpointing (issue #274)
+
+`watch()` / `watchAll()` enforces safe checkpointing across restarts and interruptions:
+
+- **Checkpoint Advancement:** A page's RPC cursor is saved to the configured `cursorStore` **only after** the consumer resumes past that page's `yield`.
+- **At-Least-Once Delivery:** If a process crashes or is interrupted between receiving a page and advancing past its `yield`, the cursor checkpoint is not advanced. Upon restart, the consumer will re-fetch and re-process that page. Consumers must be designed to handle possible duplicate page delivery idempotently.
 
 ### `observedAt`
 
