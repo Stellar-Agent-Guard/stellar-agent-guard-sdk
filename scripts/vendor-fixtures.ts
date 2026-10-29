@@ -72,6 +72,16 @@ export interface VendoredArtifact {
   note?: string;
   /** ISO timestamp recorded as the last refresh of this artifact. */
   updatedAt?: string;
+  /**
+   * Optional raw-source -> vendored-content transform, applied after fetch.
+   *
+   * A feed whose upstream file is not itself the vendored JSON (e.g. the
+   * contract's reason glossary, which is a markdown table) declares one here
+   * so `npm run vendor:refresh` still does fetch -> parse -> canonicalize ->
+   * stamp in a single offline-testable pass. The digest is taken over the
+   * transformed content, exactly as for a raw-JSON feed.
+   */
+  transform?: (raw: string) => string;
 }
 
 /**
@@ -114,6 +124,120 @@ const AUTH_CHECKED_VOCABULARY: VendoredArtifact = {
 };
 
 /**
+ * The guard contract's reason glossary (`docs/reason-glossary.md`), extracted
+ * into machine-readable JSON (SDK issue #38).
+ *
+ * Upstream, the glossary is a markdown table: one row per blocked reason with
+ * its `Error` code, what was attempted, and per-observer guidance (agent /
+ * operator / auditor). This SDK consumes it as the vocabulary source for the
+ * `explainReason` parity test (`tests/unit/reasons.test.ts`): every fixture
+ * symbol must have non-empty SDK guidance, and every SDK reason must exist
+ * upstream — both directions, so a contract-added reason fails this repo's CI
+ * until the SDK's table is extended.
+ */
+const REASON_GLOSSARY: VendoredArtifact = {
+  sourceRepo: "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+  repoCommit: "730611d2f52e3be4b0fa2ecd3decd712ca964179",
+  sourcePath: "docs/reason-glossary.md",
+  outputPath: "tests/fixtures/vendor/reasons.fixture.json",
+  upstreamLanded: true,
+  contentKey: "reasonGlossary",
+  upstreamIssue: "Stellar-Agent-Guard/stellar-agent-guard-contracts#143",
+  note: "machine-readable extraction of the landed contracts reason-glossary table (symbol, code, what-was-attempted, per-observer guidance, SPEC ref); the SDK's explainReason parity test consumes it as the reason-vocabulary source (SDK issue #38)",
+  updatedAt: "2026-10-21T00:00:00.000Z",
+  transform: reasonGlossaryToJson,
+};
+
+/**
+ * Parse the contracts repo's reason-glossary markdown table into the JSON
+ * content that becomes the vendored `reasons.fixture.json` (SDK issue #38).
+ *
+ * Only the table is parsed — header, separator, one row per reason — and the
+ * parser fails loudly (throw; `npm run vendor:refresh` exits non-zero) rather
+ * than guessing when the table's shape drifts: a malformed or short row must
+ * surface as a refresh failure, never as a silently dropped reason. The
+ * no-evasion prose around the table is intentionally ignored.
+ */
+export function reasonGlossaryToJson(markdown: string): string {
+  const lines = markdown.split("\n");
+  const start = lines.findIndex((line) => line.startsWith("| reason symbol |"));
+  if (start === -1 || !/^\|[-\s|]+\|$/.test((lines[start + 1] ?? "").trim())) {
+    throw new Error("reason glossary: could not find the reason table header/separator");
+  }
+  const reasons: Record<
+    string,
+    {
+      code: number;
+      what_was_attempted: string;
+      agent_guidance: string;
+      operator_action: string;
+      auditor_note: string;
+      spec_ref: string;
+    }
+  > = {};
+  for (const line of lines.slice(start + 2)) {
+    if (!line.startsWith("|")) break; // end of the table
+    const cells = line
+      .split("|")
+      .slice(1, -1)
+      .map((cell) => cell.trim());
+    if (cells.length !== 7) {
+      throw new Error(`reason glossary: expected 7 columns, got ${cells.length}: ${line}`);
+    }
+    const [symbolCell, codeCell, attempted, agent, operator, auditor, specRef] = cells as [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+    ];
+    const symbolMatch = /^`([a-z0-9_]+)`$/.exec(symbolCell);
+    if (!symbolMatch) {
+      throw new Error(`reason glossary: unexpected reason-symbol cell: ${symbolCell}`);
+    }
+    const code = Number(codeCell);
+    if (!Number.isInteger(code)) {
+      throw new Error(`reason glossary: non-numeric code for ${symbolMatch[1]}: ${codeCell}`);
+    }
+    const symbol = symbolMatch[1];
+    if (symbol === undefined || reasons[symbol] !== undefined) {
+      throw new Error(`reason glossary: duplicate row for ${symbolCell}`);
+    }
+    reasons[symbol] = {
+      code,
+      what_was_attempted: attempted,
+      agent_guidance: agent,
+      operator_action: operator,
+      auditor_note: auditor,
+      spec_ref: specRef,
+    };
+  }
+  if (Object.keys(reasons).length === 0) {
+    throw new Error("reason glossary: the reason table parsed zero rows");
+  }
+  return `${JSON.stringify(
+    {
+      schema_version: 1,
+      description:
+        "Machine-readable extraction of the guard contract's reason glossary (docs/reason-glossary.md): one entry per blocked reason with its Error code, what was attempted, and per-observer guidance. Consumed by the SDK's explainReason parity test (SDK issue #38).",
+      columns: [
+        "code",
+        "what_was_attempted",
+        "agent_guidance",
+        "operator_action",
+        "auditor_note",
+        "spec_ref",
+      ],
+      reasons,
+    },
+    null,
+    2,
+  )}\n`;
+}
+
+/**
  * Canonical `policyToScVal` ↔ contract `PolicyConfig` encode-parity vectors
  * (SDK issue #260, contracts issue #31 / PR #277).
  *
@@ -140,6 +264,7 @@ export const VENDORED_ARTIFACTS: readonly VendoredArtifact[] = [
   POLICY_SCHEMA,
   AUTH_CHECKED_VOCABULARY,
   POLICY_VECTORS,
+  REASON_GLOSSARY,
 ];
 
 export interface VendorReport {
@@ -163,6 +288,7 @@ export function provenanceHeader(
       sourceRepo: artifact.sourceRepo,
       sourceCommit: artifact.repoCommit,
       sourcePath: artifact.sourcePath,
+      sourceUrl: `https://raw.githubusercontent.com/${artifact.sourceRepo}/${artifact.repoCommit}/${artifact.sourcePath}`,
       digest: `sha256:${digest}`,
       digestAlgorithm: `sha256 over the vendored content bytes (the \`${contentKey}\` value re-serialized)`,
       refreshCommand: "npm run vendor:refresh",
@@ -257,7 +383,8 @@ async function main(): Promise<void> {
   const dryRun = process.argv.includes("--dry-run");
   for (const artifact of VENDORED_ARTIFACTS) {
     try {
-      const content = await fetchUpstream(artifact);
+      const raw = await fetchUpstream(artifact);
+      const content = artifact.transform ? artifact.transform(raw) : raw;
       const report = refreshArtifact(artifact, content, { dryRun });
       const state = report.unchanged ? "unchanged" : dryRun ? "would write" : "wrote";
       console.log(

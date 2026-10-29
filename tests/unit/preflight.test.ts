@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Account, Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
+  DEFAULT_MAX_CONCURRENT_SIMULATIONS,
   InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
@@ -17,7 +18,12 @@ import {
   type PreFlightDecision,
 } from "../../src/preflight.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
-import { ContractResponseError } from "../../src/errors.ts";
+import {
+  ContractResponseError,
+  GuardError,
+  GuardUndeterminedError,
+  RateLimitedError,
+} from "../../src/errors.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
@@ -67,6 +73,10 @@ function createMockServer(options?: {
     async getLatestLedger() {
       requestCount++;
       return { sequence: 1000 };
+    },
+    async getLedgerEntries() {
+      requestCount++;
+      return { entries: [] };
     },
     async simulateTransaction() {
       requestCount++;
@@ -722,6 +732,235 @@ describe("throw vs verdict contract asymmetry", () => {
           fn: call.fn,
           argsCount: 3,
         });
+        return true;
+      },
+    );
+  });
+});
+
+describe("assertAllowed and assertBatchAllowed behavior matrix & transport wrapping (issue #90)", () => {
+  const call = validTransferCall(100n);
+
+  it("assertAllowed: admissible verdict returns decision and does not throw", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const decision = await interceptor.assertAllowed(call);
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.kind, "admissible");
+  });
+
+  it("assertAllowed: blocked verdict throws GuardBlockedError and extends GuardError", async () => {
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const interceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardBlockedError, "must be GuardBlockedError");
+        assert.equal(err.reason, "per_tx_cap_exceeded");
+        assert.equal(err.stage, "preflight");
+        assert.deepEqual(err.call, call);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: undetermined verdict throws GuardUndeterminedError and preserves underlying cause", async () => {
+    const server = createMockServer({
+      enforcedSimulateResponse: {
+        minResourceFee: "not-a-fee",
+        result: { auth: [] },
+        transactionData: {
+          getReadOnly: () => [],
+          getReadWrite: () => [],
+        },
+      },
+    });
+    const interceptor = createTestInterceptor(server);
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.ok(err instanceof PreFlightUndeterminedError, "must be backwards compatible alias");
+        assert.equal(err.stage, "preflight");
+        assert.ok(err.cause instanceof ContractResponseError, "must preserve cause");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps generic transport Error in GuardUndeterminedError preserving cause", async () => {
+    const transportError = new Error("fetch failed: connection reset by peer");
+    const server = {
+      ...createMockServer(),
+      async simulateTransaction() {
+        throw transportError;
+      },
+    } as unknown as rpc.Server;
+    const interceptor = createTestInterceptor(server);
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        // Transport error preserved either directly or via simulation error cause
+        const underlying =
+          err.cause === transportError ||
+          (err.cause as { cause?: unknown })?.cause === transportError;
+        assert.ok(underlying, "original Error must be preserved on cause");
+        assert.match(err.message, /fetch failed: connection reset by peer/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps raw uncaught Error from check in GuardUndeterminedError with direct cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const rawError = new Error("raw transport socket exploded");
+    interceptor.check = async () => {
+      throw rawError;
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError);
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, rawError);
+        assert.match(err.message, /raw transport socket exploded/);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps non-Error throws in GuardUndeterminedError preserving cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    interceptor.check = async () => {
+      throw "raw socket error";
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.strictEqual(
+          err.cause,
+          "raw socket error",
+          "primitive throw must be preserved on cause",
+        );
+        assert.match(err.message, /raw socket error/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: rethrows InvalidInputError programmer validation errors directly", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const invalidCall = { contract: "", fn: "", args: [] } as unknown as ContractCall;
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(invalidCall),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidInputError, "programmer error must not be wrapped");
+        return true;
+      },
+    );
+  });
+
+  it("assertBatchAllowed: behavior matrix for admissible, blocked, undetermined, and transport failure", async () => {
+    // 1. All admissible
+    const interceptor = createTestInterceptor(createMockServer());
+    const batchRes = await interceptor.assertBatchAllowed([call]);
+    assert.equal(batchRes.overallAdmissible, true);
+
+    // 2. Blocked in batch throws GuardBlockedError
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("recipient_not_allowed"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const blockedInterceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => blockedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardBlockedError);
+        assert.equal(err.reason, "recipient_not_allowed");
+        return true;
+      },
+    );
+
+    // 3. Undetermined in batch throws GuardUndeterminedError
+    const undeterminedInterceptor = createTestInterceptor(
+      createMockServer({
+        enforcedSimulateResponse: {
+          minResourceFee: "invalid-fee",
+          result: { auth: [] },
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+        },
+      }),
+    );
+    await assert.rejects(
+      async () => undeterminedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.ok(err.cause instanceof ContractResponseError);
+        return true;
+      },
+    );
+
+    // 4. Raw transport error during batch throws wrapped GuardUndeterminedError
+    const transportErr = new Error("batch network down");
+    const failingInterceptor = createTestInterceptor(createMockServer());
+    failingInterceptor.checkBatch = async () => {
+      throw transportErr;
+    };
+    await assert.rejects(
+      async () => failingInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, transportErr);
         return true;
       },
     );
@@ -2174,5 +2413,234 @@ describe("PreFlightInterceptor.checkBatch()", () => {
         }
       }
     });
+  });
+});
+
+describe("PreFlightInterceptor concurrency limit and 429 handling (issue #40)", () => {
+  const PASSPHRASE = "Test SDF Network ; September 2015";
+
+  /** A 429 as the SDK's HTTP client surfaces it (axios-style). */
+  function rateLimitError(retryAfter?: string): Error {
+    return Object.assign(new Error("Request failed with status code 429"), {
+      response: {
+        status: 429,
+        headers: retryAfter === undefined ? {} : { "retry-after": retryAfter },
+      },
+    });
+  }
+
+  const okSimulation = {
+    minResourceFee: "100",
+    latestLedger: 123_456,
+    result: { auth: [] },
+    transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+  };
+
+  /**
+   * A transport that records how many checks are in flight at once. Every check
+   * runs exactly two simulations on one transaction sequence number, so a check
+   * is "in flight" from its first simulation start to its second one finishing.
+   */
+  function instrumentedServer(options: { delayMs?: number } = {}) {
+    const active = new Set<string>();
+    const seen = new Map<string, number>();
+    let peak = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction(tx: { sequence: string }) {
+        const key = tx.sequence;
+        const count = (seen.get(key) ?? 0) + 1;
+        seen.set(key, count);
+        active.add(key);
+        peak = Math.max(peak, active.size);
+        await new Promise((resolve) => setTimeout(resolve, options.delayMs ?? 5));
+        if (count === 2) active.delete(key);
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    return {
+      server,
+      get peak() {
+        return peak;
+      },
+    };
+  }
+
+  function interceptorFor(server: rpc.Server, extra: Record<string, unknown> = {}) {
+    return new PreFlightInterceptor({
+      server,
+      networkPassphrase: PASSPHRASE,
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      coalesceInFlight: false,
+      ...extra,
+    });
+  }
+
+  it("keeps at most the configured number of simulations in flight across 20 parallel checks", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server, { maxConcurrentSimulations: 3 });
+    const decisions = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.ok(
+      decisions.every((d) => d.kind === "admissible"),
+      "every queued check must still get its verdict",
+    );
+    assert.ok(transport.peak >= 2, `limit should be reached, peak ${transport.peak}`);
+    assert.ok(transport.peak <= 3, `at most 3 in flight, saw ${transport.peak}`);
+  });
+
+  it("defaults to 4 concurrent simulations", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server);
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.equal(DEFAULT_MAX_CONCURRENT_SIMULATIONS, 4);
+    assert.ok(transport.peak <= 4, `default limit is 4, saw ${transport.peak}`);
+  });
+
+  it("is observably unbounded when the limit is raised (the instrument can see overlap)", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server, { maxConcurrentSimulations: 100 });
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.ok(transport.peak > 4, `expected overlap above 4, saw ${transport.peak}`);
+  });
+
+  it("rejects an unusable limit or backoff at construction", () => {
+    const { server } = instrumentedServer();
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      assert.throws(() => interceptorFor(server, { maxConcurrentSimulations: bad }), TypeError);
+    }
+    assert.throws(() => interceptorFor(server, { rateLimit: { backoffMs: -1 } }), TypeError);
+    assert.throws(
+      () => interceptorFor(server, { rateLimit: { maxBackoffMs: Number.NaN } }),
+      TypeError,
+    );
+  });
+
+  it("does not let a queued check that timed out take a slot later", async () => {
+    let started = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        started++;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    const interceptor = interceptorFor(server, { maxConcurrentSimulations: 1 });
+    const first = interceptor.check(validTransferCall(1n));
+    const second = await interceptor.check(validTransferCall(2n), { timeoutMs: 10 });
+    assert.equal(second.kind, "undetermined");
+    assert.ok(second.kind === "undetermined" && second.error instanceof RpcTimeoutError);
+    assert.equal((await first).kind, "admissible");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(started, 2, "only the first check's two simulations ran");
+  });
+
+  /** A server whose first `failures` simulations are rate limited. */
+  function limitedServer(failures: number, retryAfter?: string) {
+    let calls = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        calls++;
+        if (calls <= failures) throw rateLimitError(retryAfter);
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    return { server, calls: () => calls };
+  }
+
+  function recordingClock() {
+    const slept: number[] = [];
+    const clock: Clock = {
+      now: () => Date.now(),
+      sleep: async (ms: number) => {
+        slept.push(ms);
+      },
+    };
+    return { clock, slept };
+  }
+
+  it("waits once on a first 429 and then succeeds", async () => {
+    const { server } = limitedServer(1);
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+    assert.deepEqual(slept, [500], "one bounded default backoff");
+  });
+
+  it("honours Retry-After, capped at maxBackoffMs", async () => {
+    const short = recordingClock();
+    await interceptorFor(limitedServer(1, "2").server, { clock: short.clock }).check(
+      validTransferCall(),
+    );
+    assert.deepEqual(short.slept, [2000]);
+
+    const long = recordingClock();
+    await interceptorFor(limitedServer(1, "3600").server, {
+      clock: long.clock,
+      rateLimit: { maxBackoffMs: 1500 },
+    }).check(validTransferCall());
+    assert.deepEqual(long.slept, [1500]);
+  });
+
+  it("returns undetermined with cause rate_limited when the 429 persists", async () => {
+    const { server, calls } = limitedServer(Number.POSITIVE_INFINITY, "1");
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "undetermined");
+    assert.equal(decision.allowed, false);
+    if (decision.kind !== "undetermined") return;
+    assert.equal(decision.cause, "rate_limited");
+    assert.ok(decision.error instanceof RateLimitedError);
+    assert.equal(decision.error.kind, "rate_limited");
+    assert.equal(decision.error.retryAfterMs, 1000);
+    assert.equal(decision.error.attempts, 2);
+    assert.deepEqual(slept, [1000], "exactly one backoff, not a retry loop");
+    assert.equal(calls(), 2, "one retry only");
+  });
+
+  it("does not tag other failures as rate limited and does not retry them", async () => {
+    let calls = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        calls++;
+        throw Object.assign(new Error("boom"), { response: { status: 500 } });
+      },
+    } as unknown as rpc.Server;
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.kind === "undetermined" && decision.cause === undefined);
+    assert.equal(calls, 1);
+    assert.deepEqual(slept, []);
   });
 });

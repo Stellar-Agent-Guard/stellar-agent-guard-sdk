@@ -5,8 +5,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { policyDiff, type PolicyChange } from "../../src/policy-diff.ts";
 import {
+  policyAddressComparisonKey,
   unsafeAccountAddress,
   unsafeContractAddress,
+  type AccountAddress,
   type PolicyConfig,
 } from "../../src/policy.ts";
 import * as sdk from "../../src/index.ts";
@@ -64,6 +66,16 @@ function canonical(p: PolicyConfig): string {
 describe("policyDiff", () => {
   it("is exported from the package root", () => {
     assert.equal(sdk.policyDiff, policyDiff);
+  });
+
+  it("exports canonical Stellar address comparison keys and rejects invalid values", () => {
+    assert.equal(sdk.policyAddressComparisonKey, policyAddressComparisonKey);
+    assert.equal(policyAddressComparisonKey(R1), R1);
+    assert.equal(policyAddressComparisonKey(DEX), DEX);
+    assert.notEqual(policyAddressComparisonKey(R1), policyAddressComparisonKey(DEX));
+    assert.equal(policyAddressComparisonKey(R1.toLowerCase()), null);
+    assert.equal(policyAddressComparisonKey("not-an-address"), null);
+    assert.equal(policyAddressComparisonKey(1), null);
   });
 
   it("reports a scalar change", () => {
@@ -172,6 +184,60 @@ describe("policyDiff", () => {
     assert.deepEqual(policyDiff(policy(), policy({ blocked_recipients: [R2] })), [
       { field: "blocked_recipients", path: "blocked_recipients[0]", kind: "added", after: R2 },
     ]);
+  });
+
+  it("collapses duplicate members in malformed drafts without implying a change", () => {
+    const duplicated = policy({
+      assets: [TOKEN, TOKEN],
+      recipients: [R1, R1],
+      protocols: [
+        { contract: DEX, fns: ["swap", "swap"] },
+        { contract: DEX, fns: ["withdraw"] },
+      ],
+      recipient_window_caps: [
+        { recipient: R1, cap: 5n },
+        { recipient: R1, cap: 6n },
+      ],
+    });
+    const unique = policy({
+      assets: [TOKEN],
+      recipients: [R1],
+      protocols: [{ contract: DEX, fns: ["swap"] }],
+      recipient_window_caps: [{ recipient: R1, cap: 5n }],
+    });
+
+    assert.deepEqual(policyDiff(duplicated, unique), []);
+    assert.deepEqual(policyDiff(unique, duplicated), []);
+    assert.deepEqual(
+      policyDiff(
+        duplicated,
+        policy({ assets: [], recipients: [], protocols: [], recipient_window_caps: [] }),
+      ),
+      [
+        { field: "assets", path: "assets[0]", kind: "removed", before: TOKEN },
+        { field: "protocols", path: "protocols[0]", kind: "removed", before: DEX },
+        { field: "recipients", path: "recipients[0]", kind: "removed", before: R1 },
+        {
+          field: "recipient_window_caps",
+          path: "recipient_window_caps[0]",
+          kind: "removed",
+          before: R1,
+        },
+      ],
+    );
+  });
+
+  it("does not normalize invalid addresses into a match", () => {
+    assert.deepEqual(
+      policyDiff(
+        policy({ recipients: ["not-an-address" as AccountAddress] }),
+        policy({ recipients: ["NOT-AN-ADDRESS" as AccountAddress] }),
+      ),
+      [
+        { field: "recipients", path: "recipients[0]", kind: "removed", before: "not-an-address" },
+        { field: "recipients", path: "recipients[0]", kind: "added", after: "NOT-AN-ADDRESS" },
+      ],
+    );
   });
 
   it("orders changes by field declaration order", () => {

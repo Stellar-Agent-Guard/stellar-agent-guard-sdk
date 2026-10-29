@@ -311,6 +311,36 @@ describe("policy schema consumption (issue #133)", () => {
         assert.deepEqual(failures, [], `cap form ${String(cap)} should pass`);
       }
     });
+
+    it("reports matching i128/u64 upper-bound failures for bigint and string values", async () => {
+      const { schema } = await loadVendoredSchema();
+      const maximumI128 = 2n ** 127n - 1n;
+      const maximumU64 = 2n ** 64n - 1n;
+      const invalid = samplePolicy({
+        per_tx_cap: maximumI128 + 1n,
+        window_secs: (maximumU64 + 1n).toString(),
+        window_cap: (maximumI128 + 1n).toString(),
+        active_from: maximumU64 + 1n,
+        active_until: (maximumU64 + 1n).toString(),
+        dms_grace_secs: maximumU64 + 1n,
+        recipient_window_caps: [{ recipient: RECIPIENT, cap: (maximumI128 + 1n).toString() }],
+      });
+      const failures = validateGuardPolicyAgainstSchema(invalid, schema);
+      assert.deepEqual(
+        failures
+          .filter((failure) => failure.rule === "integer_out_of_range")
+          .map((failure) => failure.path),
+        [
+          "per_tx_cap",
+          "window_secs",
+          "window_cap",
+          "active_from",
+          "active_until",
+          "dms_grace_secs",
+          "recipient_window_caps[0].cap",
+        ],
+      );
+    });
   });
 
   describe("code-enforced §8 rules (the honest half of the split)", () => {

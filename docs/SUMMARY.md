@@ -16,6 +16,7 @@
   * [GuardTelemetryListener](api/telemetry-listener.md)
   * [Framework Adapters](api/framework-adapters.md)
   * [Invoke Pipeline](api/invoke-pipeline.md)
+* [Running an Agent 24/7](agent-runtime.md)
 * [Architecture](architecture.md)
 * [Event Schema](event-schema.md)
 * [Integration Hooks](integration-hooks.md)
