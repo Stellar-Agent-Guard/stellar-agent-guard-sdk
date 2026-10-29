@@ -299,7 +299,7 @@ This version introduces **branded types** to distinguish contract addresses (C..
 **Type Guards:**
 
 ```ts
-import { 
+import {
   isContractAddress,    // Validates C... addresses
   isAccountAddress,     // Validates G... addresses
   isStrKeyAddress,      // Validates any StrKey (C... or G...)
