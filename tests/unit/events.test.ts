@@ -14,7 +14,9 @@ import {
   GUARD_EVENT_TOPICS,
   decodeAuthDecision,
   decodeGuardEventXdr,
+  normalizeEventData,
   normalizeU64,
+  validateGuardEventXdr,
 } from "../../src/events.ts";
 
 /** Build the base64 `ContractEvent` XDR a block explorer hands over. */
@@ -137,10 +139,16 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
 
   it("verifies fixture provenance and hermetic vendoring", () => {
     assert.ok(fixture._provenance, "Fixture must include _provenance header");
-    assert.equal(fixture._provenance.sourceRepo, "Stellar-Agent-Guard/stellar-agent-guard-contracts");
+    assert.equal(
+      fixture._provenance.sourceRepo,
+      "Stellar-Agent-Guard/stellar-agent-guard-contracts",
+    );
     assert.ok(fixture._provenance.sourceCommit.length >= 7, "Commit hash must be present");
     assert.equal(fixture._provenance.refreshCommand, "npm run sync:fixtures");
-    assert.ok(Array.isArray(fixture.entries) && fixture.entries.length > 0, "Fixture entries must be non-empty");
+    assert.ok(
+      Array.isArray(fixture.entries) && fixture.entries.length > 0,
+      "Fixture entries must be non-empty",
+    );
   });
 
   for (const entry of fixture.entries) {
@@ -151,7 +159,9 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
           const scVal = xdr.ScVal.fromXDR(xdrBase64, "base64");
           return String(scValToNative(scVal));
         } catch (err) {
-          assert.fail(`[${entry.name}] field 'topicsXdr[${idx}]' failed ScVal base64 decode: ${String(err)}`);
+          assert.fail(
+            `[${entry.name}] field 'topicsXdr[${idx}]' failed ScVal base64 decode: ${String(err)}`,
+          );
         }
       });
 
@@ -256,11 +266,10 @@ describe("differential test: SDK ScVal decoding vs contract fixture vocabulary",
 });
 
 describe("normalizeU64", () => {
-  
   it("normalizes a string of digits to a bigint", () => {
     assert.equal(normalizeU64("1789393232"), 1789393232n);
   });
-  
+
   it("never loses precision for >2^53", () => {
     const large = "9007199254740993"; // Number.MAX_SAFE_INTEGER + 2
     assert.equal(normalizeU64(large), 9007199254740993n);
@@ -268,6 +277,42 @@ describe("normalizeU64", () => {
 
   it("preserves non-digit strings", () => {
     assert.equal(normalizeU64("2023-11-20T12:00:00Z"), "2023-11-20T12:00:00Z");
+  });
+});
+
+describe("normalizeEventData (issue #276)", () => {
+  it("normalises the heartbeat's documented `at` u64", () => {
+    assert.deepEqual(normalizeEventData({ at: "1789393232" }, "heartbeat"), {
+      at: 1789393232n,
+    });
+  });
+
+  it("leaves nested values untouched", () => {
+    assert.deepEqual(
+      normalizeEventData({ at: "1789393232", meta: { id: "12345", at: "99" } }, "heartbeat"),
+      { at: 1789393232n, meta: { id: "12345", at: "99" } },
+    );
+  });
+
+  it("keeps numeric-looking identifiers on other kinds as strings", () => {
+    assert.deepEqual(normalizeEventData({ by: "12345", id: "98765" }, "initialized"), {
+      by: "12345",
+      id: "98765",
+    });
+    assert.deepEqual(normalizeEventData({ reason: "12345" }, "auth_checked"), { reason: "12345" });
+  });
+
+  it("does not normalise an unknown event kind", () => {
+    assert.deepEqual(normalizeEventData({ at: "1789393232" }, "unknown"), {
+      at: "1789393232",
+    });
+  });
+
+  it("never mutates the input payload", () => {
+    const input = { at: "1789393232" };
+    const output = normalizeEventData(input, "heartbeat");
+    assert.deepEqual(input, { at: "1789393232" });
+    assert.notEqual(output, input);
   });
 });
 
@@ -294,7 +339,11 @@ describe("decodeGuardEventXdr", () => {
 
   it("decodes a blocked event and keeps its reason", () => {
     const decision = decodeGuardEventXdr(
-      contractEventXdr([GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "per_tx_cap_exceeded"]),
+      contractEventXdr([
+        GUARD_EVENT_TOPICS.authChecked,
+        GUARD_AUTH_RESULTS.blocked,
+        "per_tx_cap_exceeded",
+      ]),
     );
     assert.deepEqual(decision, {
       result: "blocked",
@@ -305,7 +354,10 @@ describe("decodeGuardEventXdr", () => {
 
   it("accepts the DiagnosticEvent wrapper a simulation error carries", () => {
     const topics = [GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "paused"];
-    assert.deepEqual(decodeGuardEventXdr(diagnosticEventXdr(topics)), decodeGuardEventXdr(contractEventXdr(topics)));
+    assert.deepEqual(
+      decodeGuardEventXdr(diagnosticEventXdr(topics)),
+      decodeGuardEventXdr(contractEventXdr(topics)),
+    );
   });
 
   it("honours an explicit source for a ledger-read payload", () => {
@@ -321,11 +373,136 @@ describe("decodeGuardEventXdr", () => {
   });
 
   it("rejects the un-prefixed topic the docs use, so docs drift cannot pass", () => {
-    assert.equal(decodeGuardEventXdr(contractEventXdr(["auth_checked", "blocked", "paused"])), null);
+    assert.equal(
+      decodeGuardEventXdr(contractEventXdr(["auth_checked", "blocked", "paused"])),
+      null,
+    );
   });
 
   it("agrees with the object-path decode for the same event", () => {
-    const topics = [GUARD_EVENT_TOPICS.authChecked, GUARD_AUTH_RESULTS.blocked, "window_cap_exceeded"];
-    assert.deepEqual(decodeGuardEventXdr(contractEventXdr(topics)), decodeAuthDecision(topics, "diagnostic"));
+    const topics = [
+      GUARD_EVENT_TOPICS.authChecked,
+      GUARD_AUTH_RESULTS.blocked,
+      "window_cap_exceeded",
+    ];
+    assert.deepEqual(
+      decodeGuardEventXdr(contractEventXdr(topics)),
+      decodeAuthDecision(topics, "diagnostic"),
+    );
+  });
+});
+
+describe("validateGuardEventXdr (strict offline validation)", () => {
+  it("reports malformed XDR and unknown topics by input index and stage, keeping valid neighbours", () => {
+    const allowed = contractEventXdr([
+      GUARD_EVENT_TOPICS.authChecked,
+      GUARD_AUTH_RESULTS.allowed,
+      "",
+    ]);
+    const blocked = contractEventXdr([
+      GUARD_EVENT_TOPICS.authChecked,
+      GUARD_AUTH_RESULTS.blocked,
+      "paused",
+    ]);
+    const unknownTopic = contractEventXdr(["fn_call", "transfer"]);
+
+    const report = validateGuardEventXdr([allowed, "!!!not-base64!!!", unknownTopic, blocked]);
+
+    assert.equal(report.ok, false, "any rejected input makes the report fail");
+    assert.deepEqual(
+      report.results.map((result) => [result.index, result.ok, result.ok ? null : result.stage]),
+      [
+        [0, true, null],
+        [1, false, "xdr"],
+        [2, false, "decision"],
+        [3, true, null],
+      ],
+      "every input is accounted for, in input order",
+    );
+    assert.deepEqual(
+      report.failures.map((failure) => ({
+        index: failure.index,
+        path: failure.path,
+        stage: failure.stage,
+        code: failure.code,
+      })),
+      [
+        { index: 1, path: "events[1]", stage: "xdr", code: "xdr.unparseable" },
+        {
+          index: 2,
+          path: "events[2].topics[0]",
+          stage: "decision",
+          code: "decision.unknown_topic",
+        },
+      ],
+      "failure paths are stable and identify the exact event and field",
+    );
+    assert.deepEqual(report.events, [
+      { result: "allowed", reason: null, source: "diagnostic" },
+      { result: "blocked", reason: "paused", source: "diagnostic" },
+    ]);
+  });
+
+  it("reports an invalid decision result at the result-topic path", () => {
+    const invalid = contractEventXdr([GUARD_EVENT_TOPICS.authChecked, "maybe", "paused"]);
+
+    const report = validateGuardEventXdr([invalid]);
+
+    assert.equal(report.ok, false);
+    assert.deepEqual(report.failures, [
+      {
+        index: 0,
+        path: "events[0].topics[1]",
+        stage: "decision",
+        code: "decision.invalid_result",
+        message: report.failures[0]!.message,
+      },
+    ]);
+  });
+
+  it("applies the requested source and path without changing the live decoder", () => {
+    const payload = contractEventXdr([
+      GUARD_EVENT_TOPICS.authChecked,
+      GUARD_AUTH_RESULTS.allowed,
+      "",
+    ]);
+
+    const report = validateGuardEventXdr([payload], { source: "ledger", path: "fixtures" });
+
+    assert.equal(report.ok, true);
+    assert.deepEqual(report.events, [{ result: "allowed", reason: null, source: "ledger" }]);
+    assert.equal(report.results[0]?.path, "fixtures[0]");
+    assert.deepEqual(decodeGuardEventXdr(payload), {
+      result: "allowed",
+      reason: null,
+      source: "diagnostic",
+    });
+  });
+
+  it("rejects non-string and empty inputs at the input stage", () => {
+    const report = validateGuardEventXdr([null, "", 42]);
+
+    assert.deepEqual(
+      report.failures.map((failure) => [failure.index, failure.stage, failure.code]),
+      [
+        [0, "input", "input.not_string"],
+        [1, "input", "input.empty"],
+        [2, "input", "input.not_string"],
+      ],
+    );
+    assert.equal(report.ok, false);
+  });
+
+  it("returns a stable report when the same fixture is validated twice", () => {
+    const valid = contractEventXdr([
+      GUARD_EVENT_TOPICS.authChecked,
+      GUARD_AUTH_RESULTS.blocked,
+      "paused",
+    ]);
+
+    assert.deepEqual(
+      validateGuardEventXdr([valid, "broken"]),
+      validateGuardEventXdr([valid, "broken"]),
+    );
   });
 });

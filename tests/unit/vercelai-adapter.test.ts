@@ -16,7 +16,11 @@ import type { PreFlightDecision, PreFlightInterceptor } from "../../src/prefligh
 import type { ContractCall } from "../../src/tx.ts";
 import type { VercelAIToolLike } from "../../src/adapters/vercelai.ts";
 
-const CALL: ContractCall = { contract: unsafeContractAddress("C".repeat(56)), fn: "transfer", args: [] };
+const CALL: ContractCall = {
+  contract: unsafeContractAddress("C".repeat(56)),
+  fn: "transfer",
+  args: [],
+};
 
 /** An interceptor stub whose verdicts are queued per check. */
 function stubInterceptor(verdicts: PreFlightDecision[]): PreFlightInterceptor {
@@ -176,9 +180,7 @@ describe("createVercelAIGuard", () => {
     });
     const tool = guard("send_payment", { execute: async () => "ran" });
     await (tool.execute as (input: never) => Promise<unknown>)(null as never);
-    await assert.rejects(() =>
-      (tool.execute as (input: never) => Promise<unknown>)(null as never),
-    );
+    await assert.rejects(() => (tool.execute as (input: never) => Promise<unknown>)(null as never));
     assert.deepEqual(seen, decisions);
   });
 });
@@ -195,7 +197,12 @@ describe("wrapToolWithGuard", () => {
     };
     const wrapped = wrapToolWithGuard(
       original,
-      { interceptor: stubInterceptor([{ allowed: true, kind: "admissible", estimatedResourceFee: 1n, footprintKeys: 2 }]), toContractCall: () => CALL },
+      {
+        interceptor: stubInterceptor([
+          { allowed: true, kind: "admissible", estimatedResourceFee: 1n, footprintKeys: 2 },
+        ]),
+        toContractCall: () => CALL,
+      },
       { toolName: "send_payment", input: undefined },
     );
     assert.equal(wrapped.description, "payment tool");
@@ -217,6 +224,180 @@ describe("wrapToolWithGuard", () => {
     await assert.rejects(
       () => (tool.execute as (input: never) => Promise<unknown>)(null as never),
       InvalidInputError,
+    );
+  });
+});
+
+describe("onDecision isolation (issue #277)", () => {
+  const ADMISSIBLE: PreFlightDecision = {
+    allowed: true,
+    kind: "admissible",
+    estimatedResourceFee: 1n,
+    footprintKeys: 2,
+  };
+  const BLOCKED: PreFlightDecision = {
+    allowed: false,
+    kind: "blocked",
+    reason: "paused",
+    explanation: "paused",
+    detail: "d",
+    diagnosticEvents: [],
+  };
+  const UNDETERMINED: PreFlightDecision = {
+    allowed: false,
+    kind: "undetermined",
+    detail: "rpc unreachable",
+  };
+  const throwingObserver = () => {
+    throw new Error("telemetry sink is down");
+  };
+
+  it("runs an admissible tool even when the observer throws", async () => {
+    let entered = 0;
+    const guard = createVercelAIGuard({
+      interceptor: stubInterceptor([ADMISSIBLE]),
+      toContractCall: () => CALL,
+      onDecision: throwingObserver,
+    });
+    const tool = guard("send_payment", {
+      execute: async () => {
+        entered += 1;
+        return "ran";
+      },
+    });
+
+    assert.equal(await (tool.execute as (input: never) => Promise<unknown>)(null as never), "ran");
+    assert.equal(entered, 1, "an advisory observer failure must not block execution");
+  });
+
+  it("still blocks a blocked decision when the observer throws", async () => {
+    let entered = 0;
+    const guard = createVercelAIGuard({
+      interceptor: stubInterceptor([BLOCKED]),
+      toContractCall: () => CALL,
+      onDecision: throwingObserver,
+    });
+    const tool = guard("send_payment", {
+      execute: async () => {
+        entered += 1;
+        return "ran";
+      },
+    });
+
+    await assert.rejects(
+      () => (tool.execute as (input: never) => Promise<unknown>)(null as never),
+      GuardBlockedError,
+    );
+    assert.equal(entered, 0, "an observer failure must not rescue a refusal");
+  });
+
+  it("still fails closed on an undetermined decision when the observer throws", async () => {
+    let entered = 0;
+    const guard = createVercelAIGuard({
+      interceptor: stubInterceptor([UNDETERMINED]),
+      toContractCall: () => CALL,
+      onDecision: throwingObserver,
+    });
+    const tool = guard("send_payment", {
+      execute: async () => {
+        entered += 1;
+        return "ran";
+      },
+    });
+
+    await assert.rejects(
+      () => (tool.execute as (input: never) => Promise<unknown>)(null as never),
+      PreFlightUndeterminedError,
+    );
+    assert.equal(entered, 0, "an observer failure must not change a fail-closed verdict");
+  });
+
+  it("isolates the observer for every verdict of a batch as well", async () => {
+    let entered = 0;
+    let reports = 0;
+    const guard = createVercelAIGuard({
+      interceptor: {
+        checkBatch: async () => ({
+          admissible: true,
+          overallAdmissible: true,
+          verdicts: [ADMISSIBLE, ADMISSIBLE],
+          calls: [CALL, CALL],
+          totalEstimatedResourceFee: 0n,
+        }),
+      } as unknown as PreFlightInterceptor,
+      toContractCalls: () => [CALL, CALL],
+      onDecision: () => {
+        reports += 1;
+        throw new Error("telemetry sink is down");
+      },
+    });
+    const tool = guard("batch_transfer", {
+      execute: async () => {
+        entered += 1;
+        return "ran";
+      },
+    });
+
+    assert.equal(await (tool.execute as (input: never) => Promise<unknown>)(null as never), "ran");
+    assert.equal(reports, 2, "every batch verdict is still reported");
+    assert.equal(entered, 1);
+  });
+});
+
+describe("Vercel AI SDK ordered call batch (issue #318)", () => {
+  const BLOCKED: PreFlightDecision = {
+    allowed: false,
+    kind: "blocked",
+    reason: "per_tx_cap_exceeded",
+    explanation: "per-transaction cap exceeded",
+    detail: "stub",
+    diagnosticEvents: [],
+  };
+  const ADMISSIBLE: PreFlightDecision = {
+    allowed: true,
+    kind: "admissible",
+    estimatedResourceFee: 1n,
+    footprintKeys: 1,
+  };
+
+  function batchInterceptor(verdicts: PreFlightDecision[]): PreFlightInterceptor {
+    return {
+      check: async () => {
+        throw new Error("single-call check must not run for a batch mapping");
+      },
+      checkBatch: async () => ({
+        admissible: verdicts.every((verdict) => verdict.allowed),
+        overallAdmissible: verdicts.every((verdict) => verdict.allowed),
+        verdicts,
+        calls: verdicts,
+        totalEstimatedResourceFee: 0n,
+      }),
+    } as unknown as PreFlightInterceptor;
+  }
+
+  it("checks the whole batch first and does not execute when a later call is blocked", async () => {
+    const seen: PreFlightDecision[] = [];
+    let entered = 0;
+    const guard = createVercelAIGuard({
+      interceptor: batchInterceptor([ADMISSIBLE, BLOCKED]),
+      toContractCalls: () => [CALL, { ...CALL, fn: "transfer_from" }],
+      onDecision: (_call, decision) => seen.push(decision),
+    });
+    const tool = guard("batch_transfer", {
+      execute: async () => {
+        entered += 1;
+        return "ran";
+      },
+    });
+
+    await assert.rejects(
+      () => (tool.execute as (input: never) => Promise<unknown>)(null as never),
+      GuardBlockedError,
+    );
+    assert.equal(entered, 0);
+    assert.deepEqual(
+      seen.map((decision) => decision.kind),
+      ["admissible", "blocked"],
     );
   });
 });

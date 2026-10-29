@@ -235,6 +235,30 @@ describe("resolveLogger", () => {
     assert.deepEqual(seen, [{ message: "agent-7: retrying", meta: { attempt: 1 } }]);
   });
 
+  it("redacts private keys, signer output, caller arguments, and raw payloads from metadata", () => {
+    const seen: GuardLogMeta[] = [];
+    const original: GuardLogMeta = {
+      safe: "kept",
+      privateKey: "private-key",
+      signerOutput: "signature",
+      rawPayload: { xdr: "payload" },
+      call: { contract: GUARD, fn: "transfer", args: ["caller-data"] },
+      nested: { visible: true, diagnosticEvents: [{ secret: "event" }] },
+    };
+    const logger = resolveLogger({ debug: (_message, meta) => meta && seen.push(meta) });
+
+    logger.debug("diagnostics", original);
+
+    assert.deepEqual(seen, [
+      {
+        safe: "kept",
+        call: { contract: GUARD, fn: "transfer" },
+        nested: { visible: true },
+      },
+    ]);
+    assert.equal(original.privateKey, "private-key", "redaction must not mutate caller metadata");
+  });
+
   it("drops levels the host did not implement instead of routing them elsewhere", () => {
     const seen: string[] = [];
     const logger = resolveLogger({ warn: (message) => seen.push(message) });
@@ -356,8 +380,13 @@ describe("injected logger receives the decision points", () => {
     await interceptor.check(transferCall());
     await interceptor.check(transferCall());
 
-    assert.equal(log.messages().filter((message) => message === "pre-flight verdict cached").length, 1);
-    const hits = log.messages().filter((message) => message === "pre-flight verdict served from cache");
+    assert.equal(
+      log.messages().filter((message) => message === "pre-flight verdict cached").length,
+      1,
+    );
+    const hits = log
+      .messages()
+      .filter((message) => message === "pre-flight verdict served from cache");
     assert.equal(hits.length, 1, "the second identical check is the one served from cache");
   });
 
@@ -374,21 +403,30 @@ describe("injected logger receives the decision points", () => {
       guardAuth: { guard: GUARD, agent: Keypair.random() },
       pollAttempts: 1,
       pollIntervalMs: 0,
-      retry: { maxAttempts: 2, sleep: async () => {} },
+      retry: { maxAttempts: 2, sleep: async () => {}, random: () => 0.5 },
       logger: log.logger,
     });
 
     assert.ok(outcome instanceof InvokeRetryError);
     const retries = log.at("debug").filter((line) => line.message.startsWith("retrying invoke"));
     assert.equal(retries.length, 1, "one retry, one line");
-    assert.deepEqual(retries[0]!.meta, { attempt: 1, maxAttempts: 2, retryable: "stale_ledger_resource_limit" });
+    assert.deepEqual(retries[0]!.meta, {
+      attempt: 1,
+      maxAttempts: 2,
+      retryable: "stale_ledger_resource_limit",
+      delayMs: 50,
+    });
 
     const exhausted = log.at("warn");
     assert.equal(exhausted.length, 1);
     assert.match(exhausted[0]!.message, /retry budget exhausted after 2 attempt\(s\)/);
     // A failure that is about to be retried is not also reported as terminal:
     // one failure, one line.
-    assert.equal(log.messages().filter((message) => message.startsWith("invoke ended without a verdict")).length, 0);
+    assert.equal(
+      log.messages().filter((message) => message.startsWith("invoke ended without a verdict"))
+        .length,
+      0,
+    );
   });
 
   it("reports telemetry pages, dropped events and a coverage gap", async () => {
@@ -436,7 +474,11 @@ describe("injected logger receives the decision points", () => {
     const pages = log.at("debug").filter((line) => line.message === "telemetry page received");
     assert.equal(pages.length, 1);
     assert.equal(pages[0]!.meta?.["events"], 1);
-    assert.equal(pages[0]!.meta?.["dropped"], 1, "an uninterpretable event is counted, not silently ignored");
+    assert.equal(
+      pages[0]!.meta?.["dropped"],
+      1,
+      "an uninterpretable event is counted, not silently ignored",
+    );
     assert.equal(pages[0]!.meta?.["oldestLedger"], 500);
 
     // The same response also proves a gap (expected 100, retained from 500) on
@@ -452,7 +494,9 @@ describe("injected logger receives the decision points", () => {
       // Drain: the assertion is about the notice, not the stream.
     }
     assert.equal(gaps.length, 1);
-    const gapWarnings = log.at("warn").filter((line) => line.message.startsWith("telemetry coverage gap"));
+    const gapWarnings = log
+      .at("warn")
+      .filter((line) => line.message.startsWith("telemetry coverage gap"));
     assert.equal(gapWarnings.length, 1);
     assert.equal(gapWarnings[0]!.meta?.["fromLedger"], 100);
     assert.equal(gapWarnings[0]!.meta?.["toLedger"], 499);
@@ -505,7 +549,8 @@ describe("injected logger receives the decision points", () => {
     // from a description that could not be rendered.
     assert.equal(outcome.kind, "error");
     assert.equal(
-      log.messages().filter((message) => message.endsWith("(resource description unavailable)")).length,
+      log.messages().filter((message) => message.endsWith("(resource description unavailable)"))
+        .length,
       1,
     );
   });
@@ -556,7 +601,10 @@ describe("library-side output audit", () => {
 
   it("finds no console call and no direct stdout/stderr write anywhere in src/", () => {
     const files = sourceFiles(SRC);
-    assert.ok(files.length > 10, `expected to scan the real source tree, found ${files.length} file(s)`);
+    assert.ok(
+      files.length > 10,
+      `expected to scan the real source tree, found ${files.length} file(s)`,
+    );
 
     const offenders: string[] = [];
     for (const file of files) {

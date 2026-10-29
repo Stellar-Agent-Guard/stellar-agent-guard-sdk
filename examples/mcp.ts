@@ -26,10 +26,18 @@ import {
   type McpToolCallRequest,
 } from "../src/index.ts";
 
-export const EXAMPLE_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
-export const EXAMPLE_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
-export const ALLOWED_RECIPIENT = unsafeAccountAddress("GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ");
-export const BLOCKED_RECIPIENT = unsafeAccountAddress("GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM");
+export const EXAMPLE_GUARD = unsafeContractAddress(
+  "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+);
+export const EXAMPLE_TOKEN = unsafeContractAddress(
+  "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+);
+export const ALLOWED_RECIPIENT = unsafeAccountAddress(
+  "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+);
+export const BLOCKED_RECIPIENT = unsafeAccountAddress(
+  "GDZOKF3HGA6XSKIEEPJC5ANON3IJ5OGZMCX7GEGJLZN7JFRKOO4N2HXM",
+);
 
 /** Map an MCP tool call into a typed Soroban `ContractCall`. */
 export function toContractCall(request: McpToolCallRequest): ContractCall | null {
@@ -177,7 +185,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log("[Run 1: Allowed] Handler ran:", res.allowedHandlerRan);
     console.log("[Run 1: Allowed] Result:", res.allowedResult.content[0]?.text);
     console.log("[Run 2: Blocked] Handler ran:", res.blockedHandlerRan);
-    console.log("[Run 2: Blocked] isError:", "isError" in res.blockedResult ? res.blockedResult.isError : false);
+    console.log(
+      "[Run 2: Blocked] isError:",
+      "isError" in res.blockedResult ? res.blockedResult.isError : false,
+    );
     console.log("[Client boundary] Request sent:", res.requestSent);
     if (res.blockedInfos.length > 0) {
       const b = res.blockedInfos[0]!;

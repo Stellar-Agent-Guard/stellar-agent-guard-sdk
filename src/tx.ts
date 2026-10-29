@@ -41,7 +41,6 @@
  * interface when the contracts decision does. Research, options and the revisit
  * trigger: `docs/concepts/multi-key-agent-signing.md`.
  */
-import { createHash } from "node:crypto";
 import {
   Account,
   Address,
@@ -62,6 +61,7 @@ import {
   SimulationError,
 } from "./errors.ts";
 import { systemClock, type Clock } from "./clock.ts";
+import { bytesToHex, sha256 } from "./hash.ts";
 import type { ContractAddress } from "./policy.ts";
 
 /** Extra ledger validity granted to a guard auth entry when it is signed. */
@@ -86,8 +86,18 @@ export interface ContractCall {
  * or bigint. All three are accepted only when they are an exact non-negative
  * u64. A missing field is invalid, not zero: callers must report the simulation
  * as undetermined rather than make a budget decision from fabricated pricing.
+ *
+ * Every rejection is the same typed `ContractResponseError` naming the exact
+ * field, so a malformed fee is classified like every other malformed contract
+ * response instead of escaping as a native conversion error. `options.stage`
+ * records where the value was read (`"simulate"`, `"preflight"`, `"assemble"`),
+ * so the failure says *which* stage saw the bad value.
  */
-export function parseSimulationResourceFee(raw: unknown): bigint {
+export function parseSimulationResourceFee(
+  raw: unknown,
+  options?: { stage?: string | undefined },
+): bigint {
+  const stage = options?.stage;
   let value: bigint;
   if (typeof raw === "bigint") {
     value = raw;
@@ -98,14 +108,14 @@ export function parseSimulationResourceFee(raw: unknown): bigint {
   } else {
     throw new ContractResponseError(
       `simulation returned an invalid resource fee: ${JSON.stringify(raw)}`,
-      { field: "minResourceFee" },
+      { field: "minResourceFee", ...(stage !== undefined ? { stage } : {}) },
     );
   }
 
   if (value < 0n || value > MAX_RESOURCE_FEE) {
     throw new ContractResponseError(
       `simulation resource fee ${value} is outside the u64 range`,
-      { field: "minResourceFee" },
+      { field: "minResourceFee", ...(stage !== undefined ? { stage } : {}) },
     );
   }
   return value;
@@ -121,11 +131,90 @@ export const GUARD_STORAGE_KEYS = [
 
 /** Stable identity for a ledger key, for de-duplicating footprint entries. */
 function ledgerKeyId(key: xdr.LedgerKey): string {
-  return Buffer.from(key.toXDR()).toString("base64");
+  return bytesToHex(key.toXDR());
 }
 
 export function addressToScVal(strkey: string): xdr.ScVal {
   return new Address(strkey).toScVal();
+}
+
+/**
+ * The public-key forms an `AgentSigner.publicKey` may use.
+ *
+ * Both are verify-only encodings of the same 32-byte Ed25519 public key:
+ *
+ *  - the registered account StrKey (`G…`, with its version byte and checksum), and
+ *  - the raw 32-byte key encoded as 64 hexadecimal characters (the shape the
+ *    guard contract stores and `PublicKeyHex` describes in `policy.ts`).
+ *
+ * A secret seed (`S…`) is explicitly not a supported identity. The SDK never
+ * derives a public key from one or accepts private key material at this
+ * boundary; callers that sign locally pass a `Keypair`, which exposes only its
+ * public identity to `AgentSigner`.
+ */
+const AGENT_PUBLIC_KEY_FORMS =
+  "a checksum-valid G... Ed25519 StrKey or a 64-character hex-encoded 32-byte public key";
+const HEX_AGENT_PUBLIC_KEY = /^[0-9a-fA-F]{64}$/;
+
+/** Decode 64 hexadecimal characters into the 32-byte Ed25519 public key. */
+function hexToEd25519PublicKey(hex: string): Uint8Array {
+  const bytes = new Uint8Array(32);
+  for (let index = 0; index < 32; index++) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * Validate an agent signer's public identity and return it in its canonical
+ * `G…` form.
+ *
+ * Validation is deliberately performed at the signer boundary —
+ * `keypairAgentSigner` / `toAgentSigner` construction and again before
+ * `buildGuardAuthEntry` invokes `signDigest` — so a configuration mismatch is an
+ * actionable `SigningError` instead of a contract-level `__check_auth` failure
+ * after an RPC round trip. The input is only ever inspected: this helper never
+ * derives, stores, or accepts private key material.
+ *
+ * @throws {SigningError} when the value is not one of the supported public-key
+ * forms, including a checksum-invalid StrKey, a malformed hex value, or a
+ * secret seed (`S…`).
+ */
+export function validateAgentPublicKey(publicKey: string): string {
+  if (typeof publicKey !== "string" || publicKey.length === 0) {
+    throw new SigningError(
+      `signer.publicKey must be ${AGENT_PUBLIC_KEY_FORMS}`,
+    );
+  }
+
+  if (publicKey.startsWith("S") && StrKey.isValidEd25519SecretSeed(publicKey)) {
+    throw new SigningError(
+      "signer.publicKey must not be a secret key (S...): supply the registered public key " +
+        "(G...) or its 32-byte hex encoding, never private key material",
+    );
+  }
+
+  if (HEX_AGENT_PUBLIC_KEY.test(publicKey)) {
+    return StrKey.encodeEd25519PublicKey(hexToEd25519PublicKey(publicKey));
+  }
+
+  if (StrKey.isValidEd25519PublicKey(publicKey)) return publicKey;
+
+  throw new SigningError(
+    `signer.publicKey is not a supported agent identity: expected ${AGENT_PUBLIC_KEY_FORMS} ` +
+      `(received ${JSON.stringify(publicKey)})`,
+  );
+}
+
+/** Non-throwing form of {@link validateAgentPublicKey}, for setup diagnostics. */
+export function isValidAgentPublicKey(publicKey: unknown): boolean {
+  if (typeof publicKey !== "string") return false;
+  try {
+    validateAgentPublicKey(publicKey);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -151,7 +240,11 @@ export function verifyAgentSignature(
 ): boolean {
   try {
     const rawPublicKey =
-      typeof publicKey === "string" ? StrKey.decodeEd25519PublicKey(publicKey) : publicKey;
+      typeof publicKey === "string"
+        ? HEX_AGENT_PUBLIC_KEY.test(publicKey)
+          ? hexToEd25519PublicKey(publicKey)
+          : StrKey.decodeEd25519PublicKey(publicKey)
+        : publicKey;
     if (rawPublicKey.length !== 32 || payload.length !== 32 || signature.length !== 64) return false;
     return verifyEd25519(payload, signature, rawPublicKey);
   } catch {
@@ -238,9 +331,10 @@ export interface AgentSigner {
  * behaviour the SDK has always had.
  */
 export function keypairAgentSigner(agent: Keypair): AgentSigner {
+  const publicKey = validateAgentPublicKey(agent.publicKey());
   return {
-    publicKey: agent.publicKey(),
-    signDigest: (digest) => agent.sign(Buffer.from(digest)),
+    publicKey,
+    signDigest: (digest) => agent.sign(digest),
   };
 }
 
@@ -253,7 +347,12 @@ export function keypairAgentSigner(agent: Keypair): AgentSigner {
  */
 export function toAgentSigner(signer: AgentSigner | Keypair): AgentSigner {
   if (typeof (signer as AgentSigner).signDigest === "function") {
-    return signer as AgentSigner;
+    const custom = signer as AgentSigner;
+    // Validate at the first boundary that sees the identity, before any probe,
+    // signing or network I/O. The signer is returned unchanged so a remote or
+    // threshold implementation keeps its own identity representation.
+    validateAgentPublicKey(custom.publicKey);
+    return custom;
   }
   return keypairAgentSigner(signer as Keypair);
 }
@@ -317,7 +416,7 @@ export async function buildGuardAuthEntry(params: {
     ),
     subInvocations: [],
   });
-  const networkId = createHash("sha256").update(networkPassphrase).digest();
+  const networkId = sha256(networkPassphrase);
   const guardAddress = new Address(guard).toScAddress();
 
   const preimage =
@@ -340,7 +439,7 @@ export async function buildGuardAuthEntry(params: {
           }),
         );
 
-  const digest = createHash("sha256").update(preimage.toXDR()).digest();
+  const digest = sha256(preimage.toXDR());
   let signature: Uint8Array;
   try {
     signature = await signer.signDigest(digest);
@@ -505,7 +604,15 @@ export function assembleFromSimulation(params: {
     footprintKeys = merged.length;
   }
 
-  const minResourceFee = BigInt(simulation.minResourceFee);
+  // The simulation's own price for the transaction, read through the shared
+  // exact-u64 parser. `BigInt(...)` would accept whatever the RPC sent and
+  // throw a native `SyntaxError` on a malformed value; the parser instead
+  // rejects a missing, negative or out-of-range fee with the SDK's typed
+  // `ContractResponseError`, naming the field, so a malformed simulation is
+  // classified like every other malformed contract response.
+  const minResourceFee = parseSimulationResourceFee(simulation.minResourceFee, {
+    stage: "assemble",
+  });
   const extra = params.extraResourceFee ?? 0n;
   data.setResourceFee(minResourceFee + extra);
 
@@ -600,6 +707,11 @@ export interface SubmissionResult {
   hash: string;
   status: string;
   ledger: number | null;
+  /**
+   * True when an overall invocation deadline stopped post-broadcast polling.
+   * The transaction may still be included; absence is the normal case.
+   */
+  deadlineExceeded?: boolean;
   /** Present when the network rejected the transaction after broadcast. */
   failure: {
     resultXdr: string | null;
@@ -611,11 +723,60 @@ export interface SubmissionResult {
   events: unknown[];
 }
 
+/**
+ * What the network said about a submission, reported the moment the RPC
+ * answered — before any status polling.
+ *
+ * The transaction hash is the operator's recovery handle. It is what a support
+ * engineer needs to look the transaction up on an explorer when the SDK's own
+ * polling never finishes, so it is published as soon as it exists rather than
+ * only on the final outcome: a caller that stores it keeps it even when the
+ * subsequent status query fails or the invocation's budget runs out.
+ */
+export interface SubmissionAcceptedEvent {
+  /**
+   * The transaction hash the network assigned, or `null` when the broadcast
+   * response carried none.
+   *
+   * `null` is the **ambiguous** case: the server answered, but the answer
+   * names no transaction, so the SDK cannot poll for it and cannot say where
+   * it went. It is reported rather than hidden, and the submission fails
+   * closed — an untrackable transaction is never reported as submitted.
+   */
+  hash: string | null;
+  /**
+   * The RPC's own status for the submission (`PENDING`, `SUCCESS`, `ERROR`),
+   * or `null` when the response carried none.
+   */
+  status: string | null;
+}
+
+/**
+ * Deliver the submission event to the caller's hook.
+ *
+ * The hook is the caller's, and a throwing hook must never decide whether a
+ * transaction ran — the same rule the `onStep` hook follows. The event is
+ * delivered exactly once, immediately after the network answered and before
+ * any polling, so a caller that records the hash has it even if everything
+ * after the broadcast fails.
+ */
+function notifySubmitted(
+  hook: ((event: SubmissionAcceptedEvent) => void) | undefined,
+  event: SubmissionAcceptedEvent,
+): void {
+  if (!hook) return;
+  try {
+    hook(event);
+  } catch {
+    /* a broken consumer must not break the submission */
+  }
+}
+
 /** Recursively convert SDK XDR values into plain, inspectable objects. */
 function toPlain(value: unknown, depth = 0): unknown {
   if (value === null || value === undefined || depth > 8) return value ?? null;
   if (typeof value === "bigint") return value.toString();
-  if (value instanceof Uint8Array) return `0x${Buffer.from(value).toString("hex")}`;
+  if (value instanceof Uint8Array) return `0x${bytesToHex(value)}`;
   if (typeof value !== "object") return value;
   const withXdr = value as { toXdrObject?: () => unknown };
   if (typeof withXdr.toXdrObject === "function") {
@@ -765,6 +926,23 @@ export function describeSubmissionFailure(failure: NonNullable<SubmissionResult[
   return lines.join("\n");
 }
 
+/** The fail-closed result when the overall invocation deadline stops polling. */
+function deadlineExceededResult(hash: string): SubmissionResult {
+  return {
+    hash,
+    status: "TIMEOUT",
+    ledger: null,
+    deadlineExceeded: true,
+    failure: {
+      resultXdr: null,
+      resultCode: null,
+      message: "overall invoke deadline exceeded before ledger inclusion",
+      diagnosticEvents: [],
+    },
+    events: [],
+  };
+}
+
 /** Submit a signed transaction and poll until it is included in a ledger. */
 export async function submitAndPoll(
   server: rpc.Server,
@@ -774,6 +952,16 @@ export async function submitAndPoll(
     pollAttempts?: number | undefined;
     pollIntervalMs?: number | undefined;
     clock?: Clock | undefined;
+    /** Absolute clock time at which polling must stop; consumes the same budget. */
+    deadlineAt?: number | undefined;
+    /**
+     * Called once with the network's answer, before any status polling.
+     *
+     * This is where the transaction hash becomes available to the caller: it is
+     * the operator's recovery handle, and publishing it here means a caller
+     * keeps it even when the polling that follows fails or runs out of budget.
+     */
+    onSubmitted?: ((event: SubmissionAcceptedEvent) => void) | undefined;
   } = {},
 ): Promise<SubmissionResult> {
   const clock = options.clock ?? systemClock;
@@ -799,9 +987,25 @@ export async function submitAndPoll(
   } catch (error) {
     throw new BroadcastError("transaction submission request failed", { cause: error });
   }
+
+  // The network has answered. Publish what it said — above all the hash —
+  // before anything else can consume the caller's budget, so the caller can
+  // look the transaction up even if the wait below never resolves.
+  const accepted: SubmissionAcceptedEvent = {
+    hash: typeof sent.hash === "string" && sent.hash.length > 0 ? sent.hash : null,
+    status: typeof sent.status === "string" ? sent.status : null,
+  };
+  notifySubmitted(options.onSubmitted, accepted);
+
+  // The send may itself have consumed the rest of the budget. Check before
+  // interpreting its result, so a success-shaped response cannot outrun the
+  // caller's deadline.
+  if (options.deadlineAt !== undefined && clock.now() >= options.deadlineAt) {
+    return deadlineExceededResult(accepted.hash ?? "");
+  }
   if (sent.status === "ERROR") {
     return {
-      hash: sent.hash,
+      hash: accepted.hash ?? "",
       status: sent.status,
       ledger: null,
       failure: {
@@ -814,22 +1018,46 @@ export async function submitAndPoll(
     };
   }
 
+  // An ambiguous broadcast response: the server claimed the transaction but
+  // named no hash. There is nothing to poll for and nothing to report as
+  // submitted, so the submission fails closed with a typed `BroadcastError`
+  // rather than pretending an untrackable transaction is on its way.
+  const hash = accepted.hash;
+  if (hash === null) {
+    throw new BroadcastError(
+      "the network accepted the submission but returned no transaction hash",
+      { transactionHash: null },
+    );
+  }
+
   const attempts = options.pollAttempts ?? 20;
   const interval = options.pollIntervalMs ?? 3_000;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    await clock.sleep(interval);
+    if (options.deadlineAt !== undefined) {
+      const remaining = options.deadlineAt - clock.now();
+      if (remaining <= 0) return deadlineExceededResult(hash);
+      await clock.sleep(Math.min(interval, remaining));
+      if (clock.now() >= options.deadlineAt) return deadlineExceededResult(hash);
+    } else {
+      await clock.sleep(interval);
+    }
     let result: Awaited<ReturnType<rpc.Server["getTransaction"]>>;
     try {
-      result = await server.getTransaction(sent.hash);
+      result = await server.getTransaction(hash);
     } catch (error) {
-      throw new BroadcastError(`could not poll transaction ${sent.hash}`, {
-        transactionHash: sent.hash,
+      throw new BroadcastError(`could not poll transaction ${hash}`, {
+        transactionHash: hash,
         cause: error,
       });
     }
+    // A poll that answers at or after the deadline is not an admissible result,
+    // even when it says SUCCESS: the caller's budget was already spent.
+    if (options.deadlineAt !== undefined && clock.now() >= options.deadlineAt) {
+      return deadlineExceededResult(hash);
+    }
     if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
       return {
-        hash: sent.hash,
+        hash,
         status: result.status,
         ledger: result.ledger ?? null,
         failure: null,
@@ -843,7 +1071,7 @@ export async function submitAndPoll(
         diagnosticEventsXdr?: unknown[];
       };
       return {
-        hash: sent.hash,
+        hash,
         status: result.status,
         ledger: result.ledger ?? null,
         failure: {
@@ -857,7 +1085,7 @@ export async function submitAndPoll(
     }
   }
   return {
-    hash: sent.hash,
+    hash,
     status: "TIMEOUT",
     ledger: null,
     failure: {
