@@ -28,6 +28,7 @@
 * [Threat Model](threat-model.md)
 * [Attack-Surface Inventory](attack-surface.md)
 * [Contributing](contributing.md)
+  * [Architecture on-ramp: where a change lands](../CONTRIBUTING.md#architecture-on-ramp-where-a-change-lands)
 * [Releasing](releasing.md)
 * [API Deprecations](deprecations.md)
 * [FAQ](faq.md)
