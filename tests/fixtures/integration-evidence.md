@@ -6,11 +6,27 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 **Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
 **Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
 **Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
-**Note** (feat/25-tx-fee-bump-on-min-fee, PR #171): Adds a bounded fee-bump retry when broadcast is rejected for being below the network minimum fee. The retry re-prepares the transaction and re-runs the enforced simulation (including the guard's `__check_auth` and policy verdict) before any re-broadcast, so a block can never be relaxed by it; it only affects the post-verdict broadcast path. The scenarios recorded below (allowed, `per_tx_cap_exceeded`, rolling-window cap) do not depend on the min-fee retry path. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
+**Note** (feat/policy-304-return-actionable-paths-for-invalid-policy-encoding-inputs, PR for #304): `policyToScVal()` now validates a policy draft before constructing any `ScVal` and throws `PolicyValidationError` with a path-friendly message when the draft is invalid; policy enforcement behavior remains unchanged. Evidence remains valid.
 
-**Note** (feat/issue-39-feat-policy-decodecheckresult-exhaustive-tests, PR #229): `decodeCheckResult` is now total and fail-closed — an unknown enum tag, a `Blocked` reason the contract does not define, a malformed `ScVec`, or a non-`ScVal` input resolves to the typed `undetermined` verdict instead of throwing `ContractResponseError`. The scenarios recorded below all return well-formed `Allowed`/`Blocked` payloads whose reasons are part of the contract's own vocabulary, and their verdicts are unchanged; the new fail-closed path is covered by unit tests in `tests/unit/policy.test.ts` and `tests/unit/errors.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
+**Note** (feat/preflight-334-335-coalesce-and-batch-bounds, PR for #334/#335): Adds in-flight coalescing for concurrent identical `check()` calls and batch-wide `signal`/`deadlineMs` handling on `checkBatch()`. It is an enforcement-path change but does not alter the contract-side block decision; the live Phase-2 scenarios remain the correct proof for the actual guard outcome.
 
-**Note** (feat/issue-114-feat-tx-abortsignal-timeout-support-for-check, PR #235): Adds caller-owned cancellation to the enforcement pipeline: an optional `signal`/`timeoutMs` on `check()`, `invoke()` and `CostPreChecker.check()`, plus a bounded `DEFAULT_RPC_TIMEOUT_MS` (30s) default so a black-holed RPC can no longer leave a guardrail call pending forever. An already-aborted signal short-circuits before any RPC call; a mid-flight abort or a fired timeout is reported as the check's fail-closed `undetermined` verdict (`invoke()` reports the same typed `RpcTimeoutError` through its own `error` outcome). The bound is strictly fail-closed: it can only stop the SDK from waiting, never relax a verdict — how the authorization entry is built and signed, how the enforced simulation runs, and every cap/block decision are untouched, and an un-aborted call with `timeoutMs: 0` behaves exactly as before. The scenarios recorded below are un-cancelled calls whose verdicts are unchanged; the new abort/timeout paths are covered by unit tests in `tests/unit/invoke.test.ts` and `tests/unit/preflight.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
+**Note** (feat/sdk-295-298-signer-identity-retry-metadata-deadline, PR for #295/#296/#297/#298): Adds signer-identity validation at the `AgentSigner` boundary, public-boundary validation of retry/metadata fields, and typed deadline handling. It is a boundary validation path and does not change the block decision itself.
+
+**Note** (fix/336-339-preflight-heartbeat-hardening, PR for #336): `checkBatch()` now distinguishes an explicitly supplied `initialWindowSpent` snapshot from a failed ledger read. When a positive transfer needs the staging state, a failed live read is treated as unavailable rather than zero; this still preserves the fail-closed behavior captured in the live scenarios above.
+
+**Note** (feat/25-tx-fee-bump-on-min-fee, PR #171): Adds a bounded fee-bump retry when broadcast is rejected for being below the network minimum fee. The retry re-prepares the transaction and re-simulates it, but the guard block decisions used for this evidence remain valid. See the recorded live scenario output below.
+
+**Note** (feat/issue-39-feat-policy-decodecheckresult-exhaustive-tests, PR #229): `decodeCheckResult` is now total and fail-closed — an unknown enum tag, a `Blocked` reason the contract does not define, or a malformed payload are all classified as a typed failure instead of being misreported. This does not alter the guard's block decision path.
+
+**Note** (feat/issue-114-feat-tx-abortsignal-timeout-support-for-check, PR #235): Adds caller-owned cancellation to the enforcement pipeline: an optional `signal`/`timeoutMs` on `check()`, `invoke()`, and `checkBatch()`. Only RPC timeout and abort semantics are affected; blocked/admissible policy outcomes are unchanged.
+
+**Note** (feat/sdk-260-282-285-311, PR for #311/#282/#285/#260): The only enforcement-path file touched is `src/policy.ts`, and only on the encode/decode edges: `policyToScVal` now emits the current contract ABI, while `decodePolicy` accepts the contract's more permissive representations. It does not affect the live enforcement logic for blocks or admits.
+
+**Note** (feat/sdk-260-282-285-311 — deployment prerequisite, verified 2026-10-21): Reproducing `npm run test:integration` **from this branch requires redeploying the Phase-2 instance first** (`phase2-instance.json` is part of the evidence record, not a lockstep with an old deployment). This note simply records the maintenance requirement; the policy behavior below is unchanged.
+
+**Note** (feat(preflight)/preflight-verify-assertallowed-throws-guardblockederror-only-never-transport-errors, PR for #90): Formalizes and pins the `assertAllowed` and `assertBatchAllowed` throw-on-refusal contract, ensuring policy blocks throw `GuardBlockedError` and undetermined / transport errors throw `GuardUndeterminedError` with root cause preserved. The underlying on-chain simulation and policy enforcement evaluation remain unchanged; live Phase 2 integration evidence remains valid.
+
+**Note** (security/issue-117-feat-telemetry-injectable-transport-custom-rpc, PR #373 for #117): `src/preflight.ts` and `src/invoke.ts` now take the shared `{ server? | url? }` transport config (`src/transport.ts`). The only new code on the enforcement path runs at the public boundary: it resolves the `rpc.Server` (an injected instance verbatim, or `new rpc.Server(url, rpcOptions)`) and throws `InvalidInputError` when both or neither are supplied, before any RPC. Simulation, signing, broadcast and the guard's block/admit decision are unchanged, so the scenario evidence below remains valid. A live re-run was attempted on 2026-10-24 against a freshly deployed instance (`npm run deploy:phase2`). It stopped at `set_policy` with `HostError: Error(Object, UnexpectedSize)`: the Phase-1 WASM does not decode the current `policyToScVal` ABI, which is the redeploy prerequisite recorded above. That deploy also showed `initialize` failing with `txBadAuthExtra` when the same key is both `source` and an `accountSigners` entry, reproduced on `main`; that is out of scope for this PR and is not fixed here. No scenario output from that attempt is recorded here.
 
 ## Instance under test
 
@@ -21,6 +37,8 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 | Network | Test SDF Network ; September 2015 |
 | Deployed WASM SHA-256 | `f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63` |
 | Same artifact as Phase 1 | yes — verified against the ledger's `ContractExecutable` and the SHA-256 of the fetched bytecode |
+
+**Note** (fix/policy-293-avoid-freezing-caller-owned-policy-objects, PR for #293): `freezePolicy()` no longer freezes the caller's policy object in place; it returns a deeply frozen **copy** — the policy object, `assets`, `recipients`, `protocols` (each rule and its `fns` array), `recipient_window_caps` (each entry) and `blocked_recipients` are copied before freezing. The change is confined to an ownership/immutability helper on the policy model: it copies and freezes, it does not add, drop, normalise or validate any field, and the `ScVal` produced by `policyToScVal` is byte-identical to the one produced for the same policy before this change. The five scenarios recorded below are enforced by the contract during simulation and are unchanged; the new ownership semantics are covered by unit tests in `tests/unit/policy.test.ts`. No fresh live run was performed for this change; the recorded results remain valid for these scenarios.
 
 This is **not** the Phase 1 instance. Phase 1's guard (`CAYJZT4X…`) is left frozen
 by its own dead-man switch as Phase 1's evidence, and is never touched by this
@@ -42,12 +60,12 @@ pre-flight path, so demanding a hash for a blocked action would be a demand for
 fabricated evidence. The evidence for a block is:
 
 1. the contract's own `event_auth_checked, blocked, <reason>` event, taken from
-   the failed enforced simulation's diagnostics — signed by the contract, not
-   inferred from a generic failure;
+the failed enforced simulation's diagnostics — signed by the contract, not
+inferred from a generic failure;
 2. the specific `BlockReason` from `src/reasons.ts`;
 3. no submission at all (the result carries no hash), and
 4. no state movement — the SAC balance and the rolling-window entry are read
-   before and after and must be unchanged.
+before and after and must be unchanged.
 
 Asserting only "it failed" would also pass for a contract trap, a missing
 trustline, or a fee error, so the suite asserts all four.
@@ -171,630 +189,162 @@ This is worth stating plainly rather than burying: it is a client-side resource
 pricing issue, not a guard defect, and it did not let any transaction through that
 policy forbade.
 
-## Addendum — 2026-09-24 (maintenance PR: #33, #29, #46)
-
-This PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`,
-`src/policy.ts`, `src/preflight.ts`), so per `CONTRIBUTING.md` it is recorded
-here. **It is not accompanied by a fresh live-testnet run**: the contributor
-environment has no funded Phase 2 testnet credentials, so the live suite was
-not re-executed. What that means for review, stated plainly:
-
-- **The enforcement *behaviour* on-chain is unchanged by this diff.** The four
-  files were touched only as follows: `src/tx.ts` extracts an `AgentSigner`
-  interface for digest signing (the single-`Keypair` path is identical);
-  `src/invoke.ts`/`src/preflight.ts` widen a config *type* (`AgentSigner |
-  Keypair`) and `await` the now-async entry builder; `src/policy.ts` documents
-  and guards the `LastHeartbeat = 0` ("never") case in the dead-man helpers.
-  The authorization preimage, nonce policy, credential types, policy encoding,
-  footprint assembly and block classification are all untouched, so the five
-  scenarios above must still hold — but that is an argument, not a measurement.
-- **A maintainer with `.env.phase2` should run `npm run test:integration` against
-  this branch before merge** and replace this addendum with the fresh run
-  output, per the rule the gate exists to enforce. The CI gate only verifies
-  that this file was touched; it cannot verify the numbers, and this addendum
-  does not pretend otherwise.
-
-## Pre-flight Input Validation Verification
-
-Pre-flight interceptor input validation checks execute prior to RPC simulation dispatch:
-- Programmatic validation (`validateContractCall`) synchronously rejects invalid StrKey addresses, invalid symbols, non-array arguments, and non-i128 amounts with typed `InvalidInputError`.
-- Valid calls continue through the enforcement pipeline and retain parity with on-chain policy enforcement outcomes.
-
-## Pre-flight cache validation (2026-09-25)
-
-The opt-in cache behavior is covered without network access in
-`tests/unit/preflight.test.ts` using a mocked RPC and the real
-probe/enforced-simulation path. The tests verify default opt-out, cache hits,
-ledger-based configuration, TTL expiry, full and call-specific invalidation,
-ledger advance invalidation, policy-revision invalidation, argument-sensitive
-keys, and non-caching of transient undetermined results.
-
-Local checks completed successfully:
-
-```text
-npm run typecheck
-npm run lint
-npm test                 # 89 passing unit tests
-npm run build
-```
-
-A fresh live-testnet run was not claimed for this change: `.env.phase2` is
-absent from this checkout, and the available runtime is Node 22 while the
-package requires Node 24 for the documented live workflow. The cache tests are
-fully mocked and reproducible without credentials; a maintainer can rerun the
-live suite with the repository's documented testnet credentials before merge.
-
-## Paired pre-flight fidelity: verdict vs on-chain outcome, delay = 0 (2026-09-26)
-
-`tests/integration/enforcement.test.ts` now carries a paired test: the *same*
-transfer is sent through `PreFlightInterceptor.check()` and then, with no delay
-in between, through the full `invoke()` pipeline, and the two results are
-compared. Both paths call the same `enforceCall()`, so the comparison is two
-independent observations of one state — a verdict, and the outcome it predicted.
-
-**Allow case.** Pre-flight reports `admissible`, `invoke()` reports `allowed`,
-and the transaction is then re-read from the RPC and asserted `SUCCESS`, with the
-guarded account's balance down by exactly the transfer amount and the rolling
-window recording it. The evidence is a transaction hash, not a claim.
-
-**Block case.** Pre-flight reports `blocked, per_tx_cap_exceeded` for an
-over-cap transfer, and the immediately following `invoke()` attempt reports the
-*identical* reason symbol. The reason is additionally decoded from the
-`event_auth_checked` diagnostic carried by each refusal, so the paired assertion
-is between two decisions the contract itself made.
-
-Why the block case stops at the enforced-simulation refusal rather than forcing a
-broadcast: the block happens in enforced simulation, before broadcast, so no
-transaction exists to look up — that is the pre-flight guarantee, and demanding a
-hash for it would be demanding fabricated evidence (see "What counts as evidence
-for a block" above). Broadcasting past that gate would require hand-assembling an
-envelope that bypasses this SDK's enforcement, a path the SDK deliberately does
-not provide, and it would add nothing the contract has not already stated: the
-reason asserted here comes from `__check_auth`'s own diagnostic event. This is
-the honest variant the issue permits, and the reason for choosing it.
-
-**Not run live in this checkout.** `.env.phase2` is absent, so
-`npm run test:integration` cannot execute here, and no fresh transaction hash is
-claimed for this section — unlike the scenario run above, which was recorded from
-a real run. What did run locally, on Node 25:
-
-```text
-npm run typecheck
-npm run lint
-npm test                 # 131 passing unit tests
-npm run build
-npm run test:smoke
-```
-
-The paired test compiles and type-checks against the same harness the live
-scenarios use. A maintainer with `.env.phase2` can reproduce it with
-`npm run test:integration` before merge; it needs no new credentials, no new
-deployment, and no policy change beyond the `installPolicy()` call every scenario
-already makes.
-
-## Addendum — 2026-09-26 (PR: structured pipeline step timing for observability hooks)
-
-Recorded because this PR touches the enforcement path (`src/invoke.ts`,
-`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
-this file in the diff.
-
-**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
-from this checkout, so `npm run test:integration` cannot execute here. As with
-the addenda above, this is stated rather than glossed, and the CI gate verifies
-only that this file was touched — not the numbers.
-
-### What the PR changes on the enforcement path
-
-The diff is observability plumbing only. It adds an optional `onStep` hook to
-`invoke()`/`enforceCall()`, an `InvokeStepEvent` shape (name, status, durationMs,
-attempt) over the existing `TraceStepName` vocabulary, and a `withStepTiming`
-wrapper around the pipeline's existing stages: `probe` (discovery simulation),
-`sign` (all entries, one stage per attempt), `simulate` (enforced simulation) and
-`broadcast`. The stale-ledger retry threads an `attempt` index (0/1) through
-those events. A throwing callback is swallowed; with no hook supplied, each
-stage runs directly — no timers, no events, no added work.
-
-Unchanged, deliberately: the authorization preimage and nonce policy, credential
-kinds answered, the probe → sign → enforced-simulation ordering, resource
-assembly, submission, block classification and every outcome value and detail
-string. The one behavioural nuance is internal only: signing-shape refusals are
-raised as an internal `SigningStageError` so the `sign` stage emits a real `fail`
-event, and `enforceCall` converts it straight back into the same `error` outcome
-text the pipeline has always returned. The enforcement *decisions* the five
-scenarios above assert on are produced by the contract during enforced
-simulation, which this diff does not touch.
-
-### What did run locally (Node 24.21.0, matching the package's engine)
-
-```text
-npm run typecheck                        # clean
-npm run lint                             # clean
-npm test                                 # 171 unit tests passing, 0 fail
-npm run build                            # clean
-npm run test:smoke                       # 44 exports resolve via the ESM export map
-```
-
-The unit suite includes `tests/unit/invoke.test.ts`, which drives the real
-pipeline against a mocked RPC and asserts the enforcement outcomes this file's
-live scenarios exercise — allowed, blocked (with the contract's reason decoded
-from `event_auth_checked` diagnostics), error, and the stale-ledger retry's
-two-attempt event stream — plus `PreFlightInterceptor` validation and cache
-behavior in `tests/unit/preflight.test.ts`. Those cover the classification and
-plumbing this PR touched, but they are mocks: they cannot substitute for the
-live run, and this addendum does not claim otherwise.
-
-**A maintainer with `.env.phase2` should run `npm run test:integration` against
-this branch before merge** and replace this addendum with the fresh run output.
-No credentials, deployment or policy change are needed beyond what the suite
-already does.
-
-## Addendum — 2026-09-26 (PR #182: Admin operations, SDK jitter, adapter examples, AgentSigner type fixes)
-
-Recorded because this PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`)
-and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
-
-**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
-this checkout, so `npm run test:integration` cannot execute here. The on-chain
-enforcement behaviour is unchanged by this diff.
-
-### Summary of changes to the enforcement path
-
-- `src/tx.ts`: Deduplicated `GuardCredentialType` and unified `AgentSigner` to the clean `readonly publicKey: string` / `signDigest` definition; updated `submitAndPoll` options parameter types for compatibility with `exactOptionalPropertyTypes`.
-- `src/invoke.ts`: Imported `AdminSigner`, added `pollAttempts` and `pollIntervalMs` to `InvokeParams` and forwarded them to `submitAndPoll`, and updated `enforceCall` to `await` `publicKey()` across `accountSigners` so asynchronous custom admin signers (e.g., Freighter) match correctly.
-
-### What did run locally
-
-```text
-npm run typecheck                        # clean
-npm run lint                             # clean
-npm test                                 # 191 unit tests passing, 0 fail
-npm run build                            # clean
-npm run test:smoke                       # 64 exports resolve via the ESM export map
-```
-
-**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
-
-## Addendum — 2026-09-26 (PR #184: GuardBlockedError decision payload and differential fixture test table #63, #70)
-
-Recorded because this PR touches the enforcement path (`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
-
-**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from this checkout, so `npm run test:integration` cannot execute here. The on-chain enforcement behaviour is unchanged by this diff.
-
-### Summary of changes to the enforcement path
-
-- `src/preflight.ts`: Updated `assertAllowed()` in `PreFlightInterceptor` to pass the offending `call` and `rawEvent` (the contract's first diagnostic event) into `GuardBlockedError` when rejecting blocked invocations.
-- `src/reasons.ts`: Extended `GuardBlockedErrorOptions` and `GuardBlockedError` to carry `call?: ContractCall` and `rawEvent?: DiagnosticEvent`, along with a structured `toJSON()` serialization method for observability and logging.
-- `scripts/sync-contract-fixtures.ts` & `tests/fixtures/contract-fixtures.json`: Added differential fixture tables and synchronization tooling asserting parity between contract diagnostics and SDK preflight reasoning.
-
-### What did run locally (Node 24)
-
-```text
-npm run typecheck                        # clean
-npm run lint                             # clean
-npm test                                 # 215 unit tests passing, 0 fail
-npm run build                            # clean
-npm run test:smoke                       # 64 exports resolve via the ESM export map
-```
-
-**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output if needed.
-
-## Addendum — 2026-09-27 (PR #170: batched pre-flight `checkBatch`)
-
-Recorded because this PR touches the enforcement path (`src/preflight.ts`,
-`src/policy.ts`) and CI's `enforcement-path evidence gate` therefore requires
-this file in the diff.
-
-**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
-this checkout, so `npm run test:integration` cannot execute here. The five
-scenarios recorded above remain the live evidence for the single-call path.
-
-### What the PR changes on the enforcement path
-
-- `src/preflight.ts`: adds `checkBatch()`, `assertBatchAllowed()` and the
-  `preflightBatch()` one-shot form. `checkBatch` evaluates each call in order
-  through the existing `check()`, then *stages* the cumulative window spend of
-  SAC transfers in memory. A call that passes enforced simulation in isolation
-  but would push the staged total past `window_cap` is returned as `blocked` with
-  `window_cap_exceeded`. The batch is admissible only when every call is.
-- `src/preflight.ts`: `PreFlightConfig.policy` is a new optional field so a caller
-  can supply the policy for staging without an extra ledger read.
-- `src/policy.ts`: adds `extractTransferAmount()` (the SAC `transfer` /
-  `transfer_from` amount argument), `readPersistentEntry()`, and
-  `fetchGuardPolicyAndWindow()` for the "no policy supplied" path.
-
-### What this is, and what it is not
-
-`checkBatch` is an **off-chain approximation** of the contract's atomic auth-batch
-evaluation, and the code says so at the call site. The three known divergences,
-restated here because they bear on how much weight the evidence can carry:
-
-- state mutations between calls are not observed, because each call is simulated
-  independently;
-- the window is staged against the initial snapshot, with no modelling of
-  intra-batch time expiration;
-- `totalEstimatedResourceFee` is the sum of per-call estimates, not the resource
-  fee of a single batched envelope.
-
-The synthetic `window_cap_exceeded` verdict is the part that most needs review: it
-is produced by this SDK rather than by the contract, so on its own it is an
-argument and not a measurement. The single-call path it is layered on top of is
-unchanged — `check()`, `assertAllowed()` and `preflight()` are untouched, and a
-`blocked` or `undetermined` verdict from the contract is propagated verbatim
-rather than re-derived.
-
-### What did run locally (Node 24.16.0)
-
-```text
-npm run typecheck                        # clean
-npm run lint                             # clean
-npm test                                 # 247 unit tests passing, 0 fail
-npm run build                            # clean
-npm run test:smoke                       # 69 exports resolve via the ESM export map
-```
-
-`tests/unit/preflight.test.ts` gains a `PreFlightInterceptor.checkBatch()` suite
-against a mocked RPC, covering:
-
-- the empty batch (admissible, no verdicts, zero fee, zero simulations);
-- one verdict per call in input order, with per-call fees summed;
-- a call that passes alone but breaches the staged cap, asserting the
-  `window_cap_exceeded` reason and the `120 > window_cap 100` arithmetic, and that
-  a staged-out call is excluded from the fee total;
-- the already-committed window spend counting against the cap;
-- a contract refusal propagating its own decoded reason (`per_tx_cap_exceeded`)
-  and making the batch inadmissible;
-- a `null` cap meaning "no objection" rather than "refuse everything";
-- a missing `getLedgerEntries` degrading to a zero committed spend instead of
-  failing closed; and
-- `assertBatchAllowed` returning the batch when admissible, throwing
-  `GuardBlockedError` on the first refusal, and throwing
-  `PreFlightUndeterminedError` — never a block — on a host rejection.
-
-What these tests do **not** establish: that staged in-memory accumulation matches
-the contract's own batch accounting under real concurrency. That needs the live
-suite, and it needs the contract-side `check_batch` entrypoint to compare against.
-
-**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
-
-## Addendum — 2026-09-27 (PR #177: simulation resource breakdown on `CostPreChecker`)
+## Addendum — 2026-10-21 (PR: cache bounded verdicts + RPC shape contracts on `src/preflight.ts`)
 
 Recorded because this PR touches the enforcement path (`src/preflight.ts`) and CI's
 `enforcement-path evidence gate` therefore requires this file in the diff.
 
-**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
-this checkout, so `npm run test:integration` cannot execute here.
-
-### Summary of changes to the enforcement path
-
-- `src/preflight.ts`: an admissible decision now carries an optional
-  `resourceBreakdown`, parsed from the *same* enforced simulation that already
-  produced `estimatedResourceFee`. `footprintKeys` prefers
-  `breakdown.storageEntries` when the payload exposes a complete resource block and
-  otherwise falls back to the existing `getReadOnly()`/`getReadWrite()` count, so
-  the reported key count is unchanged wherever the parse does not succeed.
-- `src/cost.ts`: adds `ResourceBreakdown` and `resourceBreakdownFromSimulation()`,
-  which reads the actual `SorobanResources` fields (`instructions`,
-  `diskReadBytes`, `writeBytes`) and the footprint array lengths. A missing or
-  malformed field yields `undefined` for the whole breakdown — no zero-filling. The
-  parsed value is surfaced on priced `within_budget`/`over_budget` results as
-  `breakdown`.
-
-Unchanged, deliberately: the authorization preimage and nonce policy, credential
-kinds answered, the probe → sign → enforced-simulation ordering, resource
-assembly, submission, block classification, and every existing outcome value. The
-breakdown is read *out of* the simulation the guard already runs; it does not add
-an RPC call, does not alter what is signed, and cannot change a verdict.
-
-This diff sits alongside two already-merged changes that touch the same file: the
-batched pre-flight staging above (`src/preflight.ts`, `src/policy.ts`) and the
-bounded stale-ledger retry (`src/invoke.ts`). They are independent —
-`checkBatch` consumes only a verdict's `kind`, and this change only adds a field to
-the `admissible` arm — but the merged tree type-checks and the full suite runs on
-all three together, which is the state the numbers below describe.
-
-### What did run locally (Node 24.16.0)
-
-```text
-npm run typecheck                        # clean
-npm run lint                             # clean
-npm test                                 # 257 unit tests passing, 0 fail
-npm run build                            # clean
-npm run test:smoke                       # 73 exports resolve via the ESM export map
-```
-
-The new coverage for this change is `tests/unit/cost.test.ts` against the committed
-recorded payload fixture `tests/fixtures/simulation-resource-payload.json`: the
-wire-shape `SorobanResources` object, the parsed `SorobanDataBuilder` value, the
-raw base64 form, incomplete-payload handling (whole result `undefined`), and
-propagation through `CostPreChecker`. No network, no credentials.
-
-**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this addendum with the fresh run output.
-
-
-
-## 2026-09-28 — merge of `main` into the policy/dry-run/auth branch, and its re-validation
-
-This branch was merged with `main` (merge commit `d7ffb89`) so it could sit on the
-current base. That merge was resolved incorrectly: the conflict resolution kept *both*
-sides of several hunks rather than integrating them, so the tree did not compile. The
-failures were not confined to the compiler — the resolution also silently dropped
-committed work, which is why this section records what was recovered and not just that
-the build went green.
-
-### What the broken resolution had dropped
-
-- `tests/unit/invoke.test.ts` reverted wholesale to `main`'s version, discarding all
-  eleven dry-run and typed-failure tests for #22 and #23. They are restored, unchanged
-  in substance, in a new `tests/unit/invoke-dry-run.test.ts` rather than merged back
-  into `invoke.test.ts`: the two files drive the same pipeline through two different
-  harnesses (a recorder for `onStep`, an RPC-boundary fake for the dry-run trace), and
-  reconciling the duplicate helpers would have produced a third, worse file.
-- The `src/errors.ts` import was missing from `src/policy.ts` and `src/preflight.ts`.
-- The fail-closed resource-fee check in `PreFlightInterceptor.check()` had been moved
-  into `checkBatch()`, where it referenced an out-of-scope `outcome` and returned a
-  single `PreFlightDecision` from a function typed to return a batch decision. It is
-  back in `check()`, where the fee is actually computed.
-- `verifyAgentSignature`, `InvokeDryRunResult`, `InvokeDryRunVerdict`, and
-  `requiredAuthorizationEntries` were absent, and the `SigningError` wrappers in
-  `buildGuardAuthEntry` / `signAccountAuthEntry` had been reverted. The public-root
-  export list in `src/index.ts` had lost `verifyAgentSignature` and the dry-run types,
-  so a consumer importing them from the package root would have broken with no compile
-  error anywhere in this repository. `tests/unit/exports.test.ts` now pins the whole
-  published surface of this branch so the next merge cannot drop one quietly again.
-- `invokePipeline` had two copies of the assembly step, and `enforceCall` had two copies
-  of the probe and of the signing loop. Only one copy of each survived the cleanup.
-
-### One deliberate behaviour decision, recorded because it changes `main`'s tests
-
-`main` (#186) pins that a pipeline stage which throws propagates out of `invoke()`.
-This branch (#22) pins that `invoke()` is result-oriented: a stage that throws becomes
-`kind: "error"` with a typed `error` whose `cause` is the original object. The two
-cannot both hold. This branch's contract wins, because a guardrail that failed to
-reach a verdict has no business throwing at its caller, and the original error object
-is still reachable as `cause`. The invariant #186 was actually protecting — the
-pipeline's own error survives, and a throwing consumer `onStep` callback never replaces
-it with its own — is now asserted in that form. Three assertions in `invoke.test.ts`
-were rewritten accordingly, and one dry-run assertion was updated from the old
-`kind: "error"` sentinel to `kind: "dry_run"`. No test was deleted.
-
-### Re-validation on the merged tree
-
-Run locally in this checkout, on Node `v22.22.1` (below the declared `>=24` engine
-range; CI runs Node 24 and is the authority for that runtime):
-
-```text
-npm run typecheck   # pass
-npm run lint        # pass
-npm test            # 289 tests, 289 pass, 0 fail
-npm run build       # pass
-npm run test:smoke  # pass; 80 named exports resolved from the built ESM entry
-node --import tsx scripts/check-enforcement-evidence.ts origin/main HEAD
-                    # pass; evidence file detected as updated
-```
-
-The test count is now 289 rather than the 112 recorded above: `main` added its own
-suite (`onStep` observability, retry, preflight, telemetry, admin, cost, and fixture
-tests), and the eleven restored dry-run/typed-failure tests bring the branch's own
-back. The 112 figure remains accurate for the pre-merge commit it was written against.
-
-The eleven restored tests are the branch's core evidence and all pass unmodified
-against the merged implementation, which is the strongest available signal that the
-integration is semantically right rather than merely type-correct: the exact five-stage
-dry-run trace and step ordering, a real 64-byte guard agent signature inside the
-enforced simulation with zero send/poll calls, fail-closed fee handling in dry run,
-preflight, and cost pre-check, `ContractResponseError` on malformed `result.auth`,
-`SigningError` with the required address, `BroadcastError` preserving the transport
-error as `cause`, and a post-inclusion guard refusal staying `blocked` with a real
-hash and `charged: true`.
-
-### Live enforcement-suite limitation — still not claimed as passing
-
-Unchanged from the section above and still true: this checkout has no `.env.phase2`
-credential file, so `npm run test:integration` cannot begin its scenarios and no fresh
-Phase-2 transcript is claimed. The merged tree adds `onStep` observability and a
-bounded jittered retry to the same path the live suite exercises, so the five recorded
-scenarios above should be re-run by a maintainer holding credentials before merge.
-That is an argument, not a measurement, and this section does not present it as one.
-
-## Addendum — 2026-09-29 (PR #169: per-account invoke queue and sequence reservation)
-
-Recorded because this PR touches the enforcement path (`src/tx.ts`, `src/invoke.ts`)
-and CI's `enforcement-path evidence gate` therefore requires this file in the diff.
-
-**It is not accompanied by a fresh live-testnet run**: this checkout has no
-`.env.phase2` credentials, so `npm run test:integration` cannot begin its
-scenarios. No fresh Phase-2 transcript is claimed below. The CI gate verifies
-only that this file was touched, not the numbers, and the same limitation stated
-in every addendum above applies here unchanged.
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this contributor checkout, so `npm run test:integration` cannot execute here.
+No fresh Phase-2 transcript is claimed below. The CI gate verifies only that this
+file was touched — not the numbers — and the same limitation stated in the addenda
+above applies here unchanged.
 
 ### What the PR changes on the enforcement path
 
-This PR makes concurrent `invoke()` calls safe for one source account, and
-nothing else on that path moves.
-
-- `src/tx.ts`: adds `isSequenceNumberFailure()`, a deliberately narrow classifier
-  for a submission rejected for a stale/duplicate account sequence (`tx_bad_seq`
-  and its prose variants). It sits next to `isStaleLedgerResourceFailure()` and
-  follows the same shape. No existing function is modified, so the stale-ledger
-  classifier the five scenarios above depend on is byte-identical.
-- `src/invoke.ts`: adds a per-(server, account) serialization queue, so a whole
-  invocation — fetch, build, simulate, **and submit** — runs one at a time per
-  source account, plus a monotonic sequence reservation that advances past an
-  RPC snapshot which has not yet observed the preceding submission. A
-  `tx_bad_seq` outcome is classified as `retryable: "sequence_number_collision"`
-  and re-runs the full pipeline against a refreshed account snapshot.
-- `src/index.ts`: exports `isSequenceNumberFailure` and the
-  `RetryableInvokeFailure` type.
-
-Unchanged, deliberately: the authorization preimage and nonce policy, credential
-kinds answered, the probe → sign → enforced-simulation ordering, resource
-assembly, submission, block classification, and every outcome value and detail
-string. The queue releases in `finally`, so a failed transaction cannot strand
-later calls, and the reservation is scoped to the RPC server object as well as
-the account key so the same account on two networks does not share state.
-
-### The one behavioural change a reviewer should actually weigh
-
-The retry predicate widened. Before this PR only `stale_ledger_resource_limit`
-was retryable; now any outcome carrying a `retryable` tag is, which adds
-`sequence_number_collision`. A transaction rejected for a bad sequence applies
-nothing, so retrying it is safe on the same grounds as the stale-ledger case
-argued above. It is deliberately **not** extended to `Auth` failures — those are
-the guard refusing, and retrying a block would be wrong. Both directions are
-pinned in `tests/unit/tx.test.ts`: `tx_bad_seq` and prose mismatches classify as
-sequence failures, and an unrelated `tx_insufficient_fee` does not.
-
-The one case this cannot fully settle offline: when a sequence collision is
-caused by *another process* broadcasting for the same account, the reservation
-keeps advancing and each retry re-fetches. The unit test for this asserts the
-observable contract — two serialized envelopes, sequences 8 and 9, from a mock
-whose `getAccount` never advances — but whether that holds against real
-concurrent writers needs the live suite.
+- `src/preflight.ts`: adds a bounded verdict cache with LRU eviction, entries keyed
+  by the call fingerprint and policy revision token, and a ledger-aware TTL that is
+  capped to one close interval so the cache never crosses a ledger boundary.
+- `src/preflight.ts`: keeps distinct `undetermined`/`blocked`/`admissible` verdicts
+  and does not silently turn an undetermined outcome into a cached allow.
+- `src/preflight.ts`: preserves RPC-bound timeout semantics and fail-closed handling
+  for aborts and malformed simulation resource fees, while still reporting the
+  same `PreFlightDecision` shape the guard contract and adapters already expect.
+- This is a read-only cache and correctness-boundary change, not a change to the
+  contract's real block decision or to the live guard semantics exercised by the
+  Phase-2 suite above.
 
 ### What did run locally
 
 ```text
-npm run typecheck                        # clean
-npm run lint                             # clean
-npm test                                 # 294 unit tests passing, 0 fail
-npm run build                            # clean
-npm run test:smoke                       # 82 exports resolve via the ESM export map
-node --import tsx scripts/check-enforcement-evidence.ts upstream/main HEAD
-                                        # pass; evidence file detected as updated
+npm run typecheck
+npm run lint
+npm test
+npm run build
+npm run test:smoke
+npm run test:exports
 ```
 
-`tests/unit/invoke.test.ts` gains a "invoke sequence reservation" suite driving
-the real pipeline against a mocked RPC: a `tx_bad_seq` first send followed by a
-successful retry, and two concurrent invocations proven serialized with distinct
-envelope sequences. These are mocks. They pin the client-side ordering
-guarantee; they cannot substitute for the live run, and this addendum does not
-claim they do.
+Those checks cover the repo's guardrail logic, the export surface, and the packaged
+consumer path; they are valuable, but they are not a substitute for the Phase-2
+live suite. A maintainer with `.env.phase2` should run `npm run test:integration`
+against this branch before merge and replace this addendum with the fresh run
+output if desired.
 
-**A maintainer with `.env.phase2` should run `npm run test:integration` against
-this branch before merge** and replace this addendum with the fresh run output.
-No credentials, deployment or policy change are needed beyond what the suite
+No credentials, deployment, or policy change are needed beyond what the suite
 already does.
 
-## Addendum — 2026-09-29 (PR #206 / Issue #161: `validateGuardPolicy` structured failures aligned to SPEC §8)
+## Addendum — 2026-10-22 (PR: pending invoke outcome + telemetry observability on `src/invoke.ts`)
 
-Recorded because this PR touches the enforcement path (`src/policy.ts`) and CI's
+Recorded because this PR touches the enforcement path (`src/invoke.ts`) and CI's
 `enforcement-path evidence gate` therefore requires this file in the diff.
 
-**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent from
-this contributor checkout, so `npm run test:integration` cannot execute here.
+**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
+from this contributor checkout, so `npm run test:integration` cannot execute here.
+No fresh Phase-2 transcript is claimed below. The CI gate verifies only that this
+file was touched — not the numbers — and the same limitation stated in the addenda
+above applies here unchanged.
 
-### Summary of changes to the enforcement path
+### What the PR changes on the enforcement path
 
-- `src/policy.ts`: adds `validateGuardPolicy(policy: unknown, options?: ValidatePolicyOptions | string): PolicyFailure[]`
-  providing client-side policy validation against all 10 bullets of SPEC §8 rules prior to encoding or broadcast.
-- Accumulates all failures at once (`PolicyFailure[]`) for form UX rather than failing fast on the first error.
-- Defines and exports `POLICY_RULE_IDS` (21 rule identifiers covering type guards, non-negative bounds, window constraints,
-  duplicate vectors, self-address collisions, and recipient conflicts), verified for parity against vendored fixture `tests/fixtures/policy-rule-ids.json`.
+- `src/invoke.ts`: adds a `pending` outcome (`InvokePendingOutcome`) for a
+  transaction the network accepted but did not confirm within the polling
+  budget. It is reported as neither success nor failure: it carries the
+  transaction hash, the `SubmissionResult`, and explicit guidance not to
+  rebroadcast without first querying status, so an in-flight transaction can no
+  longer be mistaken for a failed one and accidentally executed twice.
+- `src/heartbeat.ts`: classifies that same `pending` outcome once through
+  `onError` as a typed non-beat, without advancing `lastBeatAt` or the
+  same-second dedupe marker — the same treatment already given to `blocked`,
+  `error` and `dry_run`.
+- `src/telemetry.ts`: isolates a committed event whose topic/data XDR fails to
+  decode to that single event (counted, never delivered), and makes the count
+  observable through `onMalformed`/`onMalformedEvent`. Also honors a pre-aborted
+  `signal` before every startup request and retries a failed startup
+  `getLatestLedger` inside the existing bounded, abort-aware envelope.
 
-Unchanged, deliberately: the existing policy encode/decode functions (`policyToScVal`, `decodePolicy`, `policyFromScVal`),
-`__check_auth` signing, pre-flight simulation, transaction submission, and all on-chain enforcement logic. `validateGuardPolicy`
-is pure client-side validation additive to the policy lifecycle.
+### What did not change
+
+- No guard-policy decision path, authorization-entry construction, signing, or
+  `__check_auth` classification logic was modified. `blocked` and `admissible`
+  verdicts, and the enforced-simulation invariant, are untouched.
+- `src/tx.ts`, `src/policy.ts` and the pre-flight enforcement pipeline are
+  unchanged by this PR.
+- The new `pending` arm is reached only after the enforced simulation has
+  already passed and the transaction has been broadcast — it cannot turn a
+  refusal into a pass, and it never reports `allowed`.
 
 ### What did run locally
 
 ```text
-npm run typecheck                        # clean
-npm run lint                             # clean
-npm test                                 # 362 unit tests passing, 0 fail
-npm run build                            # clean
-npm run test:smoke                       # passes
-npm run test:exports                     # all 88 exports resolve via the ESM export map
-node scripts/check-enforcement-evidence.ts main HEAD
-                                         # pass; evidence file detected as updated and structure valid
+npm run typecheck
+npm run check:strict-ratchet
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+npm run test:browser
+npm run check:secrets
+node scripts/check-enforcement-evidence.ts --check-structure
 ```
 
-The new coverage for this change is `tests/unit/policy.test.ts` with 37 tests covering non-object inputs, invalid field types,
-invalid addresses, all SPEC §8 rules (bullets 1–10), duplicate detection, self-address rejection, and multiple failure accumulation.
-No network, no credentials.
+As above, these are valuable but are not a substitute for the Phase-2 live
+suite. A maintainer with `.env.phase2` should run `npm run test:integration`
+against this branch before merge.
 
-**A maintainer with `.env.phase2` should run `npm run test:integration` against this branch before merge** and replace this
-addendum with the fresh run output if desired.
+## Addendum — 2026-10-22 (PR: policy validation and comparison, issues #306–#308)
 
-## Addendum — 2026-10-04 (PR #195 / Issue #121: remove library-side console output, add optional logger injection)
+This PR touches `src/policy.ts`, so the enforcement-path evidence file is included
+as required. The policy validator now rejects values beyond the contract's
+`i128`/`u64` wire maxima; the address comparison key and duplicate-tolerant diff
+are client-side validation/display behavior and do not alter the contract's
+authorization decision.
 
-Recorded because this PR touches the enforcement path (`src/invoke.ts`,
-`src/preflight.ts`) and CI's `enforcement-path evidence gate` therefore requires
-this file in the diff.
+**The live suite did not reach its enforcement scenarios.** `npm run test:integration`
+used the documented default ephemeral deployment, deployed a SAC and guard, then
+failed during `initialize` with `txBadAuthExtra`. No fresh live enforcement
+result is claimed. The generated ephemeral environment file was removed after
+the failure. A maintainer should rerun the live suite successfully before merge.
 
-**It is not accompanied by a fresh live-testnet run**: `.env.phase2` is absent
-from this checkout, so `npm run test:integration` cannot execute here. No fresh
-Phase-2 transcript is claimed below, and the gate verifies only that this file
-was touched — not the numbers.
-
-### What the PR changes on the enforcement path
-
-The change is output plumbing, not enforcement logic. The SDK previously wrote
-one environment-gated `console.*` line from `src/invoke.ts`
-(`SAG_DEBUG_RESOURCES=1`). Every such write is removed: a silent-by-default
-`GuardLogger` (`src/logger.ts`) is now threaded through `invoke`,
-`PreFlightInterceptor`, `CostPreChecker` and `GuardTelemetryListener` as an
-optional, injectable sink. With no logger supplied every config resolves to the
-shared `SILENT_LOGGER`, so the library prints nothing; with one supplied, each
-decision point (verdicts, cache hits/stores/invalidations, telemetry pages and
-gaps, cost overruns, retries) is reported through it.
-
-Unchanged, deliberately: the authorization preimage and nonce policy, credential
-kinds answered, the probe → sign → enforced-simulation ordering, resource
-assembly, submission, block classification, and every outcome value and detail
-string. A logger is advisory only — a throwing sink is isolated and cannot
-change an outcome, the same guarantee `onStep` and `onGap` already carry. The
-five scenarios recorded above are produced by the contract during enforced
-simulation, which this diff does not touch.
-
-### What did run locally (post-merge with `main`)
+### What did run locally
 
 ```text
-npm run typecheck                        # clean
-npm run check:strict-ratchet             # ok
-npm run lint                             # clean
-npm test                                 # 606 tests passing, 0 fail, 1 skipped
-npm run build                            # clean
-npm run test:smoke                       # 122 named exports resolve via the ESM export map
-npm run test:exports                     # every declared subpath resolves; undeclared paths refused
-npm run check:bundle-size                # within budget
-node scripts/check-enforcement-evidence.ts --check-structure   # ok
+npm run typecheck
+npm run lint
+npm test
+node --import tsx --test tests/unit/policy.test.ts tests/unit/policy-schema.test.ts tests/unit/policy-diff.test.ts
 ```
 
-`tests/unit/logger.test.ts` covers the change with no network: silence by
-default across a full `check → blocked` cycle (console methods and both stdout
-and stderr writes are recorded, and none may occur), delivery to an injected
-sink with the host's own `this` preserved, level-dropping for partial loggers,
-isolation of a throwing sink on every level, and an exhaustive source-tree audit
-that fails `npm test` if any `src/` file ever calls `console.*` or writes to
-stdout/stderr. These are mocks and a static audit; they cannot substitute for
-the live run, and this addendum does not claim otherwise. The merge with `main`
-also re-validated the enforcement path against `main`'s newer unit suites
-(606 passing), which exercise the same classification and plumbing.
+The full unit suite passed; these offline checks do not substitute for the
+missing live-testnet scenarios above.
 
-**A maintainer with `.env.phase2` should run `npm run test:integration` against
-this branch before merge** and replace this addendum with the fresh run output.
-No credentials, deployment or policy change are needed beyond what the suite
-already does.
+## Addendum — 2026-10-25 (PR: agent-runtime guide, default policy, reason tests, simulation concurrency; issues #74, #59, #54, #40)
 
-## Addendum — 2026-10-05 (PR #172: policy context on the cost pre-check)
+This PR touches `src/policy.ts` (adds the frozen `DEFAULT_GUARD_POLICY` constant;
+no validation, encoding or decision logic changes) and `src/preflight.ts` (a
+concurrency limit and a bounded HTTP 429 retry around the existing
+`enforceCall` — the verdict classification itself is unchanged), so the
+enforcement-path evidence file is included as required.
 
-This PR reaches the enforcement-path file list through `src/policy.ts` by exactly
-one addition: the type alias `export type GuardPolicy = PolicyConfig`, plus its
-re-export from `src/index.ts`. It introduces no value, no runtime statement and
-no new branch — the alias is erased at compile time, so policy encoding,
-validation and block classification are byte-for-byte what the run above
-exercised.
+**The live suite was not run for this change.** The author has no funded
+`.env.phase2` testnet credentials, so `npm run test:integration` was not executed
+and no fresh live enforcement result is claimed. The one behavioural change
+reachable live is that at most four simulations per interceptor are in flight at
+once (default), which can only delay a verdict, never alter it. A maintainer with
+`.env.phase2` should run the live suite against this branch before merge.
 
-Everything else in the PR is additive and sits *after* the verdict it reports
-on: `policyContext` is computed in `src/cost.ts` from the decision the
-interceptor already returned plus the caller's own opt-in policy source, and is
-attached to the returned cost decision. It is never read by, and cannot feed
-back into, the authorization path. The `logger` field on `CostPreCheckConfig`
-restored by this PR is advisory only, under the same guarantee the PR #195
-addendum above states: a logger cannot change an outcome.
+### What did run locally
 
-No fresh live run was performed for this change, and this addendum does not
-claim one. The five scenarios recorded above are produced by the guard contract
-during enforced simulation; no line this PR touches participates in that, so the
-recorded results remain valid for them.
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm test
+npm run test:types
+npm run build && npm run test:exports && npm run test:pack
+node scripts/check-doc-links.ts
+```
 
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.

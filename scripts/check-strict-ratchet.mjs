@@ -27,11 +27,7 @@ import { dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** The flags that must be exactly `true`, in report order. */
-const REQUIRED_FLAGS = [
-  "strict",
-  "noUncheckedIndexedAccess",
-  "exactOptionalPropertyTypes",
-];
+const REQUIRED_FLAGS = ["strict", "noUncheckedIndexedAccess", "exactOptionalPropertyTypes"];
 
 /** Configs checked when no explicit paths are given on the command line. */
 const DEFAULT_CONFIGS = ["tsconfig.json", "tsconfig.build.json"];
@@ -111,11 +107,8 @@ export function loadEffectiveConfig(configPath, seen = new Set()) {
   seen.add(absolute);
 
   const raw = parseJsonConfig(readFileSync(absolute, "utf8"));
-  const parents = raw.extends === undefined
-    ? []
-    : Array.isArray(raw.extends)
-      ? raw.extends
-      : [raw.extends];
+  const parents =
+    raw.extends === undefined ? [] : Array.isArray(raw.extends) ? raw.extends : [raw.extends];
 
   let effective = { ...raw };
   let compilerOptions = { ...(raw.compilerOptions ?? {}) };
