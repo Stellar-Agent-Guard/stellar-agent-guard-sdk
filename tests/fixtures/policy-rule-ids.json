@@ -8,7 +8,7 @@
   "rules": [
     {
       "id": "invalid_type",
-      "specSection": "§8 (type integrity)",
+      "specSection": " 8 (type integrity)",
       "description": "Policy object or property has wrong primitive or structural type."
     },
     {
