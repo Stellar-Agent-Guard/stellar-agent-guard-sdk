@@ -1,4 +1,17 @@
 /**
+ * @example langchain
+ * @policy examples/README.md — every file here is typechecked in CI via the
+ *   `examples` tsconfig project (see .github/workflows/ci.yml, "Typecheck
+ *   examples" step) and must carry this expected-output header.
+ * @expected-output
+ *   === LangChain Middleware Example Run ===
+ *   [Run 1: Allowed] Tool ran: true
+ *   [Run 1: Allowed] Result: { content: '{"success":true,"transferred":"50"}' }
+ *   [Run 2: Blocked] Tool ran: false
+ *   [Run 2: Blocked] Message content:
+ *    Blocked by Stellar Agent Guard: recipient_not_allowed — recipient is not on the allowlist.
+ */
+/**
  * LangChain Middleware Example — Full runnable demonstration with a fake transfer tool.
  *
  * Demonstrates:

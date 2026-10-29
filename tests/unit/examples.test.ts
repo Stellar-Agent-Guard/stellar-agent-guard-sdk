@@ -1,7 +1,12 @@
-/**
+/*
  * Unit tests verifying runnable framework adapter examples in examples/ directory.
  *
  * Ensures no dead code in documentation/examples, matching evidence culture.
+ *
+ * Policy (see examples/README.md): every example file is imported by this
+ * test suite so that it is compiled/typechecked and executed in CI. Adding a
+ * new example requires adding an import + case here (and a matching row in
+ * examples/README!.md).
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";

@@ -20,6 +20,7 @@
 * [Architecture](architecture.md)
 * [Event Schema](event-schema.md)
 * [Integration Hooks](integration-hooks.md)
+* [Examples](examples/README.md)
 * [Testnet Verification](verification.md)
 * [Benchmarks](benchmarks.md)
 * [Enforcement Scope](enforcement-scope.md)

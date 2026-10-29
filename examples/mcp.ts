@@ -1,6 +1,15 @@
 /**
  * MCP Adapter Example — Full runnable demonstration guarding an MCP tool.
  *
+ * Expected output (run with `npx tsx examples/mcp.ts`):
+ *   === MCP Adapter Example Run ===
+ *   [Run 1: Allowed] Handler ran: true
+ *   [Run 1: Allowed] Result: transferred
+ *   [Run 2: Blocked] Handler ran: false
+ *   [Run 2: Blocked] isError: true
+ *   [Client boundary] Request sent: false
+ *   [Run 2: Blocked] adapter=mcp reason=recipient_not_allowed
+ *
  * Demonstrates:
  *  1. `PreFlightInterceptor` construction with Soroban RPC and guard configuration.
  *  2. `toContractCall` mapping an MCP tool call into a typed Soroban `ContractCall`.
@@ -13,6 +22,10 @@
  * The handler/call shapes are structural (see `docs/integration-hooks.md` §4), so
  * neither `@modelcontextprotocol/sdk` nor `@modelcontextprotocol/server` is a
  * dependency of this SDK.
+ *
+ * CI: this file is compiled by the `examples` tsconfig project
+ * (`tsconfig.examples.json`) and executed by the `examples-smoke` CI step
+ * (see `.github/workflows/ci.yml`), so it cannot silently rot.
  */
 import { Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {

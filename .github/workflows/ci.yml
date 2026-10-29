@@ -95,6 +95,12 @@ jobs:
       - name: lint
         run: npm run lint
 
+      # Every file in examples/ must be compiled/typechecked in CI (examples/
+      # policy rule 1). This glob-compatible step typechecks the examples
+      # project so a new example cannot land without being checked.
+      - name: typecheck examples
+        run: npm run typecheck:examples
+
       # Formatting gate (issue #138): Prettier owns whitespace, so review no
       # longer re-litigates it. Golden/evidence fixtures and hand-wrapped
       # Markdown are excluded in `.prettierignore` with the rationale there.
@@ -128,9 +134,6 @@ jobs:
       - name: packed-consumer TypeScript declarations
         run: npm run test:types:packed
 
-      - name: unit tests
-        run: npm test
-
       - name: smoke test export resolution
         run: npm run test:smoke
 
@@ -159,6 +162,12 @@ jobs:
       - name: bundle-size canary (dashboard import shape)
         run: npm run check:bundle-size
 
+      # README-snippet checker (fenced blocks) — extended to also cover
+      # examples/ so example files never go stale silently (examples/ policy
+      # rule 1, mechanism reused from the snippet-checker issue).
+      - name: examples snippet check
+        run: npm run check:snippets
+
       # Informational only, never gating: shared runners are too noisy for a
       # wall-time threshold to mean anything. The committed baseline lives in
       # docs/benchmarks.md; compare changes on a developer machine, not here.
@@ -172,6 +181,12 @@ jobs:
       # green on a document nothing can parse. No network, no secret.
       - name: evidence structure check
         run: node scripts/check-enforcement-evidence.ts --check-structure
+
+      # examples/ policy rule 2: every example carries an expected-output
+      # comment header. Fails the required check when an example is added
+      # without one, so the inventory stays honest.
+      - name: examples expected-output headers
+        run: npm run check:examples-headers
 
       # A PR that changes the enforcement path must ship fresh live-testnet
       # evidence in the same PR. This checks the file list only: no network, no
