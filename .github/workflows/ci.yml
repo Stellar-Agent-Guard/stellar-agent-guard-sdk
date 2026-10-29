@@ -2,8 +2,8 @@
 # `ci`. The job below is named `ci` — both the job name and its `name:` key — so
 # the check this workflow reports is the one the ruleset gates on.
 #
-# `ci` is the ONLY check that gates a merge, and it deliberately touches no
-# secret: every step either really runs or the job fails.
+# `ci` is the required aggregate check. It succeeds only when the Node 24
+# checks and every blocking Node test matrix leg succeed.
 #
 # The live testnet suite is deliberately NOT here. It is:
 #   (a) required locally before any PR that touches the enforcement path, with
@@ -18,12 +18,11 @@
 # ---------------------------------------------------------------------------
 # Pipeline shape (issue #101) — why two jobs, and why not more:
 #
-#   * `npm ci` runs once per job, and `actions/setup-node` restores the npm
-#     cache keyed on `package-lock.json` (`cache: npm`), so the second job's
-#     install is a cache hit. There is deliberately no fan-out for
-#     typecheck/lint/test/build: splitting those would pay the ~5s install and
-#     ~3s node setup again in every job for no parallel win, because each already
-#     runs in a couple of seconds.
+#   * `ci-checks` keeps typecheck, lint, build and consumer checks on Node 24.
+#     `node-tests` runs unit tests and coverage on Node 24 and 26 in parallel
+#     with those checks. The final `ci` aggregate is the required branch check
+#     and blocks unless both jobs pass. The extra matrix leg adds its install
+#     and test time as parallel runner work, not to the critical path.
 #   * The one split is the informational benchmark, and it is a *latency* split.
 #     `decode-path benchmarks (informational)` is `continue-on-error: true`, is
 #     never a gate, and at ~16s it was the largest single step in the required
@@ -41,7 +40,8 @@
 #     include `${{ matrix.node-version }}` in the artifact name to retain one
 #     diagnostic artifact per leg.
 #
-# Every gate is still enforced; none is dropped, and none moved out of `ci`:
+# Every gate is still enforced; unit and coverage tests run in `node-tests`,
+# with other required checks in `ci-checks` and `ci` as their aggregate:
 #   typecheck -> `typecheck`        lint      -> `lint`
 #   format    -> `format check`      test      -> `unit tests`
 #   build     -> `build`
@@ -60,8 +60,37 @@ permissions:
   contents: read
 
 jobs:
-  ci:
-    name: ci
+  # Unit tests run on Node 24 (the declared minimum and current LTS) and Node 26
+  # (the current release as of 2026-10-21). Node 25 is EOL; Node 27 has not
+  # shipped. Both legs are blocking. Typecheck and lint stay once on Node 24 in
+  # `ci-checks`; the matrix adds a second install/test leg (~5s setup + test time).
+  node-tests:
+    name: unit tests (Node ${{ matrix.node-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [24, 26]
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      - name: unit tests
+        run: npm test
+
+      - name: coverage floor (verdict-critical path)
+        run: npm run test:coverage:floor
+
+  ci-checks:
+    name: ci checks (Node 24)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -78,8 +107,8 @@ jobs:
       - name: install
         run: npm ci
 
-      # Cheapest static gates first (~2s each): a typo or lint error should fail
-      # the run before the ~14s test suite or the ~6s pack/install step starts.
+      # Static gates run once on the primary Node 24 leg; unit and coverage
+      # tests run on every Node version in the blocking node-tests matrix.
       - name: typecheck
         run: npm run typecheck
 
