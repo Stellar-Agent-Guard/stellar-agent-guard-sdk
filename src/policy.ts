@@ -382,9 +382,10 @@ export type CheckResult =
 export function policyToScVal(policy: ReadonlyPolicyConfig): xdr.ScVal {
   const failures = validatePolicyForEncoding(policy);
   if (failures.length > 0) throw new PolicyEncodeError(failures);
-  // `protocol_calls_per_window` is a contract-side `u32`: validate the range
-  // here rather than let a narrowing conversion or a silent truncation decide
-  // (issue #260). Absent means the contract default of 0.
+
+  // Defence in depth for a validated draft: `protocol_calls_per_window` is a
+  // contract-side `u32`, so keep the range check at the encode boundary too.
+  // Absent means the contract default of 0.
   const protocolCallsPerWindow = policy.protocol_calls_per_window ?? 0;
   if (
     !Number.isInteger(protocolCallsPerWindow) ||
@@ -1367,10 +1368,12 @@ function describeEncodingValue(value: unknown): string {
  *   is rejected instead of being rounded by `nativeToScVal`, and numeric
  *   strings are rejected rather than coerced;
  * - addresses are checksum-valid Stellar strkeys;
- * - protocol function names are valid Soroban symbols;
+ * - protocol function names are valid Soroban symbols, and a protocol rule's
+ *   optional `paused` flag is a boolean;
  * - the optional `recipient_window_caps`/`blocked_recipients` lists are
- *   well-formed even though the current contract `PolicyConfig` does not carry
- *   them, so an editor draft is never silently submitted with a broken list.
+ *   well-formed, so an editor draft is never silently submitted with a broken
+ *   list;
+ * - `protocol_calls_per_window`, when present, fits the contract's `u32`.
  *
  * Every failure is returned, in policy field order, so a form can render all of
  * them at once. Returning an empty array means `policyToScVal` will encode the
@@ -1401,6 +1404,7 @@ export function validatePolicyForEncoding(policy: unknown): PolicyEncodingFailur
   validateEncodingInteger(raw, "active_until", "u64", failures);
   validateEncodingBoolean(raw.paused, "paused", failures);
   validateEncodingInteger(raw, "dms_grace_secs", "u64", failures);
+  validateEncodingProtocolCallsPerWindow(raw.protocol_calls_per_window, failures);
   validateEncodingRecipientWindowCaps(raw.recipient_window_caps, failures);
   validateEncodingAddressArray(raw.blocked_recipients, "blocked_recipients", true, failures);
 
@@ -1566,6 +1570,14 @@ function validateEncodingProtocols(value: unknown, failures: PolicyEncodingFailu
       validateEncodingAddress(rule.contract, `${path}.contract`, failures);
     }
 
+    if (rule.paused !== undefined && typeof rule.paused !== "boolean") {
+      failures.push({
+        path: `${path}.paused`,
+        rule: "invalid_type",
+        message: `expected a boolean paused flag, got ${describeEncodingValue(rule.paused)}`,
+      });
+    }
+
     if (rule.fns === undefined) {
       failures.push({
         path: `${path}.fns`,
@@ -1599,6 +1611,29 @@ function validateEncodingProtocols(value: unknown, failures: PolicyEncodingFailu
       }
     }
   });
+}
+
+/** `protocol_calls_per_window` is the contract's `u32`; absent means 0. */
+function validateEncodingProtocolCallsPerWindow(
+  value: unknown,
+  failures: PolicyEncodingFailure[],
+): void {
+  if (value === undefined) return;
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    failures.push({
+      path: "protocol_calls_per_window",
+      rule: "invalid_type",
+      message: `expected a u32 integer, got ${describeEncodingValue(value)}`,
+    });
+    return;
+  }
+  if (value < 0 || value > U32_MAX) {
+    failures.push({
+      path: "protocol_calls_per_window",
+      rule: "integer_out_of_range",
+      message: `${value} is outside the u32 range [0, ${U32_MAX}]`,
+    });
+  }
 }
 
 function validateEncodingRecipientWindowCaps(
