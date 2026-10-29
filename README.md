@@ -294,6 +294,7 @@ Adapter callbacks (`onDecision`, `onBlocked`) are never awaited. A callback that
 
 #### Branded Address Types (v0.2.0+)
 
+<!-- no-check: illustrative snippet; `userInput` is an undeclared placeholder. -->
 This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
 
 **Type Guards:**
@@ -316,6 +317,7 @@ if (!isContractAddress(userInput)) {
 
 #### Branded Address Types (v0.2.0+)
 
+<!-- no-check: illustrative snippet; `userInput` is an undeclared placeholder. -->
 This version introduces **branded types** to distinguish contract addresses (C...) from account addresses (G...) at compile time, preventing a common source of bugs where an address is used in the wrong context.
 
 **Type Guards:**
@@ -429,6 +431,7 @@ account-state changes.
 
 ### Cost Pre-Checking with Policy Context
 
+<!-- no-check: illustrative snippet; `interceptor` and `args` placeholders are not declared in-block. -->
 ```ts
 import { CostPreChecker } from "stellar-agent-guard-sdk";
 

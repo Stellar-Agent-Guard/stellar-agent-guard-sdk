@@ -69,9 +69,10 @@
   },
   "homepage": "https://github.com/stellar-agent-guard/stellar-agent-guard-sdk#README",
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node api.js && tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "check:strict-ratchet": "node scripts/check-strict-ratchet.mjs",
+    "check:readme-snippets": "node --import tsx scripts/check-readme-snippets.ts",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
