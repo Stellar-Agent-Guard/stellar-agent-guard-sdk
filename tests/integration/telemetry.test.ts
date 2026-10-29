@@ -20,7 +20,12 @@ import {
   describeGuardEvent,
   guardEventsFromDiagnostics,
 } from "../../src/telemetry.ts";
-import { TESTNET_PASSPHRASE, installPolicy, loadPhase2Config, type Phase2Config } from "./harness.ts";
+import {
+  TESTNET_PASSPHRASE,
+  installPolicy,
+  loadPhase2Config,
+  type Phase2Config,
+} from "./harness.ts";
 
 let config: Phase2Config;
 let server: rpc.Server;
