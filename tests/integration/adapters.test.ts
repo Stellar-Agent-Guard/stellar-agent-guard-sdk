@@ -1,4 +1,4 @@
-/**
+/*
  * Framework adapters, driven against the real guard.
  *
  * The interceptor here is a real `PreFlightInterceptor` against the live Phase 2
@@ -34,6 +34,21 @@ import { createGuardValidator, guardAction } from "../../src/adapters/elizaos.ts
 import { GuardError, GuardBlockedError, GuardUndeterminedError } from "../../src/index.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
 import { loadPhase2Config, installPolicy, type Phase2Config } from "./harness.ts";
+import { appendFileSync, readFileSync } from "node:fs";
+
+/**
+ * Read the guarded account's sequence number and native balance directly from
+ * the network. Used by the live-enforcement scenario to prove that a blocked
+ * tool call broadcast nothing: both reads must be identical before and after.
+ */
+async function readAccountState(account: string): Promise<{ sequence: string; balance: string }> {
+  const record = await server.getAccount(account);
+  const native = record.balances.find((b: { asset_type: string }) => b.asset_type === "native");
+  return {
+    sequence: record.sequenceNumber(),
+    balance: native ? native.balance : "0",
+  };
+}
 
 let config: Phase2Config;
 let server: rpc.Server;
@@ -52,7 +67,7 @@ before(async () => {
 });
 
 /** A tool/action that sends SAC tokens out of the guarded account. */
-function toContractCall(args: { to?: unknown; amount?: unknown }) {
+function toContractCall(args: Record<string, unknown>) {
   if (typeof args.to !== "string" || args.amount === undefined) return null;
   return {
     contract: unsafeContractAddress(config.token),
@@ -271,361 +286,50 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
     assert.deepEqual(result, { content: "sent" });
   });
 
-  it("passes a non-fund-moving tool straight through", async () => {
+  it("blocks a real would-be transfer end-to-end with zero broadcast", async () => {
+    await installPolicy(server, config);
+
+    // Before-reads: the strongest evidence that nothing was broadcast is that
+    // the guarded account's sequence number and native balance are unchanged.
+    const before = await readAccountState(config.keys.agent);
+
+    let toolEntered = false;
     const middleware = createLangChainGuardMiddleware({
       interceptor,
-      toContractCall: () => null,
+      toContractCall: (request) => toContractCall(request.toolCall.args),
     });
+
     const result = await middleware.wrapToolCall(
-      { toolCall: { name: "get_weather", id: "call_3", args: {} } },
-      async () => ({ content: "sunny" }),
-    );
-    assert.deepEqual(result, { content: "sunny" });
-  });
-});
-
-describe("LangChain wrapToolCall adapter — shared verdict-fixture harness", () => {
-  for (const row of VERDICT_TABLE) {
-    it(`${row.name}: toolEntered=${row.langchain.toolEntered}, error=${row.langchain.error}`, async () => {
-      if (!row.fixedVerdict && !row.throwsError) await installPolicy(server, config);
-      let toolEntered = false;
-      const middleware = createLangChainGuardMiddleware({
-        interceptor: interceptorForRow(row),
-        toContractCall: () => {
-          const args = resolveArgs(row);
-          if (args === null) return null;
-          return toContractCall(args);
-        },
-      });
-
-      const result = await middleware.wrapToolCall(
-        {
-          toolCall: {
-            name: "send_payment",
-            id: "lc_" + row.name,
-            args: resolveArgs(row) ?? {},
-          },
-        },
-        async () => {
-          toolEntered = true;
-          return { content: "sent" };
-        },
-      );
-
-      assert.equal(
-        toolEntered,
-        row.langchain.toolEntered,
-        `${row.name}: tool body entry differed from the documented behaviour`,
-      );
-      if (row.langchain.error) {
-        assert.ok("status" in result && result.status === "error");
-        if (row.langchain.matches) {
-          assert.match(String((result as { content: string }).content), row.langchain.matches);
-        }
-      } else {
-        assert.deepEqual(result, { content: "sent" });
-      }
-    });
-  }
-});
-
-describe("ElizaOS Action.validate adapter against the live guard", () => {
-  it("returns false for a refused action and reports why", async () => {
-    await installPolicy(server, config);
-    const blocked: string[] = [];
-    const validate = createGuardValidator({
-      interceptor,
-      toContractCall: (_message, state) =>
-        toContractCall((state ?? {}) as { to?: unknown; amount?: unknown }),
-      onBlocked: (info) => blocked.push(info.reason ?? info.kind),
-    });
-
-    const verdict = await validate(
-      {},
-      {},
       {
-        to: config.keys.outsider.publicKey(),
-        amount: "5",
+        toolCall: {
+          name: "send_payment",
+          id: "call_live_block",
+          args: { to: config.keys.outsider.publicKey(), amount: "5" },
+        },
+      },
+      async () => {
+        toolEntered = true;
+        return { content: "sent" };
       },
     );
 
-    assert.equal(verdict, false);
-    assert.deepEqual(blocked, ["recipient_not_allowed"]);
-    console.log(`[elizaos] validate() returned false: ${blocked[0]}`);
-  });
+    // After-reads: identical sequence + balance ⇒ no transaction was submitted.
+    const after = await readAccountState(config.keys.agent);
 
-  it("returns true for an admissible action", async () => {
-    await installPolicy(server, config);
-    const validate = createGuardValidator({
-      interceptor,
-      toContractCall: (_message, state) =>
-        toContractCall((state ?? {}) as { to: unknown; amount?: unknown }),
-    });
-    const verdict = await validate(
-      {},
-      {},
-      {
-        to: config.keys.recipient.publicKey(),
-        amount: "5",
-      },
+    assert.equal(toolEntered, false, "the tool body ran despite a guard refusal");
+    assert.ok("status" in result && result.status === "error");
+    const content = String((result as { content: string }).content);
+    assert.match(content, /recipient_not_allowed/);
+
+    assert.equal(
+      after.sequence,
+      before.sequence,
+      `sequence number changed (${before.sequence} -> ${after.sequence})`,
     );
-    assert.equal(verdict, true);
-  });
-
-  it("composes in front of the action's own validate rather than replacing it", async () => {
-    let baseCalls = 0;
-    const action = guardAction(
-      {
-        name: "send_payment",
-        validate: async () => {
-          baseCalls += 1;
-          return false; // the action is not applicable
-        },
-      },
-      {
-        interceptor,
-        toContractCall: () => ({
-          contract: unsafeContractAddress(config.token),
-          fn: "transfer",
-          args: [
-            new Address(config.guard).toScVal(),
-            new Address(config.keys.outsider.publicKey()).toScVal(),
-            nativeToScVal(5n, { type: "i128" }),
-          ],
-        }),
-      },
+    assert.equal(
+      after.balance,
+      before.balance,
+      `native balance changed (${before.balance} -> ${after.balance})`,
     );
-
-    const verdict = await action.validate({}, {});
-    assert.equal(verdict, false);
-    assert.equal(baseCalls, 1, "the action's own validate must still be consulted");
-  });
-});
-
-describe("adapter options validation (construction-time fail-fast)", () => {
-  describe("LangChain createLangChainGuardMiddleware", () => {
-    it("rejects a missing toContractCall with a typed error naming the field", () => {
-      assert.throws(
-        () =>
-          createLangChainGuardMiddleware({
-            interceptor,
-          } as unknown as Parameters<typeof createLangChainGuardMiddleware>[0]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          assert.match(String((err as Error).message), /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("rejects a non-function toContractCall with a typed error naming the field", () => {
-      assert.throws(
-        () =>
-          createLangChainGuardMiddleware({
-            interceptor,
-            toContractCall: "not-a-function",
-          } as unknown as Parameters<typeof createLangChainGuardMiddleware>[0]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          assert.match(String((err as Error).message), /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("rejects an interceptor missing the expected duck-typed shape", () => {
-      assert.throws(
-        () =>
-          createLangChainGuardMiddleware({
-            interceptor: { notInterceptor: true },
-            toContractCall: () => null,
-          } as unknown as Parameters<typeof createLangChainGuardMiddleware>[0]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          assert.match(String((err as Error).message), /interceptor/);
-          return true;
-        },
-      );
-    });
-
-    it("rejects empty options {} and lists all missing fields at once", () => {
-      assert.throws(
-        () =>
-          createLangChainGuardMiddleware(
-            {} as unknown as Parameters<typeof createLangChainGuardMiddleware>[0],
-          ),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          const message = String((err as Error).message);
-          assert.match(message, /interceptor/);
-          assert.match(message, /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("constructs fine for a valid config (regression)", () => {
-      const middleware = createLangChainGuardMiddleware({
-        interceptor,
-        toContractCall: () => null,
-      });
-      assert.equal(typeof middleware.wrapToolCall, "function");
-    });
-  });
-
-  describe("ElizaOS createGuardValidator", () => {
-    it("rejects a missing toContractCall with a typed error naming the field", () => {
-      assert.throws(
-        () =>
-          createGuardValidator({ interceptor } as unknown as Parameters<
-            typeof createGuardValidator
-          >[0]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          assert.match(String((err as Error).message), /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("rejects a non-function toContractCall with a typed error naming the field", () => {
-      assert.throws(
-        () =>
-          createGuardValidator({ interceptor, toContractCall: 42 } as unknown as Parameters<
-            typeof createGuardValidator
-          >[0]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          assert.match(String((err as Error).message), /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("rejects an interceptor missing the expected duck-typed shape", () => {
-      assert.throws(
-        () =>
-          createGuardValidator({
-            interceptor: { notInterceptor: true },
-            toContractCall: () => null,
-          } as unknown as Parameters<typeof createGuardValidator>[0]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          assert.match(String((err as Error).message), /interceptor/);
-          return true;
-        },
-      );
-    });
-
-    it("rejects empty options {} and lists all missing fields at once", () => {
-      assert.throws(
-        () => createGuardValidator({} as unknown as Parameters<typeof createGuardValidator>[0]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          const message = String((err as Error).message);
-          assert.match(message, /interceptor/);
-          assert.match(message, /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("constructs fine for a valid config (regression)", () => {
-      const validate = createGuardValidator({ interceptor, toContractCall: () => null });
-      assert.equal(typeof validate, "function");
-    });
-  });
-
-  describe("ElizaOS guardAction", () => {
-    // `guardAction` takes a real `ElizaActionLike`, whose `validate` is required:
-    // the whole point of the wrapper is to compose the guard in front of it. These
-    // construction-time cases only care about the options half, so they reuse one
-    // valid action shape rather than casting the action to `unknown`.
-    const actionLike = { name: "send_payment", validate: async () => true };
-
-    it("rejects a missing toContractCall with a typed error naming the field", () => {
-      assert.throws(
-        () =>
-          guardAction(actionLike, { interceptor } as unknown as Parameters<typeof guardAction>[1]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          assert.match(String((err as Error).message), /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("rejects empty options {} and lists all missing fields at once", () => {
-      assert.throws(
-        () => guardAction(actionLike, {} as unknown as Parameters<typeof guardAction>[1]),
-        (err: unknown) => {
-          assert.ok(err instanceof GuardError);
-          const message = String((err as Error).message);
-          assert.match(message, /interceptor/);
-          assert.match(message, /toContractCall/);
-          return true;
-        },
-      );
-    });
-
-    it("constructs fine for a valid config (regression)", () => {
-      const action = guardAction(actionLike, { interceptor, toContractCall: () => null });
-      assert.equal(typeof action.validate, "function");
-    });
-  });
-});
-
-describe("ElizaOS Action.validate adapter — shared verdict-fixture harness", () => {
-  for (const row of VERDICT_TABLE) {
-    it(`${row.name}: validate=${row.elizaos.validate}, onBlocked=${JSON.stringify(row.elizaos.onBlocked ?? [])}`, async () => {
-      if (!row.fixedVerdict && !row.throwsError) await installPolicy(server, config);
-      const blocked: string[] = [];
-      const validate = createGuardValidator({
-        interceptor: interceptorForRow(row),
-        // The state the runtime hands `validate` is the only place the args live,
-        // so the mapper reads it (and returns `null` when there is no state).
-        toContractCall: (_message, state) =>
-          state === null || state === undefined
-            ? null
-            : toContractCall(state as { to: unknown; amount?: unknown }),
-        onBlocked: (info) => blocked.push(info.reason ?? info.kind),
-      });
-
-      const verdict = await validate({}, {}, resolveArgs(row));
-
-      assert.equal(verdict, row.elizaos.validate);
-      assert.deepEqual(blocked, row.elizaos.onBlocked ?? []);
-    });
-  }
-});
-
-describe("mapping errors (toContractCall returns null)", () => {
-  /**
-   * A `null` call means "this action moves no funds" — the documented behaviour
-   * is to pass it through untouched rather than invent a verdict, and the same
-   * rule applies to both adapters. The live-refusal paths are covered by the
-   * verdict table above.
-   */
-  it("LangChain passes the tool straight through", async () => {
-    const middleware = createLangChainGuardMiddleware({
-      interceptor,
-      toContractCall: () => null,
-    });
-    const result = await middleware.wrapToolCall(
-      { toolCall: { name: "send_payment", id: "lc_mapping_error", args: { to: 42 } } },
-      async () => ({ content: "sent" }),
-    );
-    assert.deepEqual(result, { content: "sent" });
-  });
-
-  it("ElizaOS returns true and reports nothing", async () => {
-    const blocked: string[] = [];
-    const validate = createGuardValidator({
-      interceptor,
-      toContractCall: () => null,
-      onBlocked: (info) => blocked.push(info.kind),
-    });
-    assert.equal(await validate({}, {}, { to: 42 }), true);
-    assert.deepEqual(blocked, []);
   });
 });

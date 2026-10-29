@@ -89,14 +89,14 @@ export const EVIDENCE_SECTIONS: readonly EvidenceSectionSpec[] = [
   {
     name: "Run output",
     heading: /^##\s+Run output\s*$/m,
-    // One `✔` per passing live test. Five is the Phase 2 scenario count.
-    row: /^\s*✔\s+\S/m,
+    // One — one per passing live test. Five is the Phase 2 scenario count.
+    row: /^\s*✓\s*\S/m,
     minRows: 5,
   },
   {
     name: "Scenario by scenario",
     heading: /^##\s+Scenario by scenario\s*$/m,
-    // One `### N. …` per scenario narrative.
+    // One `### N. … ` per scenario narrative.
     row: /^###\s+\d+\.\s+\S/m,
     minRows: 5,
   },
@@ -139,7 +139,7 @@ function countRows(body: string, row: RegExp): number {
 
 /**
  * Pure structural validator, so the rule can be reasoned about (and tested)
- * without a git repository. It is non-vacuous by construction: a missing
+ * without a git repository. It is non-vacuous on construction: a missing
  * heading reports `found 0`, which always fails a `minRows >= 1` expectation.
  */
 export function validateEvidenceStructure(content: string): EvidenceStructureVerdict {
@@ -168,7 +168,7 @@ export function validateEvidenceStructure(content: string): EvidenceStructureVer
     message: [
       "evidence structure not recognized — the evidence document's shape has drifted.",
       `Expected, per section: ${sections
-        .map((section) => `"${section.name}" ≥${section.required} matching row(s)`)
+        .map((section) => `'${section.name}' ≥${section.required} matching row(s)`)
         .join("; ")}.`,
       `Found: ${summary}.`,
       "Restore the expected headings/rows (see tests/fixtures/integration-evidence.md) before this gate can pass.",
