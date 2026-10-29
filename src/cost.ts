@@ -322,6 +322,11 @@ interface CostResultBreakdown {
   breakdown?: ResourceBreakdown;
 }
 
+/**
+ * What `CostPreChecker` needs: an interceptor to price through, and an optional
+ * fee ceiling to object to. The interceptor is structural (`Pick`), so a
+ * stand-in works anywhere the real one does — the budget arithmetic is pure.
+ */
 export interface CostPreCheckConfig {
   /**
    * The pre-flight interceptor whose `check` produces the network's own price.

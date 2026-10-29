@@ -360,6 +360,10 @@ export class InvokeRetryError extends Error {
   }
 }
 
+/**
+ * The policy answer a dry run reports: the same three arms a pre-flight
+ * decision carries (`admissible` / `blocked` / `undetermined`), as strings.
+ */
 export type InvokeDryRunVerdict = "admissible" | "blocked" | "undetermined";
 
 /**
@@ -511,6 +515,12 @@ export interface InvokePollOptions {
   pollIntervalMs?: number;
 }
 
+/**
+ * What one invocation needs: the RPC server, the fee-paying source, the call,
+ * the network passphrase, and — when the call requires the smart account's own
+ * authorization — `guardAuth`. `dryRun: true` stops before broadcast; `retry`,
+ * `onStep`, and the poll options are all optional.
+ */
 export interface InvokeParams {
   server: rpc.Server;
   /** Classic account that pays the fee and supplies the sequence number. */

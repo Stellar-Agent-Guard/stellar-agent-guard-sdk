@@ -19,6 +19,7 @@ import { hexToBytes } from "./hash.ts";
 import { policyToScVal, type ContractAddress, type ReadonlyPolicyConfig } from "./policy.ts";
 import type { AdminSigner, ContractCall } from "./tx.ts";
 
+/** Stellar Testnet passphrase — the default when an admin op is given no `networkPassphrase`. Pass your own explicitly for any other network. */
 export const DEFAULT_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
 
 const AGENT_PUBLIC_KEY_FORMAT =
@@ -96,6 +97,12 @@ export function buildRotateAgentKeyCall(
   };
 }
 
+/**
+ * Shared parameters for the `submit*` admin operations: RPC server, guard
+ * contract, and admin signer, plus optional overrides. `source` defaults to
+ * `admin`; `networkPassphrase` defaults to `DEFAULT_NETWORK_PASSPHRASE`;
+ * `dryRun` stops before broadcast.
+ */
 export interface AdminOpParams {
   server: rpc.Server;
   guard: ContractAddress;
@@ -125,10 +132,12 @@ export interface AdminOpParams {
   timeoutMs?: number | undefined;
 }
 
+/** An admin op that replaces the guard's policy: `AdminOpParams` plus the policy to set (encoded by the canonical `policyToScVal`). */
 export interface SetPolicyParams extends AdminOpParams {
   policy: ReadonlyPolicyConfig;
 }
 
+/** An admin op that re-binds the agent key: `AdminOpParams` plus the new public key as a `Keypair`, `G...` StrKey, raw 32 bytes, or hex. */
 export interface RotateAgentKeyParams extends AdminOpParams {
   newAgent: string | Uint8Array | Keypair;
 }
