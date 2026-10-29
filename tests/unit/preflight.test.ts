@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Account, Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
+  DEFAULT_MAX_CONCURRENT_SIMULATIONS,
   InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
@@ -17,15 +18,25 @@ import {
   type PreFlightDecision,
 } from "../../src/preflight.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
-import { ContractResponseError } from "../../src/errors.ts";
+import {
+  ContractResponseError,
+  GuardError,
+  GuardUndeterminedError,
+  RateLimitedError,
+} from "../../src/errors.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
 import { unsafeContractAddress, unsafeAccountAddress } from "../../src/policy.ts";
+import { type Clock, FakeClock } from "../../src/clock.ts";
 import { mulberry32, randomUint } from "./seeded-random.ts";
 
-const VALID_GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
-const VALID_TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
+const VALID_GUARD = unsafeContractAddress(
+  "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+);
+const VALID_TOKEN = unsafeContractAddress(
+  "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+);
 const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
 
 function validTransferCall(amount: bigint = 100n): ContractCall {
@@ -62,6 +73,10 @@ function createMockServer(options?: {
     async getLatestLedger() {
       requestCount++;
       return { sequence: 1000 };
+    },
+    async getLedgerEntries() {
+      requestCount++;
+      return { entries: [] };
     },
     async simulateTransaction() {
       requestCount++;
@@ -132,10 +147,7 @@ describe("one-shot pre-flight helpers", () => {
   it("preflight() constructs an interceptor and checks one call", async () => {
     const decision = await preflight(config(), validTransferCall());
     assert.equal(decision.kind, "admissible");
-    assert.equal(
-      decision.kind === "admissible" ? decision.provenance?.ledger : undefined,
-      123_456,
-    );
+    assert.equal(decision.kind === "admissible" ? decision.provenance?.ledger : undefined, 123_456);
   });
 
   it("preflightBatch() constructs an interceptor and checks a batch", async () => {
@@ -149,7 +161,8 @@ describe("validateContractCall validator unit tests", () => {
   describe("contract format validation", () => {
     it("rejects missing or empty contract string", () => {
       assert.throws(
-        () => validateContractCall({ contract: unsafeContractAddress(""), fn: "transfer", args: [] }),
+        () =>
+          validateContractCall({ contract: unsafeContractAddress(""), fn: "transfer", args: [] }),
         (err: unknown) => {
           assert(err instanceof InvalidInputError);
           assert.equal(err.field, "contract");
@@ -160,9 +173,18 @@ describe("validateContractCall validator unit tests", () => {
     });
 
     it("rejects non-StrKey or malformed contract IDs", () => {
-      for (const bad of ["invalid-contract", "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH", "C1234"]) {
+      for (const bad of [
+        "invalid-contract",
+        "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH",
+        "C1234",
+      ]) {
         assert.throws(
-          () => validateContractCall({ contract: unsafeContractAddress(bad), fn: "transfer", args: [] }),
+          () =>
+            validateContractCall({
+              contract: unsafeContractAddress(bad),
+              fn: "transfer",
+              args: [],
+            }),
           (err: unknown) => {
             assert(err instanceof InvalidInputError);
             assert.equal(err.field, "contract");
@@ -224,7 +246,12 @@ describe("validateContractCall validator unit tests", () => {
   describe("args array & ScVal type validation", () => {
     it("rejects non-array args", () => {
       assert.throws(
-        () => validateContractCall({ contract: VALID_TOKEN, fn: "transfer", args: null as unknown as xdr.ScVal[] }),
+        () =>
+          validateContractCall({
+            contract: VALID_TOKEN,
+            fn: "transfer",
+            args: null as unknown as xdr.ScVal[],
+          }),
         (err: unknown) => {
           assert(err instanceof InvalidInputError);
           assert.equal(err.field, "args");
@@ -343,7 +370,12 @@ describe("interceptor.check() input validation and zero RPC round-trips", () => 
     const interceptor = createTestInterceptor(mockServer);
 
     await assert.rejects(
-      async () => interceptor.check({ contract: unsafeContractAddress("not-a-contract"), fn: "transfer", args: [] }),
+      async () =>
+        interceptor.check({
+          contract: unsafeContractAddress("not-a-contract"),
+          fn: "transfer",
+          args: [],
+        }),
       (err: unknown) => {
         assert(err instanceof InvalidInputError);
         assert.equal(err.field, "contract");
@@ -352,7 +384,11 @@ describe("interceptor.check() input validation and zero RPC round-trips", () => 
       },
     );
 
-    assert.equal(mockServer.requestCount, 0, "No RPC calls should be attempted on invalid contract");
+    assert.equal(
+      mockServer.requestCount,
+      0,
+      "No RPC calls should be attempted on invalid contract",
+    );
   });
 
   it("throws InvalidInputError synchronously with 0 RPC requests on missing/invalid method", async () => {
@@ -416,12 +452,19 @@ describe("abortSignal + timeoutMs plumbing", () => {
     assert.ok(error instanceof RpcTimeoutError);
     assert.equal(error.stage, "pre-flight");
     assert.equal(error.aborted, true);
-    assert.equal(mockServer.requestCount, 0, "No RPC calls should be attempted when signal is already aborted");
+    assert.equal(
+      mockServer.requestCount,
+      0,
+      "No RPC calls should be attempted when signal is already aborted",
+    );
   });
 
   it("mid-flight abort returns an undetermined verdict promptly", async () => {
     const controller = new AbortController();
-    const mockServer = createMockServer({ simulateDelayMs: 10_000, simulateSignal: controller.signal });
+    const mockServer = createMockServer({
+      simulateDelayMs: 10_000,
+      simulateSignal: controller.signal,
+    });
     const interceptor = createTestInterceptor(mockServer);
 
     const started = Date.now();
@@ -602,7 +645,8 @@ describe("throw vs verdict contract asymmetry", () => {
     const interceptor = createTestInterceptor(mockServer);
 
     await assert.rejects(
-      async () => interceptor.check({ contract: unsafeContractAddress(""), fn: "transfer", args: [] }),
+      async () =>
+        interceptor.check({ contract: unsafeContractAddress(""), fn: "transfer", args: [] }),
       InvalidInputError,
     );
   });
@@ -688,6 +732,235 @@ describe("throw vs verdict contract asymmetry", () => {
           fn: call.fn,
           argsCount: 3,
         });
+        return true;
+      },
+    );
+  });
+});
+
+describe("assertAllowed and assertBatchAllowed behavior matrix & transport wrapping (issue #90)", () => {
+  const call = validTransferCall(100n);
+
+  it("assertAllowed: admissible verdict returns decision and does not throw", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const decision = await interceptor.assertAllowed(call);
+    assert.equal(decision.allowed, true);
+    assert.equal(decision.kind, "admissible");
+  });
+
+  it("assertAllowed: blocked verdict throws GuardBlockedError and extends GuardError", async () => {
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const interceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardBlockedError, "must be GuardBlockedError");
+        assert.equal(err.reason, "per_tx_cap_exceeded");
+        assert.equal(err.stage, "preflight");
+        assert.deepEqual(err.call, call);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: undetermined verdict throws GuardUndeterminedError and preserves underlying cause", async () => {
+    const server = createMockServer({
+      enforcedSimulateResponse: {
+        minResourceFee: "not-a-fee",
+        result: { auth: [] },
+        transactionData: {
+          getReadOnly: () => [],
+          getReadWrite: () => [],
+        },
+      },
+    });
+    const interceptor = createTestInterceptor(server);
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.ok(err instanceof PreFlightUndeterminedError, "must be backwards compatible alias");
+        assert.equal(err.stage, "preflight");
+        assert.ok(err.cause instanceof ContractResponseError, "must preserve cause");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps generic transport Error in GuardUndeterminedError preserving cause", async () => {
+    const transportError = new Error("fetch failed: connection reset by peer");
+    const server = {
+      ...createMockServer(),
+      async simulateTransaction() {
+        throw transportError;
+      },
+    } as unknown as rpc.Server;
+    const interceptor = createTestInterceptor(server);
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        // Transport error preserved either directly or via simulation error cause
+        const underlying =
+          err.cause === transportError ||
+          (err.cause as { cause?: unknown })?.cause === transportError;
+        assert.ok(underlying, "original Error must be preserved on cause");
+        assert.match(err.message, /fetch failed: connection reset by peer/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps raw uncaught Error from check in GuardUndeterminedError with direct cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const rawError = new Error("raw transport socket exploded");
+    interceptor.check = async () => {
+      throw rawError;
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError);
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, rawError);
+        assert.match(err.message, /raw transport socket exploded/);
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: wraps non-Error throws in GuardUndeterminedError preserving cause", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    interceptor.check = async () => {
+      throw "raw socket error";
+    };
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(call),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardError, "must extend GuardError");
+        assert.ok(err instanceof GuardUndeterminedError, "must be GuardUndeterminedError");
+        assert.strictEqual(
+          err.cause,
+          "raw socket error",
+          "primitive throw must be preserved on cause",
+        );
+        assert.match(err.message, /raw socket error/);
+        assert.equal(err.stage, "preflight");
+        return true;
+      },
+    );
+  });
+
+  it("assertAllowed: rethrows InvalidInputError programmer validation errors directly", async () => {
+    const interceptor = createTestInterceptor(createMockServer());
+    const invalidCall = { contract: "", fn: "", args: [] } as unknown as ContractCall;
+
+    await assert.rejects(
+      async () => interceptor.assertAllowed(invalidCall),
+      (err: unknown) => {
+        assert.ok(err instanceof InvalidInputError, "programmer error must not be wrapped");
+        return true;
+      },
+    );
+  });
+
+  it("assertBatchAllowed: behavior matrix for admissible, blocked, undetermined, and transport failure", async () => {
+    // 1. All admissible
+    const interceptor = createTestInterceptor(createMockServer());
+    const batchRes = await interceptor.assertBatchAllowed([call]);
+    assert.equal(batchRes.overallAdmissible, true);
+
+    // 2. Blocked in batch throws GuardBlockedError
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("recipient_not_allowed"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const blockedInterceptor = createTestInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+    );
+    await assert.rejects(
+      async () => blockedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardBlockedError);
+        assert.equal(err.reason, "recipient_not_allowed");
+        return true;
+      },
+    );
+
+    // 3. Undetermined in batch throws GuardUndeterminedError
+    const undeterminedInterceptor = createTestInterceptor(
+      createMockServer({
+        enforcedSimulateResponse: {
+          minResourceFee: "invalid-fee",
+          result: { auth: [] },
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+        },
+      }),
+    );
+    await assert.rejects(
+      async () => undeterminedInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.ok(err.cause instanceof ContractResponseError);
+        return true;
+      },
+    );
+
+    // 4. Raw transport error during batch throws wrapped GuardUndeterminedError
+    const transportErr = new Error("batch network down");
+    const failingInterceptor = createTestInterceptor(createMockServer());
+    failingInterceptor.checkBatch = async () => {
+      throw transportErr;
+    };
+    await assert.rejects(
+      async () => failingInterceptor.assertBatchAllowed([call]),
+      (err: unknown) => {
+        assert.ok(err instanceof GuardUndeterminedError);
+        assert.strictEqual(err.cause, transportErr);
         return true;
       },
     );
@@ -800,7 +1073,7 @@ function makeHarness() {
 
 function makeInterceptor(
   harness: ReturnType<typeof makeHarness>,
-  options: { cache?: PreFlightCacheOptions } = {},
+  options: { cache?: PreFlightCacheOptions; clock?: Clock } = {},
 ): PreFlightInterceptor {
   return new PreFlightInterceptor({
     server: harness.server,
@@ -809,7 +1082,17 @@ function makeInterceptor(
     agent: harness.source,
     source: harness.source,
     ...(options.cache ? { cache: options.cache } : {}),
+    ...(options.clock ? { clock: options.clock } : {}),
   });
+}
+
+/** A distinct call fingerprint per amount, for exercising cache cardinality. */
+function callWithAmount(amount: bigint): ContractCall {
+  return {
+    contract: CONTRACT,
+    fn: "noop",
+    args: [nativeToScVal(amount, { type: "i128" })],
+  };
 }
 
 describe("PreFlightInterceptor simulation cache", () => {
@@ -1007,14 +1290,305 @@ describe("PreFlightInterceptor simulation cache", () => {
 
   it("rejects a cache configuration without a positive TTL", () => {
     const harness = makeHarness();
-    assert.throws(
-      () => makeInterceptor(harness, { cache: {} }),
-      /requires ttlMs or ttlLedgers/,
-    );
+    assert.throws(() => makeInterceptor(harness, { cache: {} }), /requires ttlMs or ttlLedgers/);
     assert.throws(
       () => makeInterceptor(harness, { cache: { ttlMs: 0 } }),
       /ttlMs must be a positive finite number/,
     );
+  });
+
+  it("evicts the least-recently-used verdict when maxEntries is reached", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000, maxEntries: 2 } });
+    const first = callWithAmount(1n);
+    const second = callWithAmount(2n);
+    const third = callWithAmount(3n);
+
+    await interceptor.check(first); // cache: [first]
+    await interceptor.check(second); // cache: [first, second]
+    await interceptor.check(first); // hit, recency: [second, first]
+    await interceptor.check(third); // miss, evicts second: [first, third]
+    assert.equal(harness.simulations, 6);
+
+    await interceptor.check(first); // still cached
+    assert.equal(harness.simulations, 6);
+    await interceptor.check(second); // was evicted, so it is re-simulated
+    assert.equal(harness.simulations, 8);
+  });
+
+  it("bounds the cache size under many unique calls", async () => {
+    const harness = makeHarness();
+    const maxEntries = 8;
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000, maxEntries } });
+    const calls = Array.from({ length: 100 }, (_, index) => callWithAmount(BigInt(index + 1)));
+
+    for (const call of calls) await interceptor.check(call);
+    assert.equal(harness.simulations, 200);
+
+    // The bound holds after far more unique fingerprints than it can store.
+    const cacheSize = (interceptor as unknown as { cache: Map<string, unknown> }).cache.size;
+    assert.equal(cacheSize, maxEntries);
+
+    // The newest `maxEntries` verdicts survive; the oldest are gone.
+    await interceptor.check(calls[calls.length - 1]!);
+    assert.equal(harness.simulations, 200);
+    await interceptor.check(calls[calls.length - 1 - maxEntries]!);
+    assert.equal(harness.simulations, 202);
+  });
+
+  it("keeps explicit invalidation complete while bounded", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000, maxEntries: 2 } });
+    const first = callWithAmount(1n);
+    const second = callWithAmount(2n);
+
+    await interceptor.check(first);
+    await interceptor.check(second);
+    interceptor.invalidate();
+    await interceptor.check(first);
+    await interceptor.check(second);
+
+    assert.equal(harness.simulations, 8);
+  });
+
+  it("keeps per-call invalidation precise while bounded", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000, maxEntries: 2 } });
+    const first = callWithAmount(1n);
+    const second = callWithAmount(2n);
+
+    await interceptor.check(first);
+    await interceptor.check(second);
+    interceptor.invalidate(first);
+    await interceptor.check(first); // re-simulated
+    await interceptor.check(second); // still cached
+
+    assert.equal(harness.simulations, 6);
+  });
+
+  it("never serves an expired or cross-ledger verdict under eviction pressure", async () => {
+    const harness = makeHarness();
+    const clock = new FakeClock(1_000);
+    const interceptor = makeInterceptor(harness, {
+      cache: { ttlMs: 1, maxEntries: 2 },
+      clock,
+    });
+    const first = callWithAmount(1n);
+    const second = callWithAmount(2n);
+
+    await interceptor.check(first);
+    await interceptor.check(second);
+
+    // The TTL lapses while both fingerprints are still within the bound.
+    clock.advance(2);
+    await interceptor.check(first); // expired: must re-simulate, never reuse
+    assert.equal(harness.simulations, 6);
+
+    // A ledger advance discards the refreshed verdict even though the bound
+    // has room to keep it.
+    harness.advanceLedger();
+    await interceptor.check(first);
+    assert.equal(harness.simulations, 8);
+  });
+
+  it("rejects an invalid maxEntries", () => {
+    const harness = makeHarness();
+    for (const maxEntries of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      assert.throws(
+        () => makeInterceptor(harness, { cache: { ttlMs: 5_000, maxEntries } }),
+        /maxEntries must be a positive integer/,
+      );
+    }
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The cached path honours the caller's bound exactly like the uncached one.
+ *
+ * The cache's ledger lookup is an RPC the check makes, so it carries the same
+ * abort/timeout semantics as the enforcement pipeline: an already-aborted
+ * signal issues no RPC at all, a stalled lookup is bounded rather than waited
+ * on, and a cache failure only falls back to the uncached path while that path
+ * is still inside the caller's bound.
+ */
+describe("PreFlightInterceptor cached checks honour the caller's bound", () => {
+  /** A cached check whose ledger lookup can be stalled or made to fail. */
+  function makeCacheHarness(options: { ledger?: "ok" | "stall" | "fail-cache-read" } = {}) {
+    const source = Keypair.random();
+    let simulations = 0;
+    let latestLedgerCalls = 0;
+    const server = {
+      getAccount: async () => new Account(source.publicKey(), "1"),
+      getLatestLedger: async () => {
+        latestLedgerCalls += 1;
+        if (options.ledger === "stall") {
+          // A ledger read that never answers. The check must not wait on it.
+          return new Promise<{ sequence: number }>(() => {});
+        }
+        if (options.ledger === "fail-cache-read" && latestLedgerCalls === 1) {
+          // The cache's own lookup fails. The enforcement run reads the ledger
+          // too (for the signature expiry), and that read still succeeds.
+          throw new Error("ledger read failed");
+        }
+        return { sequence: 100 };
+      },
+      simulateTransaction: async () => {
+        simulations += 1;
+        return {
+          result: { auth: [] },
+          minResourceFee: "17",
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [{}] },
+        };
+      },
+    } as unknown as rpc.Server;
+
+    return {
+      server,
+      source,
+      call: CALL,
+      get simulations() {
+        return simulations;
+      },
+      get latestLedgerCalls() {
+        return latestLedgerCalls;
+      },
+    };
+  }
+
+  function makeCachedInterceptor(
+    harness: ReturnType<typeof makeCacheHarness>,
+    cache: PreFlightCacheOptions = { ttlMs: 5_000 },
+  ): PreFlightInterceptor {
+    return new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache,
+    });
+  }
+
+  /**
+   * Await `work`, but fail the test instead of hanging when it never settles.
+   *
+   * A stalled RPC used to leave the check pending forever; without this guard
+   * that regression would hang the suite instead of failing it.
+   */
+  async function settleWithin<T>(work: Promise<T>, ms: number, what: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error(`${what} did not settle within ${ms}ms`)), ms);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+  }
+
+  it("issues no RPC at all when the caller's signal is already aborted", async () => {
+    const harness = makeCacheHarness();
+    const interceptor = makeCachedInterceptor(harness);
+    const controller = new AbortController();
+    controller.abort();
+
+    const decision = await interceptor.check(harness.call, { signal: controller.signal });
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, true);
+    // Neither the cache's ledger read nor a simulation is issued.
+    assert.equal(harness.latestLedgerCalls, 0);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("returns an undetermined timeout verdict when the ledger lookup stalls", async () => {
+    const harness = makeCacheHarness({ ledger: "stall" });
+    const interceptor = makeCachedInterceptor(harness);
+    const startedAt = Date.now();
+
+    const decision = await settleWithin(
+      interceptor.check(harness.call, { timeoutMs: 25 }),
+      2_000,
+      "the check",
+    );
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, false);
+    assert.equal(decision.error.timeoutMs, 25);
+    assert.equal(decision.error.stage, "pre-flight");
+    // The stalled read is bounded, not awaited: the check resolves promptly
+    // instead of hanging on an RPC that will never answer.
+    assert.ok(Date.now() - startedAt < 2_000, "the check must not wait on a stalled ledger read");
+    // The uncached enforcement path is not entered once the bound has fired.
+    assert.equal(harness.latestLedgerCalls, 1);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("falls back to the uncached path when the ledger read fails", async () => {
+    const harness = makeCacheHarness({ ledger: "fail-cache-read" });
+    const interceptor = makeCachedInterceptor(harness);
+
+    const decision = await interceptor.check(harness.call);
+
+    // A failed cache lookup is not a security decision: the uncached
+    // enforcement path runs and prices the call.
+    assert.equal(decision.kind, "admissible");
+    assert.equal(harness.latestLedgerCalls, 2);
+    assert.equal(harness.simulations, 2);
+  });
+
+  it("does not enter the uncached path once the caller's signal has fired", async () => {
+    const controller = new AbortController();
+    const harness = makeCacheHarness();
+    const interceptor = new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache: {
+        ttlMs: 5_000,
+        // The revision read fails *and* the caller gives up while it is in
+        // flight: the cache cannot be consulted, and the uncached path is no
+        // longer inside the caller's bound.
+        policyRevision: () => {
+          controller.abort();
+          throw new Error("revision unavailable");
+        },
+      },
+    });
+
+    const decision = await interceptor.check(harness.call, { signal: controller.signal });
+
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof RpcTimeoutError);
+    assert.equal(decision.error.aborted, true);
+    // No ledger read and no simulation: a caller that gave up gets no work.
+    assert.equal(harness.latestLedgerCalls, 0);
+    assert.equal(harness.simulations, 0);
+  });
+
+  it("still serves a cached verdict from a bounded ledger lookup", async () => {
+    const harness = makeCacheHarness();
+    const interceptor = makeCachedInterceptor(harness);
+
+    const first = await interceptor.check(harness.call, { timeoutMs: 1_000 });
+    const second = await interceptor.check(harness.call, { timeoutMs: 1_000 });
+
+    assert.equal(first.kind, "admissible");
+    assert.equal(second, first);
+    // The second check reused the cached verdict: one ledger read for the
+    // cache context, one inside the enforcement run, and no new simulation.
+    assert.equal(harness.latestLedgerCalls, 3);
+    assert.equal(harness.simulations, 2);
+    assert.equal(interceptor.getCacheStats().hits, 1);
   });
 });
 
@@ -1255,9 +1829,7 @@ describe("PreFlightInterceptor.checkBatch()", () => {
         }
         return admissibleSimulation("10");
       },
-      ...(options.ledgerEntries
-        ? { getLedgerEntries: async () => options.ledgerEntries?.() }
-        : {}),
+      ...(options.ledgerEntries ? { getLedgerEntries: async () => options.ledgerEntries?.() } : {}),
     } as unknown as rpc.Server;
     return {
       server,
@@ -1431,10 +2003,9 @@ describe("PreFlightInterceptor.checkBatch()", () => {
         throw new Error("rpc unavailable");
       },
     });
-    const decision = await batchInterceptor(
-      harness.server,
-      policyWithWindowCap(1_000n),
-    ).checkBatch([transferCall(10n), transferCall(20n)]);
+    const decision = await batchInterceptor(harness.server, policyWithWindowCap(1_000n)).checkBatch(
+      [transferCall(10n), transferCall(20n)],
+    );
 
     assert.equal(decision.admissible, false);
     assert.equal(decision.kind, "undetermined");
@@ -1457,10 +2028,10 @@ describe("PreFlightInterceptor.checkBatch()", () => {
     });
     // The policy is supplied (cap 100) but the committed spend is read from the
     // ledger: an absent entry means 0n, so 60 + 40 lands exactly on the cap.
-    const decision = await batchInterceptor(
-      harness.server,
-      policyWithWindowCap(100n),
-    ).checkBatch([transferCall(60n), transferCall(40n)]);
+    const decision = await batchInterceptor(harness.server, policyWithWindowCap(100n)).checkBatch([
+      transferCall(60n),
+      transferCall(40n),
+    ]);
 
     assert.equal(decision.admissible, true);
     assert.equal(decision.kind, "admissible");
@@ -1476,10 +2047,10 @@ describe("PreFlightInterceptor.checkBatch()", () => {
         throw new Error("rpc unavailable");
       },
     });
-    const decision = await batchInterceptor(
-      harness.server,
-      policyWithWindowCap(1_000n),
-    ).checkBatch([transferCall(10n), transferCall(20n)], { initialWindowSpent: 0n });
+    const decision = await batchInterceptor(harness.server, policyWithWindowCap(1_000n)).checkBatch(
+      [transferCall(10n), transferCall(20n)],
+      { initialWindowSpent: 0n },
+    );
 
     assert.equal(decision.admissible, true);
     assert.equal(decision.kind, "admissible");
@@ -1569,14 +2140,11 @@ describe("PreFlightInterceptor.checkBatch()", () => {
     });
     const interceptor = batchInterceptor(server, policyWithWindowCap(1_000n));
 
-    await assert.rejects(
-      interceptor.assertBatchAllowed([transferCall(10n)]),
-      (error: unknown) => {
-        assert.ok(error instanceof PreFlightUndeterminedError);
-        assert.match((error as Error).message, /batch staging state unavailable/);
-        return true;
-      },
-    );
+    await assert.rejects(interceptor.assertBatchAllowed([transferCall(10n)]), (error: unknown) => {
+      assert.ok(error instanceof PreFlightUndeterminedError);
+      assert.match((error as Error).message, /batch staging state unavailable/);
+      return true;
+    });
   });
 
   /**
@@ -1659,9 +2227,8 @@ describe("PreFlightInterceptor.checkBatch()", () => {
       windowCap: bigint,
       initialWindowSpent: bigint,
     ): string {
-      const replay = JSON.stringify(
-        { windowCap, initialWindowSpent, members },
-        (_key, value) => (typeof value === "bigint" ? value.toString() : value),
+      const replay = JSON.stringify({ windowCap, initialWindowSpent, members }, (_key, value) =>
+        typeof value === "bigint" ? value.toString() : value,
       );
       return `seed 0x${seed.toString(16)} iteration ${iteration}\nbatch: ${replay}`;
     }
@@ -1840,11 +2407,240 @@ describe("PreFlightInterceptor.checkBatch()", () => {
               windowCap,
               initialWindowSpent,
             )}\nexpected kinds: ${expected.kinds.join(", ")}\n${
-              error instanceof Error ? error.stack ?? error.message : String(error)
+              error instanceof Error ? (error.stack ?? error.message) : String(error)
             }`,
           );
         }
       }
     });
+  });
+});
+
+describe("PreFlightInterceptor concurrency limit and 429 handling (issue #40)", () => {
+  const PASSPHRASE = "Test SDF Network ; September 2015";
+
+  /** A 429 as the SDK's HTTP client surfaces it (axios-style). */
+  function rateLimitError(retryAfter?: string): Error {
+    return Object.assign(new Error("Request failed with status code 429"), {
+      response: {
+        status: 429,
+        headers: retryAfter === undefined ? {} : { "retry-after": retryAfter },
+      },
+    });
+  }
+
+  const okSimulation = {
+    minResourceFee: "100",
+    latestLedger: 123_456,
+    result: { auth: [] },
+    transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+  };
+
+  /**
+   * A transport that records how many checks are in flight at once. Every check
+   * runs exactly two simulations on one transaction sequence number, so a check
+   * is "in flight" from its first simulation start to its second one finishing.
+   */
+  function instrumentedServer(options: { delayMs?: number } = {}) {
+    const active = new Set<string>();
+    const seen = new Map<string, number>();
+    let peak = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction(tx: { sequence: string }) {
+        const key = tx.sequence;
+        const count = (seen.get(key) ?? 0) + 1;
+        seen.set(key, count);
+        active.add(key);
+        peak = Math.max(peak, active.size);
+        await new Promise((resolve) => setTimeout(resolve, options.delayMs ?? 5));
+        if (count === 2) active.delete(key);
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    return {
+      server,
+      get peak() {
+        return peak;
+      },
+    };
+  }
+
+  function interceptorFor(server: rpc.Server, extra: Record<string, unknown> = {}) {
+    return new PreFlightInterceptor({
+      server,
+      networkPassphrase: PASSPHRASE,
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      coalesceInFlight: false,
+      ...extra,
+    });
+  }
+
+  it("keeps at most the configured number of simulations in flight across 20 parallel checks", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server, { maxConcurrentSimulations: 3 });
+    const decisions = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.ok(
+      decisions.every((d) => d.kind === "admissible"),
+      "every queued check must still get its verdict",
+    );
+    assert.ok(transport.peak >= 2, `limit should be reached, peak ${transport.peak}`);
+    assert.ok(transport.peak <= 3, `at most 3 in flight, saw ${transport.peak}`);
+  });
+
+  it("defaults to 4 concurrent simulations", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server);
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.equal(DEFAULT_MAX_CONCURRENT_SIMULATIONS, 4);
+    assert.ok(transport.peak <= 4, `default limit is 4, saw ${transport.peak}`);
+  });
+
+  it("is observably unbounded when the limit is raised (the instrument can see overlap)", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server, { maxConcurrentSimulations: 100 });
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.ok(transport.peak > 4, `expected overlap above 4, saw ${transport.peak}`);
+  });
+
+  it("rejects an unusable limit or backoff at construction", () => {
+    const { server } = instrumentedServer();
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      assert.throws(() => interceptorFor(server, { maxConcurrentSimulations: bad }), TypeError);
+    }
+    assert.throws(() => interceptorFor(server, { rateLimit: { backoffMs: -1 } }), TypeError);
+    assert.throws(
+      () => interceptorFor(server, { rateLimit: { maxBackoffMs: Number.NaN } }),
+      TypeError,
+    );
+  });
+
+  it("does not let a queued check that timed out take a slot later", async () => {
+    let started = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        started++;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    const interceptor = interceptorFor(server, { maxConcurrentSimulations: 1 });
+    const first = interceptor.check(validTransferCall(1n));
+    const second = await interceptor.check(validTransferCall(2n), { timeoutMs: 10 });
+    assert.equal(second.kind, "undetermined");
+    assert.ok(second.kind === "undetermined" && second.error instanceof RpcTimeoutError);
+    assert.equal((await first).kind, "admissible");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(started, 2, "only the first check's two simulations ran");
+  });
+
+  /** A server whose first `failures` simulations are rate limited. */
+  function limitedServer(failures: number, retryAfter?: string) {
+    let calls = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        calls++;
+        if (calls <= failures) throw rateLimitError(retryAfter);
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    return { server, calls: () => calls };
+  }
+
+  function recordingClock() {
+    const slept: number[] = [];
+    const clock: Clock = {
+      now: () => Date.now(),
+      sleep: async (ms: number) => {
+        slept.push(ms);
+      },
+    };
+    return { clock, slept };
+  }
+
+  it("waits once on a first 429 and then succeeds", async () => {
+    const { server } = limitedServer(1);
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+    assert.deepEqual(slept, [500], "one bounded default backoff");
+  });
+
+  it("honours Retry-After, capped at maxBackoffMs", async () => {
+    const short = recordingClock();
+    await interceptorFor(limitedServer(1, "2").server, { clock: short.clock }).check(
+      validTransferCall(),
+    );
+    assert.deepEqual(short.slept, [2000]);
+
+    const long = recordingClock();
+    await interceptorFor(limitedServer(1, "3600").server, {
+      clock: long.clock,
+      rateLimit: { maxBackoffMs: 1500 },
+    }).check(validTransferCall());
+    assert.deepEqual(long.slept, [1500]);
+  });
+
+  it("returns undetermined with cause rate_limited when the 429 persists", async () => {
+    const { server, calls } = limitedServer(Number.POSITIVE_INFINITY, "1");
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "undetermined");
+    assert.equal(decision.allowed, false);
+    if (decision.kind !== "undetermined") return;
+    assert.equal(decision.cause, "rate_limited");
+    assert.ok(decision.error instanceof RateLimitedError);
+    assert.equal(decision.error.kind, "rate_limited");
+    assert.equal(decision.error.retryAfterMs, 1000);
+    assert.equal(decision.error.attempts, 2);
+    assert.deepEqual(slept, [1000], "exactly one backoff, not a retry loop");
+    assert.equal(calls(), 2, "one retry only");
+  });
+
+  it("does not tag other failures as rate limited and does not retry them", async () => {
+    let calls = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        calls++;
+        throw Object.assign(new Error("boom"), { response: { status: 500 } });
+      },
+    } as unknown as rpc.Server;
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.kind === "undetermined" && decision.cause === undefined);
+    assert.equal(calls, 1);
+    assert.deepEqual(slept, []);
   });
 });

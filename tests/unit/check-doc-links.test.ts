@@ -21,7 +21,7 @@ describe("extractLinks", () => {
 
   it("finds inline links, images, reference definitions and <a href>", () => {
     const md = [
-      "See [a](docs/a.md) and ![img](img/x.png \"title\").",
+      'See [a](docs/a.md) and ![img](img/x.png "title").',
       "[ref]: ./b.md#part",
       '<a href="c.md">c</a>',
     ].join("\n");
@@ -29,7 +29,10 @@ describe("extractLinks", () => {
   });
 
   it("reports 1-based line numbers", () => {
-    assert.deepEqual(extractLinks("x.md", "\n\n[a](a.md)").map((l) => l.line), [3]);
+    assert.deepEqual(
+      extractLinks("x.md", "\n\n[a](a.md)").map((l) => l.line),
+      [3],
+    );
   });
 
   it("ignores fenced code, inline code and HTML comments", () => {
@@ -44,7 +47,10 @@ describe("extractLinks", () => {
       "-->",
       "[real](yes.md)",
     ].join("\n");
-    assert.deepEqual(extractLinks("x.md", md).map((l) => [l.target, l.line]), [["yes.md", 9]]);
+    assert.deepEqual(
+      extractLinks("x.md", md).map((l) => [l.target, l.line]),
+      [["yes.md", 9]],
+    );
   });
 
   it("keeps line numbers stable across stripped comments", () => {
@@ -54,13 +60,16 @@ describe("extractLinks", () => {
 
 describe("anchors", () => {
   it("slugifies like GitHub", () => {
-    assert.equal(slugify("Pre-flight gates (any contributor can run these)"), "pre-flight-gates-any-contributor-can-run-these");
+    assert.equal(
+      slugify("Pre-flight gates (any contributor can run these)"),
+      "pre-flight-gates-any-contributor-can-run-these",
+    );
     assert.equal(slugify("`dmsUrgency()` — tri-state"), "dmsurgency--tri-state");
     assert.equal(slugify("0.x breaking-change communication"), "0x-breaking-change-communication");
   });
 
   it("dedupes repeated headings with -N and includes explicit anchors", () => {
-    const anchors = anchorsOf("# Setup\n## Setup\n<a id=\"custom\"></a>\n```\n# not a heading\n```");
+    const anchors = anchorsOf('# Setup\n## Setup\n<a id="custom"></a>\n```\n# not a heading\n```');
     assert.deepEqual([...anchors].sort(), ["custom", "setup", "setup-1"]);
   });
 });

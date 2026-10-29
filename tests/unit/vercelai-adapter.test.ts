@@ -16,7 +16,11 @@ import type { PreFlightDecision, PreFlightInterceptor } from "../../src/prefligh
 import type { ContractCall } from "../../src/tx.ts";
 import type { VercelAIToolLike } from "../../src/adapters/vercelai.ts";
 
-const CALL: ContractCall = { contract: unsafeContractAddress("C".repeat(56)), fn: "transfer", args: [] };
+const CALL: ContractCall = {
+  contract: unsafeContractAddress("C".repeat(56)),
+  fn: "transfer",
+  args: [],
+};
 
 /** An interceptor stub whose verdicts are queued per check. */
 function stubInterceptor(verdicts: PreFlightDecision[]): PreFlightInterceptor {
@@ -176,9 +180,7 @@ describe("createVercelAIGuard", () => {
     });
     const tool = guard("send_payment", { execute: async () => "ran" });
     await (tool.execute as (input: never) => Promise<unknown>)(null as never);
-    await assert.rejects(() =>
-      (tool.execute as (input: never) => Promise<unknown>)(null as never),
-    );
+    await assert.rejects(() => (tool.execute as (input: never) => Promise<unknown>)(null as never));
     assert.deepEqual(seen, decisions);
   });
 });
@@ -195,7 +197,12 @@ describe("wrapToolWithGuard", () => {
     };
     const wrapped = wrapToolWithGuard(
       original,
-      { interceptor: stubInterceptor([{ allowed: true, kind: "admissible", estimatedResourceFee: 1n, footprintKeys: 2 }]), toContractCall: () => CALL },
+      {
+        interceptor: stubInterceptor([
+          { allowed: true, kind: "admissible", estimatedResourceFee: 1n, footprintKeys: 2 },
+        ]),
+        toContractCall: () => CALL,
+      },
       { toolName: "send_payment", input: undefined },
     );
     assert.equal(wrapped.description, "payment tool");
@@ -259,10 +266,7 @@ describe("onDecision isolation (issue #277)", () => {
       },
     });
 
-    assert.equal(
-      await (tool.execute as (input: never) => Promise<unknown>)(null as never),
-      "ran",
-    );
+    assert.equal(await (tool.execute as (input: never) => Promise<unknown>)(null as never), "ran");
     assert.equal(entered, 1, "an advisory observer failure must not block execution");
   });
 
@@ -334,10 +338,7 @@ describe("onDecision isolation (issue #277)", () => {
       },
     });
 
-    assert.equal(
-      await (tool.execute as (input: never) => Promise<unknown>)(null as never),
-      "ran",
-    );
+    assert.equal(await (tool.execute as (input: never) => Promise<unknown>)(null as never), "ran");
     assert.equal(reports, 2, "every batch verdict is still reported");
     assert.equal(entered, 1);
   });

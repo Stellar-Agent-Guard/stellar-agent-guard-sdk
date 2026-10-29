@@ -24,11 +24,27 @@
  * pinned revisions and the hook search are recorded in
  * `docs/integration-hooks.md` §4.
  */
+import { GuardError } from "../errors.ts";
 import type { InvokeStepEvent } from "../invoke.ts";
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
-import { evaluateAction, renderHalt, validateAdapterOptions } from "./core.ts";
-import { hostAbortSignal, type BlockedHookLogger, type GuardBlockedHook } from "./shared.ts";
+import {
+  blockedInfoFor,
+  blockedInfoForBatch,
+  checkOptionsFor,
+  decisionFromGuardError,
+  hostAbortSignal,
+  mapContractCalls,
+  mappingFailureFor,
+  runBlockedHook,
+  runDecisionHook,
+  type BlockedHookLogger,
+  type GuardBlockedHook,
+} from "./shared.ts";
 
 /** The one field of a tool call this adapter reads. */
 export interface McpToolCallRequest {
@@ -120,8 +136,80 @@ async function guardMcpRequest<T extends McpToolResult>(
   options: McpGuardOptions,
   hostSignal?: AbortSignal | undefined,
 ): Promise<T | McpToolResult> {
-  const evaluation = await evaluateAction(request, { ...options, adapter: "mcp" }, hostSignal);
-  if (evaluation.kind === "pass-through" || evaluation.kind === "allowed") return proceed();
+  let calls: ContractCall[];
+  try {
+    calls = mapContractCalls(request, options);
+  } catch (error) {
+    // Fail closed on a mapper failure (issue #316): the tool body never runs and
+    // the halt is reported as undetermined, without a mapped `call`.
+    const failure = mappingFailureFor("mcp", error);
+    runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
+    return {
+      content: [{ type: "text", text: describeMcpRefusal(failure.decision, request.name) }],
+      isError: true,
+    };
+  }
+  if (calls.length === 0) return proceed();
+
+  const checkOptions = checkOptionsFor(options, hostSignal);
+
+  if (calls.length === 1) {
+    let decision: PreFlightDecision;
+    try {
+      decision = await options.interceptor.check(calls[0]!, checkOptions);
+    } catch (error) {
+      if (error instanceof GuardError) {
+        decision = decisionFromGuardError(error);
+      } else {
+        throw error;
+      }
+    }
+    runDecisionHook(options.onDecision, [request, decision], "mcp", options.blockedHookLogger);
+    if (decision.allowed) return proceed();
+
+    runBlockedHook(
+      options.onBlocked,
+      blockedInfoFor("mcp", calls[0]!, decision),
+      options.blockedHookLogger,
+    );
+    return {
+      content: [{ type: "text", text: describeMcpRefusal(decision, request.name) }],
+      isError: true,
+    };
+  }
+
+  // Batch mapping: report every per-call verdict, and refuse the whole action if
+  // any call is blocked or undetermined (all-or-nothing).
+  let batch: PreFlightBatchDecision;
+  try {
+    batch = await options.interceptor.checkBatch(calls, checkOptions);
+  } catch (error) {
+    if (error instanceof GuardError) {
+      const dec = decisionFromGuardError(error);
+      batch = {
+        admissible: false,
+        overallAdmissible: false,
+        kind: dec.kind,
+        detail: dec.detail,
+        verdicts: calls.map(() => dec),
+        calls: calls.map(() => dec),
+        totalEstimatedResourceFee: 0n,
+      };
+    } else {
+      throw error;
+    }
+  }
+  for (const verdict of batch.verdicts) {
+    runDecisionHook(options.onDecision, [request, verdict], "mcp", options.blockedHookLogger);
+  }
+  if (batch.admissible) return proceed();
+
+  runBlockedHook(
+    options.onBlocked,
+    blockedInfoForBatch("mcp", calls, batch.verdicts),
+    options.blockedHookLogger,
+  );
+  const refusal = batch.verdicts.find((verdict) => !verdict.allowed)!;
   return {
     content: [{ type: "text", text: renderHalt(evaluation.verdict, { kind: "message", toolName: request.name }) }],
     isError: true,

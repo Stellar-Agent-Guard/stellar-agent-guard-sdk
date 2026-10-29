@@ -16,12 +16,17 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { Account, Address, Keypair, nativeToScVal, rpc, SorobanDataBuilder, xdr } from "@stellar/stellar-sdk";
 import {
-  DEFAULT_INVOKE_RETRY_OPTIONS,
-  invoke,
-  InvokeRetryError,
-} from "../../src/invoke.ts";
+  Account,
+  Address,
+  Keypair,
+  nativeToScVal,
+  rpc,
+  SorobanDataBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
+import { DEFAULT_INVOKE_RETRY_OPTIONS, invoke, InvokeRetryError } from "../../src/invoke.ts";
+import type { InvokeParams } from "../../src/invoke.ts";
 import { BroadcastError } from "../../src/tx.ts";
 import { ContractResponseError, SimulationError } from "../../src/errors.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
@@ -171,10 +176,7 @@ function createMockServer(options: MockServerOptions = {}) {
   return mock;
 }
 
-function makeParams(
-  server: rpc.Server,
-  overrides: Partial<Parameters<typeof invoke>[0]> = {},
-): Parameters<typeof invoke>[0] {
+function makeParams(server: rpc.Server, overrides: Partial<InvokeParams> = {}): InvokeParams {
   return {
     server,
     source: Keypair.random(),
@@ -277,7 +279,10 @@ describe("invoke() onStep: pipeline order", () => {
       events.map((event) => [event.name, event.status]),
       SUCCESSFUL_ATTEMPT,
     );
-    assert.deepEqual(events.map((event) => event.attempt), [0, 0, 0, 0, 0, 0, 0, 0]);
+    assert.deepEqual(
+      events.map((event) => event.attempt),
+      [0, 0, 0, 0, 0, 0, 0, 0],
+    );
   });
 
   it("emits no broadcast events on a dry run", async () => {
@@ -290,14 +295,17 @@ describe("invoke() onStep: pipeline order", () => {
     // outcome, but the stages it does run are the same instrumented pipeline.
     assert.equal(outcome.kind, "dry_run");
     assert.equal(outcome.admissible, true);
-    assert.deepEqual(events.map((event) => [event.name, event.status]), [
-      ["probe", "start"],
-      ["probe", "ok"],
-      ["sign", "start"],
-      ["sign", "ok"],
-      ["simulate", "start"],
-      ["simulate", "ok"],
-    ]);
+    assert.deepEqual(
+      events.map((event) => [event.name, event.status]),
+      [
+        ["probe", "start"],
+        ["probe", "ok"],
+        ["sign", "start"],
+        ["sign", "ok"],
+        ["simulate", "start"],
+        ["simulate", "ok"],
+      ],
+    );
     assert.equal(server.sendCount, 0);
   });
 
@@ -316,7 +324,10 @@ describe("invoke() onStep: pipeline order", () => {
     // Nothing after the failed enforced simulation: no broadcast was attempted.
     assert.equal(events.at(-1)?.name, "simulate");
     assert.equal(events.at(-1)?.status, "fail");
-    assert.equal(events.some((event) => event.name === "broadcast"), false);
+    assert.equal(
+      events.some((event) => event.name === "broadcast"),
+      false,
+    );
   });
 
   it("reports failures that happen during the probe stage", async () => {
@@ -331,7 +342,10 @@ describe("invoke() onStep: pipeline order", () => {
       probeEvents.map((event) => event.status),
       ["start", "fail"],
     );
-    assert.equal(events.some((event) => event.name === "sign"), false);
+    assert.equal(
+      events.some((event) => event.name === "sign"),
+      false,
+    );
   });
 });
 
@@ -568,9 +582,7 @@ describe("invoke() abortSignal + timeoutMs", () => {
     const controller = new AbortController();
     controller.abort();
 
-    const outcome = await invoke(
-      makeParams(server, { signal: controller.signal }),
-    );
+    const outcome = await invoke(makeParams(server, { signal: controller.signal }));
 
     assert.equal(outcome.kind, "error");
     assert.ok(outcome.error instanceof RpcTimeoutError);
@@ -765,7 +777,10 @@ describe("invoke sequence reservation", () => {
     releaseFirst();
     const outcomes = await Promise.all([first, second]);
 
-    assert.deepEqual(outcomes.map((outcome) => outcome.kind), ["allowed", "allowed"]);
+    assert.deepEqual(
+      outcomes.map((outcome) => outcome.kind),
+      ["allowed", "allowed"],
+    );
     // TransactionBuilder consumes the base account sequence and emits base + 1,
     // so the reservation is what keeps the two broadcast envelopes distinct.
     assert.deepEqual(sent, ["8", "9"]);
@@ -806,7 +821,8 @@ describe("invoke() stale-ledger retry", () => {
     let randomCall = 0;
     const server = createMockServer({
       send: (call) => ({ status: "PENDING", hash: `tx-${call}` }),
-      getTransaction: (hash) => (hash === "tx-3" ? { status: "SUCCESS", ledger: 1002 } : staleRejection()),
+      getTransaction: (hash) =>
+        hash === "tx-3" ? { status: "SUCCESS", ledger: 1002 } : staleRejection(),
     });
 
     const outcome = await invoke(
@@ -917,7 +933,8 @@ describe("invoke() stale-ledger retry", () => {
     const server = createMockServer({
       simulate: (call) => (call >= 3 ? invalidInputSimulation() : probeSuccess()),
       send: (call) => ({ status: "PENDING", hash: `tx-${call}` }),
-      getTransaction: (hash) => (hash === "tx-1" ? staleRejection() : { status: "SUCCESS", ledger: 9 }),
+      getTransaction: (hash) =>
+        hash === "tx-1" ? staleRejection() : { status: "SUCCESS", ledger: 9 },
     });
 
     const outcome = await invoke(
@@ -935,7 +952,6 @@ describe("invoke() stale-ledger retry", () => {
     assert.equal(server.simulationCount, 3);
   });
 });
-
 
 // ── Fee-bump retry on min-fee broadcast failure (Issue #25) ──────────────────
 
@@ -1316,12 +1332,36 @@ describe("invoke() option validation", () => {
       overrides: Partial<Parameters<typeof invoke>[0]>;
       field: RegExp;
     }> = [
-      { label: "retry.maxAttempts zero", overrides: { retry: { maxAttempts: 0 } }, field: /retry\.maxAttempts/ },
-      { label: "retry.maxAttempts fractional", overrides: { retry: { maxAttempts: 1.5 } }, field: /retry\.maxAttempts/ },
-      { label: "retry.maxAttempts NaN", overrides: { retry: { maxAttempts: Number.NaN } }, field: /retry\.maxAttempts/ },
-      { label: "retry.baseDelayMs negative", overrides: { retry: { baseDelayMs: -1 } }, field: /retry\.baseDelayMs/ },
-      { label: "retry.baseDelayMs infinite", overrides: { retry: { baseDelayMs: Number.POSITIVE_INFINITY } }, field: /retry\.baseDelayMs/ },
-      { label: "retry.maxDelayMs negative", overrides: { retry: { maxDelayMs: -1 } }, field: /retry\.maxDelayMs/ },
+      {
+        label: "retry.maxAttempts zero",
+        overrides: { retry: { maxAttempts: 0 } },
+        field: /retry\.maxAttempts/,
+      },
+      {
+        label: "retry.maxAttempts fractional",
+        overrides: { retry: { maxAttempts: 1.5 } },
+        field: /retry\.maxAttempts/,
+      },
+      {
+        label: "retry.maxAttempts NaN",
+        overrides: { retry: { maxAttempts: Number.NaN } },
+        field: /retry\.maxAttempts/,
+      },
+      {
+        label: "retry.baseDelayMs negative",
+        overrides: { retry: { baseDelayMs: -1 } },
+        field: /retry\.baseDelayMs/,
+      },
+      {
+        label: "retry.baseDelayMs infinite",
+        overrides: { retry: { baseDelayMs: Number.POSITIVE_INFINITY } },
+        field: /retry\.baseDelayMs/,
+      },
+      {
+        label: "retry.maxDelayMs negative",
+        overrides: { retry: { maxDelayMs: -1 } },
+        field: /retry\.maxDelayMs/,
+      },
       {
         label: "retry.maxDelayMs below baseDelayMs",
         overrides: { retry: { baseDelayMs: 100, maxDelayMs: 50 } },
@@ -1332,20 +1372,60 @@ describe("invoke() option validation", () => {
         overrides: { retry: { baseDelayMs: 100, initialDelayMs: 50 } },
         field: /retry\.initialDelayMs/,
       },
-      { label: "retry.random not a function", overrides: { retry: { random: 1 as unknown as () => number } }, field: /retry\.random/ },
-      { label: "retry.random and jitter both set", overrides: { retry: { random: () => 0.5, jitter: () => 0.5 } }, field: /retry\.jitter/ },
+      {
+        label: "retry.random not a function",
+        overrides: { retry: { random: 1 as unknown as () => number } },
+        field: /retry\.random/,
+      },
+      {
+        label: "retry.random and jitter both set",
+        overrides: { retry: { random: () => 0.5, jitter: () => 0.5 } },
+        field: /retry\.jitter/,
+      },
       { label: "maxRetries negative", overrides: { maxRetries: -1 }, field: /maxRetries/ },
       { label: "maxRetries fractional", overrides: { maxRetries: 1.5 }, field: /maxRetries/ },
-      { label: "feeBump.maxAttempts zero", overrides: { feeBump: { maxAttempts: 0 } }, field: /feeBump\.maxAttempts/ },
-      { label: "feeBump.feeMultiplier at one", overrides: { feeBump: { feeMultiplier: 1 } }, field: /feeBump\.feeMultiplier/ },
-      { label: "feeBump.feeMultiplier NaN", overrides: { feeBump: { feeMultiplier: Number.NaN } }, field: /feeBump\.feeMultiplier/ },
-      { label: "feeBump.initialInclusionFee zero", overrides: { feeBump: { initialInclusionFee: 0n } }, field: /feeBump\.initialInclusionFee/ },
+      {
+        label: "feeBump.maxAttempts zero",
+        overrides: { feeBump: { maxAttempts: 0 } },
+        field: /feeBump\.maxAttempts/,
+      },
+      {
+        label: "feeBump.feeMultiplier at one",
+        overrides: { feeBump: { feeMultiplier: 1 } },
+        field: /feeBump\.feeMultiplier/,
+      },
+      {
+        label: "feeBump.feeMultiplier NaN",
+        overrides: { feeBump: { feeMultiplier: Number.NaN } },
+        field: /feeBump\.feeMultiplier/,
+      },
+      {
+        label: "feeBump.initialInclusionFee zero",
+        overrides: { feeBump: { initialInclusionFee: 0n } },
+        field: /feeBump\.initialInclusionFee/,
+      },
       { label: "pollAttempts zero", overrides: { pollAttempts: 0 }, field: /pollAttempts/ },
       { label: "pollAttempts fractional", overrides: { pollAttempts: 2.5 }, field: /pollAttempts/ },
-      { label: "pollIntervalMs negative", overrides: { pollIntervalMs: -1 }, field: /pollIntervalMs/ },
-      { label: "pollIntervalMs NaN", overrides: { pollIntervalMs: Number.NaN }, field: /pollIntervalMs/ },
-      { label: "pollOptions.pollAttempts zero", overrides: { pollOptions: { pollAttempts: 0 } }, field: /pollOptions\.pollAttempts/ },
-      { label: "pollOptions.pollIntervalMs negative", overrides: { pollOptions: { pollIntervalMs: -1 } }, field: /pollOptions\.pollIntervalMs/ },
+      {
+        label: "pollIntervalMs negative",
+        overrides: { pollIntervalMs: -1 },
+        field: /pollIntervalMs/,
+      },
+      {
+        label: "pollIntervalMs NaN",
+        overrides: { pollIntervalMs: Number.NaN },
+        field: /pollIntervalMs/,
+      },
+      {
+        label: "pollOptions.pollAttempts zero",
+        overrides: { pollOptions: { pollAttempts: 0 } },
+        field: /pollOptions\.pollAttempts/,
+      },
+      {
+        label: "pollOptions.pollIntervalMs negative",
+        overrides: { pollOptions: { pollIntervalMs: -1 } },
+        field: /pollOptions\.pollIntervalMs/,
+      },
       {
         label: "top-level and nested pollAttempts disagree",
         overrides: { pollAttempts: 1, pollOptions: { pollAttempts: 2 } },
@@ -1358,19 +1438,20 @@ describe("invoke() option validation", () => {
       },
       { label: "timeoutMs negative", overrides: { timeoutMs: -1 }, field: /timeoutMs/ },
       { label: "deadlineMs zero", overrides: { deadlineMs: 0 }, field: /deadlineMs/ },
-      { label: "deadlineMs infinite", overrides: { deadlineMs: Number.POSITIVE_INFINITY }, field: /deadlineMs/ },
+      {
+        label: "deadlineMs infinite",
+        overrides: { deadlineMs: Number.POSITIVE_INFINITY },
+        field: /deadlineMs/,
+      },
     ];
 
     for (const testCase of cases) {
       const { server, calls } = createUntouchableServer();
-      await assert.rejects(
-        invoke(makeParams(server, testCase.overrides)),
-        (error: unknown) => {
-          assert.ok(error instanceof RangeError, testCase.label);
-          assert.match(error.message, testCase.field, testCase.label);
-          return true;
-        },
-      );
+      await assert.rejects(invoke(makeParams(server, testCase.overrides)), (error: unknown) => {
+        assert.ok(error instanceof RangeError, testCase.label);
+        assert.match(error.message, testCase.field, testCase.label);
+        return true;
+      });
       assert.equal(calls, 0, testCase.label);
     }
   });
@@ -1468,7 +1549,12 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 3, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
@@ -1511,7 +1597,12 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 2, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
@@ -1535,16 +1626,22 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 3, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
     assert.equal(outcome.kind, "allowed");
     assert.ok(outcome.retry);
     assert.equal(outcome.retry.retried, true);
-    assert.deepEqual(outcome.retry.retries.map((attempt) => attempt.failure), [
-      "sequence_number_collision",
-    ]);
+    assert.deepEqual(
+      outcome.retry.retries.map((attempt) => attempt.failure),
+      ["sequence_number_collision"],
+    );
     assert.equal(outcome.retry.terminalFailure, null);
   });
 
@@ -1557,7 +1654,12 @@ describe("invoke() retry metadata", () => {
     const outcome = await invoke(
       makeParams(server, {
         ...FAST,
-        retry: { maxAttempts: 2, baseDelayMs: 100, random: () => 0.5, sleep: async () => undefined },
+        retry: {
+          maxAttempts: 2,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
       }),
     );
 
@@ -1973,7 +2075,11 @@ describe("invoke() malformed simulation resource fee", () => {
       assert.equal(outcome.error.field, "minResourceFee");
       assert.equal(outcome.error.stage, "assemble");
       assert.match(outcome.kind === "error" ? (outcome.detail ?? "") : "", /assembly failed/);
-      assert.equal(server.sendCount, 0, "a malformed fee must stop the pipeline before the broadcast");
+      assert.equal(
+        server.sendCount,
+        0,
+        "a malformed fee must stop the pipeline before the broadcast",
+      );
     }
   });
 
@@ -2002,5 +2108,180 @@ describe("invoke() malformed simulation resource fee", () => {
     assert.equal(outcome.error.field, "minResourceFee");
     assert.equal(outcome.error.stage, "simulate");
     assert.equal(outcome.fees.totalFeeStroops, 0n);
+  });
+});
+
+// ── A transaction accepted but not confirmed is `pending`, not a failure ────
+
+/**
+ * The submitted-but-unconfirmed case (issue #299).
+ *
+ * When the poll budget runs out before inclusion is confirmed, the transaction
+ * has already been broadcast: it may still land. Reporting that as a failure
+ * invites a rebroadcast, and a rebroadcast risks executing the action twice.
+ * `pending` is the third answer — neither success nor failure — and it carries
+ * the hash so the caller reconciles with `getTransaction` instead of resending.
+ *
+ * The mock drives the real transaction-building, signing and broadcast path;
+ * only the poll response is stubbed, and `pollIntervalMs: 0` keeps the loop's
+ * built-in sleep out of the wall clock.
+ */
+describe("invoke() pending outcome (issue #299)", () => {
+  const HASH = "c".repeat(64);
+  const FAST = { pollAttempts: 2, pollIntervalMs: 0 };
+
+  /** Every poll answers "not yet", so the budget runs out with no answer. */
+  const neverConfirmed = (): unknown => ({
+    status: rpc.Api.GetTransactionStatus.NOT_FOUND,
+  });
+
+  it("returns pending rather than error when inclusion is never confirmed", async () => {
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(makeParams(server, FAST));
+
+    assert.equal(outcome.kind, "pending");
+    if (outcome.kind !== "pending") throw new Error("unreachable");
+    // The recovery handle is the whole point: a pending transaction the caller
+    // cannot look up would be indistinguishable from a lost one.
+    assert.equal(outcome.transactionHash, HASH);
+    assert.equal(outcome.submission.hash, HASH);
+    assert.equal(outcome.submission.status, "TIMEOUT");
+    assert.match(outcome.detail, /submitted but unconfirmed after 2 poll attempt\(s\)/);
+    assert.match(outcome.guidance, /Do not rebroadcast/);
+    assert.match(outcome.guidance, new RegExp(HASH));
+  });
+
+  it("does not reclassify the timed-out submission as a post-broadcast rejection", async () => {
+    // A timed-out submission carries a `failure` describing the wait, but that
+    // is not the network rejecting the transaction. Before the `pending` arm a
+    // TIMEOUT fell into the failure branch and surfaced as `error`, which told
+    // a caller to retry a transaction that may already have landed.
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(makeParams(server, FAST));
+
+    assert.equal(outcome.kind, "pending");
+    if (outcome.kind !== "pending") throw new Error("unreachable");
+    // The rejection branch would have produced an `error` arm with a typed
+    // error; `pending` carries neither, because nothing was rejected. The
+    // submission's `failure` describes the *wait* — no result code, no XDR —
+    // which is what used to be misread as a post-broadcast rejection.
+    assert.equal("error" in outcome, false, "pending carries no typed error");
+    assert.equal("retryable" in outcome, false, "pending is not a retryable failure");
+    assert.equal(outcome.submission.failure?.resultCode, null, "no result code was decoded");
+    assert.equal(outcome.submission.failure?.resultXdr, null, "no result XDR was decoded");
+    assert.match(
+      outcome.submission.failure?.message ?? "",
+      /timed out waiting for ledger inclusion/,
+    );
+  });
+
+  it('attaches retry metadata with outcome "pending" and no terminal failure', async () => {
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        ...FAST,
+        retry: {
+          maxAttempts: 3,
+          baseDelayMs: 100,
+          random: () => 0.5,
+          sleep: async () => undefined,
+        },
+      }),
+    );
+
+    assert.equal(outcome.kind, "pending");
+    const metadata = outcome.retry;
+    assert.ok(metadata, "a pending outcome still carries retry metadata");
+    assert.equal(metadata.outcome, "pending");
+    assert.equal(metadata.attempts, 1, "a pending outcome is not itself a retry");
+    assert.equal(metadata.retried, false);
+    assert.equal(metadata.exhausted, false);
+    assert.equal(metadata.terminalFailure, null);
+    assert.equal(metadata.terminalCause, null);
+    assert.deepEqual(metadata.retries, []);
+    assert.deepEqual(Object.keys(metadata).sort(), RETRY_METADATA_KEYS);
+    // The metadata must stay safe to log, exactly like every other outcome's.
+    const serialised = JSON.stringify(metadata);
+    assert.doesNotMatch(serialised, /resultXdr|diagnostic|signature|secret|AAAA/i);
+    // The hash lives on the outcome, never in the log-safe metadata record.
+    assert.doesNotMatch(serialised, new RegExp(HASH));
+  });
+
+  it("keeps publishing the hash through onSubmitted before polling ends pending", async () => {
+    const events: SubmissionAcceptedEvent[] = [];
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, { ...FAST, onSubmitted: (event) => events.push(event) }),
+    );
+
+    assert.deepEqual(events, [{ hash: HASH, status: "PENDING" }]);
+    assert.equal(outcome.kind, "pending");
+    if (outcome.kind !== "pending") throw new Error("unreachable");
+    assert.equal(outcome.transactionHash, HASH);
+  });
+
+  it("still reports allowed when a later poll confirms the transaction", async () => {
+    let polls = 0;
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: () => {
+        polls += 1;
+        return polls < 2
+          ? { status: rpc.Api.GetTransactionStatus.NOT_FOUND }
+          : { status: "SUCCESS", ledger: 99 };
+      },
+    });
+
+    const outcome = await invoke(makeParams(server, { pollAttempts: 3, pollIntervalMs: 0 }));
+
+    assert.equal(outcome.kind, "allowed", "confirmation inside the budget is unaffected");
+    assert.equal(polls, 2);
+  });
+
+  it("does not run the pending arm when the deadline expires first", async () => {
+    // A deadline expiry during polling is its own fail-closed outcome
+    // (`RpcTimeoutError`, `deadline: true`), reported before the pending arm is
+    // ever considered. The two must not be conflated.
+    let now = 0;
+    const clock: Clock = {
+      now: () => now,
+      sleep: async (delayMs) => {
+        now += delayMs;
+      },
+    };
+    const server = createMockServer({
+      send: () => ({ status: "PENDING", hash: HASH }),
+      getTransaction: neverConfirmed,
+    });
+
+    const outcome = await invoke(
+      makeParams(server, {
+        deadlineMs: VIRTUAL_DEADLINE_MS,
+        clock,
+        pollOptions: { pollAttempts: 5, pollIntervalMs: VIRTUAL_DEADLINE_MS * 2 },
+      }),
+    );
+
+    const error = expectDeadlineError(outcome);
+    assert.equal(error.deadline, true);
+    assert.equal(outcome.kind, "error");
+    if (outcome.kind !== "error") throw new Error("unreachable");
+    assert.equal(outcome.transactionHash, HASH, "the deadline error keeps the hash");
   });
 });

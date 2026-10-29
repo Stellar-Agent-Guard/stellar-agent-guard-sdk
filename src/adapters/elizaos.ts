@@ -28,12 +28,37 @@
  * a misconfigured adapter throws `AdapterConfigError` before any action runs,
  * rather than failing mid-loop on the first tool call.
  */
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import { GuardError } from "../errors.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
-import { evaluateAction, renderHalt, validateAdapterOptions } from "./core.ts";
-import { validateOptionalFunction } from "./validate.ts";
-import type { AdapterConfigIssue } from "./validate.ts";
-import type { BlockedHookLogger, GuardBlockedHook } from "./shared.ts";
+import {
+  throwAdapterConfigError,
+  validateBatchInterceptor,
+  validateBlockedHookLogger,
+  validateContractMapping,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateOptionalSignal,
+  validateOptionalTimeout,
+  type AdapterConfigIssue,
+} from "./validate.ts";
+import {
+  blockedInfoFor,
+  blockedInfoForBatch,
+  checkOptionsFor,
+  decisionFromGuardError,
+  mappingFailureFor,
+  normalizeMappedCall,
+  normalizeMappedCalls,
+  runBlockedHook,
+  runDecisionHook,
+  type BlockedHookLogger,
+  type GuardBlockedHook,
+} from "./shared.ts";
 
 /** The subset of ElizaOS's `Validator` signature this adapter implements. */
 export type ElizaValidator = (
@@ -116,24 +141,76 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
       if (!baseOk) return false; // the action was not applicable in the first place
     }
 
-    const action = { message, state };
-    const evaluation = await evaluateAction(action, {
-      adapter: "elizaos",
-      interceptor: options.interceptor,
-      ...(options.toContractCall
-        ? { toContractCall: ({ message: currentMessage, state: currentState }) => options.toContractCall!(currentMessage, currentState) }
-        : {}),
-      ...(options.toContractCalls
-        ? { toContractCalls: ({ message: currentMessage, state: currentState }) => options.toContractCalls!(currentMessage, currentState) }
-        : {}),
-      ...(options.signal !== undefined ? { signal: options.signal } : {}),
-      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
-      onBlocked: options.onBlocked,
-      blockedHookLogger: options.blockedHookLogger,
-      onDecision: (_action, decision) => options.onDecision?.(decision),
-    });
-    if (evaluation.kind === "halt") return renderHalt(evaluation.verdict, { kind: "boolean" });
-    return true;
+    let calls: ContractCall[];
+    try {
+      calls = options.toContractCalls
+        ? normalizeMappedCalls(options.toContractCalls(message, state), "toContractCalls")
+        : normalizeMappedCall(options.toContractCall?.(message, state), "toContractCall");
+    } catch (error) {
+      // A mapper failure is a fail-closed halt, not an "applicable" action
+      // (issue #316): the runtime drops the action before its handler runs.
+      const failure = mappingFailureFor("elizaos", error);
+      runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
+      return false;
+    }
+    if (calls.length === 0) return true; // not fund-moving; nothing for the guard to say
+
+    const checkOptions = checkOptionsFor(options);
+
+    if (calls.length === 1) {
+      let decision: PreFlightDecision;
+      try {
+        decision = await options.interceptor.check(calls[0]!, checkOptions);
+      } catch (error) {
+        if (error instanceof GuardError) {
+          decision = decisionFromGuardError(error);
+        } else {
+          throw error;
+        }
+      }
+      runDecisionHook(options.onDecision, [decision], "elizaos", options.blockedHookLogger);
+      if (decision.allowed) return true;
+
+      runBlockedHook(
+        options.onBlocked,
+        blockedInfoFor("elizaos", calls[0]!, decision),
+        options.blockedHookLogger,
+      );
+      return false;
+    }
+
+    // Batch mapping: a single refusal drops the whole action before its handler
+    // runs; every per-call verdict is reported through `onDecision`.
+    let batch: PreFlightBatchDecision;
+    try {
+      batch = await options.interceptor.checkBatch(calls, checkOptions);
+    } catch (error) {
+      if (error instanceof GuardError) {
+        const dec = decisionFromGuardError(error);
+        batch = {
+          admissible: false,
+          overallAdmissible: false,
+          kind: dec.kind,
+          detail: dec.detail,
+          verdicts: calls.map(() => dec),
+          calls: calls.map(() => dec),
+          totalEstimatedResourceFee: 0n,
+        };
+      } else {
+        throw error;
+      }
+    }
+    for (const verdict of batch.verdicts) {
+      runDecisionHook(options.onDecision, [verdict], "elizaos", options.blockedHookLogger);
+    }
+    if (batch.admissible) return true;
+
+    runBlockedHook(
+      options.onBlocked,
+      blockedInfoForBatch("elizaos", calls, batch.verdicts),
+      options.blockedHookLogger,
+    );
+    return false;
   };
 }
 

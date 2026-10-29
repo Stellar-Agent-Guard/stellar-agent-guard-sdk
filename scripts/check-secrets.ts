@@ -36,15 +36,17 @@ const SECRET_PATTERNS = [
   {
     name: "Stellar Secret Seed",
     pattern: /S[A-Z2-9]{54}/,
-    description: "Stellar secret seed (starts with S, 56 chars base32)"
-  }
+    description: "Stellar secret seed (starts with S, 56 chars base32)",
+  },
 ];
 
 /**
  * Check if a string matches any of the secret patterns
  */
-function findSecretsInText(text: string): Array<{patternName: string; match: string; offset: number}> {
-  const matches: Array<{patternName: string; match: string; offset: number}> = [];
+function findSecretsInText(
+  text: string,
+): Array<{ patternName: string; match: string; offset: number }> {
+  const matches: Array<{ patternName: string; match: string; offset: number }> = [];
 
   for (const patternDef of SECRET_PATTERNS) {
     const regex = patternDef.pattern;
@@ -54,7 +56,7 @@ function findSecretsInText(text: string): Array<{patternName: string; match: str
       matches.push({
         patternName: patternDef.name,
         match: match[0],
-        offset: match.index
+        offset: match.index,
       });
     }
   }
@@ -71,44 +73,45 @@ const ALLOWLIST = [
     // Allow public addresses in fixtures and documentation
     pattern: /^[GC][A-Z2-9]{54}$/,
     justification: "Public Stellar addresses (accounts and contracts) are safe to commit",
-    paths: ["tests/fixtures/**", "docs/**", "examples/**"]
+    paths: ["tests/fixtures/**", "docs/**", "examples/**"],
   },
   {
     // Allow specific known test values in fixtures that have been reviewed
     pattern: /^"[GC][A-Z2-9]{54}"$/,
     justification: "JSON-encoded public Stellar addresses in fixtures are safe",
-    paths: ["tests/fixtures/**"]
+    paths: ["tests/fixtures/**"],
   },
   {
     // Allow policy values in fixtures (these are public parameters)
-    pattern: /" (active_from|active_until|per_tx_cap|window_cap|window_secs|dms_grace_secs)":\s*"\d+"/,
+    pattern:
+      /" (active_from|active_until|per_tx_cap|window_cap|window_secs|dms_grace_secs)":\s*"\d+"/,
     justification: "Policy parameter values in fixtures are public configuration",
-    paths: ["tests/fixtures/**"]
+    paths: ["tests/fixtures/**"],
   },
   {
     // Allow transaction hashes and other public blockchain data
     pattern: /"[a-f0-9]{64}"/,
     justification: "Transaction hashes and other public blockchain identifiers are safe",
-    paths: ["tests/fixtures/**", "docs/**"]
+    paths: ["tests/fixtures/**", "docs/**"],
   },
   {
     // Allow specific known test values that have been reviewed and deemed safe
     pattern: /"agentRawEd25519Pubkey":\s*"[a-f0-9]{64}"/,
     justification: "Public Ed25519 keys (not secret keys) in fixtures are safe",
-    paths: ["tests/fixtures/phase2-instance.json"]
+    paths: ["tests/fixtures/phase2-instance.json"],
   },
   {
     // Allow WASM hashes in fixtures (they're public)
     pattern: /"wasmHash":\s*"[a-f0-9]{64}"/,
     justification: "WASM hashes in fixtures are public identifiers",
-    paths: ["tests/fixtures/**"]
+    paths: ["tests/fixtures/**"],
   },
   {
     // Allow policy SHA256 hashes in fixtures (they're public)
     pattern: /"policySha256":\s*"[a-f0-9]{64}"/,
     justification: "Policy SHA256 hashes in fixtures are public identifiers",
-    paths: ["tests/fixtures/**"]
-  }
+    paths: ["tests/fixtures/**"],
+  },
 ];
 
 /**
@@ -134,8 +137,7 @@ function isAllowed(match: string, filePath: string): boolean {
             applies = true;
             break;
           }
-        } else if (relativePath === pathPattern ||
-                  relativePath.startsWith(`${pathPattern}/`)) {
+        } else if (relativePath === pathPattern || relativePath.startsWith(`${pathPattern}/`)) {
           applies = true;
           break;
         }
@@ -157,8 +159,8 @@ function isAllowed(match: string, filePath: string): boolean {
  */
 async function scanFile(filePath: string): Promise<ScanResult[]> {
   try {
-    const content = await readFile(filePath, 'utf8');
-    const lines = content.split('\n');
+    const content = await readFile(filePath, "utf8");
+    const lines = content.split("\n");
     const results: ScanResult[] = [];
 
     for (let lineNum = 0; lineNum < lines.length; lineNum++) {
@@ -172,8 +174,9 @@ async function scanFile(filePath: string): Promise<ScanResult[]> {
           results.push({
             filePath: filePath,
             lineNumber: lineNum + 1,
-            lineContent: line.substring(0, Math.min(line.length, 100)) + (line.length > 100 ? "..." : ""),
-            matchedPattern: secret.patternName
+            lineContent:
+              line.substring(0, Math.min(line.length, 100)) + (line.length > 100 ? "..." : ""),
+            matchedPattern: secret.patternName,
           });
         }
       }
@@ -182,7 +185,7 @@ async function scanFile(filePath: string): Promise<ScanResult[]> {
     return results;
   } catch (error) {
     // Don't error on missing files - just skip them
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
       console.error(`Error scanning file ${filePath}: ${error}`);
     }
     return [];
@@ -218,7 +221,7 @@ async function runSecretScan(): Promise<number> {
     "scripts/inspect-deployment.ts",
     "scripts/sync-contract-fixtures.ts",
     "scripts/vendor-fixtures.ts",
-    "scripts/deploy-phase2-instance.ts"
+    "scripts/deploy-phase2-instance.ts",
   ];
 
   let totalSecretsFound = 0;
@@ -243,7 +246,9 @@ async function runSecretScan(): Promise<number> {
     return 0;
   }
 
-  console.log(`\n🚨 Found ${totalSecretsFound} potential secret(s) in ${Object.keys(secretsByFile).length} file(s):\n`);
+  console.log(
+    `\n🚨 Found ${totalSecretsFound} potential secret(s) in ${Object.keys(secretsByFile).length} file(s):\n`,
+  );
 
   for (const [filePath, secrets] of Object.entries(secretsByFile)) {
     const relativePath = relative(process.cwd(), filePath);
@@ -251,9 +256,10 @@ async function runSecretScan(): Promise<number> {
 
     for (const secret of secrets) {
       // Truncate line content for display and never show actual secrets
-      const displayLine = secret.lineContent.length > 80
-        ? secret.lineContent.substring(0, 80) + "..."
-        : secret.lineContent;
+      const displayLine =
+        secret.lineContent.length > 80
+          ? secret.lineContent.substring(0, 80) + "..."
+          : secret.lineContent;
 
       console.log(`   Line ${secret.lineNumber}: ${secret.matchedPattern}`);
       console.log(`   Content: ${displayLine.replace(/[^\x20-\x7E]/g, ".")}`); // Replace non-printable/non-ASCII to avoid display issues
@@ -272,12 +278,14 @@ async function runSecretScan(): Promise<number> {
 
 // Run the scanner if this script is executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
-  runSecretScan().then(exitCode => {
-    process.exit(exitCode);
-  }).catch(error => {
-    console.error("❌ Secret scanning failed:", error);
-    process.exit(1);
-  });
+  runSecretScan()
+    .then((exitCode) => {
+      process.exit(exitCode);
+    })
+    .catch((error) => {
+      console.error("❌ Secret scanning failed:", error);
+      process.exit(1);
+    });
 }
 
 export default runSecretScan;

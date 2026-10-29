@@ -24,6 +24,31 @@ export class GuardError extends Error {
 }
 
 /**
+ * Thrown by `assertAllowed` (or an adapter's pre-execution interceptor) when the guard
+ * could not reach a decision (e.g. transport failure, simulation error, missing state).
+ *
+ * Distinct from `GuardBlockedError`: an action that is undetermined was never ruled on
+ * by policy, but must fail closed so an agent is not given an unverified green light.
+ */
+export class GuardUndeterminedError extends GuardError {
+  readonly stage: "preflight" | "submission";
+  readonly detail: string;
+
+  constructor(
+    detailOrMessage: string,
+    options: { stage?: "preflight" | "submission"; detail?: string; cause?: unknown } = {},
+  ) {
+    const message = detailOrMessage.startsWith("stellar-agent-guard could not determine")
+      ? detailOrMessage
+      : `stellar-agent-guard could not determine this action's status\n${detailOrMessage}`;
+    super(message, causeOptions(options.cause));
+    this.name = "GuardUndeterminedError";
+    this.stage = options.stage ?? "preflight";
+    this.detail = options.detail ?? detailOrMessage;
+  }
+}
+
+/**
  * A caller-supplied value had the wrong shape or type.
  *
  * This is an `InputError` in the platform sense: it is thrown before the SDK
@@ -94,6 +119,39 @@ export class SimulationError extends GuardError {
     super(message, causeOptions(options.cause));
     this.stage = options.stage;
     this.diagnosticEvents = [...(options.diagnosticEvents ?? [])];
+  }
+}
+
+/**
+ * The RPC kept answering HTTP 429 (rate limited) after the bounded retry, so no
+ * simulation ran (issue #40).
+ *
+ * Still fail-closed: it is the `error` of an `undetermined` pre-flight verdict
+ * whose `cause` is `"rate_limited"`, never a refusal and never an approval. The
+ * remedy is operational, not a policy change: lower `maxConcurrentSimulations`,
+ * or raise the RPC's limit (self-hosted RPC).
+ */
+export class RateLimitedError extends SimulationError {
+  /** Machine-readable discriminant; mirrors the verdict's `cause`. */
+  readonly kind = "rate_limited" as const;
+  /** The server's `Retry-After`, in milliseconds, when it sent one. */
+  readonly retryAfterMs: number | null;
+  /** Simulation attempts made, including the first. */
+  readonly attempts: number;
+
+  constructor(options: {
+    stage: SimulationError["stage"];
+    retryAfterMs: number | null;
+    attempts: number;
+    cause?: unknown;
+  }) {
+    super(
+      `the RPC rate-limited the simulation (HTTP 429) on ${options.attempts} attempt(s)` +
+        (options.retryAfterMs !== null ? `; Retry-After ${options.retryAfterMs}ms` : ""),
+      { stage: options.stage, cause: options.cause },
+    );
+    this.retryAfterMs = options.retryAfterMs;
+    this.attempts = options.attempts;
   }
 }
 
@@ -182,6 +240,49 @@ export class BroadcastError extends GuardError {
   }
 }
 
+/** A caller's `maxFeeCap` would be exceeded by the transaction `invoke()` is
+ * about to broadcast.
+ *
+ * Raised as a fail-closed `error` outcome **before** `sendTransaction`, never as
+ * a guard refusal: the guard approved the call and the network priced it, the
+ * caller's own spend ceiling is what stopped it. The breakdown is carried as
+ * exact stroop `bigint`s so an operator can see *which* half grew — a resource
+ * fee spike versus a fee-bump retry's inclusion fee — without parsing text.
+ */
+export class FeeCapExceededError extends GuardError {
+  /** Stable code for consumers that branch on the failure. */
+  readonly code = "fee_cap_exceeded" as const;
+  /** The ceiling supplied as `maxFeeCap`. */
+  readonly maxFeeCap: bigint;
+  /** Simulated resource fee, in stroops. */
+  readonly resourceFeeStroops: bigint;
+  /** Inclusion fee the attempt would have declared, in stroops. */
+  readonly inclusionFeeStroops: bigint;
+  /** `resourceFeeStroops + inclusionFeeStroops`, in stroops. */
+  readonly totalFeeStroops: bigint;
+  /** 0-based pipeline attempt whose price breached the cap. */
+  readonly attempt: number;
+
+  constructor(params: {
+    maxFeeCap: bigint;
+    resourceFeeStroops: bigint;
+    inclusionFeeStroops: bigint;
+    attempt: number;
+  }) {
+    const totalFeeStroops = params.resourceFeeStroops + params.inclusionFeeStroops;
+    super(
+      `fee cap exceeded: total ${totalFeeStroops} stroops ` +
+        `(resource ${params.resourceFeeStroops} + inclusion ${params.inclusionFeeStroops}) ` +
+        `exceeds maxFeeCap ${params.maxFeeCap} stroops; nothing was broadcast`,
+    );
+    this.maxFeeCap = params.maxFeeCap;
+    this.resourceFeeStroops = params.resourceFeeStroops;
+    this.inclusionFeeStroops = params.inclusionFeeStroops;
+    this.totalFeeStroops = totalFeeStroops;
+    this.attempt = params.attempt;
+  }
+}
+
 /** A contract response did not match the API shape the SDK understands. */
 export class ContractResponseError extends GuardError {
   /** The exact field of the contract response that did not match. */
@@ -212,6 +313,117 @@ export class PolicyDecodeError extends GuardError {
   constructor(message: string, options: { path: string; cause?: unknown }) {
     super(message, causeOptions(options.cause));
     this.path = options.path;
+  }
+}
+
+/**
+/**
+ * Stable identifiers for policy *encoding* failures.
+ *
+ * Deliberately separate from `POLICY_RULE_IDS` (SPEC §8 semantics): these rules
+ * describe whether a draft can be represented as the contract's `PolicyConfig`
+ * at all, not whether the resulting policy is sensible. A SPEC rule id would be
+ * misleading for an integer that simply does not fit the wire type.
+ */
+export type PolicyEncodingRuleId =
+  | "invalid_type"
+  | "missing_field"
+  | "invalid_address"
+  | "invalid_symbol"
+  | "integer_out_of_range";
+
+/** One actionable, field-level reason a policy draft cannot be encoded. */
+export interface PolicyEncodingFailure {
+  /** Dotted path into the policy object, e.g. `protocols[1].fns[0]`. */
+  path: string;
+  /** Stable rule identifier for the failed encoding check. */
+  rule: PolicyEncodingRuleId;
+  /** Human-readable detail naming the offending value. */
+  message: string;
+}
+
+/**
+ * A policy draft could not be encoded as contract `ScVal` because one or more
+ * fields violate the wire contract.
+ *
+ * The policy-editor counterpart to `PolicyDecodeError`: both report a dotted
+ * `path`, so the same form can highlight a field whether the bad value came
+ * from a draft before submission or from a policy read back off-chain. Every
+ * failure is collected before the error is thrown, and no partial `ScVal` is
+ * ever produced — `failures` is the complete list a form should render, while
+ * `path`/`rule`/`field` describe the first one.
+ *
+ * This is invalid caller input (it is caught before any RPC or encoding work),
+ * so it extends `InvalidInputError` and remains an `instanceof TypeError`.
+ */
+export class PolicyEncodeError extends InvalidInputError {
+  /** Dotted path of the first failure; equal to `failures[0]?.path`. */
+  readonly path: string;
+  /** Every encoding failure found, in policy field order. */
+  readonly failures: readonly PolicyEncodingFailure[];
+
+  constructor(failures: readonly PolicyEncodingFailure[]) {
+    const [first, ...rest] = failures;
+    if (first === undefined) {
+      throw new TypeError("PolicyEncodeError requires at least one failure");
+    }
+    super(
+      first.path,
+      first.rule,
+      rest.length === 0 ? first.message : `${first.message} (and ${rest.length} more failure(s))`,
+    );
+    this.path = first.path;
+    this.failures = Object.freeze(failures.map((failure) => Object.freeze({ ...failure })));
+  }
+}
+
+/**
+ * A policy file could not be read from disk (issue #105).
+ *
+ * Distinct from `PolicyDecodeError` on purpose: "the file is not there" is an
+ * operational problem with a filesystem path, while "the bytes are not a
+ * policy" is a content problem. `code` preserves the platform errno
+ * (`ENOENT`, `EACCES`, `EISDIR`, ...) so a shell script can branch on the cause
+ * without parsing a message.
+ */
+export class PolicyFileReadError extends GuardError {
+  /** The path the caller asked to load. */
+  readonly path: string;
+  /** The Node errno code, when the runtime reported one. */
+  readonly code: string | null;
+
+  constructor(message: string, options: { path: string; code?: string | null; cause?: unknown }) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.code = options.code ?? null;
+  }
+}
+
+/**
+ * A policy file parsed as JSON but failed SPEC §8 policy validation (issue #105).
+ *
+ * Every failure is carried, not just the first one: a policy file is edited as
+ * a whole, so reporting one violation per run would turn a form fix into a
+ * guessing game. The validator's structured `path`/`rule`/`message` shape is
+ * reused rather than flattened into a string.
+ */
+export class PolicyValidationError extends GuardError {
+  /** The file that failed validation. */
+  readonly path: string;
+  /** Every policy failure, in the validator's order. */
+  readonly failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+
+  constructor(
+    message: string,
+    options: {
+      path: string;
+      failures: ReadonlyArray<import("./policy.ts").PolicyFailure>;
+      cause?: unknown;
+    },
+  ) {
+    super(message, causeOptions(options.cause));
+    this.path = options.path;
+    this.failures = [...options.failures];
   }
 }
 

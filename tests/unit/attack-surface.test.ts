@@ -22,7 +22,11 @@ const DOC = resolve(ROOT, "docs/attack-surface.md");
 const markdown = readFileSync(DOC, "utf8");
 
 /** Sections that carry no boundary of their own. */
-const NON_BOUNDARY = new Set(["SDK attack-surface inventory", "Summary", "Review and update procedure"]);
+const NON_BOUNDARY = new Set([
+  "SDK attack-surface inventory",
+  "Summary",
+  "Review and update procedure",
+]);
 
 /** Resolve every backticked repository path cited in the document. */
 function citedPaths(text: string): string[] {
@@ -89,7 +93,11 @@ describe("SDK attack-surface inventory (issue #330)", () => {
   it("states a fail-closed behaviour and a secret rule per boundary", () => {
     for (const section of sections(markdown)) {
       if (NON_BOUNDARY.has(section.heading)) continue;
-      assert.match(section.body, /\|\s*Fail-closed behaviour\s*\|/, `no fail-closed row: ${section.heading}`);
+      assert.match(
+        section.body,
+        /\|\s*Fail-closed behaviour\s*\|/,
+        `no fail-closed row: ${section.heading}`,
+      );
       assert.match(section.body, /\|\s*Secret rule\s*\|/, `no secret rule row: ${section.heading}`);
     }
   });

@@ -36,12 +36,37 @@
  * rather than failing mid-loop on the first tool call.
  */
 import type { InvokeStepEvent } from "../invoke.ts";
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
-import { evaluateAction, renderHalt, validateAdapterOptions } from "./core.ts";
-import { validateOptionalString } from "./validate.ts";
-import type { AdapterConfigIssue } from "./validate.ts";
-import { hostAbortSignal, type BlockedHookLogger, type GuardBlockedHook } from "./shared.ts";
+import {
+  throwAdapterConfigError,
+  validateBatchInterceptor,
+  validateBlockedHookLogger,
+  validateContractMapping,
+  validateInterceptor,
+  validateOptionalFunction,
+  validateOptionalSignal,
+  validateOptionalTimeout,
+  type AdapterConfigIssue,
+} from "./validate.ts";
+import { GuardError } from "../errors.ts";
+import {
+  blockedInfoFor,
+  blockedInfoForBatch,
+  checkOptionsFor,
+  decisionFromGuardError,
+  hostAbortSignal,
+  mapContractCalls,
+  mappingFailureFor,
+  runBlockedHook,
+  runDecisionHook,
+  type BlockedHookLogger,
+  type GuardBlockedHook,
+} from "./shared.ts";
 
 /** The subset of LangChain's `ToolCallRequest` this adapter reads. */
 export interface LangChainToolCallRequest {
@@ -159,12 +184,111 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       request: LangChainToolCallRequest,
       handler: (request: LangChainToolCallRequest) => Promise<T>,
     ): Promise<T | LangChainToolMessage> {
-      const evaluation = await evaluateAction(request, {
-        ...options,
-        adapter: "langchain",
-      }, hostAbortSignal((request as { signal?: unknown }).signal) ??
-        hostAbortSignal((request as { runtime?: { signal?: unknown } }).runtime?.signal));
-      if (evaluation.kind === "pass-through" || evaluation.kind === "allowed") return handler(request);
+      // A mapper that throws or returns a malformed call fails closed (issue
+      // #316): the tool body is never entered and the failure is reported as an
+      // `undetermined` halt. A `null` return still means "not fund-moving".
+      let calls: ContractCall[];
+      try {
+        calls = mapContractCalls(request, options);
+      } catch (error) {
+        const failure = mappingFailureFor("langchain", error);
+        runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
+        return mapDecisionToLangChainResult(
+          failure.decision,
+          request.toolCall.name,
+          name,
+          request.toolCall.id ?? "",
+        );
+      }
+      if (calls.length === 0) {
+        // Not a fund-moving tool. Pass through untouched rather than inventing a
+        // verdict for something the guard has no opinion about.
+        return handler(request);
+      }
+
+      // A host may expose its invocation signal on the request itself (and some
+      // LangChain runtimes nest it under `runtime`); either is forwarded.
+      const checkOptions = checkOptionsFor(
+        options,
+        hostAbortSignal((request as { signal?: unknown }).signal) ??
+          hostAbortSignal((request as { runtime?: { signal?: unknown } }).runtime?.signal),
+      );
+
+      if (calls.length === 1) {
+        let decision: PreFlightDecision;
+        try {
+          decision = await options.interceptor.check(calls[0]!, checkOptions);
+        } catch (error) {
+          if (error instanceof GuardError) {
+            decision = decisionFromGuardError(error);
+          } else {
+            throw error;
+          }
+        }
+        runDecisionHook(
+          options.onDecision,
+          [request, decision],
+          "langchain",
+          options.blockedHookLogger,
+        );
+        if (decision.allowed) return handler(request);
+
+        // Operator-facing half of the refusal, wired through the shared primitive
+        // so this adapter and ElizaOS cannot drift on the payload shape.
+        runBlockedHook(
+          options.onBlocked,
+          blockedInfoFor("langchain", calls[0]!, decision),
+          options.blockedHookLogger,
+        );
+
+        // The tool is never entered: no signing, no broadcast, no fee.
+        // Both `blocked` and `undetermined` fail closed to a refusal message.
+        return mapDecisionToLangChainResult(
+          decision,
+          request.toolCall.name,
+          name,
+          request.toolCall.id ?? "",
+        );
+      }
+
+      // Batch mapping: check every call before entering the tool. The interceptor
+      // reports one verdict per call in order; a single non-admissible verdict
+      // refuses the whole action (all-or-nothing).
+      let batch: PreFlightBatchDecision;
+      try {
+        batch = await options.interceptor.checkBatch(calls, checkOptions);
+      } catch (error) {
+        if (error instanceof GuardError) {
+          const dec = decisionFromGuardError(error);
+          batch = {
+            admissible: false,
+            overallAdmissible: false,
+            kind: dec.kind,
+            detail: dec.detail,
+            verdicts: calls.map(() => dec),
+            calls: calls.map(() => dec),
+            totalEstimatedResourceFee: 0n,
+          };
+        } else {
+          throw error;
+        }
+      }
+      for (const verdict of batch.verdicts) {
+        runDecisionHook(
+          options.onDecision,
+          [request, verdict],
+          "langchain",
+          options.blockedHookLogger,
+        );
+      }
+      if (batch.admissible) return handler(request);
+
+      runBlockedHook(
+        options.onBlocked,
+        blockedInfoForBatch("langchain", calls, batch.verdicts),
+        options.blockedHookLogger,
+      );
+      const refusal = batch.verdicts.find((verdict) => !verdict.allowed)!;
       return mapDecisionToLangChainResult(
         evaluation.verdict,
         request.toolCall.name,
@@ -176,6 +300,18 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
 }
 
 /** Human- and model-readable refusal text, sourced from the contract's reason. */
-function describeRefusal(decision: PreFlightDecision & { allowed: false }, toolName: string): string {
-  return renderHalt(decision, { kind: "message", toolName });
+function describeRefusal(
+  decision: PreFlightDecision & { allowed: false },
+  toolName: string,
+): string {
+  if (decision.kind === "blocked") {
+    return (
+      `stellar-agent-guard blocked '${toolName}': ${decision.reason} — ${decision.explanation}\n` +
+      `No transaction was submitted, so nothing was spent and no fee was paid.`
+    );
+  }
+  return (
+    `stellar-agent-guard could not determine whether '${toolName}' is permitted; ` +
+    `it was not executed.\n${decision.detail}`
+  );
 }

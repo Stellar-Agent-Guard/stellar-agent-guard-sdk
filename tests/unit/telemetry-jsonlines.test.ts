@@ -68,12 +68,18 @@ describe("serializeEventLines (issue #324)", () => {
     const parsed = lines(out).map((line) => parseEventRecord(line));
 
     assert.equal(parsed.length, 2);
-    assert.deepEqual(parsed.map((record) => record.version), [
-      TELEMETRY_EVENT_RECORD_VERSION,
-      TELEMETRY_EVENT_RECORD_VERSION,
-    ]);
-    assert.deepEqual(parsed.map((record) => record.event.stream), ["committed", "diagnostic"]);
-    assert.deepEqual(parsed.map((record) => record.event.id), events.map((event) => event.id));
+    assert.deepEqual(
+      parsed.map((record) => record.version),
+      [TELEMETRY_EVENT_RECORD_VERSION, TELEMETRY_EVENT_RECORD_VERSION],
+    );
+    assert.deepEqual(
+      parsed.map((record) => record.event.stream),
+      ["committed", "diagnostic"],
+    );
+    assert.deepEqual(
+      parsed.map((record) => record.event.id),
+      events.map((event) => event.id),
+    );
   });
 
   it("is byte-for-byte deterministic and matches serializeEventRecord line for line", () => {
@@ -81,11 +87,16 @@ describe("serializeEventLines (issue #324)", () => {
     const first = serializeEventLines(events);
     const second = serializeEventLines(events);
     assert.equal(first, second);
-    assert.deepEqual(lines(first), events.map((event) => serializeEventRecord(event)));
+    assert.deepEqual(
+      lines(first),
+      events.map((event) => serializeEventRecord(event)),
+    );
   });
 
   it("renders bigint and byte payloads JSON-safely", () => {
-    const out = serializeEventLines([committed(0, { at: 9_007_199_254_740_993n, note: new Uint8Array([1, 2, 255]) })]);
+    const out = serializeEventLines([
+      committed(0, { at: 9_007_199_254_740_993n, note: new Uint8Array([1, 2, 255]) }),
+    ]);
     const [record] = lines(out).map((line) => parseEventRecord(line));
     assert.ok(record);
     const data = record!.event.data as Record<string, unknown>;
@@ -107,7 +118,7 @@ describe("serializeEventLines (issue #324)", () => {
     };
     const out = serializeEventLines([withRaw]);
     assert.ok(!out.includes("RAW-PAYLOAD-MUST-NOT-SHIP"));
-    assert.ok(!out.includes("\"raw\""));
+    assert.ok(!out.includes('"raw"'));
     assert.deepEqual(Object.keys(parseEventRecord(lines(out)[0]!).event), [
       "id",
       "kind",
@@ -135,7 +146,10 @@ function ledgerPage(ledgers: number[], cursor: string) {
       type: "contract" as const,
       topic: [xdr.ScVal.scvSymbol("event_heartbeat")],
       value: xdr.ScVal.scvMap([
-        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(BigInt(ledger)) }),
+        new xdr.ScMapEntry({
+          key: xdr.ScVal.scvSymbol("at"),
+          val: xdr.ScVal.scvU64(BigInt(ledger)),
+        }),
       ]),
       ledger,
       ledgerClosedAt: null,
@@ -173,10 +187,12 @@ describe("GuardTelemetryListener.recentJsonLines (issue #324)", () => {
   it("exports the bounded window in observation order", async () => {
     const listener = listenerServing([ledgerPage([501, 502, 503], "cursor-1")], 2);
     await listener.poll({ startLedger: 500, cursor: "cursor-0" });
-    const ids = lines(listener.recentJsonLines()).map(
-      (line) => parseEventRecord(line).event.id,
+    const ids = lines(listener.recentJsonLines()).map((line) => parseEventRecord(line).event.id);
+    assert.deepEqual(
+      ids,
+      ["ledger:tx-502:event_heartbeat", "ledger:tx-503:event_heartbeat"],
+      "the window is bounded",
     );
-    assert.deepEqual(ids, ["ledger:tx-502:event_heartbeat", "ledger:tx-503:event_heartbeat"], "the window is bounded");
   });
 
   it("applies the same filter surface as recent()", async () => {

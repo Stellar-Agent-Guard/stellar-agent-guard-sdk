@@ -18,8 +18,8 @@
  * |----------------|-----------------------------------------------------------------|
  * | `admissible`   | the wrapped `execute` runs and its result is returned untouched |
  * | `blocked`      | throws `GuardBlockedError` before `execute` is entered          |
- * | `undetermined` | throws `PreFlightUndeterminedError` before `execute` is entered |
- * | mapper failure | throws `PreFlightUndeterminedError` (cause: `AdapterMappingError`) before `execute` is entered |
+ * | `undetermined` | throws `GuardUndeterminedError` before `execute` is entered     |
+ * | mapper failure | throws `GuardUndeterminedError` (cause: `AdapterMappingError`) before `execute` is entered |
  *
  * Throwing (rather than returning a marker like the LangChain `ToolMessage`) is
  * the harness's documented contract for this adapter: the AI SDK renders a
@@ -29,10 +29,22 @@
  * Written structurally against the `Tool` shape, so `ai` is not a dependency of
  * this package.
  */
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import { GuardError, GuardUndeterminedError } from "../errors.ts";
+import { GuardBlockedError } from "../reasons.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
-import { evaluateAction, renderHalt, validateAdapterOptions } from "./core.ts";
-import type { BlockedHookLogger } from "./shared.ts";
+import {
+  checkOptionsFor,
+  decisionFromGuardError,
+  mapContractCalls,
+  mappingFailureFor,
+  runDecisionHook,
+  type BlockedHookLogger,
+} from "./shared.ts";
 
 /**
  * The subset of the Vercel AI SDK's `Tool` interface this adapter reads.
@@ -114,20 +126,96 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
     ...tool,
     async execute(input: never, toolOptions: unknown): Promise<unknown> {
       const request = { toolName: call.toolName, input };
-      const evaluation = await evaluateAction(request, {
-        ...options,
-        adapter: "vercelai",
-        onDecision: options.onDecision,
-      });
-      if (evaluation.kind === "pass-through" || evaluation.kind === "allowed") {
-        return execute(input, toolOptions);
+      let contractCalls: ContractCall[];
+      try {
+        contractCalls = mapContractCalls(request, options);
+      } catch (error) {
+        // Fail closed on a mapper failure (issue #316). This adapter documents
+        // `undetermined` as a thrown GuardUndeterminedError, so the mapping
+        // failure keeps that shape with the AdapterMappingError as its cause.
+        const failure = mappingFailureFor("vercelai", error);
+        throw new GuardUndeterminedError(failure.info.explanation, {
+          cause: failure.decision.error,
+        });
       }
-      return renderHalt(evaluation.verdict, {
-        kind: "throw",
-        ...(evaluation.call ? { call: evaluation.call } : {}),
-      });
+      if (contractCalls.length === 0) return execute(input, toolOptions);
+
+      const checkOptions = checkOptionsFor(options);
+
+      if (contractCalls.length === 1) {
+        let decision: PreFlightDecision;
+        try {
+          decision = await options.interceptor.check(contractCalls[0]!, checkOptions);
+        } catch (error) {
+          if (error instanceof GuardError) {
+            decision = decisionFromGuardError(error);
+          } else {
+            throw error;
+          }
+        }
+        runDecisionHook(
+          options.onDecision,
+          [request, decision],
+          "vercelai",
+          options.blockedHookLogger,
+        );
+        if (decision.allowed) return execute(input, toolOptions);
+        throw refusalFor(decision, contractCalls[0]!);
+      }
+
+      // Batch mapping: only an all-admissible batch reaches `execute`.
+      let batch: PreFlightBatchDecision;
+      try {
+        batch = await options.interceptor.checkBatch(contractCalls, checkOptions);
+      } catch (error) {
+        if (error instanceof GuardError) {
+          const dec = decisionFromGuardError(error);
+          batch = {
+            admissible: false,
+            overallAdmissible: false,
+            kind: dec.kind,
+            detail: dec.detail,
+            verdicts: contractCalls.map(() => dec),
+            calls: contractCalls.map(() => dec),
+            totalEstimatedResourceFee: 0n,
+          };
+        } else {
+          throw error;
+        }
+      }
+      for (const verdict of batch.verdicts) {
+        runDecisionHook(
+          options.onDecision,
+          [request, verdict],
+          "vercelai",
+          options.blockedHookLogger,
+        );
+      }
+      if (batch.admissible) return execute(input, toolOptions);
+
+      const index = batch.verdicts.findIndex((verdict) => !verdict.allowed);
+      const refusal = batch.verdicts[index]!;
+      if (refusal.allowed) throw new Error("non-admissible batch had no refusal verdict");
+      throw refusalFor(refusal, contractCalls[index] ?? contractCalls[0]!);
     },
   };
+}
+
+/** Throw the documented error for a non-admissible verdict. */
+function refusalFor(
+  decision: PreFlightDecision & { allowed: false },
+  contractCall: ContractCall,
+): Error {
+  if (decision.kind === "blocked") {
+    return new GuardBlockedError({
+      reason: decision.reason,
+      stage: "preflight",
+      detail: decision.detail,
+      call: contractCall,
+      rawEvent: decision.diagnosticEvents?.[0],
+    });
+  }
+  return new GuardUndeterminedError(decision.detail, { cause: decision.error });
 }
 
 /**

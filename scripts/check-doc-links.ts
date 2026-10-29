@@ -73,28 +73,32 @@ export function stripComments(markdown: string): string {
 export function extractLinks(file: string, markdown: string): DocLink[] {
   const links: DocLink[] = [];
   let fenced = false;
-  stripComments(markdown).split("\n").forEach((rawLine, index) => {
-    if (/^\s*(```|~~~)/.test(rawLine)) {
-      fenced = !fenced;
-      return;
-    }
-    if (fenced) return;
-    const line = rawLine.replace(/`[^`]*`/g, "");
-    const push = (target: string | undefined): void => {
-      if (target === undefined) return;
-      const cleaned = target.trim().replace(/^<|>$/g, "");
-      if (cleaned !== "") links.push({ file, line: index + 1, target: cleaned });
-    };
-    // Inline links and images: [text](target "title") — target up to space or ')'.
-    for (const match of line.matchAll(/!?\[[^\]]*\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)/g)) {
-      push(match[1]);
-    }
-    // Reference definitions: [label]: target
-    const reference = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/.exec(line);
-    if (reference) push(reference[1]);
-    // Raw HTML anchors: <a href="...">
-    for (const match of line.matchAll(/<a\s[^>]*href="([^"]+)"/g)) push(match[1]);
-  });
+  stripComments(markdown)
+    .split("\n")
+    .forEach((rawLine, index) => {
+      if (/^\s*(```|~~~)/.test(rawLine)) {
+        fenced = !fenced;
+        return;
+      }
+      if (fenced) return;
+      const line = rawLine.replace(/`[^`]*`/g, "");
+      const push = (target: string | undefined): void => {
+        if (target === undefined) return;
+        const cleaned = target.trim().replace(/^<|>$/g, "");
+        if (cleaned !== "") links.push({ file, line: index + 1, target: cleaned });
+      };
+      // Inline links and images: [text](target "title") — target up to space or ')'.
+      for (const match of line.matchAll(
+        /!?\[[^\]]*\]\(\s*(<[^>]*>|[^)\s]+)(?:\s+"[^"]*")?\s*\)/g,
+      )) {
+        push(match[1]);
+      }
+      // Reference definitions: [label]: target
+      const reference = /^\s{0,3}\[[^\]]+\]:\s*(\S+)/.exec(line);
+      if (reference) push(reference[1]);
+      // Raw HTML anchors: <a href="...">
+      for (const match of line.matchAll(/<a\s[^>]*href="([^"]+)"/g)) push(match[1]);
+    });
   return links;
 }
 
@@ -145,7 +149,10 @@ function isOtherScheme(target: string): boolean {
 }
 
 /** Check one relative link or same-file anchor; `null` when it resolves. */
-export function checkRelative(link: DocLink, readText: (path: string) => string = (p) => readFileSync(p, "utf-8")): string | null {
+export function checkRelative(
+  link: DocLink,
+  readText: (path: string) => string = (p) => readFileSync(p, "utf-8"),
+): string | null {
   const [rawPath = "", fragment] = link.target.split("#", 2);
   const path = decodeURIComponent(rawPath.split("?")[0] ?? "");
   const resolved = path === "" ? link.file : resolve(dirname(link.file), path);
@@ -156,7 +163,9 @@ export function checkRelative(link: DocLink, readText: (path: string) => string 
 
   const anchors = anchorsOf(readText(resolved));
   const wanted = decodeURIComponent(fragment).toLowerCase();
-  return anchors.has(wanted) ? null : `no heading or anchor #${fragment} in ${path === "" ? "this file" : path}`;
+  return anchors.has(wanted)
+    ? null
+    : `no heading or anchor #${fragment} in ${path === "" ? "this file" : path}`;
 }
 
 async function checkExternal(url: string, timeoutMs = 15_000): Promise<string | null> {
@@ -188,7 +197,14 @@ function summarize(title: string, failures: LinkFailure[]): string {
   const rows = failures.map(
     (f) => `| \`${relative(ROOT, f.file)}:${f.line}\` | \`${f.target}\` | ${f.reason} |`,
   );
-  return [`### ${title} — ${failures.length} broken`, "", "| Location | Link | Problem |", "|---|---|---|", ...rows, ""].join("\n");
+  return [
+    `### ${title} — ${failures.length} broken`,
+    "",
+    "| Location | Link | Problem |",
+    "|---|---|---|",
+    ...rows,
+    "",
+  ].join("\n");
 }
 
 async function main(): Promise<void> {
@@ -227,10 +243,14 @@ async function main(): Promise<void> {
   }
 
   for (const f of relativeFailures) {
-    console.log(`::error file=${relative(ROOT, f.file)},line=${f.line}::broken link ${f.target}: ${f.reason}`);
+    console.log(
+      `::error file=${relative(ROOT, f.file)},line=${f.line}::broken link ${f.target}: ${f.reason}`,
+    );
   }
   for (const f of externalFailures) {
-    console.log(`::warning file=${relative(ROOT, f.file)},line=${f.line}::unreachable link ${f.target}: ${f.reason}`);
+    console.log(
+      `::warning file=${relative(ROOT, f.file)},line=${f.line}::unreachable link ${f.target}: ${f.reason}`,
+    );
   }
   const summary = [
     `## Docs link check`,
@@ -238,12 +258,19 @@ async function main(): Promise<void> {
     `${files.length} Markdown files, ${kept.length} links (${links.length - kept.length} excluded by config).`,
     "",
     summarize("Relative links and anchors", relativeFailures),
-    external ? summarize(`External URLs (${new Set(externalLinks.map((l) => l.target)).size} unique)`, externalFailures) : "External URLs not checked (pass --external).\n",
+    external
+      ? summarize(
+          `External URLs (${new Set(externalLinks.map((l) => l.target)).size} unique)`,
+          externalFailures,
+        )
+      : "External URLs not checked (pass --external).\n",
   ].join("\n");
   console.log(summary);
-  if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
+  if (process.env.GITHUB_STEP_SUMMARY)
+    appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${summary}\n`);
 
-  if (relativeFailures.length > 0 || (strictExternal && externalFailures.length > 0)) process.exit(1);
+  if (relativeFailures.length > 0 || (strictExternal && externalFailures.length > 0))
+    process.exit(1);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

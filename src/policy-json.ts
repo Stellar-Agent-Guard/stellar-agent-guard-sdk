@@ -22,6 +22,8 @@ export const POLICY_JSON_VERSION = 1 as const;
 export interface PolicyJsonProtocolRule {
   contract: string;
   fns: string[] | null;
+  /** Per-rule pause flag (issue #260); absent means `false`. */
+  paused?: boolean;
 }
 
 export interface PolicyJsonRecipientWindowCap {
@@ -45,6 +47,8 @@ export interface PolicyJson {
   dms_grace_secs: string;
   recipient_window_caps?: PolicyJsonRecipientWindowCap[];
   blocked_recipients?: string[];
+  /** Contract-side u32 cap (issue #260) as a decimal string; absent means 0. */
+  protocol_calls_per_window?: string;
 }
 
 const REQUIRED_FIELDS = [
@@ -61,10 +65,15 @@ const REQUIRED_FIELDS = [
   "paused",
   "dms_grace_secs",
 ] as const;
-const OPTIONAL_FIELDS = ["recipient_window_caps", "blocked_recipients"] as const;
+const OPTIONAL_FIELDS = [
+  "recipient_window_caps",
+  "blocked_recipients",
+  "protocol_calls_per_window",
+] as const;
 const I128_MIN = -(2n ** 127n);
 const I128_MAX = 2n ** 127n - 1n;
 const U64_MAX = 2n ** 64n - 1n;
+const U32_MAX = 4_294_967_295;
 
 /** Encode a policy into a JSON-safe object without narrowing bigint fields. */
 export function policyToJson(policy: ReadonlyPolicyConfig): PolicyJson {
@@ -77,6 +86,7 @@ export function policyToJson(policy: ReadonlyPolicyConfig): PolicyJson {
     protocols: policy.protocols.map((rule) => ({
       contract: rule.contract,
       fns: rule.fns === null ? null : [...rule.fns],
+      ...(rule.paused === true ? { paused: true } : {}),
     })),
     recipients: [...policy.recipients],
     allow_any_recipient: policy.allow_any_recipient,
@@ -95,6 +105,9 @@ export function policyToJson(policy: ReadonlyPolicyConfig): PolicyJson {
     ...(policy.blocked_recipients === undefined
       ? {}
       : { blocked_recipients: [...policy.blocked_recipients] }),
+    ...(policy.protocol_calls_per_window === undefined
+      ? {}
+      : { protocol_calls_per_window: policy.protocol_calls_per_window.toString() }),
   };
 }
 
@@ -118,23 +131,29 @@ export function policyFromJson(input: unknown): PolicyConfig {
   const protocols = jsonArray(root.protocols, "policy.protocols").map((value, index) => {
     const path = `policy.protocols[${index}]`;
     const rule = jsonObject(value, path);
-    assertJsonFields(rule, path, ["contract", "fns"]);
-    return {
+    assertJsonFields(rule, path, ["contract", "fns"], ["paused"]);
+    const decoded: ProtocolRule = {
       contract: jsonAddress(rule.contract, `${path}.contract`, "contract") as ContractAddress,
       fns: jsonFunctions(rule.fns, `${path}.fns`),
-    } satisfies ProtocolRule;
+    };
+    if (rule.paused !== undefined) {
+      decoded.paused = jsonBoolean(rule.paused, `${path}.paused`);
+    }
+    return decoded;
   });
 
   const policy: PolicyConfig = {
     per_tx_cap: jsonInteger(root.per_tx_cap, "policy.per_tx_cap", "i128", I128_MIN, I128_MAX),
     window_secs: jsonInteger(root.window_secs, "policy.window_secs", "u64", 0n, U64_MAX),
     window_cap: jsonInteger(root.window_cap, "policy.window_cap", "i128", I128_MIN, I128_MAX),
-    assets: jsonArray(root.assets, "policy.assets").map((value, index) =>
-      jsonAddress(value, `policy.assets[${index}]`, "contract") as ContractAddress,
+    assets: jsonArray(root.assets, "policy.assets").map(
+      (value, index) =>
+        jsonAddress(value, `policy.assets[${index}]`, "contract") as ContractAddress,
     ),
     protocols,
-    recipients: jsonArray(root.recipients, "policy.recipients").map((value, index) =>
-      jsonAddress(value, `policy.recipients[${index}]`, "account") as AccountAddress,
+    recipients: jsonArray(root.recipients, "policy.recipients").map(
+      (value, index) =>
+        jsonAddress(value, `policy.recipients[${index}]`, "account") as AccountAddress,
     ),
     allow_any_recipient: jsonBoolean(root.allow_any_recipient, "policy.allow_any_recipient"),
     active_from: jsonInteger(root.active_from, "policy.active_from", "u64", 0n, U64_MAX),
@@ -162,6 +181,16 @@ export function policyFromJson(input: unknown): PolicyConfig {
       (value, index) =>
         jsonAddress(value, `policy.blocked_recipients[${index}]`, "account") as AccountAddress,
     );
+  }
+  if (root.protocol_calls_per_window !== undefined) {
+    const value = jsonInteger(
+      root.protocol_calls_per_window,
+      "policy.protocol_calls_per_window",
+      "u32",
+      0n,
+      BigInt(U32_MAX),
+    );
+    policy.protocol_calls_per_window = Number(value);
   }
   return policy;
 }
@@ -221,7 +250,7 @@ function jsonFunctions(value: unknown, path: string): string[] | null {
 function jsonInteger(
   value: unknown,
   path: string,
-  wireType: "u64" | "i128",
+  wireType: "u32" | "u64" | "i128",
   min: bigint,
   max: bigint,
 ): bigint {

@@ -1,6 +1,7 @@
 # Summary
 
 * [Introduction](introduction.md)
+* [Glossary](glossary.md)
 * [Installation](installation.md)
 * [Runtime and Bundler Support](runtime-support.md)
 * [Concepts](concepts/)
@@ -15,6 +16,7 @@
   * [GuardTelemetryListener](api/telemetry-listener.md)
   * [Framework Adapters](api/framework-adapters.md)
   * [Invoke Pipeline](api/invoke-pipeline.md)
+* [Running an Agent 24/7](agent-runtime.md)
 * [Architecture](architecture.md)
 * [Event Schema](event-schema.md)
 * [Integration Hooks](integration-hooks.md)
