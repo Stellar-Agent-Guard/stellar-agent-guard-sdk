@@ -9,7 +9,11 @@
  * those semantics once. It is a display helper only — nothing on the
  * authorization path reads it.
  */
-import type { PolicyConfig, ReadonlyPolicyConfig } from "./policy.ts";
+import {
+  policyAddressComparisonKey,
+  type PolicyConfig,
+  type ReadonlyPolicyConfig,
+} from "./policy.ts";
 
 /** A value appearing in a {@link PolicyChange}. */
 export type PolicyValue = bigint | boolean | string | readonly string[] | null;
@@ -58,11 +62,16 @@ type AddressSetField = "assets" | "recipients" | "blocked_recipients";
  * Semantics:
  * - scalars (caps, windows, flags) compare by value;
  * - `assets`, `recipients`, `blocked_recipients` and each protocol's `fns`
- *   compare as unordered sets;
+ *   compare as unordered sets; addresses use {@link policyAddressComparisonKey};
  * - `protocols` are matched by `contract`; `recipient_window_caps` by
  *   `recipient` — a matched entry reports only its inner changes;
  * - an absent optional list (`recipient_window_caps`, `blocked_recipients`)
  *   is the same as an empty one.
+ *
+ * Duplicate members in malformed drafts are collapsed by set membership. For
+ * duplicate protocol contracts or recipient caps, the first entry wins. This
+ * helper remains deterministic on drafts, but callers should still validate
+ * before encoding or submitting a policy.
  *
  * `policyDiff(a, b)` is empty exactly when `a` and `b` are equal under these
  * semantics.
@@ -103,19 +112,33 @@ function setDiff(
   path: string,
   before: readonly string[],
   after: readonly string[],
+  keyFor: (value: string) => string = (value) => value,
 ): void {
-  const inAfter = new Set(after);
-  const inBefore = new Set(before);
+  const inAfter = new Set(after.map(keyFor));
+  const inBefore = new Set(before.map(keyFor));
+  const seenBefore = new Set<string>();
   before.forEach((value, index) => {
-    if (!inAfter.has(value)) {
+    const key = keyFor(value);
+    if (seenBefore.has(key)) return;
+    seenBefore.add(key);
+    if (!inAfter.has(key)) {
       changes.push({ field, path: `${path}[${index}]`, kind: "removed", before: value });
     }
   });
+  const seenAfter = new Set<string>();
   after.forEach((value, index) => {
-    if (!inBefore.has(value)) {
+    const key = keyFor(value);
+    if (seenAfter.has(key)) return;
+    seenAfter.add(key);
+    if (!inBefore.has(key)) {
       changes.push({ field, path: `${path}[${index}]`, kind: "added", after: value });
     }
   });
+}
+
+function addressKey(value: string): string {
+  const normalized = policyAddressComparisonKey(value);
+  return normalized === null ? `invalid:${value}` : `valid:${normalized}`;
 }
 
 function addressSet(
@@ -124,15 +147,26 @@ function addressSet(
   before: readonly string[],
   after: readonly string[],
 ): void {
-  setDiff(changes, field, field, before, after);
+  setDiff(changes, field, field, before, after, addressKey);
 }
 
-function protocols(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: ReadonlyPolicyConfig): void {
-  const afterIndex = new Map(b.protocols.map((rule, index) => [rule.contract as string, index]));
-  const beforeContracts = new Set(a.protocols.map((rule) => rule.contract as string));
+function protocols(
+  changes: PolicyChange[],
+  a: ReadonlyPolicyConfig,
+  b: ReadonlyPolicyConfig,
+): void {
+  const afterIndex = new Map<string, number>();
+  for (const [index, rule] of b.protocols.entries()) {
+    const key = addressKey(rule.contract);
+    if (!afterIndex.has(key)) afterIndex.set(key, index);
+  }
+  const beforeContracts = new Set<string>();
 
   a.protocols.forEach((rule, index) => {
-    const matched = afterIndex.get(rule.contract);
+    const key = addressKey(rule.contract);
+    if (beforeContracts.has(key)) return;
+    beforeContracts.add(key);
+    const matched = afterIndex.get(key);
     if (matched === undefined) {
       changes.push({
         field: "protocols",
@@ -147,28 +181,54 @@ function protocols(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: Readonly
     const path = `protocols[${matched}].fns`;
     if (rule.fns === null || next.fns === null) {
       if (rule.fns !== next.fns) {
-        changes.push({ field: "protocols", path, kind: "changed", before: rule.fns, after: next.fns });
+        changes.push({
+          field: "protocols",
+          path,
+          kind: "changed",
+          before: rule.fns,
+          after: next.fns,
+        });
       }
       return;
     }
     setDiff(changes, "protocols", path, rule.fns, next.fns);
   });
 
+  const afterSeen = new Set<string>();
   b.protocols.forEach((rule, index) => {
-    if (!beforeContracts.has(rule.contract)) {
-      changes.push({ field: "protocols", path: `protocols[${index}]`, kind: "added", after: rule.contract });
+    const key = addressKey(rule.contract);
+    if (afterSeen.has(key)) return;
+    afterSeen.add(key);
+    if (!beforeContracts.has(key)) {
+      changes.push({
+        field: "protocols",
+        path: `protocols[${index}]`,
+        kind: "added",
+        after: rule.contract,
+      });
     }
   });
 }
 
-function windowCaps(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: ReadonlyPolicyConfig): void {
+function windowCaps(
+  changes: PolicyChange[],
+  a: ReadonlyPolicyConfig,
+  b: ReadonlyPolicyConfig,
+): void {
   const before = a.recipient_window_caps ?? [];
   const after = b.recipient_window_caps ?? [];
-  const afterIndex = new Map(after.map((entry, index) => [entry.recipient as string, index]));
-  const beforeRecipients = new Set(before.map((entry) => entry.recipient as string));
+  const afterIndex = new Map<string, number>();
+  for (const [index, entry] of after.entries()) {
+    const key = addressKey(entry.recipient);
+    if (!afterIndex.has(key)) afterIndex.set(key, index);
+  }
+  const beforeRecipients = new Set<string>();
 
   before.forEach((entry, index) => {
-    const matched = afterIndex.get(entry.recipient);
+    const key = addressKey(entry.recipient);
+    if (beforeRecipients.has(key)) return;
+    beforeRecipients.add(key);
+    const matched = afterIndex.get(key);
     if (matched === undefined) {
       changes.push({
         field: "recipient_window_caps",
@@ -190,8 +250,12 @@ function windowCaps(changes: PolicyChange[], a: ReadonlyPolicyConfig, b: Readonl
     }
   });
 
+  const afterRecipients = new Set<string>();
   after.forEach((entry, index) => {
-    if (!beforeRecipients.has(entry.recipient)) {
+    const key = addressKey(entry.recipient);
+    if (afterRecipients.has(key)) return;
+    afterRecipients.add(key);
+    if (!beforeRecipients.has(key)) {
       changes.push({
         field: "recipient_window_caps",
         path: `recipient_window_caps[${index}]`,

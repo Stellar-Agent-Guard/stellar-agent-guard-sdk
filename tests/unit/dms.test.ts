@@ -119,7 +119,10 @@ describe("dmsUrgency", () => {
 
   it("trusts a contract-reported dead-man freeze", () => {
     assert.equal(dmsUrgency(at(10n), policy(grace)), "ok");
-    assert.equal(dmsUrgency(status({ now: 1010n, heartbeat_expired: true }), policy(grace)), "expired");
+    assert.equal(
+      dmsUrgency(status({ now: 1010n, heartbeat_expired: true }), policy(grace)),
+      "expired",
+    );
   });
 
   it("an admin freeze is not a dead-man expiry", () => {

@@ -24,10 +24,27 @@
  * pinned revisions and the hook search are recorded in
  * `docs/integration-hooks.md` §4.
  */
+import { GuardError } from "../errors.ts";
 import type { InvokeStepEvent } from "../invoke.ts";
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
-import { blockedInfoFor, runBlockedHook, type GuardBlockedHook } from "./shared.ts";
+import {
+  blockedInfoFor,
+  blockedInfoForBatch,
+  checkOptionsFor,
+  decisionFromGuardError,
+  hostAbortSignal,
+  mapContractCalls,
+  mappingFailureFor,
+  runBlockedHook,
+  runDecisionHook,
+  type BlockedHookLogger,
+  type GuardBlockedHook,
+} from "./shared.ts";
 
 /** The one field of a tool call this adapter reads. */
 export interface McpToolCallRequest {
@@ -64,7 +81,14 @@ export interface McpGuardOptions {
    * Turn a tool call into the guarded contract call it would make, or `null` if
    * this tool moves no funds and should not be intercepted at all.
    */
-  toContractCall: (request: McpToolCallRequest) => ContractCall | null;
+  toContractCall?: (request: McpToolCallRequest) => ContractCall | null;
+  /**
+   * Additive batch mapping (issue #318): the ordered calls this tool performs.
+   * Takes precedence over `toContractCall`; the whole batch is checked before
+   * the handler runs (all-or-nothing). `null` or an empty array means the tool
+   * is not fund-moving.
+   */
+  toContractCalls?: (request: McpToolCallRequest) => readonly ContractCall[] | null;
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (request: McpToolCallRequest, decision: PreFlightDecision) => void;
   /**
@@ -74,11 +98,28 @@ export interface McpGuardOptions {
    */
   onBlocked?: GuardBlockedHook;
   /**
+   * Explicit sink for a swallowed `onBlocked` failure. Omitted (the default),
+   * a throwing hook is silent (issue #314).
+   */
+  blockedHookLogger?: BlockedHookLogger;
+  /**
    * Optional per-call observability, forwarded to the interceptor's `check()`:
    * one event per enforcement-stage attempt (probe → sign → simulate). The
    * adapter never broadcasts, so no `broadcast` events can appear here.
    */
   onStep?: (step: InvokeStepEvent) => void;
+  /**
+   * Caller-owned cancellation, forwarded to every pre-flight `check()`
+   * (issue #315). For `guardMcpToolHandler` the host's invocation signal
+   * (`extra.signal`) takes precedence when the SDK provides one.
+   */
+  signal?: AbortSignal | undefined;
+  /**
+   * Bound on each RPC call made by the pre-flight check, in milliseconds
+   * (issue #315); `0` disables it. A fired timeout yields the same fail-closed
+   * `undetermined` verdict as an abort.
+   */
+  timeoutMs?: number | undefined;
 }
 
 /**
@@ -93,19 +134,84 @@ async function guardMcpRequest<T extends McpToolResult>(
   request: McpToolCallRequest,
   proceed: () => Promise<T>,
   options: McpGuardOptions,
+  hostSignal?: AbortSignal | undefined,
 ): Promise<T | McpToolResult> {
-  const call = options.toContractCall(request);
-  if (!call) return proceed();
+  let calls: ContractCall[];
+  try {
+    calls = mapContractCalls(request, options);
+  } catch (error) {
+    // Fail closed on a mapper failure (issue #316): the tool body never runs and
+    // the halt is reported as undetermined, without a mapped `call`.
+    const failure = mappingFailureFor("mcp", error);
+    runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
+    return {
+      content: [{ type: "text", text: describeMcpRefusal(failure.decision, request.name) }],
+      isError: true,
+    };
+  }
+  if (calls.length === 0) return proceed();
 
-  const decision = await options.interceptor.check(call, {
-    ...(options.onStep ? { onStep: options.onStep } : {}),
-  });
-  options.onDecision?.(request, decision);
-  if (decision.allowed) return proceed();
+  const checkOptions = checkOptionsFor(options, hostSignal);
 
-  runBlockedHook(options.onBlocked, blockedInfoFor("mcp", call, decision));
+  if (calls.length === 1) {
+    let decision: PreFlightDecision;
+    try {
+      decision = await options.interceptor.check(calls[0]!, checkOptions);
+    } catch (error) {
+      if (error instanceof GuardError) {
+        decision = decisionFromGuardError(error);
+      } else {
+        throw error;
+      }
+    }
+    runDecisionHook(options.onDecision, [request, decision], "mcp", options.blockedHookLogger);
+    if (decision.allowed) return proceed();
+
+    runBlockedHook(
+      options.onBlocked,
+      blockedInfoFor("mcp", calls[0]!, decision),
+      options.blockedHookLogger,
+    );
+    return {
+      content: [{ type: "text", text: describeMcpRefusal(decision, request.name) }],
+      isError: true,
+    };
+  }
+
+  // Batch mapping: report every per-call verdict, and refuse the whole action if
+  // any call is blocked or undetermined (all-or-nothing).
+  let batch: PreFlightBatchDecision;
+  try {
+    batch = await options.interceptor.checkBatch(calls, checkOptions);
+  } catch (error) {
+    if (error instanceof GuardError) {
+      const dec = decisionFromGuardError(error);
+      batch = {
+        admissible: false,
+        overallAdmissible: false,
+        kind: dec.kind,
+        detail: dec.detail,
+        verdicts: calls.map(() => dec),
+        calls: calls.map(() => dec),
+        totalEstimatedResourceFee: 0n,
+      };
+    } else {
+      throw error;
+    }
+  }
+  for (const verdict of batch.verdicts) {
+    runDecisionHook(options.onDecision, [request, verdict], "mcp", options.blockedHookLogger);
+  }
+  if (batch.admissible) return proceed();
+
+  runBlockedHook(
+    options.onBlocked,
+    blockedInfoForBatch("mcp", calls, batch.verdicts),
+    options.blockedHookLogger,
+  );
+  const refusal = batch.verdicts.find((verdict) => !verdict.allowed)!;
   return {
-    content: [{ type: "text", text: describeMcpRefusal(decision, request.name) }],
+    content: [{ type: "text", text: describeMcpRefusal(refusal, request.name) }],
     isError: true,
   };
 }
@@ -128,6 +234,8 @@ export function guardMcpToolHandler<T extends McpToolResult>(
       { name: toolName, arguments: args },
       () => handler(args, extra),
       options,
+      // The MCP SDK passes the invocation's AbortSignal through `extra`.
+      hostAbortSignal((extra as { signal?: unknown } | undefined)?.signal),
     );
 }
 

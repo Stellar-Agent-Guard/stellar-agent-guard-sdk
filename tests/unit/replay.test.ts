@@ -56,9 +56,7 @@ function extractVerdict(
       : { verdict: "undetermined" };
   }
 
-  return decision?.result === "allowed"
-    ? { verdict: "admissible" }
-    : { verdict: "undetermined" };
+  return decision?.result === "allowed" ? { verdict: "admissible" } : { verdict: "undetermined" };
 }
 
 describe("offline enforcement replay", () => {

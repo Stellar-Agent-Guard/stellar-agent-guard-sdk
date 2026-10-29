@@ -1,0 +1,35 @@
+# Formatter exclusions (issue #138). Each entry is a deliberate, reviewable
+# exception; keep this list short and add a reason here when it grows.
+#
+# Build output and dependencies are never formatted.
+dist/
+coverage/
+node_modules/
+package-lock.json
+
+# Golden/evidence fixtures are hash-pinned and byte-compared by tests
+# (`tests/unit/fixture.test.ts`, `check-enforcement-evidence.ts`). Formatting
+# them would rewrite the evidence record, so they stay exactly as captured.
+tests/fixtures/
+benches/baselines/
+*.golden.json
+
+# Hand-wrapped prose and the generated changelog: Prettier re-wraps tables and
+# paragraphs, which turns a formatter PR into an unreviewable documentation
+# diff. Markdown stays lint/link-checked instead.
+*.md
+docs/
+
+# Enforcement-path files: the required `ci` job demands fresh live-testnet
+# evidence for any change here (scripts/check-enforcement-evidence.ts), and a
+# whitespace-only reformat cannot justify an evidence rerun. They stay
+# hand-formatted until the next enforcement change can carry both the code
+# change and fresh evidence in the same PR.
+src/tx.ts
+src/invoke.ts
+src/policy.ts
+src/preflight.ts
+
+# Editor/CI metadata that is either generated or intentionally hand-shaped.
+.github/RELEASE_TEMPLATE.md
+.github/pull_request_template.md

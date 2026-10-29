@@ -106,7 +106,11 @@ async function recordedCalls(fake: FakeGh): Promise<string[][]> {
 }
 
 /** Run one notify script with the fake gh first on PATH, starting from an empty call log. */
-async function runNotify(script: "failure.sh" | "success.sh", fake: FakeGh, runUrl: string): Promise<void> {
+async function runNotify(
+  script: "failure.sh" | "success.sh",
+  fake: FakeGh,
+  runUrl: string,
+): Promise<void> {
   // Fresh log per invocation: each test asserts on the calls *its* run made.
   await rm(join(fake.dir, "calls.jsonl"), { force: true });
   const result = await spawnFile("bash", [join(SCRIPTS_DIR, script)], {
@@ -167,7 +171,9 @@ describe("live-suite notification path (issue #143)", () => {
     await runNotify("success.sh", fake, "https://example.test/runs/4");
     const calls = await recordedCalls(fake);
     const mutating = calls.filter(([cmd, ...rest]) => {
-      return cmd === "issue" && (rest[0] === "create" || rest[0] === "close" || rest[0] === "comment");
+      return (
+        cmd === "issue" && (rest[0] === "create" || rest[0] === "close" || rest[0] === "comment")
+      );
     });
     assert.deepEqual(mutating, [], "the success path must not create, close, or comment anything");
   });
@@ -181,10 +187,7 @@ describe("live-suite notification path (issue #143)", () => {
 
   it("workflow wires both notify steps with the right guards and env", async () => {
     const { readFile } = await import("node:fs/promises");
-    const yaml = await readFile(
-      resolve(process.cwd(), ".github/workflows/live-suite.yml"),
-      "utf8",
-    );
+    const yaml = await readFile(resolve(process.cwd(), ".github/workflows/live-suite.yml"), "utf8");
     // Failure step: guarded by failure(), runs the real script, carries the token.
     assert.match(yaml, /if:\s*failure\(\)[\s\S]*?live-suite-notify\/failure\.sh/);
     // Success step: guarded by success(), runs the real script.

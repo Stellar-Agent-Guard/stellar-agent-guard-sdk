@@ -69,7 +69,12 @@ function serialize(value: unknown): string {
 }
 
 /** A blocked action has no submission — that is the pre-broadcast guarantee. */
-type BlockedOutcome = { kind: "blocked"; reason: string; detail?: string; diagnosticEvents: unknown[] };
+type BlockedOutcome = {
+  kind: "blocked";
+  reason: string;
+  detail?: string;
+  diagnosticEvents: unknown[];
+};
 
 function assertBlocked(
   outcome: Awaited<ReturnType<typeof transfer>>,
@@ -90,10 +95,7 @@ function assertBlocked(
   );
 
   // Pre-broadcast: no transaction was submitted, so there is no hash at all.
-  assert.ok(
-    !("submission" in outcome),
-    "a blocked action must not carry a submission result",
-  );
+  assert.ok(!("submission" in outcome), "a blocked action must not carry a submission result");
 
   // The refusal must be signed by the contract itself, not inferred from a
   // generic failure: find the guard's own decision event in the diagnostics.
@@ -145,8 +147,9 @@ describe("live enforcement: SAC transfer", () => {
 
     const outcome = await transfer(server, config, amount, config.keys.recipient.publicKey());
     assert.equal(outcome.kind, "allowed", JSON.stringify(outcome));
-    const submission = (outcome as { submission: { hash: string; status: string; ledger: number | null } })
-      .submission;
+    const submission = (
+      outcome as { submission: { hash: string; status: string; ledger: number | null } }
+    ).submission;
 
     assert.match(submission.hash, /^[0-9a-f]{64}$/, "expected a real transaction hash");
     assert.ok(submission.ledger !== null, "expected the transaction to land in a ledger");
@@ -241,7 +244,11 @@ describe("live enforcement: SAC transfer", () => {
     assert.ok(perTransfer * 2n > config.policy.window_cap);
 
     const first = await transfer(server, config, perTransfer, config.keys.recipient.publicKey());
-    assert.equal(first.kind, "allowed", `first transfer should be allowed: ${JSON.stringify(first)}`);
+    assert.equal(
+      first.kind,
+      "allowed",
+      `first transfer should be allowed: ${JSON.stringify(first)}`,
+    );
     const afterFirst = await readWindowTotal(server, config);
     assert.equal(afterFirst.total, perTransfer, "the window did not accumulate the first transfer");
 

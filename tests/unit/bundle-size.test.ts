@@ -35,29 +35,43 @@ describe("bundle-size canary (issue #145)", () => {
     // The field: audited and set (it was absent before this change — the PR
     // records the measured delta: a narrow single-export import bundling 1,887 B
     // raw before, 527 B after, −72%).
-    assert.equal(pkg.sideEffects, false, "sideEffects must be declared false for tree-shaking consumers");
-    assert.equal(pkg.type, "module", "ESM package: the module form is the tree-shaking precondition");
+    assert.equal(
+      pkg.sideEffects,
+      false,
+      "sideEffects must be declared false for tree-shaking consumers",
+    );
+    assert.equal(
+      pkg.type,
+      "module",
+      "ESM package: the module form is the tree-shaking precondition",
+    );
 
     // The claim, verified by actually bundling: a one-export import must
     // produce a bundle that is a small fraction of the full-surface canary.
     const { build } = await import("esbuild");
     const { writeFile: write, rm } = await import("node:fs/promises");
     const narrowEntry = "scripts/.narrow-entry.test-tmp.ts";
-    await write(
-      narrowEntry,
-      'export { describePolicy } from "../src/index.ts";\n',
-      "utf8",
-    );
+    await write(narrowEntry, 'export { describePolicy } from "../src/index.ts";\n', "utf8");
     try {
       const full = await build({
         entryPoints: ["scripts/bundle-size-entry.ts"],
-        bundle: true, minify: true, format: "esm", platform: "browser",
-        external: ["node:*"], write: false, logLevel: "silent",
+        bundle: true,
+        minify: true,
+        format: "esm",
+        platform: "browser",
+        external: ["node:*"],
+        write: false,
+        logLevel: "silent",
       });
       const narrow = await build({
         entryPoints: [narrowEntry],
-        bundle: true, minify: true, format: "esm", platform: "browser",
-        external: ["node:*"], write: false, logLevel: "silent",
+        bundle: true,
+        minify: true,
+        format: "esm",
+        platform: "browser",
+        external: ["node:*"],
+        write: false,
+        logLevel: "silent",
       });
       const fullBundle = full.outputFiles[0];
       const narrowBundle = narrow.outputFiles[0];
@@ -94,15 +108,15 @@ describe("bundle-size canary (issue #145)", () => {
     const original = await readFile(BUDGET_PATH, "utf8");
     const budget = JSON.parse(original) as BudgetDoc;
     // Temporarily set an impossible budget: 1 byte.
-    const lowered = JSON.stringify(
-      { ...budget, budget: { rawBytes: 1, gzipBytes: 1 } },
-      null,
-      2,
-    );
+    const lowered = JSON.stringify({ ...budget, budget: { rawBytes: 1, gzipBytes: 1 } }, null, 2);
     await writeFile(BUDGET_PATH, lowered, "utf8");
     try {
       const failing = await spawnFile("node", [SCRIPT_PATH]);
-      assert.equal(failing.code, 1, "the check MUST fail over budget — a check that cannot fail is decoration");
+      assert.equal(
+        failing.code,
+        1,
+        "the check MUST fail over budget — a check that cannot fail is decoration",
+      );
       assert.match(failing.stdout, /OVER by/);
       assert.match(failing.stderr, /Over the committed bundle-size budget/);
       assert.match(failing.stderr, /re-baseline/);
