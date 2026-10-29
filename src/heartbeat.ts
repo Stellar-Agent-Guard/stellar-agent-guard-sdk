@@ -18,11 +18,11 @@
  * beat that falls in the same wall-clock second as the previous accepted beat,
  * which saves a redundant round trip; it never claims to be the enforcement.
  */
-import { Keypair, rpc } from "@stellar/stellar-sdk";
+import { Keypair, Operation, rpc, scValToNative, TransactionBuilder } from "@stellar/stellar-sdk";
 import { DEFAULT_NETWORK_PASSPHRASE } from "./admin.ts";
 import { BroadcastError, GuardError, SimulationError } from "./errors.ts";
 import { invoke, RpcTimeoutError, type InvokeDryRunVerdict, type InvokeOutcome } from "./invoke.ts";
-import { unsafeContractAddress, type PolicyConfig } from "./policy.ts";
+import { unsafeContractAddress, type GuardStatus, type PolicyConfig } from "./policy.ts";
 import { explainReason, GuardBlockedError } from "./reasons.ts";
 import type { AgentSigner, AdminSigner } from "./tx.ts";
 
@@ -441,6 +441,132 @@ export async function submitHeartbeat(params: SubmitHeartbeatParams): Promise<He
   return {
     outcome,
     ...(ledger !== null && ledger !== undefined ? { ledger } : {}),
+  };
+}
+
+/** Parameters to `heartbeat()`: `submitHeartbeat()`'s, plus the status re-read. */
+export interface HeartbeatParams extends SubmitHeartbeatParams {
+  /**
+   * Re-read the guard's `status()` once the heartbeat is accepted, to confirm
+   * `LastHeartbeat` moved. Defaults to `true`.
+   */
+  verify?: boolean;
+  /** Replace the submission step (testing seam). Defaults to `submitHeartbeat()`. */
+  submit?: (params: SubmitHeartbeatParams) => Promise<HeartbeatSubmission>;
+}
+
+/** What a confirmed `heartbeat()` reports back. */
+export interface HeartbeatResult {
+  /** Hash of the accepted heartbeat transaction. */
+  transactionHash: string;
+  /** Ledger the heartbeat committed to, when the network reported one. */
+  ledger: number | null;
+  /**
+   * The guard's `status()` read back after the heartbeat, or `null` when
+   * `verify: false` or the read failed (the heartbeat itself still landed).
+   */
+  status: GuardStatus | null;
+  /** `status.last_heartbeat`, or `null` when no status was read back. */
+  lastHeartbeat: bigint | null;
+  /**
+   * True only when the re-read shows the effect: a non-zero `LastHeartbeat` and
+   * a dead-man switch that is not expired. False means "not confirmed", never
+   * "failed" — the transaction was accepted either way.
+   */
+  verified: boolean;
+  /** The full invoke outcome, for callers that want the raw submission. */
+  outcome: InvokeOutcome;
+}
+
+/**
+ * Read the guard's `status()` view (a simulation; nothing is submitted).
+ *
+ * `source` only supplies the simulation's source account.
+ */
+export async function readGuardStatus(params: {
+  server: rpc.Server;
+  guard: string;
+  source: string;
+  networkPassphrase?: string;
+}): Promise<GuardStatus> {
+  const account = await params.server.getAccount(params.source);
+  const tx = new TransactionBuilder(account, {
+    fee: "100",
+    networkPassphrase: params.networkPassphrase ?? DEFAULT_NETWORK_PASSPHRASE,
+  })
+    .addOperation(
+      Operation.invokeContractFunction({ contract: params.guard, function: "status", args: [] }),
+    )
+    .setTimeout(30)
+    .build();
+  const sim = await params.server.simulateTransaction(tx);
+  if (rpc.Api.isSimulationError(sim)) {
+    throw new SimulationError(`reading guard status failed: ${sim.error}`, {
+      stage: "simulate",
+    });
+  }
+  const retval = (sim as rpc.Api.SimulateTransactionSuccessResponse).result?.retval;
+  if (retval === undefined) {
+    throw new SimulationError("reading guard status returned no value", {
+      stage: "simulate",
+    });
+  }
+  return scValToNative(retval) as GuardStatus;
+}
+
+/**
+ * Sign and submit one `heartbeat()` and confirm its effect (issue #75).
+ *
+ * `submitHeartbeat()` plus the parts a one-shot caller needs: it resolves only
+ * for an accepted heartbeat, and throws for every other outcome so a refusal can
+ * never be mistaken for a beat:
+ *
+ * - `HeartbeatBlockedError` — the guard refused; `reason` is the contract's
+ *   symbol (`heartbeat_expired`: the dead-man switch already fired, an admin
+ *   must unfreeze; `admin_frozen`: an admin froze the account) and the message
+ *   carries `explainReason`'s guidance;
+ * - `HeartbeatDryRunError` — the pipeline stopped before broadcast;
+ * - `BroadcastError` — submitted but unconfirmed (do not rebroadcast blindly) or
+ *   rejected by the network; a pipeline error is rethrown as-is.
+ */
+export async function heartbeat(params: HeartbeatParams): Promise<HeartbeatResult> {
+  const { verify = true, submit = submitHeartbeat, ...submitParams } = params;
+  const submission = await submit(submitParams);
+  const outcome = submission.outcome;
+  if (outcome === undefined) throw new GuardError("heartbeat produced no outcome");
+  const classification = classifyHeartbeatOutcome(outcome);
+  if (classification.kind !== "allowed" || outcome.kind !== "allowed") {
+    throw (classification as { error: unknown }).error;
+  }
+
+  let status: GuardStatus | null = null;
+  if (verify) {
+    const source =
+      submitParams.source ?? (isAgentSigner(submitParams.signer) ? null : submitParams.signer);
+    if (source) {
+      try {
+        status = await readGuardStatus({
+          server: submitParams.server,
+          guard: submitParams.guard,
+          source: await source.publicKey(),
+          ...(submitParams.networkPassphrase !== undefined
+            ? { networkPassphrase: submitParams.networkPassphrase }
+            : {}),
+        });
+      } catch {
+        // The heartbeat is already on the ledger; an unreadable status only
+        // means it is unconfirmed, which `verified: false` reports.
+        status = null;
+      }
+    }
+  }
+  return {
+    transactionHash: outcome.submission.hash,
+    ledger: outcome.submission.ledger,
+    status,
+    lastHeartbeat: status ? status.last_heartbeat : null,
+    verified: status !== null && status.last_heartbeat !== 0n && !status.heartbeat_expired,
+    outcome,
   };
 }
 

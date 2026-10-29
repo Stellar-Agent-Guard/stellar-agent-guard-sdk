@@ -25,6 +25,7 @@ export {
   AdapterMappingError,
   BroadcastError,
   ContractResponseError,
+  FeeCapExceededError,
   GuardError,
   GuardUndeterminedError,
   InvalidFeeCeilingError,
@@ -34,6 +35,7 @@ export {
   PolicyFileReadError,
   PolicyValidationError,
   SigningError,
+  RateLimitedError,
   SimulationError,
 } from "./errors.ts";
 
@@ -66,6 +68,7 @@ export type {
 } from "./reasons.ts";
 
 export {
+  DEFAULT_GUARD_POLICY,
   POLICY_RULE_IDS,
   deadManRemaining,
   decodeCheckResult,
@@ -124,6 +127,14 @@ export {
   policyToJson,
 } from "./policy-json.ts";
 
+export { DEFAULT_TELEMETRY_PAGE_SIZE, RPC_MAX_EVENTS_PER_CALL } from "./telemetry.ts";
+export type { GuardEventFilter } from "./telemetry.ts";
+export type {
+  PolicyValidationResult,
+  ContractPolicyRuleId,
+  CONTRACT_POLICY_RULE_IDS,
+  POLICY_RULE_MESSAGES,
+} from "./policy-preflight.ts";
 export type {
   PolicyJson,
   PolicyJsonProtocolRule,
@@ -211,6 +222,7 @@ export type { TraceStepName, TraceStepStatus } from "./trace.ts";
 
 export {
   GuardUndeterminedError as PreFlightUndeterminedError,
+  DEFAULT_MAX_CONCURRENT_SIMULATIONS,
   PreFlightInterceptor,
   preflight,
   preflightBatch,
@@ -229,6 +241,7 @@ export type {
   PreFlightConfigInput,
   PreFlightDecision,
   PreFlightInterceptorOptions,
+  PreFlightUndeterminedCause,
 } from "./preflight.ts";
 
 export {
@@ -368,12 +381,16 @@ export {
   HeartbeatBlockedError,
   HeartbeatDryRunError,
   HeartbeatIntervalError,
+  heartbeat,
   isRetryableHeartbeatFailure,
+  readGuardStatus,
   startHeartbeat,
   submitHeartbeat,
   type HeartbeatBeat,
   type HeartbeatHandle,
   type HeartbeatOptions,
+  type HeartbeatParams,
+  type HeartbeatResult,
   type HeartbeatRetryOptions,
   type HeartbeatStopOptions,
   type HeartbeatStopResult,

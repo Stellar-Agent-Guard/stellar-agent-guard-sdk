@@ -694,9 +694,16 @@ export interface GuardTelemetryConfig {
   server: rpc.Server;
   /** The guard contract to follow. */
   guard: string;
-  /** Opt in to scanning failed transaction diagnostics as a third stream. */
+  /**
+   * Opt in to scanning failed transaction diagnostics as a third stream.
+   * Default: `false`.
+   */
   failedTx?: boolean;
-  /** RPC URL, only used for error messages. */
+  /**
+   * RPC URL used, ahead of the server's own URL, as the network identity (its
+   * host) that scopes cursor-store slots. Default: none (the `url` you passed,
+   * else the server's own URL, is used).
+   */
   rpcUrl?: string;
   /**
    * Optional log sink for this listener's diagnostics: a summary of every page
@@ -713,7 +720,8 @@ export interface GuardTelemetryConfig {
   counters?: GuardTelemetryCountersOptions;
   /**
    * Clock the counters consult for `windowMs` eviction. Defaults to
-   * `Date.now`; injectable so tests need no wall-clock waits.
+   * `Date.now`; injectable so tests need no wall-clock waits. When set, it
+   * replaces `counters.clock`.
    */
   clock?: (() => number) | undefined;
   /**
@@ -743,6 +751,8 @@ export interface GuardTelemetryConfig {
    * (issue #282), so one backing store can safely serve several listeners
    * without cursor cross-talk. A pre-#282 two-method store still works — it
    * simply keeps a single slot, as it always did.
+   *
+   * Default: a process-local `InMemoryCursorStore` (not durable).
    */
   cursorStore?: CursorStore;
   /**
@@ -944,6 +954,50 @@ export interface FailedTxPollResult {
  * cover what a retention window can still resurface.
  */
 const MAX_TRACKED_FAILED_TX = 1_000;
+
+/**
+ * Default capacity limit on emitted event IDs retained in `mergeGuardEventStreams`
+ * to bound memory consumption for long-running telemetry streams (issue #278).
+ */
+export const DEFAULT_DEDUP_CAPACITY = 10_000;
+
+/**
+ * Bounded deduplicator for event IDs using a FIFO eviction strategy.
+ */
+export class BoundedEventDeduplicator {
+  readonly capacity: number;
+  private readonly set = new Set<string>();
+  private readonly queue: string[] = [];
+
+  constructor(capacity: number = DEFAULT_DEDUP_CAPACITY) {
+    if (!Number.isInteger(capacity) || capacity < 1) {
+      throw new RangeError(
+        `Deduplicator capacity must be a positive integer, received ${capacity}`,
+      );
+    }
+    this.capacity = capacity;
+  }
+
+  has(id: string): boolean {
+    return this.set.has(id);
+  }
+
+  add(id: string): void {
+    if (this.set.has(id)) return;
+    if (this.queue.length >= this.capacity) {
+      const oldest = this.queue.shift();
+      if (oldest !== undefined) {
+        this.set.delete(oldest);
+      }
+    }
+    this.set.add(id);
+    this.queue.push(id);
+  }
+
+  get size(): number {
+    return this.set.size;
+  }
+}
 
 /** Cap on the coverage gaps `health()` retains, oldest evicted first. */
 const MAX_RECORDED_GAPS = 100;
@@ -1231,12 +1285,19 @@ async function* boundedPagePump(
         outstanding -= 1;
         // Refill while the consumer works on this page.
         ensurePump();
-        // Persist before delivery, mirroring the loop's own save-before-yield
-        // (#37): a consumer that stops after this page resumes from it, while
-        // the pages still buffered stay unsaved and are re-read on restart.
-        await saveCursor(page.cursor);
-        if (page.failedTxCursor !== undefined) await saveFailedTxCursor(page.failedTxCursor);
-        if (page.events.length > 0) yield page.events;
+        // Safe telemetry checkpointing (issue #274): persist the page's
+        // cursors only after the consumer resumes past the yield below, so a
+        // consumer that stops after this page leaves the stored cursor
+        // unadvanced (at-least-once). An empty page is never delivered to the
+        // consumer, so it advances its cursor as soon as it is read.
+        if (page.events.length > 0) {
+          yield page.events;
+          await saveCursor(page.cursor);
+          if (page.failedTxCursor !== undefined) await saveFailedTxCursor(page.failedTxCursor);
+        } else {
+          await saveCursor(page.cursor);
+          if (page.failedTxCursor !== undefined) await saveFailedTxCursor(page.failedTxCursor);
+        }
         continue;
       }
       if (failure !== null) {
@@ -1518,13 +1579,20 @@ export interface GuardTelemetryWatchParams {
  *   one the acceptance criteria exercise.
  */
 export interface GuardTelemetryCountersOptions {
-  /** Keep the last N decisions. Mutually exclusive with `windowMs`. */
+  /**
+   * Keep the last N decisions. Mutually exclusive with `windowMs`; exactly one
+   * of the two is required. Default: none.
+   */
   windowEvents?: number;
-  /** Keep decisions observed within the last `windowMs` milliseconds. */
+  /**
+   * Keep decisions observed within the last `windowMs` milliseconds.
+   * Default: none.
+   */
   windowMs?: number;
   /**
    * Clock used for `windowMs` eviction and for `windowStart`. Defaults to
-   * `Date.now`. Injected so tests need no wall-clock waits.
+   * `Date.now`. Injected so tests need no wall-clock waits. A listener-level
+   * `GuardTelemetryConfig.clock` overrides it.
    */
   clock?: () => number;
 }
@@ -1814,6 +1882,11 @@ export interface GuardTelemetryUnifiedParams extends GuardTelemetryWatchParams {
    * order. Absent → `watchAll()` degenerates cleanly to the committed stream.
    */
   diagnostics?: AsyncIterable<GuardDiagnosticBatch> | Iterable<GuardDiagnosticBatch>;
+  /**
+   * Optional capacity limit on retained event IDs for stream de-duplication (issue #278).
+   * Defaults to `DEFAULT_DEDUP_CAPACITY` (10,000 entries).
+   */
+  dedupCapacity?: number;
 }
 
 /** Render an unknown thrown value as a message, for the health snapshot. */
@@ -1924,10 +1997,11 @@ export async function* mergeGuardEventStreams(
   committedSource: AsyncIterable<GuardEvent[]> | Iterable<GuardEvent[]>,
   diagnosticSource?: AsyncIterable<GuardDiagnosticBatch> | Iterable<GuardDiagnosticBatch>,
   signal?: AbortSignal,
+  dedupCapacity: number = DEFAULT_DEDUP_CAPACITY,
 ): AsyncGenerator<GuardEvent, void, undefined> {
   const committed = asAsyncIterator(committedSource);
   const diagnostics = diagnosticSource ? asAsyncIterator(diagnosticSource) : null;
-  const emitted = new Set<string>();
+  const emitted = new BoundedEventDeduplicator(dedupCapacity);
 
   let onAbort: (() => void) | null = null;
   const abortArm = signal
@@ -2110,11 +2184,14 @@ export interface GuardTelemetryLocalConfig {
   server?: never;
   /** A local listener has no transport. */
   url?: never;
-  /** Opt-in sliding-window counters over allowed/blocked decisions. */
+  /**
+   * Opt-in sliding-window counters over allowed/blocked decisions.
+   * Default: none (`stats()` returns `null`).
+   */
   counters?: GuardTelemetryCountersOptions;
-  /** Clock the counters consult for `windowMs` eviction. */
+  /** Clock the counters consult for `windowMs` eviction. Default: `Date.now`. */
   clock?: (() => number) | undefined;
-  /** Optional log sink. */
+  /** Optional log sink. Default: none (silent). */
   logger?: GuardLoggerInput | undefined;
 }
 
@@ -3058,23 +3135,6 @@ export class GuardTelemetryListener {
       // diagnostic half of its merged stream for the same reason.
       for (const event of events) this.counters?.record(event);
 
-      // Persist this poll's cursors before the page reaches the consumer
-      // (#37): a consumer that stops after this page resumes from it
-      // (at-least-once, never lose-the-tail). Deferred mode (issue #36's
-      // bounded page pump) hands that responsibility to the pump, which
-      // saves at delivery — the one place a page's events become the real
-      // consumer's — so the stored cursor never leads the consumer's
-      // position by a buffered page.
-      if (!options.deferCursorSave) {
-        await this.activeCursorStore.save(page.cursor, this.cursorScope("events"));
-        if (scannedFailedTxCursor !== undefined) {
-          await this.activeFailedTxCursorStore.save(
-            scannedFailedTxCursor,
-            this.cursorScope("failed_tx"),
-          );
-        }
-      }
-
       // In deferred mode every page is yielded — an empty one included — so
       // the pump still advances the cursors of polls that produced no batch.
       if (events.length > 0 || options.deferCursorSave) {
@@ -3083,6 +3143,22 @@ export class GuardTelemetryListener {
           cursor: page.cursor,
           ...(scannedFailedTxCursor !== undefined ? { failedTxCursor: scannedFailedTxCursor } : {}),
         };
+      }
+
+      // Safe telemetry checkpointing (issue #274): persist the page's cursors
+      // only after the consumer resumes past the yield above, so a consumer
+      // that stops, throws, or is terminated before resuming leaves the stored
+      // cursor unadvanced (at-least-once, never lose the tail). In deferred
+      // mode the bounded pump owns delivery and checkpoints at its own yield
+      // site, so this eager path stays out of its way.
+      if (!options.deferCursorSave) {
+        await this.activeCursorStore.save(page.cursor, this.cursorScope("events"));
+        if (scannedFailedTxCursor !== undefined) {
+          await this.activeFailedTxCursorStore.save(
+            scannedFailedTxCursor,
+            this.cursorScope("failed_tx"),
+          );
+        }
       }
 
       // Advance confirmed coverage. A page that reached the RPC's head confirms
@@ -3132,6 +3208,7 @@ export class GuardTelemetryListener {
         committedPages(this.watchStream(params)),
         params.diagnostics,
         params.signal,
+        params.dedupCapacity,
       )) {
         // Committed and failed-tx events were already counted by the page loop
         // in `watchStream()`, so only the diagnostic half is counted here —
@@ -3151,7 +3228,11 @@ export class GuardTelemetryListener {
   }
 }
 
-/** Options accepted by `GuardTelemetryListener`. */
+/**
+ * The `counters` subset of the listener's options. The constructor itself
+ * takes `GuardTelemetryInputConfig | GuardTelemetryLocalConfig`, which carry every
+ * listener option; this interface is not re-exported from the package entry.
+ */
 export interface GuardTelemetryListenerOptions {
   /**
    * Opt-in sliding-window counters over allowed/blocked decisions. Absent →
@@ -3395,6 +3476,22 @@ export function parseEventRecord(line: string): ParsedGuardEventRecord {
     throw new TypeError("telemetry record `event` must be a JSON object");
   }
   return { version, event: event as Record<string, unknown> };
+}
+
+/** Hard upper bound the Stellar RPC enforces on one `getEvents` page. */
+export const RPC_MAX_EVENTS_PER_CALL = 10_000;
+
+/** The page size the RPC itself applies when a request omits `limit`. */
+export const DEFAULT_TELEMETRY_PAGE_SIZE = 100;
+
+/** Listener-level, presentation-only event filter. */
+export interface GuardEventFilter {
+  /** Keep events emitted by any of these contract addresses. */
+  contractIds?: readonly string[] | undefined;
+  /** Keep events whose decoded decision reason is one of these. */
+  reasons?: readonly string[] | undefined;
+  /** Keep events observed on any of these streams. */
+  streams?: readonly GuardEventStream[] | undefined;
 }
 
 /** A compact one-line rendering of a guard event, for logs. */

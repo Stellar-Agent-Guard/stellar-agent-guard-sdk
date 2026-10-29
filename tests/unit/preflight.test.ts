@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { Account, Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk";
 import {
+  DEFAULT_MAX_CONCURRENT_SIMULATIONS,
   InvalidInputError,
   PreFlightInterceptor,
   PreFlightUndeterminedError,
@@ -17,7 +18,12 @@ import {
   type PreFlightDecision,
 } from "../../src/preflight.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
-import { ContractResponseError, GuardError, GuardUndeterminedError } from "../../src/errors.ts";
+import {
+  ContractResponseError,
+  GuardError,
+  GuardUndeterminedError,
+  RateLimitedError,
+} from "../../src/errors.ts";
 import { GuardBlockedError } from "../../src/reasons.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 import type { ContractCall } from "../../src/tx.ts";
@@ -2407,5 +2413,234 @@ describe("PreFlightInterceptor.checkBatch()", () => {
         }
       }
     });
+  });
+});
+
+describe("PreFlightInterceptor concurrency limit and 429 handling (issue #40)", () => {
+  const PASSPHRASE = "Test SDF Network ; September 2015";
+
+  /** A 429 as the SDK's HTTP client surfaces it (axios-style). */
+  function rateLimitError(retryAfter?: string): Error {
+    return Object.assign(new Error("Request failed with status code 429"), {
+      response: {
+        status: 429,
+        headers: retryAfter === undefined ? {} : { "retry-after": retryAfter },
+      },
+    });
+  }
+
+  const okSimulation = {
+    minResourceFee: "100",
+    latestLedger: 123_456,
+    result: { auth: [] },
+    transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+  };
+
+  /**
+   * A transport that records how many checks are in flight at once. Every check
+   * runs exactly two simulations on one transaction sequence number, so a check
+   * is "in flight" from its first simulation start to its second one finishing.
+   */
+  function instrumentedServer(options: { delayMs?: number } = {}) {
+    const active = new Set<string>();
+    const seen = new Map<string, number>();
+    let peak = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction(tx: { sequence: string }) {
+        const key = tx.sequence;
+        const count = (seen.get(key) ?? 0) + 1;
+        seen.set(key, count);
+        active.add(key);
+        peak = Math.max(peak, active.size);
+        await new Promise((resolve) => setTimeout(resolve, options.delayMs ?? 5));
+        if (count === 2) active.delete(key);
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    return {
+      server,
+      get peak() {
+        return peak;
+      },
+    };
+  }
+
+  function interceptorFor(server: rpc.Server, extra: Record<string, unknown> = {}) {
+    return new PreFlightInterceptor({
+      server,
+      networkPassphrase: PASSPHRASE,
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      coalesceInFlight: false,
+      ...extra,
+    });
+  }
+
+  it("keeps at most the configured number of simulations in flight across 20 parallel checks", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server, { maxConcurrentSimulations: 3 });
+    const decisions = await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.ok(
+      decisions.every((d) => d.kind === "admissible"),
+      "every queued check must still get its verdict",
+    );
+    assert.ok(transport.peak >= 2, `limit should be reached, peak ${transport.peak}`);
+    assert.ok(transport.peak <= 3, `at most 3 in flight, saw ${transport.peak}`);
+  });
+
+  it("defaults to 4 concurrent simulations", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server);
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.equal(DEFAULT_MAX_CONCURRENT_SIMULATIONS, 4);
+    assert.ok(transport.peak <= 4, `default limit is 4, saw ${transport.peak}`);
+  });
+
+  it("is observably unbounded when the limit is raised (the instrument can see overlap)", async () => {
+    const transport = instrumentedServer();
+    const interceptor = interceptorFor(transport.server, { maxConcurrentSimulations: 100 });
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => interceptor.check(validTransferCall(BigInt(i + 1)))),
+    );
+    assert.ok(transport.peak > 4, `expected overlap above 4, saw ${transport.peak}`);
+  });
+
+  it("rejects an unusable limit or backoff at construction", () => {
+    const { server } = instrumentedServer();
+    for (const bad of [0, -1, 1.5, Number.NaN]) {
+      assert.throws(() => interceptorFor(server, { maxConcurrentSimulations: bad }), TypeError);
+    }
+    assert.throws(() => interceptorFor(server, { rateLimit: { backoffMs: -1 } }), TypeError);
+    assert.throws(
+      () => interceptorFor(server, { rateLimit: { maxBackoffMs: Number.NaN } }),
+      TypeError,
+    );
+  });
+
+  it("does not let a queued check that timed out take a slot later", async () => {
+    let started = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        started++;
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    const interceptor = interceptorFor(server, { maxConcurrentSimulations: 1 });
+    const first = interceptor.check(validTransferCall(1n));
+    const second = await interceptor.check(validTransferCall(2n), { timeoutMs: 10 });
+    assert.equal(second.kind, "undetermined");
+    assert.ok(second.kind === "undetermined" && second.error instanceof RpcTimeoutError);
+    assert.equal((await first).kind, "admissible");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(started, 2, "only the first check's two simulations ran");
+  });
+
+  /** A server whose first `failures` simulations are rate limited. */
+  function limitedServer(failures: number, retryAfter?: string) {
+    let calls = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        calls++;
+        if (calls <= failures) throw rateLimitError(retryAfter);
+        return okSimulation;
+      },
+    } as unknown as rpc.Server;
+    return { server, calls: () => calls };
+  }
+
+  function recordingClock() {
+    const slept: number[] = [];
+    const clock: Clock = {
+      now: () => Date.now(),
+      sleep: async (ms: number) => {
+        slept.push(ms);
+      },
+    };
+    return { clock, slept };
+  }
+
+  it("waits once on a first 429 and then succeeds", async () => {
+    const { server } = limitedServer(1);
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "admissible");
+    assert.deepEqual(slept, [500], "one bounded default backoff");
+  });
+
+  it("honours Retry-After, capped at maxBackoffMs", async () => {
+    const short = recordingClock();
+    await interceptorFor(limitedServer(1, "2").server, { clock: short.clock }).check(
+      validTransferCall(),
+    );
+    assert.deepEqual(short.slept, [2000]);
+
+    const long = recordingClock();
+    await interceptorFor(limitedServer(1, "3600").server, {
+      clock: long.clock,
+      rateLimit: { maxBackoffMs: 1500 },
+    }).check(validTransferCall());
+    assert.deepEqual(long.slept, [1500]);
+  });
+
+  it("returns undetermined with cause rate_limited when the 429 persists", async () => {
+    const { server, calls } = limitedServer(Number.POSITIVE_INFINITY, "1");
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "undetermined");
+    assert.equal(decision.allowed, false);
+    if (decision.kind !== "undetermined") return;
+    assert.equal(decision.cause, "rate_limited");
+    assert.ok(decision.error instanceof RateLimitedError);
+    assert.equal(decision.error.kind, "rate_limited");
+    assert.equal(decision.error.retryAfterMs, 1000);
+    assert.equal(decision.error.attempts, 2);
+    assert.deepEqual(slept, [1000], "exactly one backoff, not a retry loop");
+    assert.equal(calls(), 2, "one retry only");
+  });
+
+  it("does not tag other failures as rate limited and does not retry them", async () => {
+    let calls = 0;
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        calls++;
+        throw Object.assign(new Error("boom"), { response: { status: 500 } });
+      },
+    } as unknown as rpc.Server;
+    const { clock, slept } = recordingClock();
+    const decision = await interceptorFor(server, { clock }).check(validTransferCall());
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.kind === "undetermined" && decision.cause === undefined);
+    assert.equal(calls, 1);
+    assert.deepEqual(slept, []);
   });
 });

@@ -404,3 +404,33 @@ recorded results remain valid for them.
 
 The full unit suite passed; these offline checks do not substitute for the
 missing live-testnet scenarios above.
+
+## Addendum — 2026-10-25 (PR: agent-runtime guide, default policy, reason tests, simulation concurrency; issues #74, #59, #54, #40)
+
+This PR touches `src/policy.ts` (adds the frozen `DEFAULT_GUARD_POLICY` constant;
+no validation, encoding or decision logic changes) and `src/preflight.ts` (a
+concurrency limit and a bounded HTTP 429 retry around the existing
+`enforceCall` — the verdict classification itself is unchanged), so the
+enforcement-path evidence file is included as required.
+
+**The live suite was not run for this change.** The author has no funded
+`.env.phase2` testnet credentials, so `npm run test:integration` was not executed
+and no fresh live enforcement result is claimed. The one behavioural change
+reachable live is that at most four simulations per interceptor are in flight at
+once (default), which can only delay a verdict, never alter it. A maintainer with
+`.env.phase2` should run the live suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm test
+npm run test:types
+npm run build && npm run test:exports && npm run test:pack
+node scripts/check-doc-links.ts
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.

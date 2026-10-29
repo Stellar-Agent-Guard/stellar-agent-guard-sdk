@@ -26,7 +26,14 @@
  */
 import { Keypair, StrKey, rpc, xdr } from "@stellar/stellar-sdk";
 import { concatBytes, sha256Hex, utf8Bytes } from "./hash.ts";
-import { GuardError, GuardUndeterminedError, InvalidInputError, SimulationError } from "./errors.ts";
+import {
+  GuardError,
+  GuardUndeterminedError,
+  InvalidInputError,
+  RateLimitedError,
+  SimulationError,
+} from "./errors.ts";
+import { Semaphore } from "./semaphore.ts";
 import { enforceCall, RpcTimeoutError, timeoutOutcome, withRpcAbort } from "./invoke.ts";
 import {
   DEFAULT_RPC_TIMEOUT_MS,
@@ -191,7 +198,16 @@ export type PreFlightDecision =
       detail: string;
       /** Machine-readable cause; use `instanceof` instead of matching `detail`. */
       error?: GuardError;
+      /**
+       * Coarse cause, set only when the failure has an operational remedy a
+       * caller can branch on: `"rate_limited"` means the RPC kept answering
+       * HTTP 429 (see `maxConcurrentSimulations`). Absent otherwise.
+       */
+      cause?: PreFlightUndeterminedCause;
     };
+
+/** Causes an `undetermined` pre-flight verdict can carry (additive). */
+export type PreFlightUndeterminedCause = "rate_limited";
 
 /**
  * Read the ledger marker out of the simulation that produced the quote.
@@ -461,11 +477,76 @@ export interface PreFlightConfig {
    */
   coalesceInFlight?: boolean;
   /**
+   * Most simulations this interceptor keeps in flight at once (default
+   * {@link DEFAULT_MAX_CONCURRENT_SIMULATIONS}). The rest queue first-in
+   * first-out, and the queue wait counts toward each check's `signal` /
+   * `timeoutMs`.
+   *
+   * An agent firing dozens of tool calls at once would otherwise open dozens of
+   * simultaneous RPC simulations, trip the provider's rate limit and turn the
+   * whole burst into `undetermined` verdicts. Raise it for a self-hosted RPC
+   * with generous limits; it must be a positive integer.
+   */
+  maxConcurrentSimulations?: number;
+  /**
+   * Handling of an HTTP 429 from the RPC. A rate-limited simulation waits once
+   * (the server's `Retry-After` when sent, else `backoffMs`, never more than
+   * `maxBackoffMs`) and is retried once; if it is limited again the verdict is
+   * `undetermined` with `cause: "rate_limited"`. Bounded by construction.
+   */
+  rateLimit?: {
+    /** Wait when the 429 carries no `Retry-After`. Default 500. */
+    backoffMs?: number;
+    /** Upper bound on any wait, including a long `Retry-After`. Default 5000. */
+    maxBackoffMs?: number;
+  };
+  /**
    * Inject a custom clock for time-dependent operations (cache TTL, batch
    * deadlines, etc.). Defaults to the system clock; use a FakeClock in tests
    * for deterministic timing.
    */
   clock?: Clock;
+}
+
+/** Default for `maxConcurrentSimulations`. */
+export const DEFAULT_MAX_CONCURRENT_SIMULATIONS = 4;
+const DEFAULT_RATE_LIMIT_BACKOFF_MS = 500;
+const DEFAULT_RATE_LIMIT_MAX_BACKOFF_MS = 5_000;
+
+/**
+ * Read an HTTP 429 out of an error chain (axios-style `response.status`, or a
+ * bare `status` / `statusCode`), with the server's `Retry-After` in ms when it
+ * sent a delay in seconds or an HTTP date.
+ */
+function rateLimitOf(error: unknown, now: number): { retryAfterMs: number | null } | null {
+  let current: unknown = error;
+  for (let depth = 0; depth < 6 && typeof current === "object" && current !== null; depth++) {
+    const e = current as {
+      status?: unknown;
+      statusCode?: unknown;
+      response?: { status?: unknown; headers?: unknown };
+      cause?: unknown;
+    };
+    if (e.response?.status === 429 || e.status === 429 || e.statusCode === 429) {
+      const headers = e.response?.headers as
+        | { get?: (name: string) => unknown; [k: string]: unknown }
+        | undefined;
+      const raw =
+        typeof headers?.get === "function" ? headers.get("retry-after") : headers?.["retry-after"];
+      let retryAfterMs: number | null = null;
+      if (typeof raw === "string" || typeof raw === "number") {
+        const seconds = Number(raw);
+        if (Number.isFinite(seconds) && seconds >= 0) retryAfterMs = Math.round(seconds * 1000);
+        else {
+          const at = Date.parse(String(raw));
+          if (Number.isFinite(at)) retryAfterMs = Math.max(0, at - now);
+        }
+      }
+      return { retryAfterMs };
+    }
+    current = e.cause;
+  }
+  return null;
 }
 
 /** Alias used by the README's constructor terminology. */
@@ -555,6 +636,9 @@ export class PreFlightInterceptor {
   private readonly inFlight = new Map<string, Promise<PreFlightDecision>>();
   private readonly namespace: string;
   private readonly coalesceInFlight: boolean;
+  private readonly simulations: Semaphore;
+  private readonly rateLimitBackoffMs: number;
+  private readonly rateLimitMaxBackoffMs: number;
   private readonly logger: GuardLogger;
   private readonly clock: Clock;
   private _hits = 0;
@@ -569,6 +653,21 @@ export class PreFlightInterceptor {
     this.clock = config.clock ?? systemClock;
     this.coalesceInFlight = config.coalesceInFlight !== false;
     this.validateCacheOptions();
+    const maxConcurrent = config.maxConcurrentSimulations ?? DEFAULT_MAX_CONCURRENT_SIMULATIONS;
+    if (!Number.isInteger(maxConcurrent) || maxConcurrent <= 0) {
+      throw new TypeError("preflight maxConcurrentSimulations must be a positive integer");
+    }
+    this.simulations = new Semaphore(maxConcurrent);
+    this.rateLimitBackoffMs = config.rateLimit?.backoffMs ?? DEFAULT_RATE_LIMIT_BACKOFF_MS;
+    this.rateLimitMaxBackoffMs = config.rateLimit?.maxBackoffMs ?? DEFAULT_RATE_LIMIT_MAX_BACKOFF_MS;
+    for (const [name, value] of [
+      ["rateLimit.backoffMs", this.rateLimitBackoffMs],
+      ["rateLimit.maxBackoffMs", this.rateLimitMaxBackoffMs],
+    ] as const) {
+      if (!Number.isFinite(value) || value < 0) {
+        throw new TypeError(`preflight ${name} must be a non-negative finite number`);
+      }
+    }
     this.namespace = this.cacheOptions ? configFingerprint(config) : "";
     this.logger = resolveLogger(config.logger);
   }
@@ -853,6 +952,77 @@ export class PreFlightInterceptor {
     }
   }
 
+  /**
+   * Run one enforced simulation inside a concurrency slot, with one bounded
+   * retry when the RPC answers HTTP 429.
+   *
+   * The slot is held across the 429 backoff on purpose: a rate-limited RPC is
+   * asking every caller to slow down, so the pause throttles the whole queue.
+   */
+  private async simulateLimited(
+    call: ContractCall,
+    onStep: ((step: InvokeStepEvent) => void) | undefined,
+    abandoned: AbortSignal,
+  ): Promise<EnforcementOutcome> {
+    const release = await this.simulations.acquire(abandoned);
+    // Withdrawn while queued: the caller already got its verdict from its bound.
+    if (release === null) return timeoutOutcome(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+    try {
+      const run = async (): Promise<EnforcementOutcome | { limited: { retryAfterMs: number | null }; cause: unknown }> => {
+        let outcome: EnforcementOutcome;
+        try {
+          outcome = await enforceCall({
+            server: this.config.server,
+            source: this.config.source,
+            call,
+            networkPassphrase: this.config.networkPassphrase,
+            guardAuth: { guard: this.config.guard, agent: this.config.agent },
+            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
+            ...(onStep ? { onStep } : {}),
+            ...(this.config.logger ? { logger: this.config.logger } : {}),
+          });
+        } catch (error) {
+          const limited = rateLimitOf(error, this.clock.now());
+          if (limited) return { limited, cause: error };
+          throw error;
+        }
+        if (outcome.kind === "error") {
+          const limited = rateLimitOf(outcome.error, this.clock.now());
+          if (limited) return { limited, cause: outcome.error };
+        }
+        return outcome;
+      };
+
+      let result = await run();
+      if (!("limited" in result)) return result;
+
+      const wait = Math.min(
+        result.limited.retryAfterMs ?? this.rateLimitBackoffMs,
+        this.rateLimitMaxBackoffMs,
+      );
+      this.logger.warn("RPC rate-limited the simulation (429); backing off once", {
+        guard: this.config.guard,
+        waitMs: wait,
+      });
+      await this.clock.sleep(wait);
+      if (abandoned.aborted) {
+        return timeoutOutcome(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
+      }
+      result = await run();
+      if (!("limited" in result)) return result;
+
+      const error = new RateLimitedError({
+        stage: "simulate",
+        retryAfterMs: result.limited.retryAfterMs,
+        attempts: 2,
+        cause: result.cause,
+      });
+      return { kind: "error", detail: error.message, error, diagnosticEvents: [] };
+    } finally {
+      release();
+    }
+  }
+
   private async computeDecision(
     call: ContractCall,
     context: CacheContext | null,
@@ -865,6 +1035,9 @@ export class PreFlightInterceptor {
     // `RpcTimeoutError`. `invoke()` reports the same error through its own
     // `error` outcome instead — a verdict question versus a pipeline question.
     let outcome: EnforcementOutcome;
+    // Cancels a still-queued slot request when the caller's bound fires, so an
+    // abandoned check never takes capacity later.
+    const abandoned = new AbortController();
     try {
       outcome = await withRpcAbort(
         {
@@ -872,22 +1045,15 @@ export class PreFlightInterceptor {
           signal: bound.signal,
           timeoutMs: bound.timeoutMs,
         },
-        () =>
-          enforceCall({
-            server: this.config.server,
-            source: this.config.source,
-            call,
-            networkPassphrase: this.config.networkPassphrase,
-            guardAuth: { guard: this.config.guard, agent: this.config.agent },
-            ...(this.config.accountSigners ? { accountSigners: this.config.accountSigners } : {}),
-            ...(onStep ? { onStep } : {}),
-            ...(this.config.logger ? { logger: this.config.logger } : {}),
-          }),
+        () => this.simulateLimited(call, onStep, abandoned.signal),
       );
     } catch (error) {
+      abandoned.abort();
       if (!(error instanceof RpcTimeoutError)) throw error;
       outcome = timeoutOutcome(error);
     }
+    const rateLimited =
+      outcome.kind === "error" && outcome.error instanceof RateLimitedError;
 
     let decision: PreFlightDecision;
     if (outcome.kind === "error") {
@@ -896,6 +1062,7 @@ export class PreFlightInterceptor {
         kind: "undetermined",
         detail: outcome.detail,
         error: outcome.error,
+        ...(rateLimited ? { cause: "rate_limited" as const } : {}),
       };
     } else if (outcome.kind === "blocked") {
       decision = {

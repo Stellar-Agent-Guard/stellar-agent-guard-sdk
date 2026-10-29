@@ -4,7 +4,7 @@
 
 Version 0.2.0 introduces **branded types** for Stellar addresses to catch type mismatches at compile time. These prevent accidentally passing account addresses (G...) where contract addresses (C...) are required, and vice versa.
 
-## Breaking Changes
+# Breaking Changes
 
 The following function signatures now use branded types:
 
