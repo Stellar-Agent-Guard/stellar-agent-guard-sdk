@@ -35,6 +35,24 @@ We aim to acknowledge reports within 48 hours and provide an initial assessment
 following the contracts repo's policy. Timelines for a fix depend on severity and
 will be communicated in the private thread.
 
+## Supply-chain gate (dependency review)
+
+Pull requests are gated by GitHub dependency review (`.github/workflows/dependency-review.yml`).
+The gate is advisory-based and blocks new vulnerable dependencies from entering the
+lockfile at PR time. Advisory data is GitHub-managed (GitHub Advisory Database) and
+is updated on GitHub's cadence, not this repository's.
+
+**Severity policy:**
+
+- **Block:** newly-introduced dependencies with **high** or **critical** advisories.
+  (The default configuration also fails on license violations and on advisories
+  for dependencies already present in the base branch.)
+- **Warn:** low and moderate advisories are reported in the action summary and
+  do not block the PR.
+
+The gate only evaluates the dependency diff introduced by the PR; it does not
+replace a runtime `audit` and does not catch transitive drift between PRs.
+
 ## Unaudited tooling disclaimer
 
 Tooling and examples in this repository are provided as-is and are **not** covered by the contracts audit. This matches the README disclaimer: the audit
