@@ -24,13 +24,19 @@
  * pinned revisions and the hook search are recorded in
  * `docs/integration-hooks.md` §4.
  */
+import { GuardError } from "../errors.ts";
 import type { InvokeStepEvent } from "../invoke.ts";
-import type { PreFlightDecision, PreFlightInterceptor } from "../preflight.ts";
+import type {
+  PreFlightBatchDecision,
+  PreFlightDecision,
+  PreFlightInterceptor,
+} from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
 import {
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
+  decisionFromGuardError,
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
@@ -148,7 +154,16 @@ async function guardMcpRequest<T extends McpToolResult>(
   const checkOptions = checkOptionsFor(options, hostSignal);
 
   if (calls.length === 1) {
-    const decision = await options.interceptor.check(calls[0]!, checkOptions);
+    let decision: PreFlightDecision;
+    try {
+      decision = await options.interceptor.check(calls[0]!, checkOptions);
+    } catch (error) {
+      if (error instanceof GuardError) {
+        decision = decisionFromGuardError(error);
+      } else {
+        throw error;
+      }
+    }
     runDecisionHook(options.onDecision, [request, decision], "mcp", options.blockedHookLogger);
     if (decision.allowed) return proceed();
 
@@ -165,7 +180,25 @@ async function guardMcpRequest<T extends McpToolResult>(
 
   // Batch mapping: report every per-call verdict, and refuse the whole action if
   // any call is blocked or undetermined (all-or-nothing).
-  const batch = await options.interceptor.checkBatch(calls, checkOptions);
+  let batch: PreFlightBatchDecision;
+  try {
+    batch = await options.interceptor.checkBatch(calls, checkOptions);
+  } catch (error) {
+    if (error instanceof GuardError) {
+      const dec = decisionFromGuardError(error);
+      batch = {
+        admissible: false,
+        overallAdmissible: false,
+        kind: dec.kind,
+        detail: dec.detail,
+        verdicts: calls.map(() => dec),
+        calls: calls.map(() => dec),
+        totalEstimatedResourceFee: 0n,
+      };
+    } else {
+      throw error;
+    }
+  }
   for (const verdict of batch.verdicts) {
     runDecisionHook(options.onDecision, [request, verdict], "mcp", options.blockedHookLogger);
   }

@@ -14,6 +14,14 @@
  * `stellar-agent-guard-contracts/tests/fixtures/auth-checked-vocabulary.json` —
  * so a reason the contract adds is a failing test here until this table is
  * extended, rather than a symbol the SDK silently mislabels.
+ *
+ * The operator-facing guidance below (`reasonMessagesEn`, served by
+ * `explainReason`) is checked the same way, against the contract's reason
+ * glossary — vendored machine-readable at
+ * `tests/fixtures/vendor/reasons.fixture.json` from
+ * `stellar-agent-guard-contracts/docs/reason-glossary.md` (issue #38). The
+ * parity test is bidirectional: a glossary reason without SDK guidance fails,
+ * and an SDK reason the glossary does not list fails too.
  */
 import { GuardError } from "./errors.ts";
 
