@@ -70,7 +70,9 @@ export type {
 export {
   DEFAULT_GUARD_POLICY,
   POLICY_RULE_IDS,
+  DEFAULT_GUARD_POLICY,
   deadManRemaining,
+  definePolicy,
   decodeCheckResult,
   decodePolicy,
   describePolicy,
@@ -110,6 +112,8 @@ export type {
   GuardStatus,
   PolicyConfig,
   PolicyFailure,
+  PolicyOverride,
+  DefinePolicyOptions,
   PolicyRuleId,
   ProtocolRule,
   PublicKeyHex,

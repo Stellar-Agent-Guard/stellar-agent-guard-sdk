@@ -252,6 +252,16 @@ if (!isContractAddress(guardAddress)) {
   throw new Error(`Invalid guard contract address: ${guardAddress}`);
 }
 
+// Build a partial policy over the SDK defaults (deep-merged, validated, frozen)
+const policy = definePolicy({
+  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  per_tx_cap: 100n,
+});
+// Note: `definePolicy` deep-merges over the SDK defaults and validates the
+// result before returning a frozen `GuardPolicy`. Nested lists such as
+// `recipients` are replaced entirely by the override — they are never
+// concatenated with the defaults (merge-surprise on allowlists is dangerous).
+
 // For known hardcoded addresses, use type assertion
 const contractAddress = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB" as ContractAddress;
 
@@ -849,6 +859,14 @@ const scVal = policyToScVal(policy);
 The constant is deep-frozen (mutating it throws), and a unit test asserts its values still match the vendored contracts templates. On its own it reports exactly two `empty_vector_noop` findings (`assets`, `recipients`) — the deny-all intent made visible, cleared as soon as you add one of each. The numbers are a starting point, not a recommendation for your risk limits. The inline policy literals in the validation and encode sections below are deliberate: they demonstrate *invalid* or *edge-case* drafts, which a safe baseline cannot.
 
 ### Policy validation before broadcast (validateGuardPolicy)
+
+### Building a partial policy with `definePolicy()`
+
+`DEFAULT_GUARD_POLICY` is a constant: integrators who want to change one field
+had to copy the whole literal or nothing. `definePolicy()` closes that gap — it
+deep-merges a **partial** override over the defaults, validates the result, and
+returns a frozen `GuardPolicy`:
+
 
 Before encoding and submitting a policy on-chain, validate it client-side with `validateGuardPolicy`.
 This provides a **fail-before-broadcast** safety rail that catches configuration errors before burning transaction fees or facing on-chain contract rejections.
