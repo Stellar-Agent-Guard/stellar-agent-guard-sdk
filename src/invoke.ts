@@ -33,6 +33,7 @@ import {
   type GuardLoggerInput,
 } from "./logger.ts";
 import type { TraceStepName, TraceStepStatus } from "./trace.ts";
+import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 import type {
   InvokeErrorCause,
   InvokeRetryAttempt,
@@ -419,6 +420,30 @@ export interface FeeBumpConfig {
   initialInclusionFee?: bigint | undefined;
 }
 
+/**
+ * Outcome when a transaction was accepted and broadcast by the network,
+ * but ledger inclusion could not be confirmed within the polling budget
+ * (issue #299).
+ *
+ * This represents submitted-but-unconfirmed work: callers MUST NOT assume
+ * failure or automatically rebroadcast without querying the transaction status
+ * (e.g. via `server.getTransaction(hash)`), as doing so risks executing duplicate
+ * actions.
+ */
+export interface InvokePendingOutcome {
+  kind: "pending";
+  /** The transaction hash assigned by the network. */
+  transactionHash: string;
+  /** The last known submission/polling state. */
+  submission: SubmissionResult;
+  /** Summary of the pending status. */
+  detail: string;
+  /** Safe follow-up guidance advising against immediate rebroadcast. */
+  guidance: string;
+  /** Structured retry metadata attached to the outcome. */
+  retry?: InvokeRetryMetadata | undefined;
+}
+
 export type PipelineOutcome =
   | {
       kind: "allowed";
@@ -440,6 +465,7 @@ export type PipelineOutcome =
       /** Structured retry metadata attached to the terminal outcome. */
       retry?: InvokeRetryMetadata | undefined;
     }
+  | InvokePendingOutcome
   | InvokeErrorOutcome
   | InvokeRetryError;
 
@@ -1297,12 +1323,21 @@ function reserveNextSequence(
   return next.toString();
 }
 
-export function invoke(params: InvokeParams & { dryRun: true }): Promise<InvokeDryRunResult>;
+/**
+ * What `invoke()`/`enforceCall()` accept: `InvokeParams` with the shared
+ * `{ server? | url? }` transport (issue #117) in place of a mandatory `server`.
+ */
+export type InvokeParamsInput = WithRpcTransport<InvokeParams>;
+
+export function invoke(params: InvokeParamsInput & { dryRun: true }): Promise<InvokeDryRunResult>;
 export function invoke(
-  params: InvokeParams & { dryRun?: false },
+  params: InvokeParamsInput & { dryRun?: false },
 ): Promise<Exclude<InvokeOutcome, InvokeDryRunResult>>;
-export function invoke(params: InvokeParams): Promise<InvokeOutcome>;
-export async function invoke(params: InvokeParams): Promise<InvokeOutcome> {
+export function invoke(params: InvokeParamsInput): Promise<InvokeOutcome>;
+export async function invoke(input: InvokeParamsInput): Promise<InvokeOutcome> {
+  // Shared transport (issue #117): exactly one of `server` or `url`, resolved
+  // before anything else so a misconfigured transport never reaches RPC.
+  const params = withResolvedServer<InvokeParams>(input);
   // The public boundary: every option is validated before the account queue,
   // signing or any RPC. A bad option is a field-specific RangeError, not an
   // `undetermined` outcome produced after a wasted simulation.
@@ -1369,7 +1404,7 @@ function retryMetadata(params: {
   retries: readonly InvokeRetryAttempt[];
   totalDelayMs: number;
   exhausted: boolean;
-  outcome: "allowed" | "blocked" | "error";
+  outcome: "allowed" | "blocked" | "pending" | "error";
   terminalFailure: RetryableInvokeFailure | null;
   terminalCause: InvokeErrorCause | null;
 }): InvokeRetryMetadata {
@@ -1409,7 +1444,7 @@ async function invokeWithQueue(
     let totalDelayMs = 0;
 
     const metadata = (
-      outcome: "allowed" | "blocked" | "error",
+      outcome: "allowed" | "blocked" | "pending" | "error",
       terminalFailure: RetryableInvokeFailure | null,
       terminalCause: InvokeErrorCause | null,
       exhausted: boolean,
@@ -1562,6 +1597,12 @@ function logTerminalOutcome(logger: GuardLogger, outcome: InvokeOutcome): void {
   // Unreachable from `invoke()` — a dry run returns before the retry loop — but
   // the outcome union is shared, and a dry run is not a submission to report.
   if (outcome.kind === "dry_run") return;
+  if (outcome.kind === "pending") {
+    logger.warn(`invoke submitted but unconfirmed: ${outcome.detail}`, {
+      transactionHash: outcome.transactionHash,
+    });
+    return;
+  }
   if (outcome.kind === "blocked") {
     logger.info(`guard refused the call (${outcome.reason ?? "unstated"})`, {
       reason: outcome.reason,
@@ -1871,6 +1912,22 @@ async function invokePipeline(
       transactionHash: submission.hash,
     });
   }
+  if (submission.status === "TIMEOUT" || submission.status === "PENDING") {
+    const detail = `transaction ${submission.hash} submitted but unconfirmed after ${poll.pollAttempts} poll attempt(s)`;
+    const guidance =
+      `Transaction ${submission.hash} was accepted for broadcast by the network but was not confirmed ` +
+      `within the polling budget (${poll.pollAttempts} attempt(s)). Do not rebroadcast without querying ` +
+      `transaction status with getTransaction to avoid duplicate execution.`;
+    return {
+      kind: "pending",
+      transactionHash: submission.hash,
+      submission,
+      detail,
+      guidance,
+      // Retry metadata is attached by `invokeWithQueue` once the outcome
+      // leaves the pipeline — the same path every terminal outcome takes.
+    };
+  }
   if (submission.failure) {
     // A post-broadcast rejection is a hard error, not a policy block: the
     // enforced simulation already passed, so anything here is a defect in
@@ -1934,10 +1991,11 @@ async function invokePipeline(
  * Nothing here mutates the ledger, which is what makes a refusal free.
  */
 export async function enforceCall(
-  params: InvokeParams,
+  input: InvokeParamsInput,
   attempt: number = 0,
   options: { deadline?: InvokeDeadline | undefined; clock?: Clock | undefined } = {},
 ): Promise<EnforcementOutcome> {
+  const params = withResolvedServer<InvokeParams>(input);
   validateInvokeOptions(params);
   const clock = options.clock ?? params.clock ?? systemClock;
   const deadline = options.deadline ?? makeDeadline(params, clock);

@@ -14,6 +14,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./fs": {
+      "types": "./dist/fs.d.ts",
+      "import": "./dist/fs.js"
     }
   },
   "files": [
@@ -69,6 +73,8 @@
     "typecheck": "tsc --noEmit",
     "check:strict-ratchet": "node scripts/check-strict-ratchet.mjs",
     "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "node --import tsx scripts/run-tests.ts unit",
     "test:unit": "node --import tsx scripts/run-tests.ts unit",
     "test:watch": "node --import tsx scripts/run-tests.ts unit --watch",
@@ -79,6 +85,7 @@
     "test:exports": "node --import tsx scripts/check-export-map.ts",
     "test:pack": "node --import tsx scripts/check-pack-contents.ts",
     "test:packed-install": "node --import tsx scripts/check-packed-install.ts",
+    "test:types": "tsc -p tsconfig.test-d.json",
     "test:types:packed": "node --import tsx scripts/check-packed-types.ts",
     "test:browser": "node scripts/check-browser-entry.mjs",
     "check:bundle-size": "node scripts/check-bundle-size.mjs",
@@ -102,6 +109,8 @@
     "@types/node": "^26.5.1",
     "c8": "^12.0.0",
     "eslint": "^10.10.0",
+    "expect-type": "^1.4.0",
+    "prettier": "^3.6.2",
     "tinybench": "^6.2.0",
     "tsx": "^4.23.13",
     "typescript": "^5.9.2",

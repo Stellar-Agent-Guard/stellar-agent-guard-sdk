@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { StrKey, xdr } from "@stellar/stellar-sdk";
+import { rpc, StrKey, xdr } from "@stellar/stellar-sdk";
 import {
   DEFAULT_JITTER_FRACTION,
   GuardEventRingBuffer,
@@ -105,7 +105,10 @@ describe("guardEventsFromDiagnostics", () => {
           ["event_heartbeat"],
           xdr.ScVal.scvMap([
             // XDR uint64 is a native bigint in this SDK, not a constructible class.
-            new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(1789393232n) }),
+            new xdr.ScMapEntry({
+              key: xdr.ScVal.scvSymbol("at"),
+              val: xdr.ScVal.scvU64(1789393232n),
+            }),
           ]),
         ),
       ],
@@ -127,7 +130,9 @@ describe("telemetryFromDecision", () => {
       {
         kind: "blocked",
         reason: "recipient_not_allowed",
-        diagnosticEvents: [diagnosticEvent(["event_auth_checked", "blocked", "recipient_not_allowed"])],
+        diagnosticEvents: [
+          diagnosticEvent(["event_auth_checked", "blocked", "recipient_not_allowed"]),
+        ],
       },
       GUARD,
     );
@@ -242,8 +247,7 @@ describe("describeGuardEvent", () => {
  * distinctness between two different blocks inside one simulation.
  */
 describe("GuardEvent.id", () => {
-  const blocked = (reason: string) =>
-    diagnosticEvent(["event_auth_checked", "blocked", reason]);
+  const blocked = (reason: string) => diagnosticEvent(["event_auth_checked", "blocked", reason]);
 
   it("gives every decoded diagnostic event a non-null synthetic id", () => {
     const events = guardEventsFromDiagnostics([blocked("per_tx_cap_exceeded")], GUARD);
@@ -265,7 +269,10 @@ describe("GuardEvent.id", () => {
   it("keeps two distinct blocks in one simulation distinct, because their positions differ", () => {
     // Same topic list, same data: only the position within the batch separates
     // them, which is exactly the case a txHash-based id could not cover.
-    const events = guardEventsFromDiagnostics([blocked("per_tx_cap_exceeded"), blocked("per_tx_cap_exceeded")], GUARD);
+    const events = guardEventsFromDiagnostics(
+      [blocked("per_tx_cap_exceeded"), blocked("per_tx_cap_exceeded")],
+      GUARD,
+    );
     assert.equal(events.length, 2);
     assert.notEqual(events[0]!.id, events[1]!.id);
   });
@@ -762,8 +769,8 @@ describe("GuardTelemetryListener abort cancellation (issue #95)", () => {
         },
       };
       const listener = new GuardTelemetryListener({ server: server as never, guard: GUARD });
-      const iterator = listener
-        .watch({ startLedger: 400, signal: controller.signal })[Symbol.asyncIterator]();
+      const watched = listener.watch({ startLedger: 400, signal: controller.signal });
+      const iterator = watched[Symbol.asyncIterator]();
 
       const inFlight = iterator.next();
       assert.equal(getEventsCalls, 1, "the first pull dispatches exactly one request");
@@ -927,7 +934,11 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
 
     assert.ok(diagnostic, "the diagnostic feed must be present");
     assert.equal(diagnostic.source, "diagnostic");
-    assert.equal(diagnostic.observedAt, "2026-09-27T00:00:01.000Z", "diagnostics carry the observation time");
+    assert.equal(
+      diagnostic.observedAt,
+      "2026-09-27T00:00:01.000Z",
+      "diagnostics carry the observation time",
+    );
     assert.equal(diagnostic.decision?.result, "blocked");
   });
 
@@ -938,7 +949,10 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
     ])) {
       seen.push(event);
     }
-    assert.deepEqual(seen.map((event) => event.ledger), [100, 500]);
+    assert.deepEqual(
+      seen.map((event) => event.ledger),
+      [100, 500],
+    );
   });
 
   it("interleaves a diagnostic batch at its point of observation", async () => {
@@ -1011,7 +1025,10 @@ describe("GuardTelemetryListener unified stream (issue #67)", () => {
     }
     const ids = seen.map((event) => event.id);
     assert.equal(new Set(ids).size, ids.length, "no id may be delivered twice");
-    assert.deepEqual(seen.map((event) => event.stream), ["committed", "diagnostic"]);
+    assert.deepEqual(
+      seen.map((event) => event.stream),
+      ["committed", "diagnostic"],
+    );
   });
 
   it("leaves the default watch() path committed-only, tagging every event", async () => {
@@ -1079,7 +1096,10 @@ describe("GuardEventRingBuffer (issue #68)", () => {
   it("keeps the newest window across many wraps of the ring", () => {
     const buffer = new GuardEventRingBuffer(3);
     for (let i = 1; i <= 100; i += 1) buffer.push(event({ id: `e${i}`, ledger: i }));
-    assert.deepEqual(buffer.recent().map((entry) => entry.id), ["e98", "e99", "e100"]);
+    assert.deepEqual(
+      buffer.recent().map((entry) => entry.id),
+      ["e98", "e99", "e100"],
+    );
   });
 
   it("filters by stream and reason", () => {
@@ -1491,7 +1511,11 @@ describe("opt-in raw event retention (issue #94)", () => {
 });
 
 describe("GuardTelemetryListener counters", () => {
-  const decisionEvent = (result: "allowed" | "blocked", reason: string | null, index: number): GuardEvent => ({
+  const decisionEvent = (
+    result: "allowed" | "blocked",
+    reason: string | null,
+    index: number,
+  ): GuardEvent => ({
     id: `diag:${index.toString(16).padStart(64, "0")}`,
     kind: "auth_checked",
     topic: "event_auth_checked",
@@ -1560,7 +1584,7 @@ describe("GuardTelemetryListener counters", () => {
 
   it("supports a time-window with an injected clock", () => {
     let now = 0;
-    const listener = new GuardTelemetryListener( {
+    const listener = new GuardTelemetryListener({
       counters: { windowMs: 1000 },
       clock: () => now,
     });
@@ -1619,7 +1643,11 @@ describe("GuardDecisionCounters wall-clock resilience (issue #320)", () => {
     let stats = listener.stats();
     assert.ok(stats);
     assert.equal(stats!.allowed + stats!.blocked, 2, "a rollback does not evict early");
-    assert.equal(stats!.windowStart, 1_000, "clamped to the high-water mark, not the rolled-back value");
+    assert.equal(
+      stats!.windowStart,
+      1_000,
+      "clamped to the high-water mark, not the rolled-back value",
+    );
 
     // Still inside the window on the monotonic timeline (cutoff 999).
     now = 1_999;
@@ -1675,7 +1703,11 @@ describe("GuardTelemetryListener counter coverage (issue #321)", () => {
     ledgerClosedAt: stream === "committed" ? new Date(index).toISOString() : null,
     observedAt: stream === "committed" ? null : new Date(index).toISOString(),
     transactionHash: stream === "committed" ? "ab".repeat(32) : null,
-    decision: { result, reason, source: stream === "committed" ? "ledger" : "diagnostic" } as GuardEvent["decision"],
+    decision: {
+      result,
+      reason,
+      source: stream === "committed" ? "ledger" : "diagnostic",
+    } as GuardEvent["decision"],
     data: {},
   });
 
@@ -1806,6 +1838,7 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
       foreignContract: 1,
       missingContractId: 0,
       malformedContractId: 0,
+      malformedEvent: 0,
     });
   });
 
@@ -1827,6 +1860,7 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
       foreignContract: 0,
       missingContractId: 1,
       malformedContractId: 1,
+      malformedEvent: 0,
     });
   });
 
@@ -1839,5 +1873,73 @@ describe("GuardTelemetryListener event identity validation (issue #322)", () => 
     const page = await listener.poll({ startLedger: 100 });
     assert.equal(page.events.length, 1);
     assert.equal(page.events[0]!.contractId, GUARD);
+  });
+});
+
+/**
+ * Injectable transport (issue: custom rpc Server instance or fetch function).
+ *
+ * Enterprise/agent deployments route RPC through proxies (auth headers, mTLS,
+ * latency shielding) or mock it entirely in tests. The SDK used to construct
+ * its own `SorobanRpc.Server` from a URL, forcing URL-only config. These tests
+ * pin the shared `{ server? | url? }` config shape: an injected instance is
+ * used verbatim (never replaced by a fresh one built from a URL), and the
+ * mutual-exclusion rules fail closed with typed errors.
+ * See README "Injectable transport" for what sdk 17 actually supports.
+ */
+describe("injectable transport config (shared { server? | url? })", () => {
+  it("uses an injected Server instance verbatim instead of constructing one from a URL", async () => {
+    let getEventsCalls = 0;
+    let getLatestLedgerCalls = 0;
+    const injected = {
+      getLatestLedger: async () => {
+        getLatestLedgerCalls += 1;
+        return { sequence: 100 };
+      },
+      getEvents: async () => {
+        getEventsCalls += 1;
+        return { events: [], cursor: "c", latestLedger: 100 };
+      },
+    };
+
+    const listener = new GuardTelemetryListener({ server: injected as never, guard: GUARD });
+    await listener.poll({ startLedger: 100 });
+
+    assert.equal(getEventsCalls, 1, "calls must land on the injected instance");
+    assert.equal(
+      getLatestLedgerCalls,
+      0,
+      "poll() with an explicit startLedger does not probe the head",
+    );
+  });
+
+  it("rejects a config that supplies both server and url with a typed error", () => {
+    assert.throws(
+      () =>
+        new GuardTelemetryListener({
+          server: {
+            getEvents: async () => ({ events: [], cursor: "c", latestLedger: 1 }),
+          } as unknown as rpc.Server,
+          // @ts-expect-error intentionally passing both server and url
+          url: "https://soroban-testnet.stellar.org",
+          guard: GUARD,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /server.*url|url.*server/i);
+        return true;
+      },
+    );
+  });
+
+  it("rejects a config that supplies neither server nor url with a typed error", () => {
+    assert.throws(
+      () => new GuardTelemetryListener({ guard: GUARD } as never),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(error.message, /server|url/i);
+        return true;
+      },
+    );
   });
 });

@@ -12,8 +12,14 @@
  * `tests/fixtures/vendor/auth-checked-vocabulary.json`, so a reason the
  * contract adds fails this test until the SDK's table is extended — instead of
  * being silently accepted by a second, hand-maintained copy.
+ *
+ * The `explainReason` coverage the issue #38 suite adds is driven the same
+ * way, from the machine-readable reason glossary vendored at
+ * `tests/fixtures/vendor/reasons.fixture.json`: every fixture symbol must have
+ * non-empty SDK guidance, and every SDK reason must exist upstream.
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it } from "node:test";
@@ -142,6 +148,161 @@ describe("explainReason", () => {
 });
 
 /**
+ * The contract's reason glossary, read from the vendored machine-readable
+ * extraction (issue #38).
+ *
+ * The canonical glossary lives in
+ * `stellar-agent-guard-contracts/docs/reason-glossary.md`; the vendored
+ * `tests/fixtures/vendor/reasons.fixture.json` is its machine-readable form
+ * (symbol -> Error code + what-was-attempted + per-observer guidance + SPEC
+ * ref), refreshed by `npm run vendor:refresh` and digest-pinned so a hand-edit
+ * fails the integrity test below instead of silently becoming the truth.
+ */
+interface GlossaryRow {
+  code: number;
+  what_was_attempted: string;
+  agent_guidance: string;
+  operator_action: string;
+  auditor_note: string;
+  spec_ref: string;
+}
+
+interface VendoredGlossary {
+  _provenance: {
+    sourceRepo: string;
+    sourceCommit: string;
+    sourcePath: string;
+    sourceUrl: string;
+    digest: string;
+    refreshCommand: string;
+    upstreamLanded: boolean;
+  };
+  reasonGlossary: {
+    schema_version: number;
+    reasons: Record<string, GlossaryRow>;
+  };
+}
+
+function loadVendoredGlossary(): VendoredGlossary {
+  const path = resolve(process.cwd(), "tests/fixtures/vendor/reasons.fixture.json");
+  return JSON.parse(readFileSync(path, "utf8")) as VendoredGlossary;
+}
+
+describe("reason glossary parity (issue #38)", () => {
+  it("vendors the contracts reason glossary with its provenance and an intact digest", () => {
+    const doc = loadVendoredGlossary();
+    const provenance = doc._provenance;
+
+    assert.equal(provenance.sourceRepo, "Stellar-Agent-Guard/stellar-agent-guard-contracts");
+    assert.match(provenance.sourceCommit, /^[0-9a-f]{40}$/, "source commit must be a pinned SHA");
+    assert.equal(provenance.sourcePath, "docs/reason-glossary.md");
+    assert.equal(
+      provenance.sourceUrl,
+      `https://raw.githubusercontent.com/${provenance.sourceRepo}/${provenance.sourceCommit}/${provenance.sourcePath}`,
+      "the provenance header must carry the exact source URL the refresh fetches",
+    );
+    assert.equal(provenance.refreshCommand, "npm run vendor:refresh");
+    assert.equal(provenance.upstreamLanded, true);
+
+    // Recomputed from the vendored file alone, so a hand-edit or a truncated
+    // refresh fails here instead of silently becoming the vocabulary.
+    const canonical = `${JSON.stringify(doc.reasonGlossary, null, 2)}\n`;
+    const digest = createHash("sha256").update(canonical, "utf8").digest("hex");
+    assert.equal(
+      provenance.digest,
+      `sha256:${digest}`,
+      "the vendored reason glossary was modified without refreshing its digest — run npm run vendor:refresh and commit both together",
+    );
+  });
+
+  it("explains every fixture symbol with non-empty guidance, and carries guidance upstream", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    for (const [symbol, row] of Object.entries(reasonGlossary.reasons)) {
+      // The upstream row must carry its own guidance columns — a glossary row
+      // with an empty seat is a broken glossary, refreshed or not.
+      assert.ok(row.what_was_attempted.length > 0, `${symbol}: empty what_was_attempted`);
+      assert.ok(row.agent_guidance.length > 0, `${symbol}: empty agent_guidance`);
+      assert.ok(row.operator_action.length > 0, `${symbol}: empty operator_action`);
+      assert.ok(row.auditor_note.length > 0, `${symbol}: empty auditor_note`);
+      assert.ok(row.spec_ref.length > 0, `${symbol}: empty spec_ref`);
+
+      // The SDK side: the symbol must be a known reason and `explainReason`
+      // must return real guidance — not the unrecognised-reason fallback and
+      // not an empty string.
+      assert.ok(isGuardReason(symbol), `'${symbol}' is not a known guard reason`);
+      const explanation = explainReason(symbol);
+      assert.ok(explanation.length > 0, `${symbol}: explainReason returned an empty string`);
+      assert.notEqual(
+        explanation,
+        `Unrecognised guard reason: ${symbol}`,
+        `${symbol}: explainReason has no entry for this contract reason`,
+      );
+      assert.notEqual(explanation, undefined);
+      const english = reasonMessagesEn[symbol as GuardReason];
+      assert.ok(english.title.length > 0, `${symbol}: empty title`);
+      assert.ok(english.body.length > 0, `${symbol}: empty body`);
+      assert.ok(english.remediation.length > 0, `${symbol}: empty remediation`);
+    }
+  });
+
+  it("keeps the SDK's reason set and the upstream glossary in lockstep, both directions", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    const sdkSymbols = Object.keys(GUARD_REASON_CODES).sort();
+    const fixtureSymbols = Object.keys(reasonGlossary.reasons).sort();
+
+    const missingFromSdk = fixtureSymbols.filter((symbol) => !(symbol in GUARD_REASON_CODES));
+    const missingUpstream = sdkSymbols.filter((symbol) => !(symbol in reasonGlossary.reasons));
+
+    // Bidirectional: a reason present in only one of the two vocabularies
+    // fails here, with the offending symbols named — a contract-added reason
+    // fails this repo's CI until the SDK's table and guidance are extended,
+    // and a renamed or dropped SDK entry cannot pass as upstream drift.
+    assert.deepEqual(
+      missingFromSdk,
+      [],
+      `contract reason(s) the SDK does not know: ${missingFromSdk.join(", ")} — extend GUARD_REASON_CODES/reasonMessagesEn in src/reasons.ts, or refresh the fixture with \`npm run vendor:refresh\` if the glossary moved`,
+    );
+    assert.deepEqual(
+      missingUpstream,
+      [],
+      `SDK reason(s) missing from the upstream glossary: ${missingUpstream.join(", ")} — the contract's docs/reason-glossary.md must list every reason before the SDK ships it`,
+    );
+    assert.deepEqual(fixtureSymbols, sdkSymbols);
+  });
+
+  it("pins each fixture row's Error code to the SDK's code table", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    for (const [symbol, row] of Object.entries(reasonGlossary.reasons)) {
+      assert.equal(
+        GUARD_REASON_CODES[symbol as GuardReason],
+        row.code,
+        `${symbol}: the SDK's numeric code drifted from the contract glossary`,
+      );
+    }
+    const codes = Object.values(reasonGlossary.reasons).map((row) => row.code);
+    assert.equal(new Set(codes).size, codes.length, "duplicate codes in the glossary fixture");
+  });
+
+  it("flags a newly added contract reason instead of accepting it silently", () => {
+    const { reasonGlossary } = loadVendoredGlossary();
+
+    // The lockstep check above is only meaningful if it can fail: a synthetic
+    // reason the SDK does not know must be reported as a mismatch.
+    const withNewReason = Object.keys(reasonGlossary.reasons).concat("brand_new_reason").sort();
+    const sdkSymbols = Object.keys(GUARD_REASON_CODES).sort();
+    const missingFromSdk = withNewReason.filter((symbol) => !(symbol in GUARD_REASON_CODES));
+
+    assert.deepEqual(missingFromSdk, ["brand_new_reason"]);
+    assert.notDeepEqual(withNewReason, sdkSymbols);
+    assert.equal(isGuardReason("brand_new_reason"), false);
+    assert.match(explainReason("brand_new_reason"), /Unrecognised/);
+  });
+});
+
+/**
  * Golden snapshot for issue #96.
  *
  * These strings were captured from `explainReason` *before* the message-key
@@ -151,31 +312,40 @@ describe("explainReason", () => {
  * changed behavior a consumer depends on.
  */
 const GOLDEN_EXPLANATIONS: Record<GuardReason, string> = {
-  unauthorized: "The presented signature did not verify against the account's registered agent key.",
+  unauthorized:
+    "The presented signature did not verify against the account's registered agent key.",
   already_initialized: "The guard account has already been initialized.",
   not_initialized: "The guard account has no registered agent key yet.",
   invalid_config: "The policy configuration was rejected by validation and was not applied.",
   invalid_amount: "The transfer amount was zero or negative.",
   no_pending_admin: "The account has no pending admin rotation to confirm or cancel.",
   admin_frozen: "An admin froze the account (freeze), or the dead-man switch grace window lapsed.",
-  heartbeat_expired: "The dead-man switch fired: no heartbeat within the policy's grace window, so the account is frozen until an admin unfreezes it.",
+  heartbeat_expired:
+    "The dead-man switch fired: no heartbeat within the policy's grace window, so the account is frozen until an admin unfreezes it.",
   no_policy: "No policy is installed (never set, or revoked) — the account is default-deny.",
   paused: "The policy's admin kill switch is engaged.",
-  outside_active_window: "The current ledger time is outside the policy's active_from/active_until window.",
+  outside_active_window:
+    "The current ledger time is outside the policy's active_from/active_until window.",
   asset_not_allowed: "The SAC token being called is not in the policy's assets list.",
   recipient_not_allowed: "The transfer recipient is not in the policy's recipients allowlist.",
   per_tx_cap_exceeded: "The transfer amount exceeds the policy's per-transaction cap.",
   window_cap_exceeded: "The transfer would push cumulative spend over the rolling-window cap.",
   protocol_not_allowed: "The contract being called is not in the policy's protocols allowlist.",
-  function_not_allowed: "The function being called on an allowlisted contract is not in its function allowlist.",
-  unknown_contract: "The contract being called is neither the account itself, an allowlisted asset, nor an allowlisted protocol (default deny).",
+  function_not_allowed:
+    "The function being called on an allowlisted contract is not in its function allowlist.",
+  unknown_contract:
+    "The contract being called is neither the account itself, an allowlisted asset, nor an allowlisted protocol (default deny).",
   self_function_not_allowed: "The call targets a guard function that the agent key may not invoke.",
   create_contract_not_allowed: "The account may not authorize contract creation.",
   recipient_blocked: "The transfer recipient is explicitly blocked by the account's policy.",
-  protocol_call_rate_exceeded: "The call would push the rolling protocol-call count past its configured limit.",
-  decision_invariant_violation: "The guard's decision engine hit an internal invariant, so the call was refused rather than allowed.",
-  asset_fn_not_allowed: "The call invoked a function other than `transfer` on an allowlisted asset.",
-  too_many_auth_contexts: "The call carried more authorization contexts than the guard's decision engine evaluates.",
+  protocol_call_rate_exceeded:
+    "The call would push the rolling protocol-call count past its configured limit.",
+  decision_invariant_violation:
+    "The guard's decision engine hit an internal invariant, so the call was refused rather than allowed.",
+  asset_fn_not_allowed:
+    "The call invoked a function other than `transfer` on an allowlisted asset.",
+  too_many_auth_contexts:
+    "The call carried more authorization contexts than the guard's decision engine evaluates.",
 };
 
 describe("explainReason golden snapshot (issue #96)", () => {
@@ -204,14 +374,8 @@ describe("explainReason golden snapshot (issue #96)", () => {
 
 describe("reasonMessages structure (issue #96)", () => {
   it("lists every reason exactly once, derived from the single code source", () => {
-    assert.deepEqual(
-      Object.keys(reasonMessages).sort(),
-      Object.keys(GUARD_REASON_CODES).sort(),
-    );
-    assert.deepEqual(
-      Object.keys(reasonMessagesEn).sort(),
-      Object.keys(GUARD_REASON_CODES).sort(),
-    );
+    assert.deepEqual(Object.keys(reasonMessages).sort(), Object.keys(GUARD_REASON_CODES).sort());
+    assert.deepEqual(Object.keys(reasonMessagesEn).sort(), Object.keys(GUARD_REASON_CODES).sort());
   });
 
   it("namespaces distinct title/body/remediation keys per reason and carries the code", () => {
@@ -266,10 +430,7 @@ describe("explainReason localisation (issue #96)", () => {
     const fr: Record<string, string> = {
       [reasonMessages.paused.bodyKey]: "Le coupe-circuit administrateur est actif.",
     };
-    assert.equal(
-      explainReason("paused", fr, { paused: "overridden" }),
-      "overridden",
-    );
+    assert.equal(explainReason("paused", fr, { paused: "overridden" }), "overridden");
   });
 });
 
@@ -370,5 +531,77 @@ describe("account-state reasons", () => {
       );
     }
     assert.ok(!ACCOUNT_STATE_REASONS.includes("per_tx_cap_exceeded"));
+  });
+});
+
+/**
+ * Quality ratchet over `explainReason` (issue #54).
+ *
+ * The loop is driven by the vendored contract glossary, the same single source of
+ * truth the lockstep test above uses (no second hand-kept list). Presence is not
+ * enough: an operator reads this text at the moment of a refusal, so a blank, a
+ * placeholder, or a restated code is a defect that must fail here, not render in
+ * production. Floors are set just under the shortest current entry, so they catch
+ * a gutted entry without freezing the wording (the golden snapshot does that).
+ */
+describe("explainReason guidance quality (issue #54)", () => {
+  const MIN_BODY_CHARS = 25;
+  const MIN_REMEDIATION_CHARS = 20;
+  const PLACEHOLDER = /\b(todo|tbd|fixme|xxx|lorem|placeholder|n\/a)\b/i;
+
+  const symbols = (): string[] => Object.keys(loadVendoredGlossary().reasonGlossary.reasons);
+
+  it("returns real, non-placeholder prose for every reason", () => {
+    for (const symbol of symbols()) {
+      const text = explainReason(symbol);
+      const humanised = symbol.replaceAll("_", " ");
+      assert.ok(
+        text.trim().length >= MIN_BODY_CHARS,
+        `${symbol}: explanation too short: "${text}"`,
+      );
+      assert.match(text, /[A-Za-z]{3,}\s+[A-Za-z]{2,}/, `${symbol}: no words in "${text}"`);
+      assert.doesNotMatch(text, PLACEHOLDER, `${symbol}: placeholder text in "${text}"`);
+      assert.doesNotMatch(text, /^\d+$/, `${symbol}: numeric-only explanation`);
+      for (const raw of [symbol, humanised, String(GUARD_REASON_CODES[symbol as GuardReason])]) {
+        assert.notEqual(
+          text.toLowerCase(),
+          raw.toLowerCase(),
+          `${symbol}: explanation is just the raw code "${raw}"`,
+        );
+      }
+    }
+  });
+
+  it("is the same text for the symbol and for its numeric code", () => {
+    for (const symbol of symbols()) {
+      assert.equal(explainReason(GUARD_REASON_CODES[symbol as GuardReason]), explainReason(symbol));
+    }
+  });
+
+  it("carries a title and an actionable remediation distinct from the body", () => {
+    for (const symbol of symbols()) {
+      const entry = reasonMessagesEn[symbol as GuardReason];
+      assert.ok(entry.title.trim().length > 0, `${symbol}: empty title`);
+      assert.ok(
+        entry.remediation.trim().length >= MIN_REMEDIATION_CHARS,
+        `${symbol}: remediation too short: "${entry.remediation}"`,
+      );
+      assert.doesNotMatch(entry.remediation, PLACEHOLDER, `${symbol}: placeholder remediation`);
+      assert.notEqual(entry.remediation, entry.body, `${symbol}: remediation repeats the body`);
+      // Actionable means it tells the reader what to do: a sentence that does not
+      // open by describing the failure ("The ...", "This ...", "No ...").
+      assert.match(entry.remediation, /^[A-Z][a-z]+\b.*\.$/s, `${symbol}: not a sentence`);
+      assert.doesNotMatch(
+        entry.remediation,
+        /^(The|This|That|A|An|No|It|There|Your)\b/,
+        `${symbol}: remediation describes instead of instructing: "${entry.remediation}"`,
+      );
+    }
+  });
+
+  it("documents the unrecognised-reason fallback with a stable format and never throws", () => {
+    assert.equal(explainReason("brand_new_reason"), "Unrecognised guard reason: brand_new_reason");
+    assert.equal(explainReason(999), "Unrecognised guard reason: 999");
+    assert.equal(explainReason(""), "Unrecognised guard reason: ");
   });
 });

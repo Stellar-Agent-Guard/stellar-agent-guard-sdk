@@ -14,6 +14,14 @@
  * `stellar-agent-guard-contracts/tests/fixtures/auth-checked-vocabulary.json` —
  * so a reason the contract adds is a failing test here until this table is
  * extended, rather than a symbol the SDK silently mislabels.
+ *
+ * The operator-facing guidance below (`reasonMessagesEn`, served by
+ * `explainReason`) is checked the same way, against the contract's reason
+ * glossary — vendored machine-readable at
+ * `tests/fixtures/vendor/reasons.fixture.json` from
+ * `stellar-agent-guard-contracts/docs/reason-glossary.md` (issue #38). The
+ * parity test is bidirectional: a glossary reason without SDK guidance fails,
+ * and an SDK reason the glossary does not list fails too.
  */
 import { GuardError } from "./errors.ts";
 
@@ -269,7 +277,8 @@ export const reasonMessagesEn: Readonly<Record<GuardReason, ReasonMessageText>> 
   decision_invariant_violation: {
     title: "Decision invariant violation",
     body: "The guard's decision engine hit an internal invariant, so the call was refused rather than allowed.",
-    remediation: "Treat this as a guard defect: capture the call and report it to the contract maintainers.",
+    remediation:
+      "Treat this as a guard defect: capture the call and report it to the contract maintainers.",
   },
   asset_fn_not_allowed: {
     title: "Asset function not permitted",
@@ -389,9 +398,7 @@ export class GuardBlockedError extends GuardError {
     this.name = "GuardBlockedError";
     this.reason = name;
     this.code =
-      typeof params.reason === "number"
-        ? params.reason
-        : GUARD_REASON_CODES[name as GuardReason];
+      typeof params.reason === "number" ? params.reason : GUARD_REASON_CODES[name as GuardReason];
     this.explanation = explanation;
     this.stage = params.stage;
     this.charged = params.charged ?? false;

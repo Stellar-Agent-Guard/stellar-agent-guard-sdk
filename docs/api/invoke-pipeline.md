@@ -11,7 +11,37 @@ Executes an end-to-end transaction through the guard:
 5. Handles transient `scecExceededLimit` ledger resource errors with bounded retry.
 6. Handles minimum-fee broadcast rejections (`tx_insufficient_fee` / "tx too cheap") with bounded fee-bump retry.
 
-Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
+Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, `{ kind: "pending", transactionHash, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
+
+### Options
+
+#### `InvokeOptions` (alias of `InvokeParams`; `invoke(options)`)
+
+Every caller-controlled option is validated before any signing or RPC; a bad value throws a field-specific `RangeError`.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `server` | `rpc.Server` | required | Soroban RPC for simulation, submission and polling. |
+| `source` | `Keypair \| AdminSigner` | required | Classic account that pays the fee and supplies the sequence number. |
+| `call` | `ContractCall` | required | The contract call to run. |
+| `networkPassphrase` | `string` | required | Network the envelope is built and signed for. |
+| `guardAuth` | `GuardAuthorization \| null` | none — no smart-account authorization is signed | Present when the call needs the guarded account's own authorization (guard address plus agent signer). |
+| `accountSigners` | `Array<Keypair \| AdminSigner>` | none | Extra classic-account authorizers (e.g. an admin). |
+| `dryRun` | `boolean` | `false` | Stop before broadcast and return the full pre-broadcast trace. A dry run never submits. |
+| `retry` | `InvokeRetryOptions` | `DEFAULT_INVOKE_RETRY_OPTIONS`: `maxAttempts: 3`, `baseDelayMs: 100`, `maxDelayMs: 2000` | Bounded full-jitter retry for stale-ledger resource-limit failures. Also accepts `random` / `jitter` (not both), `sleep`, and `initialDelayMs` (alias of `baseDelayMs`; must match it when both are set). `maxAttempts` counts the first attempt. |
+| `pollAttempts` | `number` (integer ≥ 1) | `20` | Status polls after a broadcast. ⚠️ Exhausting them returns the `pending` outcome: the transaction was accepted but not confirmed. Do not rebroadcast without `server.getTransaction(hash)`. |
+| `pollIntervalMs` | `number` (≥ 0) | `3000` | Delay between status polls. |
+| `pollOptions` | `{ pollAttempts?, pollIntervalMs? }` | none — the top-level values apply | Nested spelling of the two poll options; must agree with the top-level values when both are set. |
+| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, `initialInclusionFee` is a positive `bigint` in stroops. |
+| `maxRetries` | `number` (integer ≥ 0) | none — each retry class keeps its own budget | Overall cap across retry classes; `0` means a single attempt. The tighter of this and a per-class budget wins. |
+| `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
+| `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
+| `timeoutMs` | `number` (≥ 0) | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is the same fail-closed `error` outcome as an abort. `0` disables the per-call timeout (a `deadlineMs` still applies). |
+| `deadlineMs` | `number` (> 0) | none — only the per-call `timeoutMs` applies | ⚠️ One budget for discovery, signing, simulation, retry backoff, broadcast and polling. Expiry is fail-closed (`RpcTimeoutError` with `deadline: true`), even after the guard approved the call; a dry run reports `undetermined`. |
+| `clock` | `Clock` | `systemClock` | Time source for deadline accounting and poll/backoff delays. Must have `now()` and `sleep()`. |
+| `onStep` | `(step: InvokeStepEvent) => void` | none | One event per stage attempt (probe → sign → simulate → broadcast). Exceptions are isolated. |
+| `onSubmitted` | `(event: SubmissionAcceptedEvent) => void` | none | Called once with the network's answer to the broadcast, before polling, so the transaction hash survives a failed poll. |
+| `logger` | `GuardLoggerInput` | none — silent | Stage attempts and retries at `debug`, a refusal at `info`, no-verdict outcomes at `warn`. Never changes behaviour. |
 
 ### Fee-Bump Configuration (`feeBump`)
 
@@ -78,6 +108,7 @@ string or a log line:
 | --- | --- |
 | `allowed` | `outcome.submission.hash` |
 | `blocked` (post-broadcast refusal) | `outcome.transactionHash` |
+| `pending` (accepted, not confirmed in budget) | `outcome.transactionHash` |
 | `error` (failed poll, rejected transaction) | `outcome.transactionHash` |
 | `error` (deadline spent while polling) | `outcome.transactionHash` |
 | `InvokeRetryError` (retry budget exhausted) | `outcome.transactionHash` |
@@ -85,6 +116,35 @@ string or a log line:
 A `deadline` that fires while the pipeline is waiting for an inclusion does
 not un-send the transaction: it may still land. The hash travels with the
 `RpcTimeoutError` for exactly that reason.
+
+### The pending outcome: accepted, not confirmed
+
+When the network has accepted the submission but the polling budget runs out
+before inclusion is confirmed, `invoke()` returns `kind: "pending"` rather than
+claiming either success or failure (issue #299):
+
+```ts
+const outcome = await invoke({ server, source, call, networkPassphrase });
+if (outcome.kind === "pending") {
+  outcome.transactionHash; // the hash the network assigned — query it, do not resend
+  outcome.submission; // the `SubmissionResult` the broadcast produced
+  outcome.detail; // one-line summary, e.g. "transaction <hash> submitted but unconfirmed after 3 poll attempt(s)"
+  outcome.guidance; // safe follow-up text advising against rebroadcast
+}
+```
+
+The distinction matters for correctness, not just ergonomics: a transaction
+that was never sent and one that was sent but not yet confirmed require
+**opposite** handling. Treating a `pending` outcome as a failure and
+rebroadcasting risks executing the action twice, so the SDK reports the hash and
+asks the caller to reconcile out of band — for example with
+`server.getTransaction(outcome.transactionHash)`. `InvokePendingOutcome` is
+exported by name so an adapter can narrow on it without re-declaring the shape.
+
+`pending` is distinct from a `deadline` expiry: a deadline fires while the
+pipeline still owns the whole invocation and returns the fail-closed `error`
+outcome carrying `RpcTimeoutError`. `pending` means the submission itself
+completed and only the confirmation polling ran out of budget.
 
 ### Malformed simulation data
 
@@ -166,9 +226,9 @@ timeout outcome and must reconcile it out of band.
 
 ### Retry metadata
 
-Terminal outcomes carry additive `retry` metadata: `allowed` and `blocked`
-outcomes, the `error` outcome, `InvokeRetryError`, and a fee-bump-exhausted
-`BroadcastError`.
+Terminal outcomes carry additive `retry` metadata: `allowed`, `blocked` and
+`pending` outcomes, the `error` outcome, `InvokeRetryError`, and a
+fee-bump-exhausted `BroadcastError`.
 
 ```ts
 export interface InvokeRetryMetadata {
@@ -185,7 +245,7 @@ export interface InvokeRetryMetadata {
   }>;
   terminalFailure: RetryableInvokeFailure | null;
   terminalCause: InvokeErrorCause | null;
-  outcome: "allowed" | "blocked" | "error";
+  outcome: "allowed" | "blocked" | "pending" | "error";
 }
 ```
 

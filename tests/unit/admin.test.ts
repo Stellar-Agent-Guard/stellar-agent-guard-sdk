@@ -23,6 +23,7 @@ import {
   submitSetPolicy,
   submitUnfreeze,
 } from "../../src/admin.ts";
+import { InvalidInputError } from "../../src/errors.ts";
 import {
   policyToScVal,
   type ContractAddress,
@@ -171,9 +172,27 @@ describe("agentPubkeyToScVal conversion", () => {
     assert.deepEqual(Buffer.from(scValToNative(sc) as Uint8Array), Buffer.from(kp.rawPublicKey()));
   });
 
-  it("rejects invalid public key shapes", () => {
-    assert.throws(() => agentPubkeyToScVal("invalid_key"), /invalid agent public key format/);
-    assert.throws(() => agentPubkeyToScVal(new Uint8Array(16)), /byte length must be 32/);
+  it("validates the StrKey checksum and reports a typed field error without echoing input", () => {
+    const invalid = kp.publicKey().slice(0, -1) + (kp.publicKey().endsWith("A") ? "B" : "A");
+    assert.throws(
+      () => agentPubkeyToScVal(invalid),
+      (error: unknown) => {
+        assert.ok(error instanceof InvalidInputError);
+        assert.equal(error.field, "newAgent");
+        assert.match(error.message, /G\.\.\. Ed25519 public key/);
+        assert.doesNotMatch(error.message, new RegExp(invalid));
+        return true;
+      },
+    );
+  });
+
+  it("rejects wrong byte lengths and malformed hex with typed field errors", () => {
+    for (const invalid of [new Uint8Array(16), "z".repeat(64), "a".repeat(63)]) {
+      assert.throws(
+        () => agentPubkeyToScVal(invalid),
+        (error: unknown) => error instanceof InvalidInputError && error.field === "newAgent",
+      );
+    }
   });
 });
 
@@ -313,7 +332,10 @@ describe("admin helpers forward signal and timeoutMs", () => {
         }>,
     },
     { name: "submitFreeze", run: (params) => submitFreeze(params) as Promise<{ kind: string }> },
-    { name: "submitUnfreeze", run: (params) => submitUnfreeze(params) as Promise<{ kind: string }> },
+    {
+      name: "submitUnfreeze",
+      run: (params) => submitUnfreeze(params) as Promise<{ kind: string }>,
+    },
     {
       name: "submitRotateAgentKey",
       run: (params) =>
@@ -380,6 +402,9 @@ describe("admin helpers forward signal and timeoutMs", () => {
     });
 
     assert.equal(outcome.kind, "allowed");
-    assert.equal(outcome.kind === "allowed" ? outcome.submission.hash : undefined, "admin_tx_hash_123");
+    assert.equal(
+      outcome.kind === "allowed" ? outcome.submission.hash : undefined,
+      "admin_tx_hash_123",
+    );
   });
 });

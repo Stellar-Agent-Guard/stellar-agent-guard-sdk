@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { SorobanDataBuilder } from "@stellar/stellar-sdk";
+import { SorobanDataBuilder, nativeToScVal } from "@stellar/stellar-sdk";
 import {
   CostPreChecker,
   STROOPS_PER_XLM,
@@ -24,6 +24,7 @@ import {
   type CostProvenance,
   type PolicyContext,
   type ResourceBreakdown,
+  type WindowSpendSnapshot,
 } from "../../src/cost.ts";
 import { InvalidFeeCeilingError, InvalidInputError } from "../../src/errors.ts";
 import { INCLUSION_FEE } from "../../src/tx.ts";
@@ -32,7 +33,11 @@ import type { PreFlightDecision } from "../../src/preflight.ts";
 import type { ContractCall } from "../../src/tx.ts";
 import type { PolicyConfig } from "../../src/policy.ts";
 
-const CALL: ContractCall = { contract: unsafeContractAddress("C".padEnd(56, "A")), fn: "transfer", args: [] };
+const CALL: ContractCall = {
+  contract: unsafeContractAddress("C".padEnd(56, "A")),
+  fn: "transfer",
+  args: [],
+};
 const RECORDED_RESOURCE_PAYLOAD = JSON.parse(
   readFileSync(new URL("../fixtures/simulation-resource-payload.json", import.meta.url), "utf8"),
 ) as unknown;
@@ -214,10 +219,7 @@ describe("CostPreChecker fee ceiling validation (#345)", () => {
       },
     });
 
-    await assert.rejects(
-      checker.check(CALL, { maxFeeStroops: -5n }),
-      InvalidFeeCeilingError,
-    );
+    await assert.rejects(checker.check(CALL, { maxFeeStroops: -5n }), InvalidFeeCeilingError);
     assert.equal(calls, 0, "a malformed budget must not spend an RPC");
   });
 
@@ -284,7 +286,9 @@ describe("CostPreChecker", () => {
       readWriteEntries: 1,
       storageEntries: 3,
     };
-    const checker = new CostPreChecker({ interceptor: fakeInterceptor(admissible(2_000n, 3, breakdown)) });
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissible(2_000n, 3, breakdown)),
+    });
     const decision = await checker.check(CALL);
 
     assert.equal(decision.kind, "within_budget");
@@ -477,11 +481,14 @@ describe("formatFee", () => {
       );
     }
     // A number is a distinct, deliberate refusal: precision is already gone.
-    assert.throws(() => formatFee(1 as unknown as bigint), (err: unknown) => {
-      assert(err instanceof TypeError);
-      assert.match(err.message, /lost precision/);
-      return true;
-    });
+    assert.throws(
+      () => formatFee(1 as unknown as bigint),
+      (err: unknown) => {
+        assert(err instanceof TypeError);
+        assert.match(err.message, /lost precision/);
+        return true;
+      },
+    );
     assert.throws(() => formatFee(1.5 as unknown as bigint), TypeError);
   });
 
@@ -499,8 +506,7 @@ describe("formatFee", () => {
       const rendered = formatFee(stroops);
       const [whole = "", fraction = ""] = rendered.split(".");
       const back =
-        BigInt(whole) * STROOPS_PER_XLM +
-        (fraction === "" ? 0n : BigInt(fraction.padEnd(7, "0")));
+        BigInt(whole) * STROOPS_PER_XLM + (fraction === "" ? 0n : BigInt(fraction.padEnd(7, "0")));
       assert.equal(back, stroops, `round-trip of ${stroops}`);
     }
   });
@@ -648,7 +654,11 @@ describe("CostPreChecker policyContext integration", () => {
     assert.equal(decision.reason, "window_cap_exceeded");
     assert.ok(decision.policyContext !== null);
     assert.equal(decision.policyContext.perTxCapOk, true, "per-tx cap was not exceeded");
-    assert.equal(decision.policyContext.windowRemainingEstimate, null, "never report 0 for unavailable window state");
+    assert.equal(
+      decision.policyContext.windowRemainingEstimate,
+      null,
+      "never report 0 for unavailable window state",
+    );
     assert.equal(decision.policyContext.reason, "window_cap_exceeded");
     assert.equal(decision.totalFeeStroops, 0n);
   });
@@ -771,5 +781,306 @@ describe("CostPreChecker policyContext integration", () => {
     assert.ok(decision.policyContext !== null);
     assert.equal(decision.policyContext.perTxCapOk, true);
     assert.equal(decision.policyContext.windowRemainingEstimate, null);
+  });
+});
+
+describe("CostPreChecker window-spend snapshot (issue #311)", () => {
+  const GUARD_ADDR = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+  const LEDGER = 1_000;
+
+  /** A `transfer(from, to, amount)` call carrying a real i128 amount. */
+  function transferCall(amount: bigint): ContractCall {
+    return {
+      contract: unsafeContractAddress("C".padEnd(56, "A")),
+      fn: "transfer",
+      args: [
+        nativeToScVal("GDUT5FVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUUWYM", {
+          type: "address",
+        }),
+        nativeToScVal("GDUYKWVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRHT", {
+          type: "address",
+        }),
+        nativeToScVal(amount, { type: "i128" }),
+      ],
+    };
+  }
+
+  /** A `transfer_from(from, to, spender, amount)` call. */
+  function transferFromCall(amount: bigint): ContractCall {
+    return {
+      contract: unsafeContractAddress("C".padEnd(56, "A")),
+      fn: "transfer_from",
+      args: [
+        nativeToScVal("GDUT5FVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUUWYM", {
+          type: "address",
+        }),
+        nativeToScVal("GDUYKWVFLVISVOM5FK5KTBA446VQQ7NBRRFMLNLKLISKL26LJGKUVRHT", {
+          type: "address",
+        }),
+        nativeToScVal("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44", {
+          type: "address",
+        }),
+        nativeToScVal(amount, { type: "i128" }),
+      ],
+    };
+  }
+
+  function snapshot(overrides: Partial<WindowSpendSnapshot> = {}): WindowSpendSnapshot {
+    return {
+      ledger: LEDGER,
+      windowCapStroops: 10_000n,
+      windowSpentStroops: 2_500n,
+      ...overrides,
+    };
+  }
+
+  /** Admissible decision priced at `ledger`, like a real enforced simulation. */
+  function admissibleAt(ledger: number): PreFlightDecision {
+    return admissible(1_000n, 3, undefined, { ledger });
+  }
+
+  it("computes the remaining window budget from a snapshot tied to the priced ledger", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot(),
+    });
+    const decision = await checker.check(transferCall(500n));
+    assert.equal(decision.kind, "within_budget");
+    assert.ok(decision.policyContext !== null);
+    // 10_000 cap − 2_500 already spent − this call's 500 = 7_000 remaining.
+    assert.equal(decision.policyContext.windowRemainingEstimate, 7_000);
+  });
+
+  it("reads transfer_from amounts from the fourth argument", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot(),
+    });
+    const decision = await checker.check(transferFromCall(1_000n));
+    assert.ok(decision.policyContext !== null);
+    assert.equal(decision.policyContext.windowRemainingEstimate, 6_500);
+  });
+
+  it("boundary: computes zero exactly when the window is spent, and clamps overspend to zero", async () => {
+    const exact = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot({ windowCapStroops: 3_000n, windowSpentStroops: 2_500n }),
+    });
+    const exactDecision = await exact.check(transferCall(500n));
+    assert.ok(exactDecision.policyContext !== null);
+    assert.equal(
+      exactDecision.policyContext.windowRemainingEstimate,
+      0,
+      "a computed zero means exactly spent — not unknown",
+    );
+
+    const over = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot({ windowCapStroops: 3_000n, windowSpentStroops: 2_500n }),
+    });
+    const overDecision = await over.check(transferCall(900n));
+    assert.ok(overDecision.policyContext !== null);
+    assert.equal(overDecision.policyContext.windowRemainingEstimate, 0, "never negative");
+  });
+
+  it("retains null when the transfer amount is not known", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot(),
+    });
+    const decision = await checker.check({
+      contract: unsafeContractAddress("C".padEnd(56, "A")),
+      fn: "swap",
+      args: [],
+    });
+    assert.ok(decision.policyContext !== null);
+    assert.equal(decision.policyContext.windowRemainingEstimate, null);
+  });
+
+  it("retains null for a stale snapshot, and honours an explicitly widened tolerance", async () => {
+    // Snapshot observed two ledgers before the priced check: outside the
+    // default (zero) tolerance, so it is treated as missing.
+    const staleSnapshot = snapshot({ ledger: LEDGER - 2 });
+    const strict = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: staleSnapshot,
+    });
+    const strictDecision = await strict.check(transferCall(500n));
+    assert.ok(strictDecision.policyContext !== null);
+    assert.equal(strictDecision.policyContext.windowRemainingEstimate, null);
+
+    const tolerant = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: staleSnapshot,
+      windowSnapshotMaxAgeLedgers: 2,
+    });
+    const tolerantDecision = await tolerant.check(transferCall(500n));
+    assert.ok(tolerantDecision.policyContext !== null);
+    assert.equal(tolerantDecision.policyContext.windowRemainingEstimate, 7_000);
+
+    // Exactly one ledger beyond the widened tolerance is stale again.
+    const tooOld = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot({ ledger: LEDGER - 3 }),
+      windowSnapshotMaxAgeLedgers: 2,
+    });
+    const tooOldDecision = await tooOld.check(transferCall(500n));
+    assert.ok(tooOldDecision.policyContext !== null);
+    assert.equal(tooOldDecision.policyContext.windowRemainingEstimate, null);
+  });
+
+  it("rejects a snapshot dated after the check's own ledger instead of trusting it", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot({ ledger: LEDGER + 1 }),
+    });
+    const decision = await checker.check(transferCall(500n));
+    assert.ok(decision.policyContext !== null);
+    assert.equal(decision.policyContext.windowRemainingEstimate, null);
+  });
+
+  it("retains null when the check carries no priced ledger context", async () => {
+    // Admissible without provenance: nothing to tie the snapshot to.
+    const noProvenance = new CostPreChecker({
+      interceptor: fakeInterceptor(admissible(1_000n)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot(),
+    });
+    const decision = await noProvenance.check(transferCall(500n));
+    assert.ok(decision.policyContext !== null);
+    assert.equal(decision.policyContext.windowRemainingEstimate, null);
+
+    // A blocked verdict is never snapshot-priced: the estimate stays null even
+    // with a perfectly tied snapshot in hand.
+    const blocked = new CostPreChecker({
+      interceptor: fakeInterceptor({
+        allowed: false,
+        kind: "blocked",
+        reason: "window_cap_exceeded",
+        explanation: "window exhausted",
+        detail: "simulation refused by guard",
+        diagnosticEvents: [],
+      }),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot(),
+    });
+    const blockedDecision = await blocked.check(transferCall(500n));
+    assert.equal(blockedDecision.kind, "blocked");
+    assert.ok(blockedDecision.policyContext !== null);
+    assert.equal(blockedDecision.policyContext.windowRemainingEstimate, null);
+  });
+
+  it("reports null rather than a number that would lose precision", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot({
+        windowCapStroops: 2n ** 60n,
+        windowSpentStroops: 0n,
+      }),
+    });
+    const decision = await checker.check(transferCall(1n));
+    assert.ok(decision.policyContext !== null);
+    assert.equal(decision.policyContext.windowRemainingEstimate, null);
+  });
+
+  it("supports a per-call snapshot override, including clearing a configured one", async () => {
+    const checker = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot({ windowSpentStroops: 0n }),
+    });
+
+    const overridden = await checker.check(transferCall(500n), {
+      windowSnapshot: snapshot({ windowSpentStroops: 4_000n }),
+    });
+    assert.ok(overridden.policyContext !== null);
+    assert.equal(overridden.policyContext.windowRemainingEstimate, 5_500);
+
+    const cleared = await checker.check(transferCall(500n), { windowSnapshot: null });
+    assert.ok(cleared.policyContext !== null);
+    assert.equal(cleared.policyContext.windowRemainingEstimate, null);
+  });
+
+  it("never lets the estimate change the authorization outcome", async () => {
+    const call = transferCall(500n);
+    const withSnapshot = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      windowSnapshot: snapshot(),
+      maxFeeStroops: 100n,
+    });
+    const withoutSnapshot = new CostPreChecker({
+      interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+      policySource: GUARD_ADDR,
+      maxFeeStroops: 100n,
+    });
+
+    // The same verdict, with and without a snapshot in hand.
+    const a = await withSnapshot.check(call);
+    const b = await withoutSnapshot.check(call);
+    assert.equal(a.kind, b.kind);
+    assert.equal(a.allowed, b.allowed);
+    assert.equal(a.totalFeeStroops, b.totalFeeStroops);
+    assert.equal(a.kind, "over_budget", "the ceiling decision is unaffected by any estimate");
+    assert.ok(a.policyContext !== null && b.policyContext !== null);
+    assert.notEqual(a.policyContext.windowRemainingEstimate, null);
+    assert.equal(b.policyContext.windowRemainingEstimate, null);
+  });
+
+  it("validates the snapshot at the configuration boundary, before any RPC", async () => {
+    for (const invalid of [
+      { ledger: -1, windowCapStroops: 1n, windowSpentStroops: 0n },
+      { ledger: 1.5, windowCapStroops: 1n, windowSpentStroops: 0n },
+      { ledger: 1, windowCapStroops: 100, windowSpentStroops: 0n },
+      { ledger: 1, windowCapStroops: 1n, windowSpentStroops: -1n },
+    ] as unknown as WindowSpendSnapshot[]) {
+      assert.throws(
+        () =>
+          new CostPreChecker({
+            interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+            windowSnapshot: invalid,
+          }),
+        TypeError,
+        `must reject ${JSON.stringify(invalid, (_k, v) => (typeof v === "bigint" ? String(v) : v))}`,
+      );
+    }
+
+    let intercepted = false;
+    const checker = new CostPreChecker({
+      interceptor: {
+        check: async (): Promise<PreFlightDecision> => {
+          intercepted = true;
+          return admissibleAt(LEDGER);
+        },
+      },
+      policySource: GUARD_ADDR,
+    });
+    await assert.rejects(
+      () =>
+        checker.check(transferCall(500n), {
+          windowSnapshot: { ledger: 1, windowCapStroops: -5n, windowSpentStroops: 0n },
+        }),
+      TypeError,
+    );
+    assert.equal(intercepted, false, "an invalid snapshot must fail before the interceptor runs");
+
+    assert.throws(
+      () =>
+        new CostPreChecker({
+          interceptor: fakeInterceptor(admissibleAt(LEDGER)),
+          windowSnapshotMaxAgeLedgers: -1,
+        }),
+      TypeError,
+    );
   });
 });
