@@ -113,7 +113,17 @@ diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`,
-`onMalformed`, `onMalformedEvent`, and `signal`.
+`onFailedTxError`, `onMalformed`, `onMalformedEvent`, and `signal`.
+
+**Validated at this boundary (issue #283).** `limit`, `startLedger` and
+`resumeLedger` must be positive integers, `pollIntervalMs` a non-negative
+integer, and `jitter` either `"none"` or `"full"`; passing a `cursor` together
+with `startLedger`, or a `resumeLedger` together with `startLedger`, is a
+contradiction. Every violation throws a field-specific `TypeError` before any
+RPC request is issued or any timer is armed — invalid configuration costs zero
+round trips and names its own field instead of surfacing later as a
+host-dependent RPC error. `poll()` and `pollFailedTransactions()` validate the
+same fields the same way.
 
 #### Unknown topics
 

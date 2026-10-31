@@ -1117,7 +1117,10 @@ describe("PreFlightInterceptor simulation cache", () => {
 
     assert.equal(harness.simulations, 2);
     assert.equal(harness.latestLedgerCalls, 3);
-    assert.equal(second, first);
+    // Same verdict, independent object: a hit is a snapshot (issue #273), so
+    // identity is deliberately not preserved — equality of content is.
+    assert.deepEqual(second, first);
+    assert.notEqual(second, first);
 
     const stats = interceptor.getCacheStats();
     assert.equal(stats.hits, 1);
@@ -1307,9 +1310,17 @@ describe("PreFlightInterceptor simulation cache", () => {
     assert.equal(second.kind, "admissible");
     assert.equal(second.allowed, true);
     if (second.kind === "admissible") {
-      assert.equal(second.estimatedResourceFee, servedFee, "the stored fee is untouched by the edit");
+      assert.equal(
+        second.estimatedResourceFee,
+        servedFee,
+        "the stored fee is untouched by the edit",
+      );
     }
-    assert.equal(harness.simulations, 2, "the second check was still a cache hit, not a resimulation");
+    assert.equal(
+      harness.simulations,
+      2,
+      "the second check was still a cache hit, not a resimulation",
+    );
   });
 
   it("a mutated blocked verdict and its diagnosticEvents cannot change a later cache hit (issue #273)", async () => {
@@ -1362,9 +1373,18 @@ describe("PreFlightInterceptor simulation cache", () => {
     assert.notEqual(second, first, "the cache must not hand back the object the caller edited");
     assert.equal(second.kind, "blocked");
     assert.equal(second.allowed, false);
-    if (second.kind !== "blocked") assert.fail("a mutated hit must still report the guard's refusal");
-    assert.equal(second.diagnosticEvents.length, 1, "the pushed entry is not in the stored verdict");
-    assert.notEqual(second.diagnosticEvents, first.diagnosticEvents, "nested arrays are copies too");
+    if (second.kind !== "blocked")
+      assert.fail("a mutated hit must still report the guard's refusal");
+    assert.equal(
+      second.diagnosticEvents.length,
+      1,
+      "the pushed entry is not in the stored verdict",
+    );
+    assert.notEqual(
+      second.diagnosticEvents,
+      first.diagnosticEvents,
+      "nested arrays are copies too",
+    );
     assert.equal(
       (second.diagnosticEvents[0] as Record<string, unknown>)["forged"],
       undefined,
@@ -1668,7 +1688,10 @@ describe("PreFlightInterceptor cached checks honour the caller's bound", () => {
     const second = await interceptor.check(harness.call, { timeoutMs: 1_000 });
 
     assert.equal(first.kind, "admissible");
-    assert.equal(second, first);
+    // A hit is an independent snapshot (issue #273): equal content, never the
+    // same object.
+    assert.deepEqual(second, first);
+    assert.notEqual(second, first);
     // The second check reused the cached verdict: one ledger read for the
     // cache context, one inside the enforcement run, and no new simulation.
     assert.equal(harness.latestLedgerCalls, 3);

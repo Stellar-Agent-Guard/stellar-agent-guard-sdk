@@ -88,7 +88,8 @@ function decodedEvent(
     // Format from `guardEventId`: `ledger:<txHash>:<topic>`, plus `:<rpc id>`
     // when the raw event below reported one — the raw event carries txHash
     // `tx-<ledger>`, so the decoded id is derivable here.
-    id: eventId !== undefined ? `ledger:${txHash}:${topic}:${eventId}` : `ledger:${txHash}:${topic}`,
+    id:
+      eventId !== undefined ? `ledger:${txHash}:${topic}:${eventId}` : `ledger:${txHash}:${topic}`,
     kind: "heartbeat",
     topic,
     source: "ledger",
@@ -481,7 +482,11 @@ describe("repeated same-topic events in one transaction (issue #275)", () => {
       seen.push(event);
     }
 
-    assert.equal(seen.length, 2, "both same-topic events survive de-duplication, each exactly once");
+    assert.equal(
+      seen.length,
+      2,
+      "both same-topic events survive de-duplication, each exactly once",
+    );
     assert.notEqual(seen[0]!.id, seen[1]!.id);
   });
 });
@@ -829,14 +834,46 @@ describe("option validation before any RPC (issue #283)", () => {
 
   /** Table-driven: every entry names a field and the message it must carry. */
   const invalidPolls: { name: string; params: PollParams; message: RegExp }[] = [
-    { name: "limit is zero", params: { limit: 0 }, message: /telemetry: limit must be a positive integer/ },
-    { name: "limit is a fraction", params: { limit: 2.5 }, message: /telemetry: limit must be a positive integer/ },
-    { name: "limit is negative", params: { limit: -10 }, message: /telemetry: limit must be a positive integer/ },
-    { name: "limit is NaN", params: { limit: Number.NaN }, message: /telemetry: limit must be a positive integer \(received NaN\)/ },
-    { name: "limit is infinite", params: { limit: Number.POSITIVE_INFINITY }, message: /telemetry: limit must be a positive integer/ },
-    { name: "startLedger is zero", params: { startLedger: 0 }, message: /telemetry: startLedger must be a positive integer/ },
-    { name: "startLedger is negative", params: { startLedger: -5 }, message: /telemetry: startLedger must be a positive integer/ },
-    { name: "startLedger is a fraction", params: { startLedger: 12.5 }, message: /telemetry: startLedger must be a positive integer/ },
+    {
+      name: "limit is zero",
+      params: { limit: 0 },
+      message: /telemetry: limit must be a positive integer/,
+    },
+    {
+      name: "limit is a fraction",
+      params: { limit: 2.5 },
+      message: /telemetry: limit must be a positive integer/,
+    },
+    {
+      name: "limit is negative",
+      params: { limit: -10 },
+      message: /telemetry: limit must be a positive integer/,
+    },
+    {
+      name: "limit is NaN",
+      params: { limit: Number.NaN },
+      message: /telemetry: limit must be a positive integer \(received NaN\)/,
+    },
+    {
+      name: "limit is infinite",
+      params: { limit: Number.POSITIVE_INFINITY },
+      message: /telemetry: limit must be a positive integer/,
+    },
+    {
+      name: "startLedger is zero",
+      params: { startLedger: 0 },
+      message: /telemetry: startLedger must be a positive integer/,
+    },
+    {
+      name: "startLedger is negative",
+      params: { startLedger: -5 },
+      message: /telemetry: startLedger must be a positive integer/,
+    },
+    {
+      name: "startLedger is a fraction",
+      params: { startLedger: 12.5 },
+      message: /telemetry: startLedger must be a positive integer/,
+    },
     {
       name: "cursor combined with startLedger",
       params: { cursor: "cursor-1", startLedger: 100 },
@@ -845,15 +882,51 @@ describe("option validation before any RPC (issue #283)", () => {
   ];
 
   const invalidWatches: { name: string; params: WatchParams; message: RegExp }[] = [
-    { name: "limit is negative", params: { limit: -1 }, message: /telemetry: limit must be a positive integer/ },
-    { name: "limit is a fraction", params: { limit: 0.5 }, message: /telemetry: limit must be a positive integer/ },
-    { name: "startLedger is zero", params: { startLedger: 0 }, message: /telemetry: startLedger must be a positive integer/ },
-    { name: "resumeLedger is negative", params: { resumeLedger: -1 }, message: /telemetry: resumeLedger must be a positive integer/ },
-    { name: "resumeLedger is a fraction", params: { resumeLedger: 3.5 }, message: /telemetry: resumeLedger must be a positive integer/ },
-    { name: "pollIntervalMs is negative", params: { pollIntervalMs: -1 }, message: /telemetry: pollIntervalMs must be a non-negative integer/ },
-    { name: "pollIntervalMs is a fraction", params: { pollIntervalMs: 1.5 }, message: /telemetry: pollIntervalMs must be a non-negative integer/ },
-    { name: "pollIntervalMs is NaN", params: { pollIntervalMs: Number.NaN }, message: /telemetry: pollIntervalMs must be a non-negative integer \(received NaN\)/ },
-    { name: "pollIntervalMs is infinite", params: { pollIntervalMs: Number.POSITIVE_INFINITY }, message: /telemetry: pollIntervalMs must be a non-negative integer/ },
+    {
+      name: "limit is negative",
+      params: { limit: -1 },
+      message: /telemetry: limit must be a positive integer/,
+    },
+    {
+      name: "limit is a fraction",
+      params: { limit: 0.5 },
+      message: /telemetry: limit must be a positive integer/,
+    },
+    {
+      name: "startLedger is zero",
+      params: { startLedger: 0 },
+      message: /telemetry: startLedger must be a positive integer/,
+    },
+    {
+      name: "resumeLedger is negative",
+      params: { resumeLedger: -1 },
+      message: /telemetry: resumeLedger must be a positive integer/,
+    },
+    {
+      name: "resumeLedger is a fraction",
+      params: { resumeLedger: 3.5 },
+      message: /telemetry: resumeLedger must be a positive integer/,
+    },
+    {
+      name: "pollIntervalMs is negative",
+      params: { pollIntervalMs: -1 },
+      message: /telemetry: pollIntervalMs must be a non-negative integer/,
+    },
+    {
+      name: "pollIntervalMs is a fraction",
+      params: { pollIntervalMs: 1.5 },
+      message: /telemetry: pollIntervalMs must be a non-negative integer/,
+    },
+    {
+      name: "pollIntervalMs is NaN",
+      params: { pollIntervalMs: Number.NaN },
+      message: /telemetry: pollIntervalMs must be a non-negative integer \(received NaN\)/,
+    },
+    {
+      name: "pollIntervalMs is infinite",
+      params: { pollIntervalMs: Number.POSITIVE_INFINITY },
+      message: /telemetry: pollIntervalMs must be a non-negative integer/,
+    },
     {
       name: "jitter is an unknown mode",
       // Deliberately untyped: the runtime check is what a JS caller gets.
@@ -879,7 +952,11 @@ describe("option validation before any RPC (issue #283)", () => {
 
       await assert.rejects(listener.poll(testCase.params), testCase.message, testCase.name);
       assert.equal(requests.length, 0, `${testCase.name}: no getEvents request may be issued`);
-      assert.equal(latestLedgerCalls(), 0, `${testCase.name}: not even the default-head probe runs`);
+      assert.equal(
+        latestLedgerCalls(),
+        0,
+        `${testCase.name}: not even the default-head probe runs`,
+      );
     }
   });
 
@@ -890,7 +967,11 @@ describe("option validation before any RPC (issue #283)", () => {
 
       await assert.rejects(listener.watch(testCase.params).next(), testCase.message, testCase.name);
       assert.equal(requests.length, 0, `${testCase.name}: no getEvents request may be issued`);
-      assert.equal(latestLedgerCalls(), 0, `${testCase.name}: not even the default-head probe runs`);
+      assert.equal(
+        latestLedgerCalls(),
+        0,
+        `${testCase.name}: not even the default-head probe runs`,
+      );
     }
   });
 
@@ -912,7 +993,11 @@ describe("option validation before any RPC (issue #283)", () => {
 
     await listener.poll({ startLedger: 1, limit: 10 });
 
-    assert.equal(requests.length, 1, "validation rejects only unusable values, never valid pagination");
+    assert.equal(
+      requests.length,
+      1,
+      "validation rejects only unusable values, never valid pagination",
+    );
   });
 });
 

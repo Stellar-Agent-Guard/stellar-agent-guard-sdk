@@ -954,7 +954,7 @@ export class PreFlightInterceptor {
             ledger: context.ledger,
           });
           this._hits++;
-          return cached.decision;
+          return snapshotDecision(cached.decision);
         }
         this.cache.delete(context.key);
       }
@@ -1179,8 +1179,11 @@ export class PreFlightInterceptor {
     // An undetermined result is not a verdict and may be transient, so it is
     // deliberately not cached. Actual admissible/blocked results are.
     if (context && decision.kind !== "undetermined") {
+      // The cache keeps its own copy (issue #273): the caller receives the
+      // `decision` object below, so storing it by reference would let an edit
+      // to the returned verdict rewrite what the next hit is served.
       this.storeCacheEntry(context.key, {
-        decision,
+        decision: snapshotDecision(decision),
         ledger: context.ledger,
         expiresAt: context.expiresAt,
       });

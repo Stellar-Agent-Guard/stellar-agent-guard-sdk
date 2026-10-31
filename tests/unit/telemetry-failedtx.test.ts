@@ -152,6 +152,12 @@ function harness(options: {
   };
   let eventsPage = 0;
   let txPage = 0;
+  let remainingFailures =
+    options.failGetTransactions === true
+      ? Number.POSITIVE_INFINITY
+      : options.failGetTransactionsOnce === true
+        ? 1
+        : 0;
   const pages = options.eventsPages ?? [
     { events: [], cursor: "events-cursor-0", latestLedger: 501 },
   ];
@@ -644,7 +650,10 @@ describe("failed-transaction scan failures are observable (issue #280)", () => {
         contractId: GUARD,
         topic: [xdr.ScVal.scvSymbol("event_heartbeat")],
         value: xdr.ScVal.scvMap([
-          new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(1_789_393_232n) }),
+          new xdr.ScMapEntry({
+            key: xdr.ScVal.scvSymbol("at"),
+            val: xdr.ScVal.scvU64(1_789_393_232n),
+          }),
         ]),
         ledger: 4_675_001,
         ledgerClosedAt: "2026-09-14T00:00:00Z",

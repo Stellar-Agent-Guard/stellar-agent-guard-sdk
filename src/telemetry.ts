@@ -1482,6 +1482,88 @@ function resolveTelemetryRetry(
   return { maxRetries, baseDelayMs, maxDelayMs };
 }
 
+/**
+ * Reject an unusable pagination or timing option at the public boundary
+ * (issue #283), naming the offending field.
+ *
+ * Every value validated here travels straight into an RPC request or a timer,
+ * where a non-finite, non-integer or negative number surfaces as a
+ * host-dependent error (or a silently wrong delay) instead of a diagnosis.
+ * Checking before any request is issued proves the misconfiguration locally at
+ * zero round-trips. An omitted option is always fine — each of these has a
+ * documented default — and `0` is a legal `pollIntervalMs` (an unjittered
+ * loop with no delay, which the test suites lean on), so only `limit` and the
+ * ledger positions require a strictly positive value.
+ */
+function assertIntegerOption(
+  value: number | undefined,
+  field: string,
+  requirement: "positive" | "non-negative",
+): void {
+  if (value === undefined) return;
+  const floor = requirement === "positive" ? 1 : 0;
+  if (!Number.isInteger(value) || value < floor) {
+    throw new TypeError(
+      `telemetry: ${field} must be a ${requirement} integer (received ${String(value)})`,
+    );
+  }
+}
+
+/**
+ * Validate one page-read's options before any RPC is issued (issue #283).
+ *
+ * Shared by `poll()` and `pollFailedTransactions()`, which take the same
+ * pagination fields, and by `watch()` before it builds its first page read.
+ * The cursor/range contradiction is rejected rather than
+ * silently resolved: the RPC refuses a request that mixes the two modes, so a
+ * host that wins the silent branch is told nothing about why its second field
+ * never took effect.
+ */
+function validatePollParams(
+  params: {
+    startLedger?: number;
+    cursor?: string;
+    limit?: number;
+  },
+  /** The public entry point, so the contradiction is reported where it was made. */
+  entry: "poll()" | "watch()" | "pollFailedTransactions()",
+): void {
+  assertIntegerOption(params.limit, "limit", "positive");
+  assertIntegerOption(params.startLedger, "startLedger", "positive");
+  if (params.cursor !== undefined && params.startLedger !== undefined) {
+    throw new TypeError(
+      `telemetry: ${entry} accepts either cursor or startLedger, not both — the RPC rejects a request that mixes the two modes`,
+    );
+  }
+}
+
+/**
+ * Validate one `watch()`/`watchAll()` call's options before any RPC is issued
+ * or any timer is armed (issue #283).
+ *
+ * Beyond the fields `poll()` takes, this covers the stream's own controls:
+ * `resumeLedger` (meaningless once `startLedger` pins the range — the resume
+ * point would be silently ignored), `pollIntervalMs` (non-negative, because a
+ * zero-delay loop is a legitimate way to drive the stream from injected
+ * `sleep`), and `jitter` (a closed two-value vocabulary — an unknown mode
+ * would otherwise fall through to `computePollDelay` and be read as anything).
+ */
+function validateWatchParams(params: GuardTelemetryWatchParams): void {
+  validatePollParams(params, "watch()");
+  assertIntegerOption(params.resumeLedger, "resumeLedger", "positive");
+  assertIntegerOption(params.pollIntervalMs, "pollIntervalMs", "non-negative");
+  if (params.jitter !== undefined && params.jitter !== "none" && params.jitter !== "full") {
+    throw new TypeError(
+      `telemetry: jitter must be "none" or "full" (received ${JSON.stringify(params.jitter)})`,
+    );
+  }
+  if (params.resumeLedger !== undefined && params.startLedger !== undefined) {
+    throw new TypeError(
+      "telemetry: watch() accepts either resumeLedger or startLedger, not both — an explicit startLedger pins the range, so a resume point could never apply",
+    );
+  }
+}
+
 export interface GuardTelemetryWatchParams {
   startLedger?: number;
   pollIntervalMs?: number;
@@ -1588,6 +1670,24 @@ export interface GuardTelemetryWatchParams {
    * A throwing callback is isolated so an observability sink cannot stop the stream.
    */
   onMalformedEvent?: (diagnostic: { ledger: number; transactionHash: string | null }) => void;
+  /**
+   * Called once per failed-transaction scan failure, while the committed
+   * stream keeps its own delivery untouched (issue #280).
+   *
+   * The opt-in `failedTx` stream can stop delivering — a rejected
+   * `getTransactions` page, or the head probe that seeds its cursor — without
+   * that being visible anywhere: committed events arrive as if nothing were
+   * missing. This callback is that visibility: it receives the failure that
+   * skipped a scan, and coverage resumes from the *unchanged* failed-tx cursor
+   * on the next loop, so no unread failed transaction is passed over.
+   *
+   * Failures stay isolated: the callback runs after the scan has already been
+   * abandoned, and a callback that throws is swallowed — an observability sink
+   * cannot stop telemetry, the same contract as `onGap` and
+   * `onUnknownTopics`. Omitting it changes nothing except who is told; the
+   * failure is still logged when a logger is configured.
+   */
+  onFailedTxError?: (error: unknown) => void;
   /**
    * Called once when the committed stream ends because of a terminal RPC
    * failure — after the bounded retry envelope is exhausted. Fail-visible
@@ -2676,6 +2776,9 @@ export class GuardTelemetryListener {
         | undefined;
     } = {},
   ): Promise<PollResult> {
+    // Rejected before the request object exists, let alone a request (#283):
+    // bad pagination must cost zero round trips and name its own field.
+    validatePollParams(params, "poll()");
     const request = (
       params.cursor
         ? {
@@ -2945,6 +3048,9 @@ export class GuardTelemetryListener {
     params: GuardTelemetryWatchParams = {},
     options: { deferCursorSave?: boolean } = {},
   ): AsyncGenerator<WatchPage, void, undefined> {
+    // The public boundary: a misconfiguration is reported with its field name
+    // before the first RPC probe, the cursor-store load, or the timer (#283).
+    validateWatchParams(params);
     const interval = params.pollIntervalMs ?? 5_000;
     const jitter = params.jitter ?? "full";
     const rng = params.rng ?? Math.random;
@@ -3129,6 +3235,11 @@ export class GuardTelemetryListener {
           });
           failedTxCursor = failedTxPage.cursor;
           failedTxEvents = failedTxPage.events;
+          // A page that failed inside the scanner reports it on its result,
+          // with the cursor left exactly where it was — surfaced, not swallowed.
+          if (failedTxPage.error !== undefined) {
+            this.reportFailedTxError(params, failedTxPage.error);
+          }
           // A failed scan leaves the stored cursor untouched so the page is
           // retried after a restart (issue #279). Persisting the failed-tx
           // stream's own cursor — independently of the getEvents cursor — is
