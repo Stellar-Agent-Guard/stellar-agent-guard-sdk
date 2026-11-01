@@ -186,7 +186,7 @@ describe("GuardTelemetryListener.recentJsonLines (issue #324)", () => {
 
   it("exports the bounded window in observation order", async () => {
     const listener = listenerServing([ledgerPage([501, 502, 503], "cursor-1")], 2);
-    await listener.poll({ startLedger: 500, cursor: "cursor-0" });
+    await listener.poll({ cursor: "cursor-0" });
     const ids = lines(listener.recentJsonLines()).map((line) => parseEventRecord(line).event.id);
     assert.deepEqual(
       ids,
@@ -197,7 +197,7 @@ describe("GuardTelemetryListener.recentJsonLines (issue #324)", () => {
 
   it("applies the same filter surface as recent()", async () => {
     const listener = listenerServing([ledgerPage([501, 502], "cursor-1")], 10);
-    await listener.poll({ startLedger: 500, cursor: "cursor-0" });
+    await listener.poll({ cursor: "cursor-0" });
     assert.equal(lines(listener.recentJsonLines({ fromLedger: 502 })).length, 1);
     assert.deepEqual(lines(listener.recentJsonLines({ toLedger: 501 })).length, 1);
     assert.equal(lines(listener.recentJsonLines({ reason: "per_tx_cap_exceeded" })).length, 0);
@@ -205,7 +205,7 @@ describe("GuardTelemetryListener.recentJsonLines (issue #324)", () => {
 
   it("is deterministic across calls and does not leak a mutated snapshot back", async () => {
     const listener = listenerServing([ledgerPage([501], "cursor-1")], 10);
-    await listener.poll({ startLedger: 500, cursor: "cursor-0" });
+    await listener.poll({ cursor: "cursor-0" });
     const first = listener.recentJsonLines();
     assert.equal(listener.recentJsonLines(), first);
     // The snapshot is detached: exporting cannot mutate the retained event.
