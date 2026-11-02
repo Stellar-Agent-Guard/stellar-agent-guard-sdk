@@ -106,14 +106,14 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
-    "@types/node": "^26.5.1",
+    "@types/node": "^26.6.5",
     "c8": "^12.0.0",
-    "eslint": "^10.10.0",
+    "eslint": "^10.13.0",
     "expect-type": "^1.4.0",
-    "prettier": "^3.6.2",
-    "tinybench": "^6.2.0",
-    "tsx": "^4.23.13",
+    "prettier": "^3.9.10",
+    "tinybench": "^6.2.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.2",
-    "typescript-eslint": "^8.70.0"
+    "typescript-eslint": "^8.72.0"
   }
 }
