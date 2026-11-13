@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Markdown link checker (issue #140). Zero dependencies: Node built-ins only.
+ * Markdown link checker (issues #78 and #140). Zero dependencies: Node built-ins only.
  *
  *   node scripts/check-doc-links.ts               # relative links + anchors (PR gate)
  *   node scripts/check-doc-links.ts --external    # also probe http(s) URLs (scheduled sweep)
