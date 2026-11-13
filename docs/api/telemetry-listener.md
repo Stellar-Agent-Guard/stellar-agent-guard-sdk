@@ -58,7 +58,7 @@ The retained window of most-recent decoded events, oldest first, empty unless a
 `toLedger`; a ledger-less diagnostic event is excluded from a ledger range rather
 than treated as inside it. Non-durable: the window lives in process memory and a
 restart empties it. Only events this listener decoded are retained — committed
-events via `poll()`/`watch()`, diagnostic events via `watchAll()`, and failed
+events via `poll()`/`watch()`/`watchPages()`, diagnostic events via `watchAll()`, and failed
 transaction events via `pollFailedTransactions()` or `watch()` when `failedTx`
 is enabled.
 
@@ -102,15 +102,27 @@ cursor on the next call; omitting it starts at the current RPC head, without
 replaying older failures. Only failed transactions with diagnostics emitted by
 the configured guard are returned. RPC errors leave a supplied cursor unchanged.
 
-### `watch(params?): AsyncIterable<GuardEventPage>`
+### `watch(params?): AsyncIterable<GuardEvent[]>`
 
 Yields pages of decoded guard events (`event_auth_checked`, `event_policy_updated`, etc.).
 Set `failedTx: true` in the constructor options to include failed-transaction
 diagnostics; this scan maintains its own cursor and does not advance the
-committed event cursor.
+committed event cursor. Empty pages are skipped, and the existing event-array
+contract is unchanged.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`,
 `onMalformed`, `onMalformedEvent`, and `signal`.
+
+### `watchPages(params?): AsyncIterable<GuardTelemetryWatchPage>`
+
+The page-oriented alternative yields every committed poll, including empty pages,
+so a consumer can checkpoint cursor progress without reimplementing polling.
+Each page includes `events`, `cursor`, `latestLedger`, `oldestLedger`, `dropped`,
+`unknownTopics`, and `gaps`. `gaps` contains the provable retention gap detected
+for that page, or is empty; `onGap` remains available for callback-based alerts.
+When `failedTx` is enabled, `events` also includes the failed-transaction events
+read during that poll, while the returned cursor remains the committed-event
+cursor. `GuardTelemetryWatchPage` is exported from the package root.
 
 #### Unknown topics
 
@@ -169,7 +181,7 @@ contract as every later poll:
 #### One active stream per listener
 
 A listener owns shared cursor, failed-transaction de-duplication, counter, and
-buffer state, so it supports **one active `watch()`/`watchAll()` stream at a
+buffer state, so it supports **one active `watch()`/`watchPages()`/`watchAll()` stream at a
 time**. Starting a second stream while the first is still being pulled throws
 `ConcurrentTelemetryStreamError` (`code: "telemetry.concurrent_stream"`) before
 it issues an RPC request, saves a cursor, or records an event. The active stream
