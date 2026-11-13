@@ -608,6 +608,53 @@ describe("AgentSigner", () => {
     assert.equal(toAgentSigner(custom), custom, "no wrapping an already-adapted signer");
   });
 
+  it("rejects signatures that are not exactly 64 bytes", async () => {
+    for (const signature of [new Uint8Array(63), new Uint8Array(65)]) {
+      await assert.rejects(
+        buildGuardAuthEntry({
+          guard: GUARD,
+          call: CALL,
+          signer: {
+            publicKey: Keypair.random().publicKey(),
+            signDigest: () => signature,
+          },
+          nonce: 1n,
+          signatureExpirationLedger: 100,
+          networkPassphrase,
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof SigningError);
+          assert.equal(error.address, GUARD);
+          assert.match(error.message, /invalid Ed25519 signature/);
+          return true;
+        },
+      );
+    }
+  });
+
+  it("rejects a non-byte signer result without echoing it", async () => {
+    const privateOutput = "sensitive signer output";
+    await assert.rejects(
+      buildGuardAuthEntry({
+        guard: GUARD,
+        call: CALL,
+        signer: {
+          publicKey: Keypair.random().publicKey(),
+          signDigest: () => privateOutput as unknown as Uint8Array,
+        },
+        nonce: 1n,
+        signatureExpirationLedger: 100,
+        networkPassphrase,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.equal(error.address, GUARD);
+        assert.doesNotMatch(error.message, /sensitive signer output/);
+        return true;
+      },
+    );
+  });
+
   it("wraps a plain Keypair so existing callers keep working", () => {
     const keypair = Keypair.random();
     const signer = toAgentSigner(keypair);

@@ -452,6 +452,12 @@ export async function buildGuardAuthEntry(params: {
       cause: error,
     });
   }
+  if (!(signature instanceof Uint8Array) || signature.length !== 64) {
+    throw new SigningError(
+      "agent signer returned an invalid Ed25519 signature for guard authorization",
+      { address: guard },
+    );
+  }
 
   const addressCredentials = new xdr.SorobanAddressCredentials({
     address: guardAddress,
