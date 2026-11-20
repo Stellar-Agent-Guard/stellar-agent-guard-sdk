@@ -11,6 +11,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { runNpm } from "./npm-cli.ts";
 
 const ROOT = process.cwd();
 
@@ -21,11 +22,11 @@ function fail(message: string): never {
 }
 
 function npm(args: string[], cwd: string): string {
-  return execFileSync("npm", args, {
+  return runNpm(args, {
     cwd,
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
-  }) as string;
+  });
 }
 
 function run(): void {
