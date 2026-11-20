@@ -122,6 +122,15 @@ jobs:
           set -o pipefail
           npm run test:coverage:floor 2>&1 | tee ci-diagnostics/coverage-floor.log
 
+      # Coverage-ratchet summary (issue #493): parses c8 output and writes a
+      # Markdown summary to the job summary showing per-file line/branch/function
+      # coverage against the configured floor in .c8rc.json, plus deltas against main.
+      # Non-gating: floor check above remains the required gate.
+      - name: coverage-ratchet summary
+        if: always() && steps.coverage-floor.outcome != 'skipped'
+        run: node --import tsx scripts/coverage-summary.ts
+        continue-on-error: true
+
       - name: build
         run: npm run build
 
