@@ -8,6 +8,12 @@
  * signing, policy and simulation failures. Invalid caller input is the deliberate
  * exception: `InvalidInputError` extends `TypeError` so a malformed argument is
  * distinguishable from an operational failure.
+ *
+ * Public error message shapes and structured properties (`code`, `rule`, `path`,
+ * `stage`) are snapshot-tested (see `tests/unit/errors.test.ts`). Messages may
+ * still evolve in a minor release to improve diagnostic clarity or troubleshooting
+ * anchors, but not silently: any change requires a deliberate, reviewed snapshot
+ * update.
  */
 import type { InvokeRetryMetadata } from "./retry.ts";
 

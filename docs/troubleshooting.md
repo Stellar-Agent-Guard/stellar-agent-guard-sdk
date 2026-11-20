@@ -32,3 +32,9 @@ Confirm the `GuardTelemetryListener` is subscribed before the invoke pipeline ru
 ## Agent Key Rotation and Recovery
 
 See the [Agent Key Rotation and Recovery runbook](concepts/custom-account-signing.md#operator-runbook-agent-key-rotation-and-recovery) for procedures to rotate the agent key of a custom account and recover from rotation failures.
+
+## Error Messages and Stability
+
+Error message strings and structured failure attributes (`code`, `rule`, `path`, `stage`) are snapshot-tested across every exported error class.
+
+Callers should branch on typed error classes (or programmatic properties such as `code`, `rule`, `path`, and `stage`), not by matching human-readable message strings. While error messages may still evolve in a minor release (for example, to improve troubleshooting clarity or docs anchors), they will not change silently: every message update requires a deliberate, reviewed snapshot update in the test suite.
