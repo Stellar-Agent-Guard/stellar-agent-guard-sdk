@@ -33,6 +33,11 @@
 #     path of the check that actually blocks merges. This is the issue's
 #     "justified split with shared cache": the parallel saving (~16s off the
 #     required check) exceeds the extra parallel work (~8s of setup + install).
+#   * The Windows offline leg is a separate, clearly named check
+#     (`ci-windows (offline gates)`). It runs the cross-platform subset of the
+#     gates on every push and PR — no live suite, no browser bundling, and no
+#     duplicate matrix — so a Windows-only path, pack, temp-directory or line-
+#     ending regression cannot be hidden by the Ubuntu job.
 #   * Steps inside `ci` are ordered cheapest-first — typecheck and lint precede
 #     the test suite and build/consumer checks, so a broken change fails fast.
 #   * Test output is captured as TAP (`npm test`) and as the coverage-floor log.
@@ -210,6 +215,45 @@ jobs:
           path: ci-diagnostics/
           if-no-files-found: ignore
           retention-days: 7
+
+  # Cross-platform offline gates (issue #488). This is intentionally not a job
+  # matrix: the required check keeps the exact name `ci`, while Windows reports
+  # its own clearly named check. It runs the same install, static checks, unit
+  # tests, build and offline packaging gates as the Linux job, but excludes the
+  # live integration suite and browser bundling. `cache: npm` keys the cache on
+  # package-lock.json exactly as the Linux job does.
+  windows:
+    name: ci-windows (offline gates)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      - name: typecheck
+        run: npm run typecheck
+
+      - name: lint
+        run: npm run lint
+
+      - name: unit tests
+        run: npm test
+
+      - name: build
+        run: npm run build
+
+      - name: published-file-set check
+        run: npm run test:pack
+
+      - name: clean packed-install consumer
+        run: npm run test:packed-install
 
   # Informational only, never gating — and deliberately a separate job so it does
   # not lengthen the required `ci` check (see the header comment). It runs on
