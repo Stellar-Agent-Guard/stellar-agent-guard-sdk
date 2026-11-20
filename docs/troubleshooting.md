@@ -32,3 +32,342 @@ Confirm the `GuardTelemetryListener` is subscribed before the invoke pipeline ru
 ## Agent Key Rotation and Recovery
 
 See the [Agent Key Rotation and Recovery runbook](concepts/custom-account-signing.md#operator-runbook-agent-key-rotation-and-recovery) for procedures to rotate the agent key of a custom account and recover from rotation failures.
+
+## Error classes
+
+Use this section when a log gives you only a class name. There is exactly one
+entry per error class exported from the package root, headed by the class name
+alone — message text can change between releases, so it is listed inside the
+entry, never in the heading. `tests/unit/troubleshooting-errors.test.ts` fails
+when an exported error class has no entry here, or when an entry's **Retry**
+advice disagrees with `isRetryableHeartbeatFailure()`.
+
+Branch on the class with `instanceof` (or on a stable field such as `code`,
+`rule`, `kind`, `path`), not on the message. The hierarchy and the 0.1.x
+migration notes are in the README's
+[typed errors section](../README.md#typed-errors-and-01x-migration); the
+definitions are in [`src/errors.ts`](../src/errors.ts) and the modules named
+below.
+
+Every entry lists:
+
+- **Extends** — the parent class, so you know which broader `instanceof` check catches it.
+- **Typical messages** — the current shapes, with `<placeholders>`; illustrative, not a contract.
+- **Stage** — where in the pipeline it is raised.
+- **Retry** — `Yes` exactly when `isRetryableHeartbeatFailure()` classifies the
+  class as a transient transport failure; `No` otherwise. `invoke()` already
+  retries its own retryable classes (`stale_ledger_resource_limit`,
+  `sequence_number_collision`, `min_fee`) inside its budget, so "Yes" means a
+  *later* attempt may succeed, not that you should loop immediately.
+- **First diagnostic** — the first command or check to run.
+
+The examples use `RPC_URL` for your Soroban RPC endpoint:
+
+```bash
+export RPC_URL=https://soroban-testnet.stellar.org
+```
+
+### `GuardError`
+
+- **Extends:** `Error`. Base class of every operational SDK error, so `instanceof GuardError` catches transport, signing, policy and simulation failures in one check. `InvalidInputError` (a `TypeError`), `InvokeRetryError` and `HeartbeatIntervalError` deliberately do not extend it.
+- **Typical messages:** whatever the concrete subclass says; `GuardError` is not thrown directly.
+- **Stage:** any.
+- **Retry:** No — the base class alone says nothing about transience; classify the concrete subclass (`error.name`).
+- **First diagnostic:** print the concrete class and its cause chain:
+
+  ```ts
+  console.error(error.name, error.message, (error as Error).cause);
+  ```
+
+### `GuardBlockedError`
+
+- **Extends:** `GuardError`. Defined in [`src/reasons.ts`](../src/reasons.ts).
+- **Typical messages:** `stellar-agent-guard blocked this action (<reason>): <explanation>`, optionally followed by ` [call: <contract>.<fn>(<n> args)]` and a detail line.
+- **Stage:** `preflight` (thrown by `assertAllowed()` / adapters before execution; `charged: false`) or `submission` (the contract refused at broadcast; `charged` may be `true`).
+- **Retry:** No — this is a policy decision. Change the policy, the call, or the account state (unpause, unfreeze, wait for the window to roll) instead.
+- **First diagnostic:** read the reason and its operator guidance:
+
+  ```ts
+  console.error(error.reason, error.code, reasonMessagesEn[error.reason]);
+  ```
+
+  Then see the [blocked-reason row](#troubleshooting) above.
+
+### `GuardUndeterminedError`
+
+- **Extends:** `GuardError`.
+- **Typical messages:** `stellar-agent-guard could not determine this action's status` followed by a detail line (`RPC call during 'pre-flight' exceeded timeout of <n>ms`, `call mapping failed before enforcement: …`, a simulation failure).
+- **Stage:** `preflight` (from `assertAllowed()`, `assertBatchAllowed()` or the Vercel AI adapter) or `submission`.
+- **Retry:** No — not by the SDK's predicate; the guard never ruled, so it fails closed. The real failure is the `cause`: if that is an `RpcTimeoutError`, `SimulationError` or `RateLimitedError`, a later attempt may succeed; an `AdapterMappingError` cause needs a code fix.
+- **First diagnostic:** inspect the cause and the RPC:
+
+  ```bash
+  curl -s "$RPC_URL" -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+  ```
+
+### `PreFlightUndeterminedError`
+
+- **Extends:** — it is the 0.1.x name of [`GuardUndeterminedError`](#guardundeterminederror), exported as an alias of the same class (`PreFlightUndeterminedError === GuardUndeterminedError`). An `instanceof` check against either name matches the same errors.
+- **Typical messages:** as `GuardUndeterminedError`.
+- **Stage:** as `GuardUndeterminedError`.
+- **Retry:** No — as `GuardUndeterminedError`; inspect the `cause`.
+- **First diagnostic:** as `GuardUndeterminedError`. Prefer the new name in new code; see the [0.1.x → 0.2 upgrade checklist](../MIGRATION.md#01x--02-upgrade-checklist).
+
+### `InvalidInputError`
+
+- **Extends:** `TypeError` (deliberately not `GuardError`), so a programmer error is distinguishable from an operational failure.
+- **Typical messages:** `Invalid input for '<field>': violates rule '<rule>' (<detail>)` — for example `Invalid input for 'contract': violates rule 'required' (contract ID is required and must be non-empty)`.
+- **Stage:** input validation, before any RPC.
+- **Retry:** No — the same input fails the same way. Fix the value named by `field`.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.field, error.rule, error.detail);
+  ```
+
+### `InvalidFeeCeilingError`
+
+- **Extends:** `InvalidInputError` (so also a `TypeError`).
+- **Typical messages:** `Invalid input for '<field>': violates rule 'non_negative_bigint' (expected a non-negative bigint, got <value>)`.
+- **Stage:** `CostPreChecker` construction (configured `maxFeeStroops`) or a per-call override, before any simulation.
+- **Retry:** No — pass a non-negative `bigint` in stroops (`500_000n`, not `500000` or `"500000"`). `0n` is a real zero ceiling; omit the option for no ceiling.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.field, typeof error.value, error.value);
+  ```
+
+### `SimulationError`
+
+- **Extends:** `GuardError`.
+- **Typical messages:** `authorization probe failed`, `signed transaction simulation request failed`, `enforced simulation returned an invalid resource fee`, `could not assemble transaction from enforced simulation`.
+- **Stage:** `probe`, `simulate` or `preflight` (the `stage` field).
+- **Retry:** Yes — a simulation that could not run is a transport/host failure a later attempt can fix. If it repeats, check the RPC and the guard address before retrying further.
+- **First diagnostic:** check RPC health, then the diagnostic events:
+
+  ```bash
+  curl -s "$RPC_URL" -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
+  ```
+
+  ```ts
+  console.error(error.stage, error.diagnosticEvents.length, error.cause);
+  ```
+
+### `RateLimitedError`
+
+- **Extends:** `SimulationError`. `kind` is `"rate_limited"`, mirroring the verdict's `cause`.
+- **Typical messages:** `the RPC rate-limited the simulation (HTTP 429) on <n> attempt(s)` with an optional `; Retry-After <ms>ms`.
+- **Stage:** pre-flight simulation, after the interceptor's one bounded backoff and retry.
+- **Retry:** Yes — after waiting at least `retryAfterMs` (when present). The lasting fix is operational: lower `maxConcurrentSimulations`, or raise the RPC's limit.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.attempts, error.retryAfterMs);
+  ```
+
+### `RpcTimeoutError`
+
+- **Extends:** `GuardError`. Defined in [`src/invoke.ts`](../src/invoke.ts); `kind` is `"timeout"`.
+- **Typical messages:** `RPC call during '<stage>' exceeded timeout of <n>ms`, `RPC call during '<stage>' aborted by caller signal`, `RPC call during '<stage>' exceeded the overall invoke deadline`.
+- **Stage:** the `stage` field (for example `pre-flight`); `deadline: true` means `deadlineMs` fired, `aborted: true` means your `signal` fired.
+- **Retry:** Yes — but if `transactionHash` is set, the transaction was already broadcast and **may still land**: look it up before resubmitting, or you risk a duplicate transfer.
+- **First diagnostic:** when a hash is present, ask the network what happened to it:
+
+  ```bash
+  curl -s "$RPC_URL" -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":{"hash":"<transactionHash>"}}'
+  ```
+
+### `SigningError`
+
+- **Extends:** `GuardError`.
+- **Typical messages:** `signer.publicKey must not be a secret key (S...)…`, `signer.publicKey is not a supported agent identity: expected …`, `could not sign the guard authorization entry`, `could not validate the agent signer identity`.
+- **Stage:** signer construction/validation, or auth-entry signing inside `invoke()` / `heartbeat()`.
+- **Retry:** No — the signer or key is wrong or unavailable; retrying signs nothing new. Use the registered agent public key (`G…` or 64-char hex), never a secret seed.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.address, isValidAgentPublicKey(signer.publicKey), error.cause);
+  ```
+
+### `BroadcastError`
+
+- **Extends:** `GuardError`. `kind` is `"error"`.
+- **Typical messages:** the RPC's rejection text, or `stellar-agent-guard broadcast failed: minimum fee not met after <n> attempt(s) (last fee: <n> stroops)` followed by a detail line.
+- **Stage:** submission, after assembly.
+- **Retry:** Yes — submission failures are transient more often than not. If `transactionHash` is set, check its status first; if `retry.exhausted` is `true`, the fee-bump budget is spent, so raise `feeBump` bounds deliberately rather than looping.
+- **First diagnostic:**
+
+  ```bash
+  curl -s "$RPC_URL" -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getTransaction","params":{"hash":"<transactionHash>"}}'
+  ```
+
+### `FeeCapExceededError`
+
+- **Extends:** `GuardError`. `code` is `"fee_cap_exceeded"`.
+- **Typical messages:** `fee cap exceeded: total <n> stroops (resource <n> + inclusion <n>) exceeds maxFeeCap <n> stroops; nothing was broadcast`.
+- **Stage:** `invoke()`, before `sendTransaction`. Nothing was broadcast.
+- **Retry:** No — your own spend ceiling stopped it. Raise `maxFeeCap` only if the budget allows, or wait for resource fees to fall.
+- **First diagnostic:** see which half grew:
+
+  ```ts
+  console.error(error.resourceFeeStroops, error.inclusionFeeStroops, error.maxFeeCap, error.attempt);
+  ```
+
+### `InvokeRetryError`
+
+- **Extends:** `Error` (not `GuardError`). Defined in [`src/invoke.ts`](../src/invoke.ts); returned as the `kind: "error"` outcome, not thrown.
+- **Typical messages:** `stellar-agent-guard invoke retry budget exhausted after <n> attempt(s) (last cause: <cause>)` followed by the last attempt's detail.
+- **Stage:** `invoke()`, after the bounded retry budget for `stale_ledger_resource_limit` / `sequence_number_collision` / `min_fee` ran out.
+- **Retry:** No — the SDK's own budget is already spent. Fix the cause (`sequence_number_collision` usually means another broadcaster shares the source account) and check `transactionHash`: the last attempt may be on the network.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.lastCause, error.retry, error.transactionHash, error.error);
+  ```
+
+### `ContractResponseError`
+
+- **Extends:** `GuardError`.
+- **Typical messages:** `simulation result is not an object`, `simulation result.auth is not an array`, `validate_policy simulation returned no result.retval`, or a malformed `minResourceFee`.
+- **Stage:** the optional `stage` field — `probe`, `simulate`, `preflight` or `assemble`.
+- **Retry:** No — the response shape is wrong, which usually means an incompatible RPC, a wrong network, or a guard WASM this SDK version does not understand.
+- **First diagnostic:** confirm the RPC network matches your `networkPassphrase`:
+
+  ```bash
+  curl -s "$RPC_URL" -H 'content-type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1,"method":"getNetwork"}'
+  ```
+
+  Then log `error.field` and `error.stage`.
+
+### `PolicyDecodeError`
+
+- **Extends:** `GuardError`.
+- **Typical messages:** `cannot decode policy JSON field <path>: <detail>` ([`policyFromJson()`](api/policy-json.md#error-paths)), `cannot decode policy field <path>: <detail>` (`decodePolicy()` / `policyFromScVal()`), `validate_policy returned an undecodable ScVal`.
+- **Stage:** decoding a policy from JSON, from a contract `ScVal`, or from a `validate_policy` simulation.
+- **Retry:** No — the bytes are not a policy this SDK understands; the same input fails the same way.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.path, error.message);
+  ```
+
+  For JSON input, compare the field at `path` with the [format table](api/policy-json.md#the-format).
+
+### `PolicyEncodeError`
+
+- **Extends:** `InvalidInputError` (so also a `TypeError`).
+- **Typical messages:** `Invalid input for '<path>': violates rule '<rule>' (<detail>)`, with ` (and <n> more failure(s))` when there are several.
+- **Stage:** `policyToScVal()`, before any `ScVal` is built.
+- **Retry:** No — fix every entry in `failures`.
+- **First diagnostic:** list every failure, not just the first:
+
+  ```ts
+  console.table(error.failures);
+  // or, without throwing: validatePolicyForEncoding(draft)
+  ```
+
+### `PolicyFileReadError`
+
+- **Extends:** `GuardError`. Raised by `loadPolicyFromFile()` from `stellar-agent-guard-sdk/fs`.
+- **Typical messages:** `cannot read policy file '<path>' (<errno>)`.
+- **Stage:** filesystem read, before any parsing.
+- **Retry:** No — fix the path or permissions named by `code` (`ENOENT`, `EACCES`, `EISDIR`, …).
+- **First diagnostic:**
+
+  ```bash
+  ls -l "<path>"
+  ```
+
+### `PolicyValidationError`
+
+- **Extends:** `GuardError`. Raised by `loadPolicyFromFile()` after a successful decode.
+- **Typical messages:** `policy file '<path>' failed validation with <n> failure(s): <rule> at <field>; …`.
+- **Stage:** SPEC §8 validation of a decoded policy file.
+- **Retry:** No — edit the policy; every failure is in `failures`.
+- **First diagnostic:**
+
+  ```ts
+  console.table(error.failures);
+  ```
+
+  The rule ids are explained in [policy schema validation](api/policy-schema.md#schema-enforced-vs-code-enforced-rules).
+
+### `AdapterMappingError`
+
+- **Extends:** `GuardError`. Usually seen as the `cause` of an `undetermined` adapter halt.
+- **Typical messages:** `the <adapter> adapter's call mapper threw: <original message>`, or a mapper that returned something that is not a contract call.
+- **Stage:** adapter call mapping, before enforcement. The wrapped tool did not run.
+- **Retry:** No — the mapper is application code; fix the function named by `field` (`toContractCall` or `toContractCalls`).
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.field, error.cause);
+  ```
+
+  See [call mapping and mapping failures](api/framework-adapters.md#call-mapping-and-mapping-failures).
+
+### `AdapterConfigError`
+
+- **Extends:** `GuardError`.
+- **Typical messages:** `<adapter> adapter options are invalid: <n> problem(s) found (<fields>).` followed by one line per problem.
+- **Stage:** adapter construction, before the first agent action.
+- **Retry:** No — a configuration bug; fix the option named by `field` to match `expected`.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.adapter, error.field, error.expected);
+  ```
+
+### `HeartbeatBlockedError`
+
+- **Extends:** `GuardError`. Defined in [`src/heartbeat.ts`](../src/heartbeat.ts).
+- **Typical messages:** `stellar-agent-guard blocked the heartbeat (<reason>): <explanation>` — typically `heartbeat_expired` or `admin_frozen`.
+- **Stage:** heartbeat submission (`heartbeat()` or `startHeartbeat()` via `onError`).
+- **Retry:** No — a refused heartbeat is a decision. An expired or frozen account needs an admin [unfreeze](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/docs/functions/freeze-unfreeze.md) (`submitUnfreeze()`).
+- **First diagnostic:** read the account status:
+
+  ```ts
+  const status = await readGuardStatus({ server, guard, source, networkPassphrase });
+  console.error(error.reason, status, dmsUrgency(status, policy));
+  ```
+
+### `HeartbeatDryRunError`
+
+- **Extends:** `GuardError`. `kind` is `"dry_run"`.
+- **Typical messages:** `stellar-agent-guard heartbeat ran as a dry run and never reached the guard (verdict: <verdict>…)`.
+- **Stage:** heartbeat submission whose outcome was `kind: "dry_run"` — typically a custom `submit` transport that calls `invoke({ dryRun: true })`. The dead-man switch was not touched.
+- **Retry:** No — re-sending the same dry-run configuration cannot help. Remove `dryRun: true` from the heartbeat's `submit` transport.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.verdict, error.reason, error.detail);
+  ```
+
+### `HeartbeatIntervalError`
+
+- **Extends:** `Error` (not `GuardError`).
+- **Typical messages:** `heartbeat interval <n>ms exceeds one third of the dead-man grace window (<n>s → at most <n>ms); a single missed beat could freeze the account`.
+- **Stage:** `startHeartbeat()`, before the first beat.
+- **Retry:** No — set `intervalMs` to at most `maxIntervalMs`.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.intervalMs, error.graceSecs, error.maxIntervalMs);
+  ```
+
+### `ConcurrentTelemetryStreamError`
+
+- **Extends:** `GuardError`. Defined in [`src/telemetry.ts`](../src/telemetry.ts); `code` is `"telemetry.concurrent_stream"`.
+- **Typical messages:** `GuardTelemetryListener already has an active watch()/watchAll() stream; <requested>() cannot start concurrently. Use one listener per stream.`
+- **Stage:** `watch()` / `watchAll()` start-up, before any RPC.
+- **Retry:** No — not while the first stream is active. End or abort it, or create a second `GuardTelemetryListener`.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.requested, listener.health());
+  ```
