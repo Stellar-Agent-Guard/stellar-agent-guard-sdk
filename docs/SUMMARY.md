@@ -25,6 +25,7 @@
 * [Integration Hooks](integration-hooks.md)
 * [Testnet Verification](verification.md)
 * [Benchmarks](benchmarks.md)
+* [Mutation Testing](mutation-testing.md)
 * [Enforcement Scope](enforcement-scope.md)
 * [Security Posture: Dependencies](security-posture.md)
 * [Troubleshooting](troubleshooting.md)
