@@ -66,8 +66,9 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 > pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
 > known gaps in simulation fidelity, and what the SDK does about each.
 >
-> **If something breaks:** search the [troubleshooting playbook](docs/troubleshooting.md)
-> by error text or outcome.
+> **If something breaks:** search the [error catalog](docs/errors.md#error-classes)
+> by class name, or the [troubleshooting playbook](docs/troubleshooting.md) by
+> error text or outcome.
 
 New to the vocabulary (allowlist, DMS, admissible, pre-flight)? Start with the
 [glossary](docs/glossary.md).
@@ -1049,7 +1050,9 @@ If you still see `cause: "rate_limited"`, **lower** `maxConcurrentSimulations`. 
 All operational SDK errors share a `GuardError` base. Invalid caller input is the
 deliberate exception: `InvalidInputError` (and `InvalidFeeCeilingError`) extend
 `TypeError`, keeping programmer errors distinct from transport, signing and policy
-failures. `invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
+failures. The [error catalog](docs/errors.md#error-classes) maps every exported
+class to its stage, meaning, retry and fail-closed behaviour, and first fix.
+`invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
 when `outcome.kind === "error"`.
 
 ```ts
@@ -1084,7 +1087,8 @@ and diagnostics. That charged outcome additionally carries `transactionHash` and
 `charged: true`; it is not flattened into a technical `BroadcastError`.
 
 `GuardBlockedError` keeps its published name, message, fields, and `instanceof` behavior
-and now extends `GuardError`; `PreFlightUndeterminedError` extends `SimulationError`.
+and now extends `GuardError`; `PreFlightUndeterminedError` is an alias of
+`GuardUndeterminedError`, not a subclass of `SimulationError`.
 The hierarchy, `decodePolicy`, and `verifyAgentSignature` are additive to 0.1.x callers.
 The one intentional behavior change is for callers already using `dryRun: true`: the old
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
@@ -1590,7 +1594,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**; which PRs must run it, and the exact enforcement-path file list, are defined once in [`CONTRIBUTING.md` § Which tests does my PR need?](CONTRIBUTING.md#which-tests-does-my-pr-need-canonical-matrix). It also runs on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift, with the committed evidence in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
-- **Integration failures**: use the [troubleshooting playbook](docs/troubleshooting.md) to map common errors and outcomes to causes and supported fixes.
+- **Integration failures**: use the [error catalog](docs/errors.md#error-classes) to identify an exported class, then the [troubleshooting playbook](docs/troubleshooting.md) to map common errors and outcomes to causes and supported fixes.
 
 ## Enforcement scope — read this before relying on the caps
 
