@@ -45,7 +45,7 @@ interface PackageManifest {
 const REQUIRED_ROOT_EXPORTS = ["PreFlightInterceptor", "CostPreChecker", "invoke"] as const;
 
 /** Specifiers that must *fail* to resolve, proving the map is not a passthrough. */
-const UNDECLARED_SUFFIXES = ["/dist/index.js", "/does-not-exist"] as const;
+const UNDECLARED_SUFFIXES = ["/dist/index.js", "/dist/fs.js", "/does-not-exist"] as const;
 
 const ROOT = process.cwd();
 
@@ -180,6 +180,11 @@ function run(): void {
       `    console.error("  root is missing the required export: " + name);`,
       `    process.exitCode = 1;`,
       `  }`,
+      `}`,
+      `const fsSubpath = await import(${JSON.stringify(`${manifest.name}/fs`)});`,
+      `if (typeof fsSubpath.loadPolicyFromFile !== "function") {`,
+      `  console.error("  ./fs subpath is missing required export: loadPolicyFromFile");`,
+      `  process.exitCode = 1;`,
       `}`,
       `for (const specifier of ${JSON.stringify(negativeSpecifiers)}) {`,
       `  try {`,
