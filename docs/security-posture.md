@@ -139,3 +139,38 @@ The dependency gate is [`.github/workflows/dependency-review.yml`](../.github/wo
   check, add `dependency-review` to the branch-protection ruleset — it is kept
   out of `ci.yml` so that the `ci` job stays the single, secret-free required
   check it is documented to be.
+
+## Publish provenance and supply-chain attestations
+
+Because `stellar-agent-guard-sdk` gates smart account operations and real fund movements on Stellar Soroban, consumers need cryptographic guarantees linking the published npm tarball directly to this repository's source code and reviewed CI workflow (issue #492).
+
+### Provenance generation in CI
+
+Starting with the release workflow in [`.github/workflows/publish.yml`](../.github/workflows/publish.yml):
+
+- **OIDC & Sigstore**: Releases published via GitHub Actions use `npm publish --provenance`. During the publish step, npm exchanges a short-lived OIDC token from GitHub Actions for a signing certificate from Sigstore (Fulcio), signs the package metadata, and logs the attestation to the public transparency log (Rekor).
+- **Least-privilege permissions**: The `id-token: write` permission is granted strictly to the `publish` job within `publish.yml`. The workflow-level default remains `contents: read`, and no other workflow in the repository is permitted `id-token: write`.
+- **Token fallback**: If provenance generation fails or the OIDC service is unreachable, the publish step falls back to token-based publishing with the maintainer's `NPM_TOKEN` to ensure critical security patches are not blocked.
+- **Dry-run safety**: A dry run (`npm publish --dry-run` or workflow dispatch with dry-run mode enabled) does not require a token or write permissions, allowing anyone to verify pack and publish prerequisites without credentials.
+
+### How a consumer verifies provenance
+
+Consumers can verify the integrity and origin of the published SDK using the following methods:
+
+1. **Verify package signatures via npm CLI**:
+   In any project where `stellar-agent-guard-sdk` is installed:
+   ```bash
+   npm audit signatures
+   ```
+   To inspect the full SLSA provenance payload (including the source repository, commit SHA, and build workflow):
+   ```bash
+   npm audit signatures --json --include-attestations
+   ```
+
+2. **Query the npm registry attestations endpoint**:
+   ```bash
+   curl -s "https://registry.npmjs.org/-/npm/v1/attestations/stellar-agent-guard-sdk@<version>" | jq .
+   ```
+
+3. **Inspect the web registry badge**:
+   Visiting `https://www.npmjs.com/package/stellar-agent-guard-sdk` displays the verified **Provenance** badge with a direct link to the GitHub Actions workflow run and commit.
