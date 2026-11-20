@@ -35,12 +35,14 @@ See the [Agent Key Rotation and Recovery runbook](concepts/custom-account-signin
 
 ## Error classes
 
-Use this section when a log gives you only a class name. There is exactly one
-entry per error class exported from the package root, headed by the class name
-alone — message text can change between releases, so it is listed inside the
-entry, never in the heading. `tests/unit/troubleshooting-errors.test.ts` fails
-when an exported error class has no entry here, or when an entry's **Retry**
-advice disagrees with `isRetryableHeartbeatFailure()`.
+Use this section when a log gives you only a class name. For the compact class →
+stage → meaning → retry → fail-closed → first-fix mapping, see the
+[error catalog](errors.md#error-classes). There is exactly one entry per error
+class exported from the package root, headed by the class name alone — message
+text can change between releases, so it is listed inside the entry, never in
+the heading. `tests/unit/troubleshooting-errors.test.ts` fails when an exported
+error class has no entry here, or when an entry's **Retry** advice disagrees
+with `isRetryableHeartbeatFailure()`.
 
 Branch on the class with `instanceof` (or on a stable field such as `code`,
 `rule`, `kind`, `path`), not on the message. The hierarchy and the 0.1.x
