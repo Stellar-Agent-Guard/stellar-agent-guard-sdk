@@ -4,6 +4,13 @@ The Stellar Agent Guard SDK exposes the following public surface. For the narrat
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`deprecations.md`](deprecations.md). Release process and versioning checklist: [`releasing.md`](releasing.md).
 
+### Policy JSON & schema validation
+
+- `policyToJson(policy)` / `policyFromJson(input)` (aliases `encodePolicyJson` / `decodePolicyJson`) and `POLICY_JSON_VERSION` — lossless JSON representation of a `PolicyConfig` with decimal-string integers, fixed key order and `PolicyDecodeError` paths. See [Policy JSON](api/policy-json.md).
+- `validateGuardPolicyAgainstSchema(policy, schema, options?)`, `POLICY_SCHEMA_PATH`, `SCHEMA_DIALECT`, `SCHEMA_RULE_ID_ANNOTATION`, `SCHEMA_VS_CODE_RULES`, `ruleForKeyword()`, `ruleFromAnnotation()` — schema-driven SPEC §8 validation with the shared rule vocabulary. See [Policy Schema Validation](api/policy-schema.md).
+
+Errors: every exported error class has an entry in [troubleshooting: error classes](troubleshooting.md#error-classes). Before going live, work through the [production readiness checklist](production-readiness.md).
+
 ### Constructor options
 
 Every constructor options object has a table (Option | Type | Default | Meaning) with source-verified defaults and ⚠️ safety notes: [`PreFlightInterceptorOptions` and its nested cache/check/batch options](api/interceptor.md#options), [`CostPreCheckConfig` / `CostPreCheckOptions`](api/cost-checker.md#options), [`GuardTelemetryConfig`](api/telemetry-listener.md#options), and [`InvokeOptions`](api/invoke-pipeline.md#options). The same tables appear in the README's [Constructor options](../README.md#constructor-options).
