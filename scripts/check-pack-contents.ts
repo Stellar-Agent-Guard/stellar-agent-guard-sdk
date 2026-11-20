@@ -16,10 +16,10 @@
  * Usage: npm run test:pack   (run `npm run build` first; the tarball is built
  * from `dist/`).
  */
-import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { runNpm } from "./npm-cli.ts";
 
 const ROOT = process.cwd();
 
@@ -47,7 +47,7 @@ function fail(message: string): never {
 function packedFiles() {
   const packDir = mkdtempSync(join(tmpdir(), "stellar-agent-guard-pack-check-"));
   try {
-    const output = execFileSync("npm", ["pack", "--json", "--pack-destination", packDir], {
+    const output = runNpm(["pack", "--json", "--pack-destination", packDir], {
       cwd: ROOT,
       encoding: "utf8",
       maxBuffer: 64 * 1024 * 1024,
