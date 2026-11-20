@@ -175,6 +175,14 @@ function settle(ms = 30): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for condition");
+    await settle(10);
+  }
+}
+
 /**
  * A promise whose settlement the test controls: an RPC request that stays in
  * flight until the test resolves or rejects it.
@@ -1312,7 +1320,7 @@ describe("bounded look-ahead pump (issue #36)", () => {
         requests.length - pulled <= 2,
         `after delivery ${pulled}: fetched (${requests.length}) minus delivered (${pulled}) must stay within the bound`,
       );
-      await settle(20);
+      await waitFor(() => requests.length - pulled === 2);
       assert.equal(
         requests.length - pulled,
         2,
