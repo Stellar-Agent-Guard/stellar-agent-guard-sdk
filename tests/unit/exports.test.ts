@@ -37,6 +37,21 @@ describe("package module format and export-map", () => {
     assert.equal(pkg.types, "./dist/index.d.ts");
   });
 
+  it("declares export map for ./fs subpath pointing to ESM entry point and types (issue #496)", () => {
+    assert(pkg.exports?.["./fs"], "export map for './fs' must be present");
+    assert.equal(pkg.exports["./fs"].import, "./dist/fs.js");
+    assert.equal(pkg.exports["./fs"].types, "./dist/fs.d.ts");
+  });
+
+  it("resolves built ESM package ./fs subpath with loadPolicyFromFile export (issue #496)", async () => {
+    const distFsPath = resolve(process.cwd(), "dist/fs.js");
+    if (!existsSync(distFsPath)) {
+      return;
+    }
+    const fsModule = await import(pathToFileURL(distFsPath).href);
+    assert.equal(typeof fsModule.loadPolicyFromFile, "function");
+  });
+
   it("resolves built ESM package entry point with expected named exports", async () => {
     if (!existsSync(DIST_INDEX_PATH)) {
       // If running before build, skip this check
