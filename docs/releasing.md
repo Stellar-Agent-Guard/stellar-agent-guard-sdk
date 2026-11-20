@@ -60,6 +60,16 @@ Checklist:
       The publish workflow records the same digest in the run summary and as the
       `release-artifact-integrity` workflow artifact, then publishes that exact
       tarball. The digest contains no credentials or secret material.
+- [ ] Pack and dry-run verified: a dry run does not require an auth token.
+      Verify that packaging and publishing dry-run succeed locally without
+      `NPM_TOKEN`:
+
+      ```bash
+      npm publish --dry-run
+      ```
+
+      This builds the project, confirms the exported tarball contents, and validates
+      publish preconditions without uploading anything or requiring credentials.
 - [ ] Live-testnet evidence is fresh for the enforcement path: if the release
       contains changes to `src/tx.ts`, `src/invoke.ts`, `src/policy.ts`, or
       `src/preflight.ts`, a run of `npm run test:integration` with evidence in
@@ -96,8 +106,21 @@ Checklist:
 
 Pushing a `v*` tag triggers [`publish.yml`](../.github/workflows/publish.yml):
 it re-runs typecheck, lint, unit tests, verifies the tag matches
-`package.json`, then runs `npm publish --access public` with `NPM_TOKEN`. The
-two-person note: publishing is deliberately bottlenecked on the maintainer's
+`package.json`, packs and hashes the artifact, and then publishes the tarball
+with provenance attestation (`npm publish "$RELEASE_TARBALL" --access public --provenance`).
+
+### Provenance and permissions (issue #492)
+
+Releases published through GitHub Actions generate a cryptographic SLSA Build
+Level 2+ provenance attestation linking the published npm package directly to
+this repository and the triggering commit. To mint the OIDC token for Sigstore,
+`publish.yml` grants `id-token: write` strictly to the `publish` job under
+least-privilege principles (no other workflow or job in this repository has
+`id-token: write`). If OIDC minting or provenance generation is temporarily
+unavailable, publishing falls back gracefully to token-based publishing with
+`NPM_TOKEN`.
+
+The two-person note: publishing is deliberately bottlenecked on the maintainer's
 npm 2FA/automation-token setup — a second person cannot publish without it, and
 that credential is **outside this repo** by design. Do not work around a missing
 token with an alternate secret name.
@@ -109,6 +132,24 @@ npm view stellar-agent-guard-sdk version   # must print the tag's version
 npm view stellar-agent-guard-sdk dist.tarball
 npm view stellar-agent-guard-sdk files     # spot-check the published set
 ```
+
+### Provenance verification
+
+Verify that the published version carries a cryptographic provenance attestation:
+
+```bash
+# Query the npm registry attestations API:
+curl -s "https://registry.npmjs.org/-/npm/v1/attestations/stellar-agent-guard-sdk@$(node -p "require('./package.json').version")" | jq .
+
+# In a consumer project where the SDK is installed:
+npm audit signatures
+
+# Include full SLSA attestation payload details:
+npm audit signatures --json --include-attestations
+```
+
+Or view the verified **Provenance** badge on the npm package page:
+`https://www.npmjs.com/package/stellar-agent-guard-sdk`
 
 Then smoke-install in a scratch directory:
 
