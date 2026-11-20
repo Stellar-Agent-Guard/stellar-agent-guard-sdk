@@ -40,7 +40,9 @@ describe("publish workflow and npm provenance attestations (issue #492)", () => 
   });
 
   it("ensures no other workflow gains id-token: write", () => {
-    const workflowFiles = readdirSync(WORKFLOWS_DIR).filter((f) => f.endsWith(".yml") || f.endsWith(".yaml"));
+    const workflowFiles = readdirSync(WORKFLOWS_DIR).filter(
+      (f) => f.endsWith(".yml") || f.endsWith(".yaml"),
+    );
     assert.ok(workflowFiles.length > 1, "expected multiple workflow files in .github/workflows");
 
     for (const file of workflowFiles) {
@@ -105,7 +107,11 @@ describe("publish workflow and npm provenance attestations (issue #492)", () => 
   it("documents consumer provenance verification commands in docs/releasing.md", () => {
     const content = readFileSync(RELEASING_DOC, "utf8");
 
-    assert.match(content, /npm audit signatures/, "docs/releasing.md must document npm audit signatures");
+    assert.match(
+      content,
+      /npm audit signatures/,
+      "docs/releasing.md must document npm audit signatures",
+    );
     assert.match(
       content,
       /npm audit signatures --json --include-attestations/,
@@ -131,7 +137,11 @@ describe("publish workflow and npm provenance attestations (issue #492)", () => 
       /## Publish provenance and supply-chain attestations/,
       "docs/security-posture.md must have a section on publish provenance",
     );
-    assert.match(content, /npm audit signatures/, "docs/security-posture.md must document npm audit signatures");
+    assert.match(
+      content,
+      /npm audit signatures/,
+      "docs/security-posture.md must document npm audit signatures",
+    );
     assert.match(
       content,
       /https:\/\/registry\.npmjs\.org\/-\/npm\/v1\/attestations/,
