@@ -32,12 +32,12 @@ function documentedRows(): ReasonCodeRow[] {
         .map((cell) => cell.trim());
       return {
         code: Number(cells[0]),
-        name: cells[1].replace(/^`|`$/g, ""),
-        meaning: cells[2],
-        trigger: cells[3],
-        action: cells[4],
-        className: cells[5],
-        references: cells[6],
+        name: (cells[1] ?? "").replace(/^`|`$/g, ""),
+        meaning: cells[2] ?? "",
+        trigger: cells[3] ?? "",
+        action: cells[4] ?? "",
+        className: cells[5] ?? "",
+        references: cells[6] ?? "",
       };
     });
 }
@@ -70,7 +70,10 @@ describe("reason-code documentation", () => {
       assert.equal(row.action, reasonMessagesEn[reason].remediation);
       assert.ok(row.trigger.length > 20, `trigger too short: ${row.name}`);
       assert.notEqual(row.trigger, row.meaning, `trigger restates meaning: ${row.name}`);
-      assert.ok(row.references.includes("explainReason()"), `missing explainReason link: ${row.name}`);
+      assert.ok(
+        row.references.includes("explainReason()"),
+        `missing explainReason link: ${row.name}`,
+      );
       assert.ok(
         row.references.includes("reasons.fixture.json#L"),
         `missing contract fixture link: ${row.name}`,
