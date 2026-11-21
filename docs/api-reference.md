@@ -261,7 +261,7 @@ When `includeRaw` is not set, `raw` is **absent** (undefined) — nothing is ret
 
 #### Reason messages (issue #96)
 
-`reasonMessages` exposes each reason's numeric code and its stable title/body/remediation keys, and `reasonMessagesEn` holds the built-in English text — so a dashboard can render a table, and a consumer can key its own translations, without the SDK taking an i18n dependency:
+`reasonMessages` exposes each reason's numeric code and its stable title/body/remediation keys, and `reasonMessagesEn` holds the built-in English text — so a dashboard can render a table, and a consumer can key its own translations, without the SDK taking an i18n dependency. For the full table of every code, including a concrete trigger and safe next action, see [Reason codes](reason-codes.md).
 
 ```ts
 import { reasonMessages, reasonMessagesEn, explainReason } from "stellar-agent-guard-sdk";

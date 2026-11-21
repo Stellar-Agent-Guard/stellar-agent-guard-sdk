@@ -2,6 +2,7 @@
 
 * [Introduction](introduction.md)
 * [Glossary](glossary.md)
+* [Reason codes](reason-codes.md)
 * [Installation](installation.md)
 * [Runtime and Bundler Support](runtime-support.md)
 * [Concepts](concepts/)
