@@ -24,7 +24,7 @@
  * call is the same fail-closed halt (issue #316): the validator returns `false`
  * and `onBlocked` reports an `undetermined` halt. This is the documented
  * contract the shared verdict-fixture harness asserts against.
- * Options are validated at construction time (see `src/adapters/validate.ts`):
+ * Options are validated at construction time (see `src/adapters/core.ts`):
  * a misconfigured adapter throws `AdapterConfigError` before any action runs,
  * rather than failing mid-loop on the first tool call.
  */
@@ -130,27 +130,10 @@ export interface ElizaGuardOptions {
  * `false`, so the action never executes either way.
  */
 export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator {
-  const issues: AdapterConfigIssue[] = [];
-  const interceptorIssue = validateInterceptor(options.interceptor);
-  if (interceptorIssue) issues.push(interceptorIssue);
-  issues.push(...validateContractMapping(options));
-  if (options.toContractCalls) {
-    const batchIssue = validateBatchInterceptor(options.interceptor);
-    if (batchIssue) issues.push(batchIssue);
-  }
-  const blockedLoggerIssue = validateBlockedHookLogger(options.blockedHookLogger);
-  if (blockedLoggerIssue) issues.push(blockedLoggerIssue);
+  const extraIssues: AdapterConfigIssue[] = [];
   const baseValidateIssue = validateOptionalFunction("baseValidate", options.baseValidate);
-  if (baseValidateIssue) issues.push(baseValidateIssue);
-  const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
-  if (onDecisionIssue) issues.push(onDecisionIssue);
-  const onBlockedIssue = validateOptionalFunction("onBlocked", options.onBlocked);
-  if (onBlockedIssue) issues.push(onBlockedIssue);
-  const signalIssue = validateOptionalSignal(options.signal);
-  if (signalIssue) issues.push(signalIssue);
-  const timeoutIssue = validateOptionalTimeout(options.timeoutMs);
-  if (timeoutIssue) issues.push(timeoutIssue);
-  throwAdapterConfigError("elizaos", issues);
+  if (baseValidateIssue) extraIssues.push(baseValidateIssue);
+  validateAdapterOptions("elizaos", options, extraIssues);
 
   return async (runtime, message, state, handlerOptions) => {
     if (options.baseValidate) {
