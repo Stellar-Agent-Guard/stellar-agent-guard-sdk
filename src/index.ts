@@ -97,7 +97,7 @@ export {
 export type { ActiveWindowState, DescribePolicyOptions } from "./policy.ts";
 
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
-export { policyDiff } from "./policy-diff.ts";
+export { formatPolicyDiff, policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
 
@@ -450,6 +450,7 @@ export type {
 // The operator alerting primitive every adapter shares (`onBlocked`).
 // Exported so a consumer can type its sink and build the payload itself.
 export {
+  batchDecisionKindFor,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
@@ -458,6 +459,7 @@ export {
   mappingFailureFor,
   normalizeMappedCall,
   normalizeMappedCalls,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
 } from "./adapters/shared.ts";
@@ -465,6 +467,8 @@ export {
 export type {
   BlockedHookLogger,
   GuardAdapterName,
+  GuardBatchDecisionHook,
+  GuardBatchDecisionInfo,
   GuardBlockedHook,
   GuardBlockedInfo,
   GuardCallMapper,

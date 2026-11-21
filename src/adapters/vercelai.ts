@@ -38,12 +38,15 @@ import type {
 } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
 import {
+  batchDecisionKindFor,
   checkOptionsFor,
   decisionFromGuardError,
   mapContractCalls,
   mappingFailureFor,
+  runBatchDecisionHook,
   runDecisionHook,
   type BlockedHookLogger,
+  type GuardBatchDecisionHook,
 } from "./shared.ts";
 
 /**
@@ -88,6 +91,13 @@ export interface VercelAIGuardOptions {
    * `onStep`/`onUnknownTopics`).
    */
   onDecision?: (call: VercelAIToolCallInput, decision: PreFlightDecision) => void;
+  /**
+   * Action-level batch decision summary hook (issue #498).
+   *
+   * Called once per batch check with `{ adapter: "vercelai", kind, verdicts, calls, correlationId? }`
+   * after all calls have been checked, before `execute` runs or the error is thrown.
+   */
+  onBatchDecision?: GuardBatchDecisionHook | undefined;
   /**
    * Explicit sink for a swallowed `onDecision` failure. Omitted (the default),
    * a throwing or rejecting observer is silent (issue #313/#314).
@@ -190,6 +200,17 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
           options.blockedHookLogger,
         );
       }
+      runBatchDecisionHook(
+        options.onBatchDecision,
+        {
+          adapter: "vercelai",
+          kind: batchDecisionKindFor(batch.verdicts),
+          verdicts: batch.verdicts,
+          calls: contractCalls,
+          correlationId: (call as { id?: string }).id,
+        },
+        options.blockedHookLogger,
+      );
       if (batch.admissible) return execute(input, toolOptions);
 
       const index = batch.verdicts.findIndex((verdict) => !verdict.allowed);

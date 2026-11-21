@@ -55,6 +55,7 @@ import {
 } from "./validate.ts";
 import { GuardError } from "../errors.ts";
 import {
+  batchDecisionKindFor,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
@@ -62,9 +63,11 @@ import {
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
   type BlockedHookLogger,
+  type GuardBatchDecisionHook,
   type GuardBlockedHook,
 } from "./shared.ts";
 
@@ -104,6 +107,13 @@ export interface LangChainGuardOptions {
   name?: string;
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (request: LangChainToolCallRequest, decision: PreFlightDecision) => void;
+  /**
+   * Action-level batch decision summary hook (issue #498).
+   *
+   * Called once per batch check with `{ adapter: "langchain", kind, verdicts, calls, correlationId? }`
+   * after all calls have been checked, before the handler runs or the refusal is returned.
+   */
+  onBatchDecision?: GuardBatchDecisionHook | undefined;
   /**
    * Operator alerting: called once per halt with a structured payload
    * (`{ adapter, kind, reason, call, explanation }`), so a refusal reaches a
@@ -185,6 +195,8 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
   if (nameIssue) issues.push(nameIssue);
   const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
   if (onDecisionIssue) issues.push(onDecisionIssue);
+  const onBatchDecisionIssue = validateOptionalFunction("onBatchDecision", options.onBatchDecision);
+  if (onBatchDecisionIssue) issues.push(onBatchDecisionIssue);
   const onStepIssue = validateOptionalFunction("onStep", options.onStep);
   if (onStepIssue) issues.push(onStepIssue);
   const signalIssue = validateOptionalSignal(options.signal);
@@ -298,6 +310,17 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
           options.blockedHookLogger,
         );
       }
+      runBatchDecisionHook(
+        options.onBatchDecision,
+        {
+          adapter: "langchain",
+          kind: batchDecisionKindFor(batch.verdicts),
+          verdicts: batch.verdicts,
+          calls,
+          correlationId: request.toolCall.id,
+        },
+        options.blockedHookLogger,
+      );
       if (batch.admissible) return handler(request);
 
       runBlockedHook(

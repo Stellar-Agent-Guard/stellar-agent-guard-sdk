@@ -82,7 +82,7 @@ createLangChainGuardMiddleware({
 
 ## Observer hooks: never awaited, never unhandled
 
-`onDecision` and `onBlocked` are advisory. The adapters call them with a
+`onDecision`, `onBatchDecision`, and `onBlocked` are advisory. The adapters call them with a
 try/catch **and** attach a rejection handler when the callback returns a
 thenable, so an `async` sink is safe:
 
@@ -104,6 +104,23 @@ createLangChainGuardMiddleware({
 ```
 
 Without `blockedHookLogger` the SDK stays silent, exactly as before issue #314.
+
+### Batch decisions: onBatchDecision summary hook
+
+When using `toContractCalls` to check an ordered batch, `onDecision` fires once per call. For operators or telemetry pipelines requiring one single summary per action, supply optional `onBatchDecision`:
+
+```ts
+createLangChainGuardMiddleware({
+  interceptor,
+  toContractCalls: (request) => mapBatch(request),
+  onBatchDecision: ({ adapter, kind, verdicts, calls, correlationId }) => {
+    // kind is "admissible" | "blocked" | "undetermined"
+    console.log(`Action on ${adapter} overall outcome: ${kind} (${calls.length} call(s))`);
+  },
+});
+```
+
+`onBatchDecision` fires once after the entire batch is checked, before the handler runs or the refusal is returned. A single-call mapping (`toContractCall` or a 1-element array) does not fire it. Callback errors are isolated and never awaited.
 
 ## Cancellation and timeouts
 
