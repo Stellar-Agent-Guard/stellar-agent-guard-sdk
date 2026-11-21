@@ -756,6 +756,24 @@ export interface GuardTelemetryConfig {
    */
   cursorStore?: CursorStore;
   /**
+   * Where the listener starts when no explicit `cursor`/`startLedger` is
+   * passed to `watch()`/`watchAll()` (issue #115).
+   *
+   * - `{ ledger: N }` — start from ledger `N` (backfill after a cursor-store
+   *   gap). Maps to `getEvents`'s `startLedger`.
+   * - `'latest'` — start from the current head and yield **no** backlog: the
+   *   first poll fetches the current cursor without replaying history, and
+   *   only events arriving after that are delivered.
+   * - `'oldest-available'` — start from the oldest ledger the RPC still
+   *   retains (`oldestLedger` on the probe page), replaying the full
+   *   retention window.
+   *
+   * An explicit `startFrom` **overrides** a stored cursor (a debug log line
+   * notes the override); it does not error. An explicit `cursor` or
+   * `startLedger` on the `watch()` params still wins over `startFrom`.
+   */
+  startFrom?: GuardTelemetryStartFrom;
+  /**
    * Opt-in: a **separate** cursor store for the failed-transaction scan
    * (issue #279). The two streams are persisted independently, so a restart
    * resumes each from its own last confirmed page and neither can skip the
@@ -767,6 +785,67 @@ export interface GuardTelemetryConfig {
    * mixing the two streams' cursors would replay or skip failed transactions.
    */
   failedTxCursorStore?: CursorStore;
+}
+
+/**
+ * The `startFrom` start-position selector (issue #115; see
+ * `GuardTelemetryConfig.startFrom`).
+ */
+export type GuardTelemetryStartFrom = { ledger: number } | "latest" | "oldest-available";
+
+/** Short alias for `GuardTelemetryStartFrom`, as used in the docs. */
+export type StartFrom = GuardTelemetryStartFrom;
+
+/**
+ * What `resolveStartCursor` returns: either a `getEvents` `startLedger`, or
+ * a cursor to resume from, or `null` when the caller should use the RPC
+ * default (no `startFrom` set, or a mode that still needs a probe page).
+ */
+export type ResolvedStartCursor = { startLedger: number } | { cursor: string } | null;
+
+/**
+ * Resolve a `startFrom` selector against a probe page (issue #115).
+ *
+ * Pure, so it is unit-testable without an RPC: the caller supplies the probe
+ * page's `cursor` / `latestLedger` / `oldestLedger` (the `poll()` result of a
+ * `limit: 1` probe at the current head).
+ *
+ * - `undefined` → `null` (use the RPC default).
+ * - `{ ledger: N }` → `{ startLedger: N }`. `N` must be an integer ≥ 1.
+ * - `"latest"` → `{ cursor: probe.cursor }`: tail from now, no backlog.
+ *   Needs a probe; without one returns `null`.
+ * - `"oldest-available"` → `{ startLedger: probe.oldestLedger }`, falling
+ *   back to `{ startLedger: probe.latestLedger }` when the RPC did not report
+ *   a retention boundary. Needs a probe; without one returns `null`.
+ *
+ * The original PR #228 declared `startFrom` on the config but never
+ * implemented this resolution — its tests imported a `resolveStartCursor`
+ * that did not exist. This is that function, actually implemented.
+ */
+export function resolveStartCursor(
+  startFrom: GuardTelemetryStartFrom | undefined,
+  probe: { cursor: string; latestLedger: number; oldestLedger: number | null } | null,
+): ResolvedStartCursor {
+  if (startFrom === undefined) return null;
+  if (typeof startFrom === "object") {
+    const ledger = (startFrom as { ledger: unknown }).ledger;
+    if (typeof ledger !== "number" || !Number.isInteger(ledger) || ledger < 1) {
+      throw new TypeError(
+        `telemetry startFrom.ledger must be an integer >= 1, received ${String(ledger)}`,
+      );
+    }
+    return { startLedger: ledger };
+  }
+  if (startFrom === "latest") {
+    return probe === null ? null : { cursor: probe.cursor };
+  }
+  if (startFrom === "oldest-available") {
+    if (probe === null) return null;
+    return { startLedger: probe.oldestLedger ?? probe.latestLedger };
+  }
+  throw new TypeError(
+    `telemetry startFrom must be { ledger } | "latest" | "oldest-available", received ${String(startFrom)}`,
+  );
 }
 
 /**
@@ -1445,6 +1524,14 @@ function resolveTelemetryRetry(
 
 export interface GuardTelemetryWatchParams {
   startLedger?: number;
+  /**
+   * Per-watch override for the constructor's `startFrom` (issue #115).
+   * Same modes, same precedence: an explicit `cursor`/`startLedger` on this
+   * call still wins over `startFrom`, and `startFrom` still overrides a
+   * stored cursor (with a debug log line). Omitted → the constructor's
+   * `startFrom`, if any.
+   */
+  startFrom?: GuardTelemetryStartFrom;
   pollIntervalMs?: number;
   limit?: number;
   /**
@@ -2896,9 +2983,60 @@ export class GuardTelemetryListener {
     this.healthState = "running";
     this.healthStartedAt = this.nowIso();
 
+    const effectiveStartFrom = params.startFrom ?? this.config.startFrom;
     if (cursor === undefined && startLedger === undefined) {
       if (signal?.aborted) return;
-      cursor = (await this.activeCursorStore.load(this.cursorScope("events"))) ?? undefined;
+      const storedCursor =
+        (await this.activeCursorStore.load(this.cursorScope("events"))) ?? undefined;
+      if (effectiveStartFrom !== undefined) {
+        // `startFrom` overrides a stored cursor: the store is consulted
+        // (so the override is visible) but its cursor is not used, and a
+        // debug log line notes the override (issue #115).
+        this.logger.debug("telemetry startFrom overrides stored cursor", {
+          startFrom:
+            typeof effectiveStartFrom === "string"
+              ? effectiveStartFrom
+              : `ledger:${effectiveStartFrom.ledger}`,
+          storedCursor: storedCursor ?? null,
+          guard: this.config.guard,
+        });
+        if (typeof effectiveStartFrom === "object") {
+          const resolved = resolveStartCursor(effectiveStartFrom, null);
+          if (resolved !== null && "startLedger" in resolved) startLedger = resolved.startLedger;
+        } else {
+          // "latest" / "oldest-available" need a probe page at the head.
+          // The probe goes straight to `getEvents` (not `poll()`), so its
+          // events are discarded without being recorded in counters or the
+          // recent-event buffer — they were never delivered to a consumer.
+          try {
+            const latest = await this.config.server.getLatestLedger();
+            const probeResponse = await this.config.server.getEvents({
+              filters: [{ type: "contract" as const, contractIds: [this.config.guard] }],
+              startLedger: latest.sequence,
+              limit: 1,
+            } as rpc.Api.GetEventsRequest);
+            const probe = {
+              cursor: probeResponse.cursor,
+              latestLedger: probeResponse.latestLedger,
+              oldestLedger:
+                typeof probeResponse.oldestLedger === "number" ? probeResponse.oldestLedger : null,
+            };
+            const resolved = resolveStartCursor(effectiveStartFrom, probe);
+            if (resolved !== null && "cursor" in resolved) cursor = resolved.cursor;
+            else if (resolved !== null) startLedger = resolved.startLedger;
+          } catch (error) {
+            // A failed probe must not silently turn a deliberate start
+            // position into a replay: fall back to the default start and
+            // say so loudly.
+            this.logger.warn(
+              `telemetry startFrom probe failed, using default start: ${error instanceof Error ? error.message : String(error)}`,
+              { guard: this.config.guard },
+            );
+          }
+        }
+      } else {
+        cursor = storedCursor;
+      }
     }
 
     if (this.config.failedTx) {

@@ -20,6 +20,7 @@ import {
   guardEventsFromDiagnostics,
   isAllowedDecision,
   mergeGuardEventStreams,
+  resolveStartCursor,
   telemetryFromDecision,
   type GuardDiagnosticBatch,
   type GuardEvent,
@@ -1941,5 +1942,189 @@ describe("injectable transport config (shared { server? | url? })", () => {
         return true;
       },
     );
+  });
+});
+
+/**
+ * `startFrom` cursor start option (issue #115).
+ *
+ * The original PR #228 declared `startFrom` on the config but never
+ * implemented it — its tests imported a `resolveStartCursor` that did not
+ * exist. These tests pin the implemented behaviour: the pure resolver's
+ * `getEvents` parameters per mode, and the watch-level override of a stored
+ * cursor (with the debug log line).
+ */
+describe("GuardTelemetryListener startFrom (issue #115)", () => {
+  const PROBE = { cursor: "probe_cursor", latestLedger: 4_899_174, oldestLedger: 4_778_215 };
+
+  it("resolveStartCursor: { ledger } maps to getEvents startLedger", () => {
+    assert.deepEqual(resolveStartCursor({ ledger: 4_670_000 }, PROBE), {
+      startLedger: 4_670_000,
+    });
+  });
+
+  it("resolveStartCursor: 'latest' maps to the probe cursor (tail from now)", () => {
+    assert.deepEqual(resolveStartCursor("latest", PROBE), { cursor: "probe_cursor" });
+  });
+
+  it("resolveStartCursor: 'oldest-available' maps to the probe oldestLedger", () => {
+    assert.deepEqual(resolveStartCursor("oldest-available", PROBE), {
+      startLedger: 4_778_215,
+    });
+  });
+
+  it("resolveStartCursor: 'oldest-available' falls back to latestLedger when retention is unknown", () => {
+    assert.deepEqual(resolveStartCursor("oldest-available", { ...PROBE, oldestLedger: null }), {
+      startLedger: 4_899_174,
+    });
+  });
+
+  it("resolveStartCursor: undefined means use the RPC default", () => {
+    assert.equal(resolveStartCursor(undefined, PROBE), null);
+    assert.equal(resolveStartCursor("latest", null), null);
+    assert.equal(resolveStartCursor("oldest-available", null), null);
+  });
+
+  it("resolveStartCursor: rejects a non-integer / out-of-range ledger", () => {
+    assert.throws(() => resolveStartCursor({ ledger: 0 }, PROBE), TypeError);
+    assert.throws(() => resolveStartCursor({ ledger: 1.5 }, PROBE), TypeError);
+    assert.throws(
+      () => resolveStartCursor({ ledger: "4670000" } as unknown as { ledger: number }, PROBE),
+      TypeError,
+    );
+  });
+
+  /** Fake RPC that records every getEvents request it receives. */
+  function recordingServer() {
+    const requests: Array<Record<string, unknown>> = [];
+    return {
+      requests,
+      getLatestLedger: async () => ({ sequence: 4_899_174 }),
+      getEvents: async (request: Record<string, unknown>) => {
+        requests.push(request);
+        return {
+          events: [],
+          cursor: `cursor_${requests.length}`,
+          latestLedger: 4_899_174,
+          oldestLedger: 4_778_215,
+        };
+      },
+    };
+  }
+
+  /** A cursor store pre-seeded with a stored cursor, recording loads. */
+  function storedCursorStore(stored: string) {
+    let saved: string | undefined;
+    return {
+      saved: () => saved,
+      load: async () => stored,
+      save: async (cursor: string) => {
+        saved = cursor;
+      },
+    };
+  }
+
+  function capturingLogger() {
+    const lines: Array<{ level: string; message: string; meta?: unknown }> = [];
+    const logger = {
+      debug: (message: string, meta?: unknown) => lines.push({ level: "debug", message, meta }),
+      info: (message: string, meta?: unknown) => lines.push({ level: "info", message, meta }),
+      warn: (message: string, meta?: unknown) => lines.push({ level: "warn", message, meta }),
+      error: (message: string, meta?: unknown) => lines.push({ level: "error", message, meta }),
+    };
+    return { lines, logger };
+  }
+
+  async function drainOneWatch(
+    listener: GuardTelemetryListener,
+    params: Parameters<GuardTelemetryListener["watch"]>[0],
+  ): Promise<void> {
+    const controller = new AbortController();
+    let ticks = 0;
+    for await (const _batch of listener.watch({
+      ...params,
+      sleep: async () => {
+        if (++ticks >= 1) controller.abort();
+      },
+      signal: controller.signal,
+    })) {
+      // one page is enough: the getEvents requests are what is asserted
+    }
+  }
+
+  it("watch(): { ledger } overrides a stored cursor and sends startLedger to getEvents", async () => {
+    const server = recordingServer();
+    const store = storedCursorStore("stored_cursor_that_must_not_be_used");
+    const { lines, logger } = capturingLogger();
+    const listener = new GuardTelemetryListener({
+      server: server as never,
+      guard: GUARD,
+      cursorStore: store as never,
+      logger,
+      startFrom: { ledger: 4_670_000 },
+    });
+    await drainOneWatch(listener, { pollIntervalMs: 1_000 });
+
+    assert.ok(server.requests.length >= 1, "expected at least one getEvents call");
+    const first = server.requests[0]!;
+    assert.equal(first.startLedger, 4_670_000);
+    assert.equal("cursor" in first, false, "stored cursor must not be sent");
+    assert.ok(
+      lines.some((l) => l.message.includes("startFrom overrides stored cursor")),
+      `expected the startFrom-override debug log line, got ${JSON.stringify(lines.map((l) => l.message))}`,
+    );
+  });
+
+  it("watch(): 'latest' probes the head, then resumes from the probe cursor", async () => {
+    const server = recordingServer();
+    const { lines, logger } = capturingLogger();
+    const listener = new GuardTelemetryListener({
+      server: server as never,
+      guard: GUARD,
+      logger,
+      startFrom: "latest",
+    });
+    await drainOneWatch(listener, { pollIntervalMs: 1_000 });
+
+    assert.ok(
+      server.requests.length >= 2,
+      `expected probe + resumed poll, got ${server.requests.length}`,
+    );
+    // Probe: a head page (startLedger = latest sequence, limit 1).
+    assert.equal(server.requests[0]!.startLedger, 4_899_174);
+    assert.equal(server.requests[0]!.limit, 1);
+    // Resumed poll: the probe cursor, no startLedger.
+    assert.equal(server.requests[1]!.cursor, "cursor_1");
+    assert.equal("startLedger" in server.requests[1]!, false);
+    assert.ok(lines.some((l) => l.message.includes("startFrom overrides stored cursor")));
+  });
+
+  it("watch(): 'oldest-available' resumes from the probe oldestLedger", async () => {
+    const server = recordingServer();
+    const listener = new GuardTelemetryListener({
+      server: server as never,
+      guard: GUARD,
+      startFrom: "oldest-available",
+    });
+    await drainOneWatch(listener, { pollIntervalMs: 1_000 });
+
+    assert.ok(
+      server.requests.length >= 2,
+      `expected probe + resumed poll, got ${server.requests.length}`,
+    );
+    assert.equal(server.requests[1]!.startLedger, 4_778_215);
+    assert.equal("cursor" in server.requests[1]!, false);
+  });
+
+  it("watch(): an explicit startLedger param still wins over startFrom", async () => {
+    const server = recordingServer();
+    const listener = new GuardTelemetryListener({
+      server: server as never,
+      guard: GUARD,
+      startFrom: { ledger: 4_670_000 },
+    });
+    await drainOneWatch(listener, { pollIntervalMs: 1_000, startLedger: 4_800_000 });
+
+    assert.equal(server.requests[0]!.startLedger, 4_800_000);
   });
 });

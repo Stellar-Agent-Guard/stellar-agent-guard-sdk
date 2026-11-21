@@ -27,6 +27,7 @@ The constructor's parameter is `GuardTelemetryInputConfig | GuardTelemetryLocalC
 | `buffer` | `GuardEventBufferOptions` (`{ max: number }`) | none — no buffer; `recent()` returns `[]` | Retain the last `max` decoded events in memory for `recent()` / `recentJsonLines()`. `max` must be a positive integer, otherwise `RangeError`. Non-durable: a restart empties it. |
 | `includeRaw` | `boolean` | `false` | Attach the raw `rpc.Api.EventResponse` to every committed event. Memory cost per event; leave off in long-running fleets. |
 | `cursorStore` | `CursorStore` | a process-local `InMemoryCursorStore` | Persists the committed-stream cursor. ⚠️ Without a durable store, a restart resumes from the head and skips events emitted while the process was down (or replays history when `startLedger` is used). |
+| `startFrom` | `{ ledger: number } \| "latest" \| "oldest-available"` | none — RPC default (recent pages only) | Start position for `watch()`/`watchAll()` when no explicit `cursor`/`startLedger` is passed (issue #115). Overrides a stored cursor, with a debug log line. See [Start position (`startFrom`)](#start-position-startfrom). |
 | `failedTxCursorStore` | `CursorStore` | a separate process-local `InMemoryCursorStore` | Cursor store for the failed-transaction scan. Never falls back to `cursorStore`; sharing would replay or skip failed transactions. |
 
 #### `GuardTelemetryLocalConfig` (local-only listener, no RPC)
@@ -110,7 +111,32 @@ diagnostics; this scan maintains its own cursor and does not advance the
 committed event cursor.
 Parameters include `startLedger`, `cursor`/`resumeLedger`, `pollIntervalMs`, `limit`,
 `maxBufferedPages`, `jitter`, `rng`, `sleep`, `onGap`, `onUnknownTopics`,
-`onMalformed`, `onMalformedEvent`, and `signal`.
+`onMalformed`, `onMalformedEvent`, `startFrom`, and `signal`.
+
+#### Start position (`startFrom`)
+
+By default the start position is implicit (the RPC default — recent pages only).
+Pass `startFrom` — on the constructor config, or per-watch on `watch()` params —
+to make it explicit:
+
+```ts
+type StartFrom = { ledger: number } | "latest" | "oldest-available";
+```
+
+- `{ ledger: number }` — begin at that ledger (backfill after a cursor-store gap).
+  Maps to `startLedger` on `getEvents`.
+- `'latest'` — fetch the current cursor and yield only events that arrive
+  afterward. **No history replay**: the backlog already present at start is
+  skipped. Consumers that need replay pass a ledger or use the default.
+- `'oldest-available'` — start at the oldest ledger the RPC still retains
+  (`oldestLedger` on the probe page).
+
+Mapping to the `stellar-sdk` `getEvents` start-cursor semantics is implemented
+against `@stellar/stellar-sdk` ^v17.
+
+#### Interaction with `cursorStore`
+
+An explicit `startFrom` **always wins** over a stored cursor: the store is not consulted for the start position when `startFrom` is set, and a log line notes that the stored cursor was ignored. This is the escape hatch for a deliberate backfill or a clean watch start. Once the stream is running, `save()` continues to persist the advancing cursor as usual. An explicit `cursor` or `startLedger` on the `watch()` call still wins over `startFrom`.
 
 #### Unknown topics
 

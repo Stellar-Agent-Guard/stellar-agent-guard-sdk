@@ -438,6 +438,64 @@ enforced simulation: a 1100-unit transfer against a 1000-unit cap. Nothing was
 broadcast, so there is no ledger or transaction hash to point at (the `null`s
 above), and the attempt is identified by its content hash, not a tx hash."
 
+## Start position — `startFrom` (issue #115)
+
+By default the listener starts where the RPC's `getEvents` cursor defaults to,
+which is "recent pages only" — history before that is not replayed. That
+implicit default is useful for a clean watch, but it is unsuitable when a
+consumer needs to backfill after a cursor-store gap, or wants to be explicit
+about not replaying history. The optional `startFrom` option makes
+the start position explicit:
+
+```ts
+type StartFrom = { ledger: number } | "latest" | "oldest-available";
+```
+
+| `startFrom` | Meaning | `getEvents` parameter sent |
+| --- | --- | --- |
+| `{ ledger: N }` | Backfill from ledger `N` inclusive. Use this after a cursor-store gap. | `startLedger: N` (no `cursor`) |
+| `'latest'` | Tail from now. The listener fetches the current cursor and discards anything below it, so the first delivered event is the first *new* one. | `cursor`: the current cursor from a probe page with `limit: 1`, no backlog emitted |
+| `'oldest-available'` | Start at the oldest ledger the RPC retains. Use this for a full replay of retained history. | `startLedger: response.oldestLedger` from the probe page |
+
+**No history replay from `'latest'`.** `'latest'` is the common case for a clean
+watch: it deliberately skips everything already in the ledger. A consumer that
+wants history must pass `{ ledger: N }` or omit `startFrom` and rely on the
+RPC default. This is documented behaviour, not an accident.
+
+**Interaction with a cursor store.** If the listener is constructed with a
+persisted cursor (see the `cursorStore` option in the README) and `startFrom` is
+also set, **`startFrom` wins**: the stored cursor is ignored for this run and a
+log line is emitted noting the override. This is intentional — an explicit
+`startFrom` is an operator action (a backfill or a clean watch) and should not be
+silently defeated by a stale cursor. The store is still written to as events are
+delivered, so the next run without `startFrom` resumes from the new position.
+
+Example — tail from now, the common case:
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD,
+  startFrom: "latest", // no backlog; first event is the first new one
+});
+
+for await (const event of listener.watchAll()) {
+  console.log(event.kind, event.decision ?? "no decision");
+}
+```
+
+Example — backfill after a cursor-store gap:
+
+```ts
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD,
+  startFrom: { ledger: 4670000 }, // replay from this ledger inclusive
+});
+```
+
 ### Reading the stream discriminator
 
 Both `event.source` and `event.decision.source` are the same closed set —
