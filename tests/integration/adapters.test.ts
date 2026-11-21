@@ -33,7 +33,13 @@ import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts"
 import { createGuardValidator, guardAction } from "../../src/adapters/elizaos.ts";
 import { GuardError, GuardBlockedError, GuardUndeterminedError } from "../../src/index.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
-import { loadPhase2Config, installPolicy, type Phase2Config } from "./harness.ts";
+import {
+  loadPhase2Config,
+  installPolicy,
+  guardTokenBalance,
+  type Phase2Config,
+} from "./harness.ts";
+import { appendFileSync, readFileSync } from "node:fs";
 
 let config: Phase2Config;
 let server: rpc.Server;
@@ -50,6 +56,27 @@ before(async () => {
     source: config.keys.agent,
   });
 });
+
+/**
+ * Read the agent account's sequence number and the guarded account's SAC
+ * token balance. Used by the live-enforcement scenario to prove that a
+ * blocked tool call broadcast nothing: both reads must be identical before
+ * and after.
+ *
+ * Issue #136 (PR #234). Fixed vs the original PR, whose helper read
+ * `record.balances` off `rpc.Server.getAccount()` — that returns a
+ * stellar-base `Account`, which has no `balances` property, so the original
+ * never typechecked. The balance here is the SAC balance from the harness's
+ * `guardTokenBalance` (a broadcast transfer would move it).
+ */
+async function readAccountState(account: string): Promise<{ sequence: string; balance: string }> {
+  const record = await server.getAccount(account);
+  const balance = await guardTokenBalance(server, config);
+  return {
+    sequence: record.sequenceNumber(),
+    balance: balance.toString(),
+  };
+}
 
 /** A tool/action that sends SAC tokens out of the guarded account. */
 function toContractCall(args: { to?: unknown; amount?: unknown }) {
@@ -269,6 +296,78 @@ describe("LangChain wrapToolCall adapter against the live guard", () => {
 
     assert.equal(toolEntered, true, "the tool did not run for an admissible call");
     assert.deepEqual(result, { content: "sent" });
+  });
+
+  it("blocks a real would-be transfer end-to-end with zero broadcast", async () => {
+    await installPolicy(server, config);
+
+    // Before-reads: the strongest evidence that nothing was broadcast is that
+    // the agent account's sequence number and the guarded account's SAC token balance are unchanged.
+    const before = await readAccountState(config.keys.agent.publicKey());
+
+    let toolEntered = false;
+    const middleware = createLangChainGuardMiddleware({
+      interceptor,
+      toContractCall: (request) => toContractCall(request.toolCall.args),
+    });
+
+    const result = await middleware.wrapToolCall(
+      {
+        toolCall: {
+          name: "send_payment",
+          id: "call_live_block",
+          args: { to: config.keys.outsider.publicKey(), amount: "5" },
+        },
+      },
+      async () => {
+        toolEntered = true;
+        return { content: "sent" };
+      },
+    );
+
+    // After-reads: identical sequence + balance ⇒ no transaction was submitted.
+    const after = await readAccountState(config.keys.agent.publicKey());
+
+    assert.equal(toolEntered, false, "the tool body ran despite a guard refusal");
+    assert.ok("status" in result && result.status === "error");
+    const content = String((result as { content: string }).content);
+    assert.match(content, /recipient_not_allowed/);
+
+    assert.equal(
+      after.sequence,
+      before.sequence,
+      `sequence number changed (${before.sequence} -> ${after.sequence}): a transaction was broadcast`,
+    );
+    assert.equal(
+      after.balance,
+      before.balance,
+      `balance changed (${before.balance} -> ${after.balance}): a transaction was broadcast`,
+    );
+
+    // Evidence: this run is intentionally tx-less — the point is the *absence*
+    // of a broadcast, so there is no hash to record. Record the simulation
+    // diagnostics (the refusal reason) plus the before/after reads instead.
+    const evidencePath = new URL("../fixtures/integration-evidence.md", import.meta.url);
+    const timestamp = new Date().toISOString();
+    const entry = [
+      "",
+      `### Live enforcement through LangChain middleware — ${timestamp}`,
+      "",
+      "- Scenario: policy-violating `transfer` invoked through `wrapToolCall` with the real `PreFlightInterceptor` against the live Phase 2 guard.",
+      "- Outcome: blocked; tool body never entered.",
+      `- Refusal reason: \`${content.split("\n")[0]}\``,
+      "- No transaction hash: this run is intentionally tx-less — the assertion is the *absence* of a broadcast.",
+      `- Account sequence before: \`${before.sequence}\`; after: \`${after.sequence}\` (unchanged).`,
+      `- SAC token balance before: \`${before.balance}\`; after: \`${after.balance}\` (unchanged).`,
+      "",
+    ].join("\n");
+    appendFileSync(evidencePath, entry);
+    // Touch the file so freshness checkers see a fresh mtime on this run.
+    readFileSync(evidencePath);
+
+    console.log(
+      `[langchain] live block: ${content.split("\n")[0]} (seq ${before.sequence} unchanged)`,
+    );
   });
 
   it("passes a non-fund-moving tool straight through", async () => {

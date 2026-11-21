@@ -29,6 +29,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import { invoke, type InvokeOutcome } from "../../src/invoke.ts";
+import { PreFlightInterceptor } from "../../src/preflight.ts";
 import {
   policyToScVal,
   unsafeContractAddress,
@@ -680,4 +681,59 @@ export async function assertPreconditions(
     tokenFunded: true,
     tokenBalance,
   };
+}
+
+/**
+ * Snapshot of the two on-chain reads that prove a blocked transfer never
+ * broadcast: the guarded account's sequence number and its SAC token balance.
+ *
+ * A refused simulation never reaches the network, so the sequence number is
+ * unchanged and the balance is untouched. Comparing these before/after an
+ * attempted tool call is the strongest available evidence of "no broadcast" —
+ * there is no transaction hash to cite precisely because no transaction exists.
+ *
+ * Restored from issue #136 (PR #234): the `fix(ci)` commit on that PR deleted
+ * this helper along with most of the harness. It is restored here on top of
+ * current main, which already contains the other helpers that commit deleted.
+ */
+export interface NoBroadcastSnapshot {
+  sequence: bigint;
+  balance: bigint;
+}
+
+/** Read the guarded account's sequence number and token balance in one shot. */
+export async function snapshotNoBroadcast(
+  server: rpc.Server,
+  config: Phase2Config,
+): Promise<NoBroadcastSnapshot> {
+  const account = await server.getAccount(config.guard);
+  const balance = await guardTokenBalance(server, config);
+  return { sequence: BigInt(account.sequenceNumber()), balance };
+}
+
+/**
+ * Build a real guard interceptor wired to the live Phase 2 instance.
+ *
+ * Unlike the mock interceptors used elsewhere in the adapter tests, this one
+ * performs the actual middleware→interceptor→RPC chain: the wrapped tool's
+ * transfer is simulated against the deployed guard contract, and the
+ * interceptor's verdict is whatever the real contract returns.
+ *
+ * Restored from issue #136 (PR #234), with the original's broken import fixed:
+ * the original imported a non-existent `createGuardInterceptor` from a
+ * non-existent `src/interceptor.ts`. There is no such module — the interceptor
+ * is `PreFlightInterceptor` in `src/preflight.ts`, constructed exactly as the
+ * adapter tests already do in their `before()` hook.
+ */
+export function createLiveInterceptor(
+  server: rpc.Server,
+  config: Phase2Config,
+): PreFlightInterceptor {
+  return new PreFlightInterceptor({
+    server,
+    networkPassphrase: TESTNET_PASSPHRASE,
+    guard: unsafeContractAddress(config.guard),
+    agent: config.keys.agent,
+    source: config.keys.agent,
+  });
 }
