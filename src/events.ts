@@ -1,4 +1,4 @@
-/**
+/*
  * The guard contract's event vocabulary, as confirmed against the chain.
  *
  * This table is not copied from documentation. Phase 2.2 captured real events
@@ -18,7 +18,7 @@
  *   #[contractevent] struct EventHeartbeat      => topic[0] = event_heartbeat
  *   #[contractevent] struct EventInitialized    => topic[0] = event_initialized
  *   #[contractevent] struct EventFrozen         => topic[0] = event_frozen
- *   #[contractevent] struct EventUnfrozen       => topic[0] = event_unfrozen
+ *   #[contractevent] struct EventUnrozen       => topic[0] = event_unfrozen
  *   #[contractevent] struct EventPolicySet      => topic[0] = event_policy_set
  *   #[contractevent] struct EventPolicyRevoked  => topic[0] = event_policy_revoked
  *
@@ -114,8 +114,19 @@ export function decodeAuthDecision(
  * to parse them as BigInt (which never loses precision for >2^53) if they consist
  * entirely of digits, while leaving other strings (like ISO timestamps) intact.
  */
+
+/**
+ * Matches a string of one or more ASCII digits and nothing else.
+ *
+ * Hoisted to a module constant so the pattern is compiled once at module
+ * load rather than re-resolved on every `normalizeU64` call. This is the
+ * hottest path in event normalisation (one call per string leaf in a payload),
+ * so it is worth the explicit constant even though V8 caches literal regexes.
+ */
+const UNSIGNED_INTEGER_RE = /^\d+$/;
+
 export function normalizeU64(value: string): bigint | string {
-  if (/^\d+$/.test(value)) {
+  if (UNSIGNED_INTEGER_RE.test(value)) {
     return BigInt(value);
   }
   return value;
@@ -166,7 +177,7 @@ export function normalizeEventData(data: unknown, kind: GuardEventDataKind): unk
   let result: Record<string, unknown> | null = null;
   for (const field of fields) {
     const value = source[field];
-    if (typeof value !== "string" || !/^\d+$/.test(value)) continue;
+    if (typeof value !== "string" || !UNSIGNED_INTEGER_RE.test(value)) continue;
     if (result === null) result = { ...source };
     result[field] = normalizeU64(value);
   }
@@ -176,8 +187,8 @@ export function normalizeEventData(data: unknown, kind: GuardEventDataKind): unk
 /**
  * Decode one topic of a contract event into its symbol text.
  *
- * Topics reach this module in two shapes depending on the caller: as a
- * base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
+ * Topics reach this module in two shapes depending on the caller: as
+ * a base64-encoded `xdr.ScVal` string (what a block explorer, a CI fixture, or
  * `getEvents` over JSON hands over) or as an already-decoded `xdr.ScVal`. Both
  * go through `scValToNative` so the text is identical either way.
  *
@@ -217,6 +228,10 @@ function inspectTopics(event: unknown): TopicInspection {
     event?: { body?: unknown };
     body?: { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } };
   } | null;
+  // Localise the body lookup so the nested optional chain is walked once and
+  // the compiler can keep the intermediate in a register across the two
+  // candidate shapes. This is the hot loop of `topicsFromEvent`, which is
+  // called once per event in a diagnostic batch.
   const body = (wrapper?.event?.body ?? wrapper?.body) as
     | { v0?: { topics?: unknown[] }; value?: { v0?: { topics?: unknown[] } } }
     | undefined;
@@ -230,18 +245,19 @@ function inspectTopics(event: unknown): TopicInspection {
     };
   }
 
-  const out: string[] = [];
-  for (const [index, topic] of topics.entries()) {
-    const symbol = topicToSymbol(topic);
+  const length = topics.length;
+  const out: string[] = new Array(length);
+  for (let i = 0; i < length; i++) {
+    const symbol = topicToSymbol(topics[i]);
     if (symbol === null) {
       return {
         ok: false,
         stage: "topic",
-        topicIndex: index,
-        message: `topic[${index}] is not a decodable ScVal`,
+        topicIndex: i,
+        message: `topic[${i}] is not a decodable ScVal`,
       };
     }
-    out.push(symbol);
+    out[i] = symbol;
   }
   return { ok: true, topics: out };
 }
@@ -301,18 +317,10 @@ export function decodeGuardEventXdr(
 ): GuardAuthDecision | null {
   if (typeof xdrBase64 !== "string" || xdrBase64.length === 0) return null;
 
-  let event: unknown;
-  try {
-    event = xdr.DiagnosticEvent.fromXDR(xdrBase64, "base64");
-  } catch {
-    try {
-      event = xdr.ContractEvent.fromXDR(xdrBase64, "base64");
-    } catch {
-      return null;
-    }
-  }
+  const parsed = parseEventXdr(xdrBase64);
+  if (!parsed.ok) return null;
 
-  const topics = topicsFromEvent(event);
+  const topics = topicsFromEvent(parsed.event);
   if (!topics) return null;
   return decodeAuthDecision(topics, source);
 }

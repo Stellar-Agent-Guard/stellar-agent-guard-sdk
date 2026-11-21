@@ -1,0 +1,24 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-144-feat-events-perf-decode-path-micro",
+    "feat/issue-150-feat-docs-docs-contributing-architecture-on",
+    "feat/issue-158-feat-policy-chore-examples-folder-policy",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-144-feat-events-perf-decode-path-micro": "main",
+    "feat/issue-150-feat-docs-docs-contributing-architecture-on": "main",
+    "feat/issue-158-feat-policy-chore-examples-folder-policy": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-144-feat-events-perf-decode-path-micro",
+    "feat/issue-150-feat-docs-docs-contributing-architecture-on",
+    "feat/issue-158-feat-policy-chore-examples-folder-policy",
+    "origin"
+  ]
+}

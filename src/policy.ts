@@ -500,6 +500,9 @@ const PROTOCOL_RULE_OPTIONAL_FIELDS = ["paused"] as const;
 const I128_MIN = -(2n ** 127n);
 const I128_MAX = 2n ** 127n - 1n;
 const U64_MAX = 2n ** 64n - 1n;
+const POLICY_FIELD_SET: ReadonlySet<string> = new Set(POLICY_FIELDS);
+const PROTOCOL_RULE_FIELD_SET: ReadonlySet<string> = new Set(PROTOCOL_RULE_FIELDS);
+const DECIMAL_INTEGER_RE = /^[+-]?\d+$/;
 const U32_MAX = 4_294_967_295;
 
 /**
@@ -661,7 +664,7 @@ function symbolMap(
     if (previous !== null && name <= previous) {
       throw policyDecodeFailure(path, `symbol keys are not sorted (${previous} precedes ${name})`);
     }
-    if (!expectedFields.includes(name)) {
+    if (!expectedFieldSet(expectedFields, optionalFields).has(name)) {
       throw policyDecodeFailure(path, `unknown field ${JSON.stringify(name)}`);
     }
     fields.set(name, entry.val);
@@ -673,6 +676,15 @@ function symbolMap(
   );
   if (missing.length > 0) throw policyDecodeFailure(path, `missing field(s): ${missing.join(", ")}`);
   return fields;
+}
+
+function expectedFieldSet(
+  expectedFields: readonly string[],
+  optionalFields: readonly string[],
+): ReadonlySet<string> {
+  if (expectedFields === POLICY_FIELDS) return POLICY_FIELD_SET;
+  if (expectedFields === PROTOCOL_RULE_FIELDS) return PROTOCOL_RULE_FIELD_SET;
+  return new Set([...expectedFields, ...optionalFields]);
 }
 
 function policyInteger(
@@ -699,7 +711,7 @@ function policyInteger(
       throw policyDecodeFailure(path, `number ${native} cannot be represented safely`);
     }
     value = BigInt(native);
-  } else if (typeof native === "string" && /^[+-]?\d+$/.test(native)) {
+  } else if (typeof native === "string" && DECIMAL_INTEGER_RE.test(native)) {
     value = BigInt(native);
   } else {
     throw policyDecodeFailure(path, "value is not a base-10 integer");
@@ -762,7 +774,7 @@ function policyAddress(scVal: xdr.ScVal, path: string): string {
 function addressVector(scVal: xdr.ScVal, path: string): string[] {
   const addresses = policyVec(scVal, path).map((item, index) => policyAddress(item, `${path}[${index}]`));
   // Cast each address based on context - caller is responsible for semantics
-  // For decodePolicy, the caller will know whether it's assets (ContractAddress) 
+  // For decodePolicy, the caller will know whether it's assets (ContractAddress)
   // or recipients (AccountAddress)
   return addresses;
 }
@@ -1311,7 +1323,7 @@ export function policyAddressComparisonKey(value: unknown): string | null {
 function isIntegerLike(val: unknown): boolean {
   if (typeof val === "bigint") return true;
   if (typeof val === "number") return Number.isSafeInteger(val);
-  if (typeof val === "string" && /^[+-]?\d+$/.test(val.trim())) return true;
+  if (typeof val === "string" && DECIMAL_INTEGER_RE.test(val.trim())) return true;
   return false;
 }
 

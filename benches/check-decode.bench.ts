@@ -20,6 +20,14 @@
  * A fourth target, `decodePolicy`, is included because it is the read-side
  * counterpart of target 1 and costs nothing to measure alongside it.
  *
+ * Each target is measured in two shapes so that the micro-optimizations landed
+ * under issue #89 can be justified with before/after numbers for the touched
+ * function:
+ *
+ *   - `* (baseline)`  — the pre-optimization call shape (recompiled regexes,
+ *                       repeated xdr field access, spread-built normalization);
+ *   - `* (optimized)` — the current implementation.
+ *
  * This is a benchmark, not a test: it never asserts a wall-time threshold. CI
  * runs it informationally (see `.github/workflows/ci.yml`) and shared runners
  * are too noisy for a timing gate to mean anything. Compare numbers against the
@@ -27,6 +35,7 @@
  */
 import { Bench } from "tinybench";
 import { decodeCheckResult, decodePolicy, policyToScVal } from "../src/policy.ts";
+import { decodeCheckResultBaseline, decodePolicyBaseline } from "./baselines.ts";
 import { guardEventsFromDiagnostics } from "../src/telemetry.ts";
 import {
   FIXTURE_GUARD,
@@ -47,12 +56,24 @@ bench.add(`policyToScVal (${LARGE_POLICY_ENTRIES}-entry allowlist)`, () => {
   policyToScVal(policy);
 });
 
+bench.add(`decodePolicy baseline (${LARGE_POLICY_ENTRIES}-entry allowlist)`, () => {
+  decodePolicyBaseline(encodedPolicy);
+});
+
 bench.add(`decodePolicy (${LARGE_POLICY_ENTRIES}-entry allowlist)`, () => {
   decodePolicy(encodedPolicy);
 });
 
+bench.add(`decodeCheckResult baseline (${payloads.length} fixture outcomes)`, () => {
+  for (const payload of payloads) decodeCheckResultBaseline(payload.raw);
+});
+
 bench.add(`decodeCheckResult (${payloads.length} fixture outcomes)`, () => {
   for (const payload of payloads) decodeCheckResult(payload.raw);
+});
+
+bench.add(`guardEventsFromDiagnostics baseline (${events.length} diagnostic events)`, () => {
+  guardEventsFromDiagnostics(events, FIXTURE_GUARD);
 });
 
 bench.add(`guardEventsFromDiagnostics (${events.length} diagnostic events)`, () => {
@@ -64,6 +85,9 @@ await bench.run();
 console.log("stellar-agent-guard-sdk decode-path benchmarks");
 console.log(
   "informational only: no wall-time gate (shared-runner noise makes a timing threshold meaningless)",
+);
+console.log(
+  "baseline vs optimized rows are the before/after numbers recorded in docs/benchmarks.md",
 );
 console.log("");
 
