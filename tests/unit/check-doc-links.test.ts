@@ -110,7 +110,9 @@ describe("scope", () => {
   });
 
   it("checks root Markdown and docs/, skipping fixtures", () => {
-    const files = markdownFiles(process.cwd()).map((f) => f.slice(process.cwd().length + 1));
+    const files = markdownFiles(process.cwd()).map((f) =>
+      f.slice(process.cwd().length + 1).replaceAll("\\", "/"),
+    );
     assert.ok(files.includes("README.md"));
     assert.ok(files.some((f) => f.startsWith("docs/")));
     assert.ok(!files.some((f) => f.includes("fixtures")));
