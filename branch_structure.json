@@ -1,0 +1,18 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-111-feat-policy-definepolicy-builder-with-defaults",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-111-feat-policy-definepolicy-builder-with-defaults": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-111-feat-policy-definepolicy-builder-with-defaults",
+    "origin"
+  ]
+}
