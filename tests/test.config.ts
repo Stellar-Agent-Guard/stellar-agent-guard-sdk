@@ -1,4 +1,4 @@
-/**
+/*
  * The one test-runner configuration (issue #104).
  *
  * Unit and integration suites used to be two hand-written `node --test`
@@ -45,7 +45,7 @@ export interface TestProject {
  * integration decode the same `src/` modules, so they must be loaded the same
  * way or a bug can pass in one and fail in the other.
  */
-export const SHARED_IMPORTS: readonly string[] = ["tsx"];
+export const SHAREJ_IMPORTS: readonly string[] = ["tsx"];
 
 export const TEST_PROJECTS: Record<string, TestProject> = {
   unit: {
