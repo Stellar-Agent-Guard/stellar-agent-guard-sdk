@@ -9,7 +9,7 @@ The Stellar Agent Guard SDK exposes the following public surface. For the narrat
 - `policyToJson(policy)` / `policyFromJson(input)` (aliases `encodePolicyJson` / `decodePolicyJson`) and `POLICY_JSON_VERSION` — lossless JSON representation of a `PolicyConfig` with decimal-string integers, fixed key order and `PolicyDecodeError` paths. See [Policy JSON](api/policy-json.md).
 - `validateGuardPolicyAgainstSchema(policy, schema, options?)`, `POLICY_SCHEMA_PATH`, `SCHEMA_DIALECT`, `SCHEMA_RULE_ID_ANNOTATION`, `SCHEMA_VS_CODE_RULES`, `ruleForKeyword()`, `ruleFromAnnotation()` — schema-driven SPEC §8 validation with the shared rule vocabulary. See [Policy Schema Validation](api/policy-schema.md).
 
-Errors: every exported error class has an entry in [troubleshooting: error classes](troubleshooting.md#error-classes). Before going live, work through the [production readiness checklist](production-readiness.md).
+Errors: use the [error catalog](errors.md#error-classes) for the class → cause → fix mapping, and [troubleshooting: error classes](troubleshooting.md#error-classes) for symptom-first guidance. Before going live, work through the [production readiness checklist](production-readiness.md).
 
 ### Constructor options
 
