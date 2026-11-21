@@ -1,0 +1,24 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-108-feat-telemetry-add-sliding-window-counters-for",
+    "feat/issue-114-feat-tx-abortsignal-timeout-support-for-check",
+    "feat/issue-163-feat-policy-test-property-tests-for-policy",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-108-feat-telemetry-add-sliding-window-counters-for": "main",
+    "feat/issue-114-feat-tx-abortsignal-timeout-support-for-check": "main",
+    "feat/issue-163-feat-policy-test-property-tests-for-policy": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-108-feat-telemetry-add-sliding-window-counters-for",
+    "feat/issue-114-feat-tx-abortsignal-timeout-support-for-check",
+    "feat/issue-163-feat-policy-test-property-tests-for-policy",
+    "origin"
+  ]
+}
