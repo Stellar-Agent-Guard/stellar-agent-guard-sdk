@@ -15,6 +15,7 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Added
 
+- Integration docs and examples: `docs/integration-decision-tree.md` ("which integration should I use?", #480); `examples/mcp-server.ts`, a complete runnable MCP server with one guarded tool (#481); and `examples/browser/`, a read-only dashboard page that uses only the browser-safe root entry, with its bundle size and security limits documented (#482).
 - `DEFAULT_GUARD_POLICY`: a deep-frozen, deny-all safe-start policy (empty allowlists, `per_tx_cap` 100, 500 per hour, 7-day dead-man grace) with values pinned to the contracts policy templates by a unit test; README now has a "Start from the safe baseline" section (#59).
 - `maxConcurrentSimulations` (default 4) and `rateLimit: { backoffMs, maxBackoffMs }` on `PreFlightInterceptor`, plus `DEFAULT_MAX_CONCURRENT_SIMULATIONS`, `RateLimitedError` and `PreFlightUndeterminedCause`: simulations queue FIFO behind a concurrency limit, an HTTP 429 gets one bounded `Retry-After`-aware backoff and retry, and a persistent 429 yields `undetermined` with `cause: "rate_limited"`. Behaviour change: bursts above 4 simultaneous checks now queue instead of all hitting the RPC at once; set `maxConcurrentSimulations` higher to restore wider fan-out (#40).
 - `docs/agent-runtime.md` and `examples/agent-runtime.ts`: the complete 24/7 agent loop (heartbeat, pre-flight, telemetry alerts, DMS countdown) with a fail-closed failure-mode table (#74).
