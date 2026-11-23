@@ -31,7 +31,7 @@
  * refusal message. This differs from the ElizaOS validator, which returns a boolean
  * and fails closed (returns `false`) on `undetermined`; the shared harness in
  * `tests/integration/adapters.test.ts` pins both contracts side by side.
- * Options are validated at construction time (see `src/adapters/validate.ts`):
+ * Options are validated at construction time (see `src/adapters/core.ts`):
  * a misconfigured adapter throws `AdapterConfigError` before any action runs,
  * rather than failing mid-loop on the first tool call.
  */
@@ -171,27 +171,10 @@ export function mapDecisionToLangChainResult(
  * decides before anything else touches the call.
  */
 export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
-  const issues: AdapterConfigIssue[] = [];
-  const interceptorIssue = validateInterceptor(options.interceptor);
-  if (interceptorIssue) issues.push(interceptorIssue);
-  issues.push(...validateContractMapping(options));
-  if (options.toContractCalls) {
-    const batchIssue = validateBatchInterceptor(options.interceptor);
-    if (batchIssue) issues.push(batchIssue);
-  }
-  const blockedLoggerIssue = validateBlockedHookLogger(options.blockedHookLogger);
-  if (blockedLoggerIssue) issues.push(blockedLoggerIssue);
-  const nameIssue = validateOptionalFunction("name", options.name);
-  if (nameIssue) issues.push(nameIssue);
-  const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
-  if (onDecisionIssue) issues.push(onDecisionIssue);
-  const onStepIssue = validateOptionalFunction("onStep", options.onStep);
-  if (onStepIssue) issues.push(onStepIssue);
-  const signalIssue = validateOptionalSignal(options.signal);
-  if (signalIssue) issues.push(signalIssue);
-  const timeoutIssue = validateOptionalTimeout(options.timeoutMs);
-  if (timeoutIssue) issues.push(timeoutIssue);
-  throwAdapterConfigError("langchain", issues);
+  const extraIssues: AdapterConfigIssue[] = [];
+  const nameIssue = validateOptionalString("name", options.name);
+  if (nameIssue) extraIssues.push(nameIssue);
+  validateAdapterOptions("langchain", options, extraIssues);
 
   const name = options.name ?? "stellar-agent-guard";
 
@@ -307,7 +290,7 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       );
       const refusal = batch.verdicts.find((verdict) => !verdict.allowed)!;
       return mapDecisionToLangChainResult(
-        refusal,
+        evaluation.verdict,
         request.toolCall.name,
         name,
         request.toolCall.id ?? "",

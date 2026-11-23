@@ -211,7 +211,7 @@ async function guardMcpRequest<T extends McpToolResult>(
   );
   const refusal = batch.verdicts.find((verdict) => !verdict.allowed)!;
   return {
-    content: [{ type: "text", text: describeMcpRefusal(refusal, request.name) }],
+    content: [{ type: "text", text: renderHalt(evaluation.verdict, { kind: "message", toolName: request.name }) }],
     isError: true,
   };
 }
@@ -229,6 +229,7 @@ export function guardMcpToolHandler<T extends McpToolResult>(
   handler: McpToolHandler<T>,
   options: McpGuardOptions,
 ): McpToolHandler<T | McpToolResult> {
+  validateAdapterOptions("mcp", options);
   return (args, extra) =>
     guardMcpRequest(
       { name: toolName, arguments: args },
@@ -250,26 +251,6 @@ export function guardMcpCallTool<T extends McpToolResult>(
   callTool: McpCallTool<T>,
   options: McpGuardOptions,
 ): McpCallTool<T | McpToolResult> {
+  validateAdapterOptions("mcp", options);
   return (request) => guardMcpRequest(request, () => callTool(request), options);
-}
-
-/**
- * Human- and model-readable refusal text. MCP results are model-visible, so the
- * wording mirrors the other adapters': name the tool, quote the contract reason
- * and its explanation, and state that nothing was submitted.
- */
-function describeMcpRefusal(
-  decision: PreFlightDecision & { allowed: false },
-  toolName: string,
-): string {
-  if (decision.kind === "blocked") {
-    return (
-      `stellar-agent-guard blocked '${toolName}': ${decision.reason} — ${decision.explanation}\n` +
-      `No transaction was submitted, so nothing was spent and no fee was paid.`
-    );
-  }
-  return (
-    `stellar-agent-guard could not determine whether '${toolName}' is permitted; ` +
-    `it was not executed.\n${decision.detail}`
-  );
 }

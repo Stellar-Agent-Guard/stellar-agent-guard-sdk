@@ -120,6 +120,7 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
   call: VercelAIToolCallInput,
 ): T {
   if (typeof tool.execute !== "function") return tool;
+  validateAdapterOptions("vercelai", options, [], true);
   const execute = tool.execute.bind(tool);
   return {
     ...tool,
