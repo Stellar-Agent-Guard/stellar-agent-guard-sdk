@@ -39,6 +39,9 @@ export {
   SimulationError,
 } from "./errors.ts";
 
+export { isFailClosed, isRetryable } from "./error-predicates.ts";
+export type { ErrorDisposition, KnownErrorClass } from "./error-predicates.ts";
+
 export type { PolicyEncodingFailure, PolicyEncodingRuleId } from "./errors.ts";
 
 export { FakeClock, systemClock } from "./clock.ts";
@@ -50,8 +53,10 @@ export {
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
   GUARD_REASONS,
+  POLICY_RULE_REMEDIATIONS,
   explainReason,
   isGuardReason,
+  policyRuleRemediation,
   reasonMessages,
   reasonMessagesEn,
   reasonName,
@@ -373,7 +378,9 @@ export {
   sha256Hex,
   toHex,
   verifyGuardWasm,
+  verifyGuardWasmStream,
   type GuardWasmVerification,
+  type VerifyGuardWasmStreamOptions,
 } from "./wasm.ts";
 
 export {

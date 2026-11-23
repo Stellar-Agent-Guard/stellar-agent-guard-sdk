@@ -55,6 +55,7 @@ import {
   type PolicyFailure,
   type PolicyRuleId,
 } from "./policy.ts";
+import { policyRuleRemediation } from "./reasons.ts";
 
 /** The single source of validation rules for this module. */
 export const POLICY_SCHEMA_PATH = "tests/fixtures/vendor/policy.schema.json";
@@ -715,12 +716,14 @@ export function validateGuardPolicyAgainstSchema(
   const failures: SchemaPolicyFailure[] = [];
   const out: FailureSink = {
     push(path, keyword, schemaPath, message, ruleOverride) {
+      const rule = ruleOverride ? ruleFromAnnotation(ruleOverride) : ruleForKeyword(keyword);
       failures.push({
         path,
-        rule: ruleOverride ? ruleFromAnnotation(ruleOverride) : ruleForKeyword(keyword),
+        rule,
         keyword,
         schemaPath,
         message,
+        remediation: policyRuleRemediation(rule, path),
       });
     },
   };

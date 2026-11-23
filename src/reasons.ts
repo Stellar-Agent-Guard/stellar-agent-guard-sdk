@@ -24,6 +24,7 @@
  * and an SDK reason the glossary does not list fails too.
  */
 import { GuardError } from "./errors.ts";
+import type { PolicyRuleId } from "./policy.ts";
 
 export const GUARD_REASON_CODES = {
   unauthorized: 1,
@@ -291,6 +292,65 @@ export const reasonMessagesEn: Readonly<Record<GuardReason, ReasonMessageText>> 
     remediation: "Split the call so each authorization carries fewer contexts.",
   },
 });
+
+export const POLICY_RULE_REMEDIATIONS: Readonly<Record<PolicyRuleId, string>> = Object.freeze({
+  invalid_type: "Set the field to the value type the policy expects.",
+  missing_field: "Add the field to the policy before submitting it.",
+  invalid_address: "Replace the field with a checksum-valid Stellar account or contract address.",
+  negative_amount: "Set the field to zero or a positive amount.",
+  integer_out_of_range: "Set the field to an integer within the contract's representable range.",
+  window_requires_secs:
+    "Set window_secs to a positive value while the field carries a positive cap.",
+  recipient_cap_requires_window:
+    "Set window_secs to a positive value while the field carries a positive per-recipient cap.",
+  active_window_inverted: "Set the field to zero or to a value strictly greater than active_from.",
+  empty_vector_noop:
+    "Add at least one entry to the field, or enable the matching allow-any setting.",
+  duplicate_asset: "Remove the repeated address from the field.",
+  duplicate_recipient: "Remove the repeated recipient from the field.",
+  duplicate_blocked_recipient: "Remove the repeated blocked recipient from the field.",
+  duplicate_protocol: "Keep one entry per contract in the field.",
+  duplicate_protocol_function: "Remove the repeated function name from the field.",
+  empty_protocol_functions:
+    "Set the field to null to allow any function, or add at least one function name.",
+  duplicate_recipient_window_cap: "Keep one cap per recipient in the field.",
+  max_recipient_entries_exceeded: "Reduce the field to the configured maximum number of entries.",
+  recipient_conflict:
+    "Remove the address from the field or from recipients so it appears in only one list.",
+  self_as_asset: "Remove the guard contract from the field and allowlist a different asset.",
+  self_as_protocol: "Remove the guard contract from the field and allowlist a different protocol.",
+  self_as_recipient: "Remove the guard contract from the field and name a different recipient.",
+  self_as_recipient_cap: "Remove the guard contract from the field and cap a different recipient.",
+});
+
+const POLICY_REMEDIATION_FIELDS = new Set([
+  "policy",
+  "per_tx_cap",
+  "window_secs",
+  "window_cap",
+  "assets",
+  "protocols",
+  "contract",
+  "fns",
+  "allow_any_recipient",
+  "recipients",
+  "blocked_recipients",
+  "recipient_window_caps",
+  "recipient",
+  "cap",
+  "active_from",
+  "active_until",
+  "paused",
+  "dms_grace_secs",
+  "protocol_calls_per_window",
+]);
+
+export function policyRuleRemediation(rule: PolicyRuleId, path: string): string {
+  const leaf = path.split(".").at(-1) ?? "";
+  const candidate = leaf.split("[")[0] ?? "";
+  const field = POLICY_REMEDIATION_FIELDS.has(candidate) ? candidate : "policy";
+  return POLICY_RULE_REMEDIATIONS[rule].replace("the field", field);
+}
 
 export function reasonNameFromCode(code: number): GuardReason | undefined {
   return BY_CODE.get(code);
