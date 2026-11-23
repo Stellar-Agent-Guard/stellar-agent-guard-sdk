@@ -24,6 +24,7 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
+import { feeBreakdown } from "../../src/cost.ts";
 import { ContractResponseError, SigningError } from "../../src/errors.ts";
 import {
   BroadcastError,
@@ -785,6 +786,99 @@ describe("isMinimumFeeBroadcastFailure", () => {
       }),
       false,
     );
+  });
+});
+
+/**
+ * Build a one-operation Soroban envelope with an explicit split between the
+ * resource fee (declared in `sorobanData`) and the inclusion fee (the builder's
+ * `fee`). The built `transaction.fee` is the sum, which is what the network
+ * charges for the inner envelope.
+ */
+function envelope(resourceFeeStroops: number, inclusionFee = 100n): Transaction {
+  const source = new Account(Keypair.random().publicKey(), "1");
+  const sorobanData = new SorobanDataBuilder().setResourceFee(resourceFeeStroops).build();
+  return new TransactionBuilder(source, {
+    fee: inclusionFee.toString(),
+    networkPassphrase: PASSPHRASE,
+    sorobanData,
+  })
+    .addOperation(
+      Operation.invokeContractFunction({
+        contract: CALL.contract,
+        function: "noop",
+        args: [],
+      }),
+    )
+    .setTimeout(0)
+    .build();
+}
+
+describe("feeBreakdown for fee-bump envelopes (issue #500)", () => {
+  it("reports a plain envelope as resource + inclusion with no bump component", () => {
+    const inner = envelope(500);
+    const fees = feeBreakdown(500n);
+
+    assert.equal(fees.resourceFeeStroops, 500n);
+    assert.equal(fees.inclusionFeeStroops, 100n);
+    assert.equal(fees.outerFeeStroops, 0n);
+    assert.equal(fees.bump, null, "a plain envelope has no bump component");
+    assert.equal(fees.totalFeeStroops, 500n + 100n);
+    // Golden cross-check against the real envelope the SDK would submit: the
+    // transaction fee is exactly the breakdown total for a plain envelope.
+    assert.equal(fees.totalFeeStroops, BigInt(inner.fee));
+  });
+
+  it("adds a fee-bump envelope's outer fee exactly once and names it as the bump", () => {
+    const inner = envelope(500, 100n);
+    const bumped = TransactionBuilder.buildFeeBumpTransaction(
+      Keypair.random(),
+      "1000",
+      inner,
+      PASSPHRASE,
+    );
+    const innerFee = BigInt(inner.fee);
+    const outerFee = BigInt(bumped.fee);
+    const fees = feeBreakdown(500n, outerFee);
+
+    // `total = inner resource + inner inclusion + outer fee`, pinned to the two
+    // real envelopes: the inner transaction's fee is resource + inclusion, and
+    // the outer envelope contributes its own fee on top.
+    assert.equal(fees.resourceFeeStroops, 500n);
+    assert.equal(fees.inclusionFeeStroops, 100n);
+    assert.equal(fees.outerFeeStroops, outerFee);
+    assert.equal(
+      fees.totalFeeStroops,
+      fees.resourceFeeStroops + fees.inclusionFeeStroops + fees.outerFeeStroops,
+    );
+    assert.equal(fees.totalFeeStroops, innerFee + outerFee);
+    assert.deepEqual(fees.bump, { component: "outer_fee", amountStroops: outerFee });
+    assert.ok(outerFee > 0n);
+  });
+
+  it("treats a zero outer fee as no bump rather than a zero-valued component", () => {
+    const fees = feeBreakdown(500n, 0n);
+    assert.equal(fees.outerFeeStroops, 0n);
+    assert.equal(fees.bump, null);
+    assert.deepEqual(fees, feeBreakdown(500n));
+  });
+
+  it("fails closed on a malformed fee instead of coercing it", () => {
+    // `undefined` for the outer fee means "no bump envelope" (the documented
+    // default), not a malformed value; everything else must be rejected.
+    const malformed = ["1000", -1n, 1000, Number.NaN, null] as unknown as bigint[];
+    for (const value of malformed) {
+      assert.throws(() => feeBreakdown(500n, value), TypeError, `outer fee ${String(value)}`);
+    }
+    // The inner resource fee is required, so `undefined` is rejected there too.
+    // A malformed price cannot slip in as a plausible-looking total either.
+    for (const value of [...malformed, undefined] as unknown as bigint[]) {
+      assert.throws(
+        () => feeBreakdown(value as unknown as bigint),
+        TypeError,
+        `resource fee ${String(value)}`,
+      );
+    }
   });
 });
 

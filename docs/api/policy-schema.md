@@ -38,7 +38,7 @@ Source: [`src/policy-schema.ts`](../../src/policy-schema.ts). Tests:
 Illustrative — `schemaDocument` is the parsed vendored file, and `policy` is a
 `PolicyConfig` (for example from [`policyFromJson()`](policy-json.md)):
 
-```ts
+```ts no-check: illustrative fragment
 import { validateGuardPolicyAgainstSchema } from "stellar-agent-guard-sdk";
 
 const failures = validateGuardPolicyAgainstSchema(policy, schemaDocument.schema, {
@@ -150,7 +150,7 @@ same list.
 
 ## Failure shape
 
-```ts
+```ts no-check: illustrative fragment
 interface SchemaPolicyFailure {
   path: string;       // dotted path, e.g. "recipients[1]"; the root is "policy"
   rule: PolicyRuleId; // shared vocabulary

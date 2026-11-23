@@ -99,7 +99,7 @@ through `scValToNative` is unaffected.
 `serializeEvent(event: GuardEvent): string` renders one event as a single-line
 canonical JSON string, for shipping to a log sink as JSON-lines:
 
-```ts
+```ts no-check: illustrative fragment
 logger.info(serializeEvent(event)); // one line per event
 ```
 
@@ -156,7 +156,7 @@ log line, not a format), and the two are independent.
 what every existing JSON-lines consumer parses. Persisted records opt in to an
 explicitly versioned envelope instead:
 
-```ts
+```ts no-check: illustrative fragment
 import { serializeEventRecord, parseEventRecord } from "stellar-agent-guard-sdk";
 
 const line = serializeEventRecord(event);
@@ -317,7 +317,7 @@ base64 `ScVal`-XDR form, not decoded JSON.
 **The call.** One page of the listener's loop decodes both events; you never
 hand-parse the topics.
 
-```ts
+```ts no-check: illustrative fragment
 import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
 
 const listener = new GuardTelemetryListener({ server, guard: GUARD });
@@ -328,7 +328,7 @@ const [decision, heartbeat] = page.events; // GuardEvent[]
 **The decoded `GuardEvent`s.** Comments mark the fields that carry the stream's
 meaning; the full field list with stability tiers is the reference table above.
 
-```ts
+```ts no-check: illustrative fragment
 decision;
 // {
 //   id: "ledger:74751b83…:event_auth_checked",   // stable id — see “Event identity”
@@ -402,7 +402,7 @@ also what `telemetryFromDecision()` calls for you when you already hold a blocke
 `PreFlightDecision`. Pass the guard address so the diagnostic `id` is scoped to
 the right contract.
 
-```ts
+```ts no-check: illustrative fragment
 import { guardEventsFromDiagnostics, explainReason } from "stellar-agent-guard-sdk";
 
 const [blocked] = guardEventsFromDiagnostics([diagnosticEvent], GUARD);
@@ -410,7 +410,7 @@ const [blocked] = guardEventsFromDiagnostics([diagnosticEvent], GUARD);
 
 **The decoded `GuardEvent`.**
 
-```ts
+```ts no-check: illustrative fragment
 blocked;
 // {
 //   id: "diag:1f0c…",                // sha256 of the content — a block has no tx to anchor on
@@ -428,7 +428,7 @@ blocked;
 
 **Explanation lookup and operator interpretation.**
 
-```ts
+```ts no-check: illustrative fragment
 explainReason(blocked.decision!.reason ?? "");
 // "The transfer amount exceeds the policy's per-transaction cap."
 ```
@@ -546,7 +546,7 @@ silence should not be indistinguishable from a contract vocabulary change, and a
 host may not have configured a logger to read the debug count. The listener
 therefore exposes the decoded names and per-page counts as optional observability:
 
-```ts
+```ts no-check: illustrative fragment
 const page = await listener.poll({ startLedger });
 for (const { topic, count } of page.unknownTopics) {
   alerting.unknownTopic(topic, count);
@@ -635,7 +635,7 @@ appears to approve everything (the motivating failure in #7).
 
 `watchAll()` follows both streams as one iterator of `GuardEvent`:
 
-```ts
+```ts no-check: illustrative fragment
 for await (const event of listener.watchAll({
   startLedger,
   // Batches of guardEventsFromDiagnostics(...) / telemetryFromDecision(...),
@@ -740,7 +740,7 @@ Delivery is the optional `watch({ onGap })` callback. Without it, behaviour is
 unchanged and the listener stays silent. A throwing `onGap` is isolated — it
 cannot break the stream (the same contract as `invoke()`'s `onStep`).
 
-```ts
+```ts no-check: illustrative fragment
 for await (const events of listener.watch({
   cursor: saved.cursor,
   resumeLedger: saved.ledger, // the last ledger already consumed

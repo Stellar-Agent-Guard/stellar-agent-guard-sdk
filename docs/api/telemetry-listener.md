@@ -4,7 +4,7 @@
 
 ## Constructor
 
-```ts
+```ts no-check: illustrative fragment
 constructor(config?: GuardTelemetryInputConfig | GuardTelemetryLocalConfig)
 ```
 
@@ -134,7 +134,7 @@ neighbours, and never stops the stream.
 drop breakdown and `malformedEvents` as a top-level summary on `PollResult` —
 and `watch()`/`watchAll()` accept two opt-in callbacks:
 
-```ts
+```ts no-check: illustrative fragment
 watch({
   // Once per page that contains at least one malformed committed event.
   onMalformed: (count) => metrics.increment("guard.events.malformed", { count }),
@@ -190,7 +190,7 @@ never dies silently and never leaves an unhandled rejection behind.
 
 The envelope is configurable per stream (issue #285):
 
-```ts
+```ts no-check: illustrative fragment
 watch({
   retry: {
     maxRetries: 8,      // retry attempts after a failed poll; integer >= 0 (default 5)
@@ -233,7 +233,7 @@ render loop, a file logger) therefore **throttles the fetches** once the bound
 is reached, instead of letting the stream race ahead with pages nobody has
 consumed (memory growth, rate-limit burn):
 
-```ts
+```ts no-check: illustrative fragment
 watch({
   maxBufferedPages: 2, // pages buffered ahead of the consumer; integer >= 0
 });
@@ -351,7 +351,7 @@ compare it with `Date.now()`; use it as the start of the retained interval.
 An opt-in, read-only snapshot of the listener's operational state (issue #286),
 for dashboards and alerting:
 
-```ts
+```ts no-check: illustrative fragment
 interface GuardTelemetryHealthSnapshot {
   state: 'idle' | 'running' | 'recovering' | 'stopped' | 'aborted' | 'failed';
   stream: 'watch' | 'watchAll' | null;
@@ -420,7 +420,7 @@ malformed or unrecognised payload so live monitoring never crashes on one bad
 event. Fixture maintainers and incident tooling need the opposite — every input
 accounted for. `validateGuardEventXdr()` is the separate strict entry point:
 
-```ts
+```ts no-check: illustrative fragment
 import { validateGuardEventXdr } from "stellar-agent-guard-sdk";
 
 const report = validateGuardEventXdr(fixtureXdr, { source: "ledger" });
@@ -454,7 +454,7 @@ from the default cursor unless its position survives the restart: it either
 **re-emits history** or **skips the gap**, silently. `cursorStore` fixes that by
 letting the cursor outlive the process:
 
-```ts
+```ts no-check: illustrative fragment
 interface CursorStore {
   /** The cursor to resume from, or `null` on first run. Consulted once, at start. */
   load(scope?: CursorStoreScope): Promise<string | null>;
@@ -506,7 +506,7 @@ interface CursorStoreScope {
 The interface is two methods wide on purpose — wire it to anything that
 outlives the process. File:
 
-```ts
+```ts no-check: illustrative fragment
 import { readFile, writeFile } from "node:fs/promises";
 import { GuardTelemetryListener, type CursorStore } from "stellar-agent-guard-sdk";
 
@@ -537,7 +537,7 @@ verbatim, do not parse it.
 A store that should serve **several** listeners from one backend keys by the
 scope it is given:
 
-```ts
+```ts no-check: illustrative fragment
 const scopedFileCursorStore: CursorStore = {
   async load(scope) {
     const key = scope ? `cursor-${scope.network}-${scope.guard}-${scope.stream}.txt` : "cursor.txt";

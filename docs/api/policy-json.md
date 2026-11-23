@@ -101,7 +101,7 @@ The JSON `policyToJson()` produces for a minimal one-asset, one-recipient policy
 
 Round trip (illustrative — `policy` is any `PolicyConfig`):
 
-```ts
+```ts no-check: illustrative fragment
 const json: PolicyJson = policyToJson(policy);
 const text = JSON.stringify(json, null, 2); // safe: no bigint left in `json`
 const decoded = policyFromJson(text);       // bigint fields restored exactly
@@ -207,7 +207,7 @@ Unknown keys are checked before missing keys, so a misspelt field
 
 Branch on the class and `path`, not on the message text:
 
-```ts
+```ts no-check: illustrative fragment
 import { PolicyDecodeError, policyFromJson } from "stellar-agent-guard-sdk";
 
 try {

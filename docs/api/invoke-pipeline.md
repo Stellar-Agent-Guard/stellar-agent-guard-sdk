@@ -47,7 +47,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 
 When network fee conditions change between prepare-time and broadcast, core may reject a transaction with a minimum-fee failure. The pipeline can automatically retry with an increased fee:
 
-```typescript
+```typescript no-check: illustrative fragment
 const outcome = await invoke({
   server,
   source,
@@ -67,6 +67,48 @@ const outcome = await invoke({
 * **How the fee multiplier works**: On each retry, the inclusion fee is scaled by `feeMultiplier` (e.g. 100 stroops → 200 stroops → 400 stroops) and re-added to the simulated resource fee. The multiplier must be a finite number greater than `1`.
 * **Guard and Simulation Invariant**: **Every fee-bump attempt is re-prepared, re-simulated, and re-evaluated by the guard policy.** A fee bump NEVER bypasses simulation or guard enforcement. If re-simulation causes a policy block, the policy block is immediately surfaced and the transaction is never broadcast.
 
+#### Fee accounting for a fee-bump envelope (`feeBreakdown`)
+
+`feeBreakdown()` (exported from the SDK root) prices a call in components and
+keeps a separate fee-bump envelope's fee apart from the inner transaction's
+fees:
+
+| Field | Meaning |
+| --- | --- |
+| `resourceFeeStroops` | The network's price for the call's resources, from the enforced simulation. |
+| `inclusionFeeStroops` | The inclusion fee declared for the one-operation inner transaction (`INCLUSION_FEE`, 100 stroops by default). |
+| `outerFeeStroops` | The fee-bump envelope's own fee; `0n` when there is no bump envelope. |
+| `bump` | `{ component: "outer_fee", amountStroops }` when an outer fee applies, otherwise `null`. |
+| `totalFeeStroops` | `resourceFeeStroops + inclusionFeeStroops + outerFeeStroops` — what the caller actually pays. |
+
+```ts
+import { feeBreakdown } from "stellar-agent-guard-sdk";
+
+const plain = feeBreakdown(500n);
+plain.totalFeeStroops; // 600n — 500 resource + 100 inclusion, no bump
+plain.bump; // null
+
+const bumped = feeBreakdown(500n, 1_000n);
+bumped.totalFeeStroops; // 1_600n — inner resource + inner inclusion + outer fee
+bumped.bump; // { component: "outer_fee", amountStroops: 1_000n }
+```
+
+Both fee arguments must be non-negative `bigint`s. A `number`, numeric string,
+negative value or `NaN` throws a `TypeError`, so a malformed fee fails closed
+instead of producing an under-quoted total (issue #500).
+
+#### The `feeBump` retry option is not a fee-bump envelope
+
+`feeBump` above does not create a Stellar fee-bump envelope. On a minimum-fee
+rejection it rebuilds the transaction with a higher **inclusion fee**
+(`initialInclusionFee * feeMultiplier^attempt`), re-simulates and re-runs the
+guard, so the fee `invoke()` reports is already the submitted envelope's fee.
+A true fee-bump envelope is a second, outer transaction whose fee is charged on
+top of the inner transaction's resource and inclusion fees. If a caller submits
+one, price it with `feeBreakdown(resourceFee, outerFee)` so the bump is counted
+exactly once — do not add `feeBumpTransaction.fee` to the breakdown total a
+second time.
+
 ### The transaction hash, as soon as the server accepts the submission
 
 The transaction hash is the operator's recovery handle after the broadcast:
@@ -75,7 +117,7 @@ confirmation polling is slow, times out, or fails. `invoke()` therefore
 publishes it the moment the network answers, rather than only on the final
 outcome.
 
-```ts
+```ts no-check: illustrative fragment
 const outcome = await invoke({
   server,
   source,
@@ -123,7 +165,7 @@ When the network has accepted the submission but the polling budget runs out
 before inclusion is confirmed, `invoke()` returns `kind: "pending"` rather than
 claiming either success or failure (issue #299):
 
-```ts
+```ts no-check: illustrative fragment
 const outcome = await invoke({ server, source, call, networkPassphrase });
 if (outcome.kind === "pending") {
   outcome.transactionHash; // the hash the network assigned — query it, do not resend
@@ -152,7 +194,7 @@ A simulation response the SDK cannot trust is reported with the SDK's typed
 `ContractResponseError`, naming the field that was wrong and the stage that
 read it — never a native conversion error.
 
-```ts
+```ts no-check: illustrative fragment
 const outcome = await invoke({ server, source, call, networkPassphrase });
 if (outcome.kind === "error" && outcome.error instanceof ContractResponseError) {
   outcome.error.field;  // e.g. "minResourceFee"
@@ -203,7 +245,7 @@ enforced simulation, retry backoff, assembly, broadcast and post-submit polling
 all consume the same remaining budget. Pass `clock` (for example a `FakeClock`)
 to make deadline accounting deterministic in tests.
 
-```ts
+```ts no-check: illustrative fragment
 const outcome = await invoke({
   server,
   source,
@@ -230,7 +272,7 @@ Terminal outcomes carry additive `retry` metadata: `allowed`, `blocked` and
 `pending` outcomes, the `error` outcome, `InvokeRetryError`, and a
 fee-bump-exhausted `BroadcastError`.
 
-```ts
+```ts no-check: illustrative fragment
 export interface InvokeRetryMetadata {
   attempts: number; // actual pipeline attempts, including the first
   maxAttempts: number; // budget for the terminal failure class

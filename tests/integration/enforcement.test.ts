@@ -212,6 +212,8 @@ describe("live enforcement: SAC transfer", () => {
     assert.deepEqual(outcome.fees, {
       resourceFeeStroops: 0n,
       inclusionFeeStroops: 0n,
+      outerFeeStroops: 0n,
+      bump: null,
       totalFeeStroops: 0n,
     });
     assert.deepEqual(

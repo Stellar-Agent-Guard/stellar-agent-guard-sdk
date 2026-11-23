@@ -75,7 +75,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — the base class alone says nothing about transience; classify the concrete subclass (`error.name`).
 - **First diagnostic:** print the concrete class and its cause chain:
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.name, error.message, (error as Error).cause);
   ```
 
@@ -87,7 +87,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — this is a policy decision. Change the policy, the call, or the account state (unpause, unfreeze, wait for the window to roll) instead.
 - **First diagnostic:** read the reason and its operator guidance:
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.reason, error.code, reasonMessagesEn[error.reason]);
   ```
 
@@ -122,7 +122,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — the same input fails the same way. Fix the value named by `field`.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.field, error.rule, error.detail);
   ```
 
@@ -134,7 +134,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — pass a non-negative `bigint` in stroops (`500_000n`, not `500000` or `"500000"`). `0n` is a real zero ceiling; omit the option for no ceiling.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.field, typeof error.value, error.value);
   ```
 
@@ -151,7 +151,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
     -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}'
   ```
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.stage, error.diagnosticEvents.length, error.cause);
   ```
 
@@ -163,7 +163,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** Yes — after waiting at least `retryAfterMs` (when present). The lasting fix is operational: lower `maxConcurrentSimulations`, or raise the RPC's limit.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.attempts, error.retryAfterMs);
   ```
 
@@ -188,7 +188,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — the signer or key is wrong or unavailable; retrying signs nothing new. Use the registered agent public key (`G…` or 64-char hex), never a secret seed.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.address, isValidAgentPublicKey(signer.publicKey), error.cause);
   ```
 
@@ -213,7 +213,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — your own spend ceiling stopped it. Raise `maxFeeCap` only if the budget allows, or wait for resource fees to fall.
 - **First diagnostic:** see which half grew:
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.resourceFeeStroops, error.inclusionFeeStroops, error.maxFeeCap, error.attempt);
   ```
 
@@ -225,7 +225,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — the SDK's own budget is already spent. Fix the cause (`sequence_number_collision` usually means another broadcaster shares the source account) and check `transactionHash`: the last attempt may be on the network.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.lastCause, error.retry, error.transactionHash, error.error);
   ```
 
@@ -252,7 +252,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — the bytes are not a policy this SDK understands; the same input fails the same way.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.path, error.message);
   ```
 
@@ -266,7 +266,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — fix every entry in `failures`.
 - **First diagnostic:** list every failure, not just the first:
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.table(error.failures);
   // or, without throwing: validatePolicyForEncoding(draft)
   ```
@@ -291,7 +291,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — edit the policy; every failure is in `failures`.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.table(error.failures);
   ```
 
@@ -305,7 +305,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — the mapper is application code; fix the function named by `field` (`toContractCall` or `toContractCalls`).
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.field, error.cause);
   ```
 
@@ -319,7 +319,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — a configuration bug; fix the option named by `field` to match `expected`.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.adapter, error.field, error.expected);
   ```
 
@@ -331,7 +331,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — a refused heartbeat is a decision. An expired or frozen account needs an admin [unfreeze](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/docs/functions/freeze-unfreeze.md) (`submitUnfreeze()`).
 - **First diagnostic:** read the account status:
 
-  ```ts
+  ```ts no-check: illustrative fragment
   const status = await readGuardStatus({ server, guard, source, networkPassphrase });
   console.error(error.reason, status, dmsUrgency(status, policy));
   ```
@@ -344,7 +344,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — re-sending the same dry-run configuration cannot help. Remove `dryRun: true` from the heartbeat's `submit` transport.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.verdict, error.reason, error.detail);
   ```
 
@@ -356,7 +356,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — set `intervalMs` to at most `maxIntervalMs`.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.intervalMs, error.graceSecs, error.maxIntervalMs);
   ```
 
@@ -368,6 +368,6 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Retry:** No — not while the first stream is active. End or abort it, or create a second `GuardTelemetryListener`.
 - **First diagnostic:**
 
-  ```ts
+  ```ts no-check: illustrative fragment
   console.error(error.requested, listener.health());
   ```

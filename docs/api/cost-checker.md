@@ -4,7 +4,7 @@
 
 ## Constructor
 
-```ts
+```ts no-check: illustrative fragment
 constructor(options: CostPreCheckConfig)
 ```
 
@@ -51,7 +51,7 @@ Returns `CostPreCheckResult` (`CostDecision`), a discriminated union:
 
 Priced decisions carry the ledger marker of the simulation that produced the quote:
 
-```ts
+```ts no-check: illustrative fragment
 provenance: { ledger: number } | null
 ```
 
@@ -64,7 +64,7 @@ provenance: { ledger: number } | null
 
 When an opt-in policy source is configured, `policyContext` exposes additive policy context derived from the live `check()` call:
 
-```ts
+```ts no-check: illustrative fragment
 policyContext: {
   perTxCapOk: boolean | null;
   windowRemainingEstimate: number | null;
@@ -99,7 +99,7 @@ The SDK never fetches this state on the caller's behalf — that would be a
 second RPC outside the one simulation that prices the call. The SDK's own
 ledger-read helper shows one way to obtain it:
 
-```ts
+```ts no-check: illustrative fragment
 import { fetchGuardPolicyAndWindow, type WindowSpendSnapshot } from "stellar-agent-guard-sdk";
 
 const { policy, windowSpent } = await fetchGuardPolicyAndWindow(server, GUARD_CONTRACT_ID);

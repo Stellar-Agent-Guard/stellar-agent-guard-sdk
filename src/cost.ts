@@ -385,13 +385,49 @@ export interface CostPreCheckConfig {
   windowSnapshotMaxAgeLedgers?: number | undefined;
 }
 
-/** The two fee components, kept separate so they are never conflated. */
+/**
+ * Identifies a fee component that a fee-bump envelope added on top of the inner
+ * transaction (issue #500).
+ *
+ * Only one component can be a bump: Stellar's fee-bump envelope wraps the inner
+ * transaction and charges its own outer fee, while the inner resource and
+ * inclusion fees are unchanged. Naming the component — rather than returning a
+ * bare number — keeps a caller from adding the outer fee a second time or from
+ * mistaking the inner inclusion fee for the bump.
+ */
+export interface FeeBumpComponent {
+  /** The component the bump introduced. Today this is always the outer fee. */
+  component: "outer_fee";
+  /** That component's amount in stroops. Never `0n` (that is not a bump). */
+  amountStroops: bigint;
+}
+
+/**
+ * The fee components, kept separate so they are never conflated.
+ *
+ * A plain envelope has three components: the network's resource fee, the SDK's
+ * inclusion fee, and an outer fee of `0n` with `bump: null`. A fee-bumped
+ * envelope adds the outer envelope's fee, which the breakdown reports as its own
+ * component and identifies through `bump`, so
+ * `totalFeeStroops = resourceFeeStroops + inclusionFeeStroops + outerFeeStroops`
+ * holds for both shapes (issue #500).
+ */
 export interface FeeBreakdown {
   /** The network's price for the call's resources, from the simulation. */
   resourceFeeStroops: bigint;
   /** The inclusion fee the SDK declares for a one-operation transaction. */
   inclusionFeeStroops: bigint;
-  /** `resourceFeeStroops + inclusionFeeStroops` — what the caller actually pays. */
+  /**
+   * The fee-bump envelope's outer fee, in stroops. `0n` for a plain envelope —
+   * a zero outer fee is a real, non-bumped transaction, not a missing value.
+   */
+  outerFeeStroops: bigint;
+  /** Which component is the bump, or `null` for a plain envelope. */
+  bump: FeeBumpComponent | null;
+  /**
+   * `resourceFeeStroops + inclusionFeeStroops + outerFeeStroops` — what the
+   * caller actually pays for the inner call plus any fee-bump envelope.
+   */
   totalFeeStroops: bigint;
 }
 
@@ -527,20 +563,46 @@ export interface CostWithDecision {
 }
 
 /**
- * Split a simulation's resource fee into the two components a caller is charged.
+ * Split a priced call into the components a caller is charged.
  *
  * Pure: no network, no configuration. The inclusion fee is the SDK's own
  * declared floor for a single-operation transaction (`INCLUSION_FEE` in `tx.ts`),
  * which is the same value the built envelope uses, so this cannot drift from what
  * is actually submitted.
+ *
+ * `outerFeeStroops` is the fee of a **separate fee-bump envelope** wrapping the
+ * built transaction (issue #500). It is a distinct charge from the inner
+ * envelope's resource and inclusion fees, so it is added once and reported as
+ * its own component; `0n` (the default) means no bump envelope. A fee that is
+ * not a non-negative `bigint` — a `number`, numeric string, negative or `NaN` —
+ * throws a `TypeError` instead of being coerced, so a malformed fee fails closed
+ * rather than silently under-quoting the total.
  */
-export function feeBreakdown(resourceFeeStroops: bigint): FeeBreakdown {
+export function feeBreakdown(
+  resourceFeeStroops: bigint,
+  outerFeeStroops: bigint = 0n,
+): FeeBreakdown {
+  assertFeeAmount("resourceFeeStroops", resourceFeeStroops);
+  assertFeeAmount("outerFeeStroops", outerFeeStroops);
   const inclusionFeeStroops = BigInt(INCLUSION_FEE);
   return {
     resourceFeeStroops,
     inclusionFeeStroops,
-    totalFeeStroops: resourceFeeStroops + inclusionFeeStroops,
+    outerFeeStroops,
+    bump:
+      outerFeeStroops === 0n ? null : { component: "outer_fee", amountStroops: outerFeeStroops },
+    totalFeeStroops: resourceFeeStroops + inclusionFeeStroops + outerFeeStroops,
   };
+}
+
+/** Refuse a fee that is not a non-negative `bigint`, without coercing it. */
+function assertFeeAmount(field: string, value: unknown): asserts value is bigint {
+  if (typeof value !== "bigint") {
+    throw new TypeError(`${field} must be a bigint, received ${typeof value}`);
+  }
+  if (value < 0n) {
+    throw new TypeError(`${field} must be non-negative, received ${value}`);
+  }
 }
 
 /**

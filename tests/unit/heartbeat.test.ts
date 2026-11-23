@@ -996,7 +996,13 @@ describe("startHeartbeat outcome classification (issue #292)", () => {
     reason: null,
     detail: null,
     error: null,
-    fees: { resourceFeeStroops: 1n, inclusionFeeStroops: 2n, totalFeeStroops: 3n },
+    fees: {
+      resourceFeeStroops: 1n,
+      inclusionFeeStroops: 2n,
+      outerFeeStroops: 0n,
+      bump: null,
+      totalFeeStroops: 3n,
+    },
     diagnostics: [],
     steps: [],
   };

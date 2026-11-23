@@ -63,7 +63,7 @@ A rejected `startHeartbeat()` submits nothing and reads no policy.
 
 A failed heartbeat used to wait for the next fixed interval before trying again — so an RPC outage that landed near the grace boundary could freeze an account even after connectivity returned. `retry` adds a bounded, jittered retry:
 
-```ts
+```ts no-check: illustrative fragment
 const hb = await startHeartbeat({
   server,
   guard: GUARD_ID,
@@ -85,7 +85,7 @@ const hb = await startHeartbeat({
 
 `submit(beat, { signal })` receives an `AbortSignal` that `stop()` aborts before it starts waiting. The default stop is still graceful: it waits for the submission promise to settle, so a transport that honours the signal shuts down promptly. A transport that may never settle can be bounded:
 
-```ts
+```ts no-check: illustrative fragment
 const result = await hb.stop({ timeoutMs: 5_000 });
 // { reason: "completed" | "timeout" | "aborted", settled: boolean,
 //   submission?: HeartbeatSubmission, error?: unknown }
@@ -108,7 +108,7 @@ zeros. Fees are non-negative: a negative `bigint` or signed string throws
 `TypeError` instead of rendering an impossible amount. A ceiling of `0n` is a
 real, maximally strict ceiling; only omitting `maxFeeStroops` disables the check.
 
-```ts
+```ts no-check: illustrative fragment
 import { formatFee } from "stellar-agent-guard-sdk";
 
 cost.totalFeeStroops;            // 12345n           — stroops (exact, source of truth)
@@ -122,7 +122,7 @@ formatFee(9_999_999n);     // "0.9999999" — largest sub-XLM value
 
 Priced `within_budget` and `over_budget` results may include a `breakdown` parsed from the same Soroban simulation that produced `resourceFeeStroops`:
 
-```ts
+```ts no-check: illustrative fragment
 if (decision.kind === "within_budget" && decision.breakdown) {
   console.log(decision.breakdown);
   // {
@@ -153,7 +153,7 @@ the approved decision.
 
 `CostPreChecker.checkWithCost()` returns both from a **single** simulation:
 
-```ts
+```ts no-check: illustrative fragment
 const { decision, cost } = await costChecker.checkWithCost(call);
 
 if (decision.kind === "blocked") {
@@ -208,7 +208,7 @@ one-shot form.
 
 A consumer that wants "the last N decisions, right now" — a dashboard panel, an agent status endpoint — can opt into a bounded in-memory window instead of maintaining its own store:
 
-```ts
+```ts no-check: illustrative fragment
 import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
 
 const listener = new GuardTelemetryListener({
@@ -229,7 +229,7 @@ const recentWindow = listener.recent({ fromLedger: 4_700_000 });
 
 `recent()` returns **detached snapshots**, not references into the buffer's own state. The array is new, and so is every event in it: the top-level fields, the decoded `decision`, the decoded `data`, and the opt-in `raw` payload are all copies. A consumer that edits what it was handed cannot change what the listener still retains, and the next `recent()` reports the retained event rather than the consumer's edit.
 
-```ts
+```ts no-check: illustrative fragment
 const snapshot = listener.recent();
 snapshot[0]!.ledger = 999;                 // the copy
 snapshot[0]!.data = { forged: true };      // the copy
@@ -243,7 +243,7 @@ The copy is structural rather than a re-serialisation: byte arrays are copied, a
 
 When a decoded verdict looks wrong, attach the **undecoded source event** to the SDK bug report. Decoding discards it by default — the raw payload carries XDR `ScVal`s and host-shaped objects, and retaining one per event is a memory decision — so it is opt-in:
 
-```ts
+```ts no-check: illustrative fragment
 // Committed feed: opt in on the listener.
 const listener = new GuardTelemetryListener({ server, guard: GUARD_ID, includeRaw: true });
 
@@ -283,7 +283,7 @@ explainReason("paused", undefined, { paused: "Agent paused by the operator." });
 
 `serializeEvent(event)` gives you one canonical JSON line per event, so a log pipeline gets a stable, diffable record with no logger dependency in the SDK:
 
-```ts
+```ts no-check: illustrative fragment
 import { serializeEvent } from "stellar-agent-guard-sdk";
 
 for await (const event of listener.watchAll({ diagnostics })) {
@@ -295,7 +295,7 @@ Key order, the drop-`undefined`/keep-`null` policy, and the `bigint`-to-decimal-
 
 For **persisted** records, prefer the versioned envelope so a future schema change is distinguishable from a historical line:
 
-```ts
+```ts no-check: illustrative fragment
 import { parseEventRecord, serializeEventRecord } from "stellar-agent-guard-sdk";
 
 logger.info(serializeEventRecord(event)); // {"v":1,"event":{…}}
@@ -306,7 +306,7 @@ const { version, event: decoded } = parseEventRecord(storedLine); // version 0 =
 
 `describePolicy(policy)` renders the policy in force as one log-friendly line. The summary is **complete**: it names the constraints that materially change which transfers are allowed — the per-recipient window caps, the blocked recipients, and the active window with its state — so a reader never has to open the policy to learn that it is narrower than the first line suggests.
 
-```ts
+```ts no-check: illustrative fragment
 import { describePolicy } from "stellar-agent-guard-sdk";
 
 describePolicy(policy);
@@ -321,7 +321,7 @@ describePolicy(policy);
 - **The active window is judged against a moment.** `nowSecs` (a number or a bigint) pins that moment; it defaults to the current time. The state is one of `unbounded` (no window), `scheduled` (not open yet), `active`, or `expired`.
 - An optional constraint that is absent and one that is empty are the same thing — the constraint is not in force — so neither produces a clause. A boundary a `Date` cannot represent is rendered as raw seconds instead of throwing.
 
-```ts
+```ts no-check: illustrative fragment
 describePolicy(policy, { detail: true, nowSecs: 1_700_000_000 });
 ```
 
@@ -331,7 +331,7 @@ describePolicy(policy, { detail: true, nowSecs: 1_700_000_000 });
 
 **It copies; it does not freeze its input.** The policy object, `assets`, `recipients`, `protocols` (each rule and its `fns` array), `recipient_window_caps` (each entry) and `blocked_recipients` are all copied before they are frozen. The caller's object shares no mutable state with the returned one and can still be edited or reused:
 
-```ts
+```ts no-check: illustrative fragment
 import { freezePolicy, policyToScVal } from "stellar-agent-guard-sdk";
 
 const config = { /* a reusable configuration object */ } satisfies PolicyConfig;

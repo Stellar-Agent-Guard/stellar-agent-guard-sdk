@@ -166,7 +166,27 @@ npm run build && npm run test:exports   # packs the tarball and resolves every e
 npm run build && npm run test:pack      # asserts the tarball ships dist + metadata only (issue #49)
 npm run test:integration   # live testnet; needs .env.phase2 (template: .env.phase2.example)
 node scripts/check-doc-links.ts   # docs PRs: relative links + anchors (the `links` workflow, #140)
+npm run check:docs   # compiles every fenced ts/typescript block in docs/ + root Markdown
 ```
+
+### Documentation code blocks
+
+`npm run check:docs` compiles each fenced `ts` / `typescript` block in `docs/**`
+and the root Markdown **in isolation** against the public surface, so a renamed
+option or export cannot leave a page teaching an API that no longer exists. A
+failing block is reported as `file:line: message`.
+
+Blocks that are intentionally fragments of a larger example opt out **visibly**:
+
+- a fence info string of `ts no-check: <reason>` for an illustrative fragment
+  that uses names from the surrounding page;
+- a fence language of `pseudocode` for pseudo-code that is not TypeScript at
+  all;
+- or a `<!-- doc-snippet: skip — <reason> -->` comment on the line above the
+  fence.
+
+Prefer making the block compile; mark only what genuinely cannot stand alone,
+and give the marker a reason.
 
 ## TypeScript strictness ratchet
 
@@ -372,7 +392,7 @@ Time-dependent modules in the SDK (cache TTLs, transaction polling) support depe
 
 **For tests that need to control time**, inject a `FakeClock`:
 
-```ts
+```ts no-check: illustrative fragment
 import { FakeClock } from "stellar-agent-guard-sdk";
 
 const clock = new FakeClock(0); // Start at t=0ms
@@ -411,7 +431,7 @@ The `Clock` interface allows tests to:
 
 **Example: Cache TTL test**
 
-```ts
+```ts no-check: illustrative fragment
 import { FakeClock } from "stellar-agent-guard-sdk";
 
 test("cache entry expires after TTL", async () => {

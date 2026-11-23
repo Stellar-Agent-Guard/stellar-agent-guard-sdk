@@ -1,0 +1,134 @@
+# Release dry run on pull requests (issue #505).
+#
+# Publishing is maintainer-only and happens after merge. Without this workflow a
+# packaging regression — a `files` entry that drops `dist/index.d.ts`, a
+# lifecycle script that no longer builds, an `npm pack` that suddenly includes
+# the test suite — first appears at release time, when the fix is most expensive.
+#
+# This job runs the packaging path against the PR, with **no publish
+# credentials**:
+#   - `permissions: contents: read` — nothing else is requested;
+#   - no `id-token: write`, no `NPM_TOKEN`, no secret is referenced anywhere;
+#   - `npm publish --dry-run` stops before contacting the registry.
+#
+# It is deliberately a separate workflow, not a job in `ci.yml`: the required
+# `ci` status check stays byte-for-byte unchanged, and this job only runs when a
+# PR actually touches packaging-relevant paths (or is dispatched by hand).
+name: release-dry-run
+
+on:
+  pull_request:
+    paths:
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "tsconfig.build.json"
+      - "src/**"
+      - "scripts/npm-cli.ts"
+      - "scripts/check-pack-contents.ts"
+      - "README.md"
+      - "LICENSE"
+      - ".github/workflows/publish.yml"
+      - ".github/workflows/release-dry-run.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    name: release dry run (no publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      # `prepublishOnly` is the build the publish workflow relies on, and it is
+      # the step a packaging change is most likely to break. `npm pack` does not
+      # run it (pack runs `prepack`/`prepare`/`postpack`); `npm publish` does, at
+      # the last step below. Running the build here as well makes a broken
+      # `prepublishOnly` attributable to the script instead of to packing, and
+      # ensures the tarball listed below is the built one.
+      - name: prepublishOnly builds successfully
+        run: npm run build
+
+      # `npm pack --dry-run` prints the exact tarball file list without writing
+      # or uploading anything. The list goes into the job summary so a reviewer
+      # can see what would ship.
+      - name: pack dry run
+        run: |
+          set -o pipefail
+          mkdir -p release-dry-run
+          npm pack --dry-run --json | tee release-dry-run/pack.json
+
+      # The same assertion the release gate uses: dist + metadata only, no
+      # tests, scripts, src, docs or .env* in the tarball.
+      - name: published-file-set assertion
+        run: npm run test:pack
+
+      # The publish path itself, with no token: npm resolves the manifest,
+      # applies the `files` whitelist, runs the lifecycle scripts and stops
+      # before any registry request. `--ignore-scripts` is deliberately NOT used
+      # — skipping the lifecycle scripts is the regression this job exists to
+      # catch.
+      - name: publish dry run (no token)
+        run: |
+          set -o pipefail
+          if [ -n "${NPM_TOKEN:-}${NODE_AUTH_TOKEN:-}" ]; then
+            echo "::error title=unexpected credential::the dry run must not have a publish credential"
+            exit 1
+          fi
+          npm publish --dry-run 2>&1 | tee release-dry-run/publish.log
+
+      - name: summarise what would ship
+        if: always()
+        run: |
+          {
+            echo "## Release dry run"
+            echo
+            echo "No secret was used and nothing was published."
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f release-dry-run/pack.json ]; then
+            node -e '
+              const fs = require("node:fs");
+              const packed = JSON.parse(fs.readFileSync("release-dry-run/pack.json", "utf8"));
+              const item = Array.isArray(packed) ? packed[0] : Object.values(packed)[0];
+              const files = item?.files ?? [];
+              const total = files.reduce((sum, file) => sum + (file.size ?? 0), 0);
+              const rows = files.map((file) => `| \`${file.path}\` | ${file.size ?? 0} |`);
+              fs.appendFileSync(
+                process.env.GITHUB_STEP_SUMMARY,
+                [
+                  "### Tarball contents (dry run)",
+                  "",
+                  "| File | Bytes |",
+                  "| --- | ---: |",
+                  ...rows,
+                  "",
+                  `**${files.length} files, ${total} bytes uncompressed.**`,
+                  "",
+                ].join("\n"),
+              );
+            '
+          fi
+          if [ -f release-dry-run/publish.log ]; then
+            {
+              echo
+              echo "<details><summary>npm publish --dry-run output</summary>"
+              echo
+              echo '```'
+              cat release-dry-run/publish.log
+              echo '```'
+              echo
+              echo "</details>"
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi

@@ -1643,6 +1643,8 @@ function dryRunTimeoutResult(error: RpcTimeoutError): InvokeDryRunResult {
     fees: {
       resourceFeeStroops: 0n,
       inclusionFeeStroops: 0n,
+      outerFeeStroops: 0n,
+      bump: null,
       totalFeeStroops: 0n,
     },
     diagnostics: [],
@@ -1730,6 +1732,8 @@ async function invokeDryRun(
       : {
           resourceFeeStroops: 0n,
           inclusionFeeStroops: 0n,
+          outerFeeStroops: 0n,
+          bump: null,
           totalFeeStroops: 0n,
         };
   const feesDurationMs = Math.max(0, performance.now() - feesStartedAt);

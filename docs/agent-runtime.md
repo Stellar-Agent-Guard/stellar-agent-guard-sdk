@@ -22,7 +22,7 @@ Every call below exists in the SDK and is compiled by `npm run typecheck` in [`e
 
 An agent that stops heartbeating freezes. Use the SDK's own submission — it signs through the same custom-account path as `invoke()`:
 
-```ts
+```ts no-check: illustrative fragment
 const hb = await startHeartbeat({
   server, guard, signer: agent, networkPassphrase,
   intervalMs: Number(graceSecs / 6n) * 1000, // must be <= grace/3 (validated before the first beat)
@@ -38,7 +38,7 @@ For a single beat use [`heartbeat()`](../README.md#send-one-heartbeat-heartbeat)
 
 ### 2. Pre-flight every transfer
 
-```ts
+```ts no-check: illustrative fragment
 const decision = await interceptor.check(call, { timeoutMs: 10_000 });
 if (decision.kind !== "admissible") {
   // blocked (policy said no) or undetermined (could not decide): refuse either way.
@@ -49,7 +49,7 @@ Pre-flight is advisory and read-only; the contract still enforces on broadcast (
 
 ### 3. Tail telemetry for operator alerts
 
-```ts
+```ts no-check: illustrative fragment
 const listener = new GuardTelemetryListener({ server, guard, rpcUrl });
 for await (const event of listener.watchAll({ signal })) {
   // freeze/unfreeze, policy_set/policy_revoked, and blocked auth_checked decisions
@@ -60,7 +60,7 @@ for await (const event of listener.watchAll({ signal })) {
 
 ### 4. Monitor the DMS countdown
 
-```ts
+```ts no-check: illustrative fragment
 const [{ policy }, status] = await Promise.all([
   fetchGuardPolicyAndWindow(server, guard),
   readGuardStatus({ server, guard, source: agent.publicKey(), networkPassphrase }),
@@ -80,7 +80,7 @@ and `"expired"` once `deadManRemaining(status, policy) <= 0` (`remaining = last_
 
 ## Reference loop
 
-```ts
+```ts no-check: illustrative fragment
 const heartbeat = await startAgentHeartbeat(config, graceSecs);        // 1
 const telemetry = tailTelemetry(config, abort.signal);                 // 3
 const dms = setInterval(() => void checkDmsHealth(config), 60_000);    // 4

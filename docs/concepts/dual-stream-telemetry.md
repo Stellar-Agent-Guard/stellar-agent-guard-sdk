@@ -27,7 +27,7 @@ methods — `load()` (consulted once when `watch()` starts) and `save()` (called
 once per poll, before the page is delivered) — wired to whatever durable
 storage the runtime already has (a file, Redis, a database row):
 
-```ts
+```ts no-check: illustrative fragment
 const listener = new GuardTelemetryListener({
   server,
   guard: GUARD_CONTRACT_ID,

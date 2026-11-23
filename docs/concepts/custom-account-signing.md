@@ -52,7 +52,8 @@ being wrapped, and the `AgentSigner` it produces exposes just the public key
 and a `signDigest` function.
 
 ```ts
-import { Keypair, keypairAgentSigner, validateAgentPublicKey } from "stellar-agent-guard-sdk";
+import { Keypair } from "@stellar/stellar-sdk";
+import { keypairAgentSigner, validateAgentPublicKey } from "stellar-agent-guard-sdk";
 
 const local = keypairAgentSigner(Keypair.random()); // validated at construction
 validateAgentPublicKey(local.publicKey);             // returns the G… form

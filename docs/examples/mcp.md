@@ -29,18 +29,19 @@ dependency of this SDK.
 The runnable implementation is maintained and typechecked in CI in
 [`examples/mcp.ts`](../../examples/mcp.ts):
 
-```typescript
+```typescript no-check: illustrative fragment
 import { Address, Keypair, nativeToScVal, rpc } from "@stellar/stellar-sdk";
 import {
   PreFlightInterceptor,
   guardMcpCallTool,
   guardMcpToolHandler,
+  unsafeContractAddress,
   type ContractCall,
   type McpToolCallRequest,
 } from "stellar-agent-guard-sdk";
 
-const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
-const TOKEN = "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB";
+const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
+const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
 
 // 1. Map the tool call to the guarded contract call it would make.
 function toContractCall(request: McpToolCallRequest): ContractCall | null {

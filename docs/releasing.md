@@ -45,6 +45,17 @@ npm run test:pack      # packed tarball ships dist + metadata only (issue #49)
 npm run test:packed-install # clean production-only consumer installs the tarball
 ```
 
+### Release dry run on pull requests
+
+`.github/workflows/release-dry-run.yml` runs the packaging path on any PR that
+touches `package.json`, `src/`, the build config or the publish workflow (and on
+manual `workflow_dispatch`). It runs `npm pack --dry-run`, the published-file-set
+assertion (`npm run test:pack`) and `npm publish --dry-run` with **no token and
+no publish permission** — `permissions: contents: read`, no `id-token`, no
+`NPM_TOKEN`. A broken lifecycle script or a `files` regression therefore fails
+the PR instead of the release. The tarball file list is written to the job
+summary. The required `ci` check is unchanged; this job is additive.
+
 Checklist:
 
 - [ ] All gates green on the release commit (not "green yesterday").

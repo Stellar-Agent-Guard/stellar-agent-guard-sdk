@@ -191,6 +191,8 @@ describe("invoke dry run", () => {
     assert.deepEqual(result.fees, {
       resourceFeeStroops: 777n,
       inclusionFeeStroops: 100n,
+      outerFeeStroops: 0n,
+      bump: null,
       totalFeeStroops: 877n,
     });
     assert.deepEqual(result.diagnostics, []);
@@ -260,6 +262,8 @@ describe("invoke dry run", () => {
     assert.deepEqual(result.fees, {
       resourceFeeStroops: 0n,
       inclusionFeeStroops: 0n,
+      outerFeeStroops: 0n,
+      bump: null,
       totalFeeStroops: 0n,
     });
     assert.equal(mock.sendCalls, 0);

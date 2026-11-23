@@ -150,7 +150,7 @@ gating) without touching the validator contract the adapter depends on.
 
 ### The hook types
 
-```typescript
+```typescript no-check: illustrative fragment
 export type Validator = (
 	runtime: IAgentRuntime,
 	message: Memory,
@@ -171,7 +171,7 @@ export type Handler = (
 Both hang off the `Action` interface, whose own doc comment calls it
 "`Action` (validate + handler)":
 
-```typescript
+```typescript no-check: illustrative fragment
 export interface Action {
 	/** Action name */
 	name: string;
@@ -191,7 +191,7 @@ export interface Action {
 `runtime.ts` calls `validate` and admits the action to the eligible set only when it
 returns truthy:
 
-```typescript
+```typescript no-check: illustrative fragment
 				try {
 					const ok = await action.validate(this, message, state);
 					if (ok) validated.push(action);
@@ -222,7 +222,7 @@ submits the transaction is never reached.
 
 Compose the guard check into `validate` rather than wrapping `handler`:
 
-```typescript
+```typescript no-check: illustrative fragment
 validate: async (runtime, message, state, options) => {
   if (!(await baseValidate(runtime, message, state, options))) return false;
   const decision = await guard.preflight(intentFrom(message, state, options));
@@ -414,7 +414,7 @@ both were reviewed before writing the adapter:
 
 An MCP server exposes a tool by registering a handler. v2:
 
-```ts
+```ts no-check: illustrative fragment
 server.registerTool(
   "transfer_tokens",
   { description, inputSchema },
@@ -473,7 +473,7 @@ written against `Tool.execute(input, options)`, not against the language-model
 middleware (`wrapLanguageModel`), whose stream already contains tool-call
 arguments the model emitted.
 
-```ts
+```ts no-check: illustrative fragment
 type Tool<INPUT, RESULT> = {
   execute?: (input: INPUT, options: ToolCallOptions) => Promise<RESULT>;
   // …description / inputSchema omitted

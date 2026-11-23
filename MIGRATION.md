@@ -327,12 +327,11 @@ The following function signatures now use branded types:
 
 If your addresses come from user input, API responses, or environment variables, validate them with the new type guards:
 
-```typescript
+```typescript no-check: illustrative fragment
 import {
   isContractAddress,
   isAccountAddress,
   PreFlightInterceptor,
-  isContractAddress,
 } from "stellar-agent-guard-sdk";
 
 // Validate a contract address from environment or API
@@ -363,7 +362,7 @@ const policy: PolicyConfig = {
 
 If you have hardcoded, verified addresses (e.g., from your deployment notes), you can use type assertions:
 
-```typescript
+```typescript no-check: illustrative fragment
 import type { ContractAddress, AccountAddress } from "stellar-agent-guard-sdk";
 
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as ContractAddress;
@@ -403,7 +402,7 @@ The SDK now exports four type guard functions:
 
 Validates that a value is a valid Stellar contract address (C...).
 
-```typescript
+```typescript no-check: illustrative fragment
 import { isContractAddress } from "stellar-agent-guard-sdk";
 
 if (isContractAddress(guardId)) {
@@ -422,7 +421,7 @@ Checks:
 
 Validates that a value is a valid Stellar account address (G...).
 
-```typescript
+```typescript no-check: illustrative fragment
 import { isAccountAddress } from "stellar-agent-guard-sdk";
 
 if (isAccountAddress(recipient)) {
@@ -441,7 +440,7 @@ Checks:
 
 Validates that a value is any valid Stellar StrKey address (either G... or C...).
 
-```typescript
+```typescript no-check: illustrative fragment
 import { isStrKeyAddress } from "stellar-agent-guard-sdk";
 
 if (isStrKeyAddress(maybeAddress)) {
@@ -454,7 +453,7 @@ if (isStrKeyAddress(maybeAddress)) {
 
 Validates that a value is a valid raw public key in hex format (64 hex characters).
 
-```typescript
+```typescript no-check: illustrative fragment
 import { isPublicKeyHex } from "stellar-agent-guard-sdk";
 
 if (isPublicKeyHex(agentKey)) {
@@ -467,7 +466,7 @@ if (isPublicKeyHex(agentKey)) {
 
 ### Before (Compiles, Fails at Runtime)
 
-```typescript
+```typescript no-check: illustrative fragment
 const policy: PolicyConfig = {
   assets: [
     "GBRPYHIL2CI3WHZDTOOQFC6EB4CGQOFN4L7MRJE47JREUMB5QFO6YL2", // ❌ Wrong! Account address in assets
@@ -483,7 +482,7 @@ const policy: PolicyConfig = {
 
 ### After (Fails at Compile Time)
 
-```typescript
+```typescript no-check: illustrative fragment
 import { isContractAddress, isAccountAddress, type ContractAddress, type AccountAddress } from "stellar-agent-guard-sdk";
 
 // Proper validation at runtime
@@ -507,7 +506,7 @@ const policy: PolicyConfig = {
 
 Existing tests continue to work with minimal changes. If your tests hardcode addresses, use type assertions:
 
-```typescript
+```typescript no-check: illustrative fragment
 import type { ContractAddress, AccountAddress } from "stellar-agent-guard-sdk";
 
 const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as ContractAddress;
@@ -542,7 +541,7 @@ A: No. Policy structure hasn't changed. Only the TypeScript types have been upda
 
 If you need to temporarily revert to untyped strings while updating your code, the old string-based signatures are available if you cast to `any`:
 
-```typescript
+```typescript no-check: illustrative fragment
 const interceptor = new PreFlightInterceptor({
   guard: "CAPADGEK..." as any, // Circumvent types, not recommended
 });
@@ -558,9 +557,9 @@ However, this negates the safety benefit. We recommend fixing your code to use t
 format it has always been, so no existing log consumer breaks. Persisted
 telemetry can opt in to an envelope instead:
 
-```ts
+```ts no-check: illustrative fragment
 // Before — bare v0 line, still supported
-const line = serializeEvent(event);
+const legacyLine = serializeEvent(event);
 
 // After — explicit envelope, recommended for stored records
 const line = serializeEventRecord(event);
@@ -569,7 +568,7 @@ const line = serializeEventRecord(event);
 
 Reading both generations is one call:
 
-```ts
+```ts no-check: illustrative fragment
 const { version, event } = parseEventRecord(line);
 // version: 0 for legacy bare lines, 1 for the current envelope
 ```

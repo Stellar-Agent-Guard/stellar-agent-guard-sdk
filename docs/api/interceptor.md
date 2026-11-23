@@ -4,7 +4,7 @@
 
 ## Constructor
 
-```ts
+```ts no-check: illustrative fragment
 constructor(options: PreFlightInterceptorOptions)
 ```
 

@@ -298,7 +298,7 @@ This version introduces **branded types** to distinguish contract addresses (C..
 
 **Type Guards:**
 
-```ts
+```ts no-check: illustrative fragment
 import {
   isContractAddress,    // Validates C... addresses
   isAccountAddress,     // Validates G... addresses
@@ -320,7 +320,7 @@ This version introduces **branded types** to distinguish contract addresses (C..
 
 **Type Guards:**
 
-```ts
+```ts no-check: illustrative fragment
 import { 
   isContractAddress,    // Validates C... addresses
   isAccountAddress,     // Validates G... addresses
@@ -384,7 +384,7 @@ Pre-flight simulation is a prediction made against one ledger snapshot, not a se
 `PreFlightInterceptor` always performs a fresh simulation by default. For agent
 loops that repeatedly check the same call, caching can be enabled explicitly:
 
-```ts
+```ts no-check: illustrative fragment
 const interceptor = new PreFlightInterceptor({
   server,
   networkPassphrase,
@@ -429,7 +429,7 @@ account-state changes.
 
 ### Cost Pre-Checking with Policy Context
 
-```ts
+```ts no-check: illustrative fragment
 import { CostPreChecker } from "stellar-agent-guard-sdk";
 
 const checker = new CostPreChecker({
@@ -474,7 +474,7 @@ Supplying both, or neither, throws `InvalidInputError` (a `TypeError`, rules
 before any RPC. A telemetry listener used only for local state (counters,
 `recent()`, no `guard`) needs no transport.
 
-```ts
+```ts no-check: illustrative fragment
 import { rpc } from "@stellar/stellar-sdk";
 import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
 
@@ -510,7 +510,7 @@ Time-dependent operations (cache TTL, transaction polling) support optional `Clo
 
 **For tests**, use `FakeClock` to control time:
 
-```ts
+```ts no-check: illustrative fragment
 import { FakeClock, PreFlightInterceptor } from "stellar-agent-guard-sdk";
 
 test("cache entry expires", async () => {
@@ -551,7 +551,7 @@ exactly as before — the hook is pure observability and writes nothing itself
 (what you do with the events is up to you; for the SDK's own diagnostics see
 [Optional logging](#optional-logging-the-sdk-is-silent-unless-you-ask)):
 
-```ts
+```ts no-check: illustrative fragment
 const outcome = await invoke({
   server,
   source,
@@ -586,7 +586,7 @@ identical stage names.
 
 The LangChain adapter exposes the same capability:
 
-```ts
+```ts no-check: illustrative fragment
 const middleware = createLangChainGuardMiddleware({
   interceptor,
   toContractCall: (request) => (/* ... */),
@@ -614,7 +614,7 @@ config that has a decision point — `PreFlightInterceptor`, `CostPreChecker`,
 logger. Each call gets a complete message plus optional structured detail, so a
 logger that ignores the detail still reads well:
 
-```ts
+```ts no-check: illustrative fragment
 import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
 
 const interceptor = new PreFlightInterceptor({
@@ -646,7 +646,7 @@ When deploying fleets of hundreds or thousands of autonomous agents derived from
 
 `GuardTelemetryListener.watch()` defaults to `jitter: 'full'`, which uniformly randomizes each poll delay in `[intervalMs * (1 - j), intervalMs]` with `j = 0.2` (a 20% variance window). This breaks lockstep fleet synchronization while keeping polling responsive and bounded. Deterministic fixed interval cadence can be restored when needed by specifying `jitter: 'none'`.
 
-```ts
+```ts no-check: illustrative fragment
 // Follow event telemetry with full jitter (default)
 for await (const events of listener.watch({
   pollIntervalMs: 5_000,
@@ -668,7 +668,7 @@ instead of letting the stream race ahead with pages nobody has consumed — no
 unbounded memory growth, no unconsumed rate-limit burn. A consumer that stops
 pulling stops the fetches once the bound is reached.
 
-```ts
+```ts no-check: illustrative fragment
 for await (const events of listener.watch({
   maxBufferedPages: 0, // strict consumer-paced polling: one page fetched per pull
 })) {
@@ -693,7 +693,7 @@ poll, and during the delay between polls. The default delay's timer is cleared
 on abort, so a stopped listener leaves no open handle behind for a Node process
 or a test suite to hang on.
 
-```ts
+```ts no-check: illustrative fragment
 const controller = new AbortController();
 for await (const events of listener.watch({ signal: controller.signal })) {
   handle(events);
@@ -762,7 +762,7 @@ questions:
 | `checkBatch()` | `undetermined` verdicts for the call in flight and for every call that never started; the completed verdicts keep their own kind |
 | `invoke()` | `invoke`'s `error` **outcome** (`outcome.error instanceof RpcTimeoutError`) — the pipeline never reached broadcast |
 
-```ts
+```ts no-check: illustrative fragment
 const decision = await interceptor.check(call, { timeoutMs: 5_000 });
 if (decision.kind === "undetermined" && decision.error instanceof RpcTimeoutError) {
   // Fail closed: the guard could not be reached in time.
@@ -794,7 +794,7 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
 
 A refusal is visible to the agent (its tool result says so), but not to the human watching dashboards — telemetry is a separate opt-in. Every adapter takes an optional `onBlocked` callback that fires once per halt, so a refusal can be wired to a webhook, log, or alert channel:
 
-```ts
+```ts no-check: illustrative fragment
 const middleware = createLangChainGuardMiddleware({
   interceptor,
   toContractCall,
@@ -810,7 +810,7 @@ The payload is the same on every adapter (`{ adapter, kind, reason, call, explan
 
 A tool that performs several guarded contract calls can map the whole action with the additive `toContractCalls` mapper instead of `toContractCall`. The complete ordered batch is checked before the handler runs; if any call is blocked or undetermined, the action is refused and no handler side effect occurs (all-or-nothing). `onDecision` receives every per-call verdict in order, and a batch halt's `onBlocked` payload also carries `calls` and `verdicts`:
 
-```ts
+```ts no-check: illustrative fragment
 const middleware = createLangChainGuardMiddleware({
   interceptor,
   toContractCalls: (request) => [approveCall, swapCall],
@@ -827,7 +827,7 @@ const middleware = createLangChainGuardMiddleware({
 
 Rather than re-typing a policy literal, start from the SDK's frozen, deny-all baseline and add only what your agent needs:
 
-```ts
+```ts no-check: illustrative fragment
 import { DEFAULT_GUARD_POLICY, policyToScVal, validateGuardPolicy, type ReadonlyPolicyConfig } from "stellar-agent-guard-sdk";
 
 const policy: ReadonlyPolicyConfig = {
@@ -857,6 +857,7 @@ Unlike fail-fast validators, `validateGuardPolicy` returns **all** failures at o
 
 ```ts
 import {
+  unsafeAccountAddress,
   validateGuardPolicy,
   type PolicyConfig,
   type PolicyFailure,
@@ -868,7 +869,7 @@ const draftPolicy: PolicyConfig = {
   window_cap: 50_000n,
   assets: [],              // Empty assets vector is a no-op
   protocols: [],
-  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  recipients: [unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH")],
   allow_any_recipient: false,
   active_from: 1000n,
   active_until: 500n,      // Inverted active window (active_until <= active_from)
@@ -882,7 +883,7 @@ const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
 
 if (failures.length > 0) {
   for (const failure of failures) {
-    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+    console.error(`[${failure.rule}] at ${failure.path}: ${failure.message}`);
   }
   // Safe-exit before encode or broadcast
 } else {
@@ -927,6 +928,8 @@ wrongly typed fields with a path-bearing `PolicyDecodeError`.
 import {
   decodePolicy,
   policyToScVal,
+  unsafeAccountAddress,
+  unsafeContractAddress,
   type PolicyConfig,
 } from "stellar-agent-guard-sdk";
 
@@ -934,14 +937,14 @@ const policy: PolicyConfig = {
   per_tx_cap: 1_000n,
   window_secs: 60n,
   window_cap: 150n,
-  assets: ["CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"],
+  assets: [unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB")],
   protocols: [
     {
-      contract: "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      contract: unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"),
       fns: ["transfer"],
     },
   ],
-  recipients: ["GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"],
+  recipients: [unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH")],
   allow_any_recipient: false,
   active_from: 0n,
   active_until: 0n,
@@ -967,7 +970,7 @@ then returns the verdict, diagnostics, network-derived fees, and per-stage timin
 stops before final transaction assembly and cannot call `sendTransaction`, so its result
 has no transaction hash or submission object.
 
-```ts
+```ts no-check: illustrative fragment
 import { invoke } from "stellar-agent-guard-sdk";
 
 const debug = await invoke({
@@ -1034,7 +1037,7 @@ An agent firing dozens of tool calls at once used to open dozens of simultaneous
 - `maxConcurrentSimulations` (default **4**) caps simulations in flight; the rest queue first-in first-out, and the queue wait counts toward each check's `signal` / `timeoutMs`.
 - A 429 waits **once** (the server's `Retry-After` when sent, else `rateLimit.backoffMs`, default 500 ms, never more than `rateLimit.maxBackoffMs`, default 5 s) and retries once. If it is limited again the verdict is `undetermined` with `cause: "rate_limited"` and a `RateLimitedError`.
 
-```ts
+```ts no-check: illustrative fragment
 const interceptor = new PreFlightInterceptor({
   // …
   maxConcurrentSimulations: 2, // public RPC with a tight limit: lower it
@@ -1052,7 +1055,7 @@ deliberate exception: `InvalidInputError` (and `InvalidFeeCeilingError`) extend
 failures. `invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
 when `outcome.kind === "error"`.
 
-```ts
+```ts no-check: illustrative fragment
 import {
   BroadcastError,
   GuardError,
@@ -1094,7 +1097,7 @@ documented above. Non-dry-run callers keep their existing outcome shapes.
 
 The SDK signs and submits the guard's `heartbeat()` itself — the same custom-account authorization path `invoke()` uses — so a TypeScript agent needs no separate tool for its one routine action. This is the primary path; the contracts repo's `agent-tx` Rust binary remains a CLI alternative.
 
-```ts
+```ts no-check: illustrative fragment
 import { heartbeat, HeartbeatBlockedError } from "stellar-agent-guard-sdk";
 
 try {
@@ -1115,7 +1118,7 @@ try {
 
 An agent that stops heartbeating freezes. `startHeartbeat` schedules the `heartbeat()` calls and makes the failure modes visible instead of silent — an ad-hoc `setTimeout` loop drops a beat on an event-loop stall and turns an RPC blip into an unhandled rejection.
 
-```ts
+```ts no-check: illustrative fragment
 import { startHeartbeat } from "stellar-agent-guard-sdk";
 
 const hb = await startHeartbeat({
@@ -1146,7 +1149,7 @@ if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 
 A failed heartbeat used to wait for the next fixed interval, so an RPC outage that landed near the grace boundary could freeze the account even after connectivity returned. `retry` adds a bounded, jittered recovery:
 
-```ts
+```ts no-check: illustrative fragment
 const hb = await startHeartbeat({
   server,
   guard: GUARD_ID,
@@ -1343,7 +1346,7 @@ source of truth, and it is what a `maxFeeStroops` ceiling is compared against.
 money-adjacent output in a security tool is not acceptable) and with no trailing
 zeros:
 
-```ts
+```ts no-check: illustrative fragment
 import { startHeartbeat } from "stellar-agent-guard-sdk";
 
 const hb = await startHeartbeat({
@@ -1374,7 +1377,7 @@ if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 
 A failed heartbeat used to wait for the next fixed interval, so an RPC outage that landed near the grace boundary could freeze the account even after connectivity returned. `retry` adds a bounded, jittered recovery:
 
-```ts
+```ts no-check: illustrative fragment
 const hb = await startHeartbeat({
   server,
   guard: GUARD_ID,
@@ -1438,7 +1441,7 @@ one-shot form.
 
 A consumer that wants "the last N decisions, right now" — a dashboard panel, an agent status endpoint — can opt into a bounded in-memory window instead of maintaining its own store:
 
-```ts
+```ts no-check: illustrative fragment
 import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
 
 const listener = new GuardTelemetryListener({
@@ -1463,7 +1466,7 @@ What it returns is a **detached snapshot**: the array, the events in it, their d
 
 When a decoded verdict looks wrong, attach the **undecoded source event** to the SDK bug report. Decoding discards it by default — the raw payload carries XDR `ScVal`s and host-shaped objects, and retaining one per event is a memory decision — so it is opt-in:
 
-```ts
+```ts no-check: illustrative fragment
 // Committed feed: opt in on the listener.
 const listener = new GuardTelemetryListener({ server, guard: GUARD_ID, includeRaw: true });
 
@@ -1503,7 +1506,7 @@ explainReason("paused", undefined, { paused: "Agent paused by the operator." });
 
 `serializeEvent(event)` gives you one canonical JSON line per event, so a log pipeline gets a stable, diffable record with no logger dependency in the SDK:
 
-```ts
+```ts no-check: illustrative fragment
 import { serializeEvent } from "stellar-agent-guard-sdk";
 
 for await (const event of listener.watchAll({ diagnostics })) {

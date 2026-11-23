@@ -100,6 +100,15 @@ jobs:
       - name: type-level tests
         run: npm run test:types
 
+      # Docs TypeScript gate (issue #497): every fenced ts/typescript block in
+      # docs/ and the root Markdown is compiled in isolation against the public
+      # surface (`src/index.ts`), so a renamed option cannot leave a page
+      # teaching an API that no longer exists. No network, no build; illustrative
+      # fragments opt out visibly with `no-check: <reason>` or a `pseudocode`
+      # fence. Failures name the Markdown file and line.
+      - name: docs TypeScript snippets
+        run: npm run check:docs
+
       - name: lint
         run: npm run lint
 

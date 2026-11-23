@@ -4,7 +4,7 @@ The SDK provides plug-and-play middleware for AI agent orchestration frameworks.
 
 ## LangChain
 
-```ts
+```ts no-check: illustrative fragment
 import { createLangChainGuardMiddleware } from "stellar-agent-guard-sdk";
 
 const middleware = createLangChainGuardMiddleware({
@@ -23,7 +23,7 @@ When the interceptor returns an `undetermined` verdict, the LangChain middleware
 
 ## ElizaOS
 
-```ts
+```ts no-check: illustrative fragment
 import { createGuardValidator } from "stellar-agent-guard-sdk";
 
 const validate = createGuardValidator({
@@ -65,7 +65,7 @@ non-empty `contract` and `fn` and an array of `args`. Because the mapping failed
 before any call existed, the `onBlocked` payload for this halt has
 `kind: "undetermined"`, `reason: null` and no `call` field.
 
-```ts
+```ts no-check: illustrative fragment
 createLangChainGuardMiddleware({
   interceptor,
   toContractCall: (request) => {
@@ -92,7 +92,7 @@ thenable, so an `async` sink is safe:
 - an observer failure can never turn a halt into an executed action, nor a pass
   into a refusal.
 
-```ts
+```ts no-check: illustrative fragment
 createLangChainGuardMiddleware({
   interceptor,
   toContractCall,
@@ -110,7 +110,7 @@ Without `blockedHookLogger` the SDK stays silent, exactly as before issue #314.
 Every adapter forwards `signal` and `timeoutMs` to the interceptor's
 `check()`/`checkBatch()`, with no framework dependency:
 
-```ts
+```ts no-check: illustrative fragment
 const controller = new AbortController();
 const validate = createGuardValidator({
   interceptor,
@@ -137,7 +137,7 @@ the SDK owns: the tool's own `execute` function (`ai` ≥ 4.1 / 5.x document
 exactly this "wrap the tool function" pattern; tested against that structural
 `Tool` shape).
 
-```ts
+```ts no-check: illustrative fragment
 import { createVercelAIGuard } from "stellar-agent-guard-sdk";
 
 const guard = createVercelAIGuard({
