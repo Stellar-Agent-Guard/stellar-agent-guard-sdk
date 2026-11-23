@@ -1150,6 +1150,27 @@ function extractContractDataScVal(entry: unknown): xdr.ScVal | undefined {
   return undefined;
 }
 
+/** The contract-data key name (`Policy`, `Window`, ...) of one ledger entry. */
+function ledgerEntryKeyName(entry: unknown): string | null {
+  if (entry === null || typeof entry !== "object") return null;
+  const key = (entry as { key?: unknown }).key;
+  if (key === null || typeof key !== "object") return null;
+  const contractData =
+    typeof (key as { contractData?: unknown }).contractData === "function"
+      ? (key as { contractData: () => unknown }).contractData()
+      : (key as { contractData?: unknown }).contractData;
+  if (contractData === null || typeof contractData !== "object") return null;
+  const dataKey =
+    typeof (contractData as { key?: unknown }).key === "function"
+      ? (contractData as { key: () => unknown }).key()
+      : (contractData as { key?: unknown }).key;
+  if (dataKey === null || typeof dataKey !== "object") return null;
+  if ((dataKey as { type?: unknown }).type !== "scvVec") return null;
+  const values = (dataKey as unknown as { vec?: xdr.ScVal[] }).vec ?? [];
+  if (values.length !== 1 || values[0]?.type !== "scvSymbol") return null;
+  return String(scValToNative(values[0]));
+}
+
 /**
  * Read one of a contract's persistent storage entries from ledger state via RPC.
  */
@@ -1251,14 +1272,22 @@ export async function fetchGuardPolicyAndWindow(
   try {
     // Attempt to get both entries in one RPC call for ledger consistency
     const response = await server.getLedgerEntries(policyKey, windowKey);
-    const entries = (response.entries ?? []).filter(Boolean);
+    const entries = response.entries ?? [];
+
+    // Prefer the entry keys: a guard with no Policy entry still returns the
+    // Window entry, and reading it positionally would misreport it as policy.
+    const namedEntries = new Map<string, unknown>();
+    for (const entry of entries) {
+      const name = ledgerEntryKeyName(entry);
+      if (name === "Policy" || name === "Window") namedEntries.set(name, entry);
+    }
+    const keyed = namedEntries.size > 0;
+    const policyRawEntry: unknown = keyed ? namedEntries.get("Policy") : entries[0];
+    let windowRawEntry: unknown = keyed ? namedEntries.get("Window") : entries[1];
 
     // If a single-entry mock server only returned one item for a two-key query,
     // fetch the second entry so both Policy and Window are populated.
-    const policyRawEntry: unknown = entries[0];
-    let windowRawEntry: unknown = entries[1];
-
-    if (entries.length === 1 && (response.entries ?? []).length === 1) {
+    if (!keyed && entries.length === 1) {
       const secondResponse = await server.getLedgerEntries(windowKey);
       windowRawEntry = secondResponse.entries?.[0];
     }

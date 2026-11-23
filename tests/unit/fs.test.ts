@@ -19,7 +19,7 @@ import {
   unsafeContractAddress,
   type PolicyConfig,
 } from "../../src/index.ts";
-import { loadPolicyFromFile } from "../../src/fs.ts";
+import { FileHeartbeatStateStore, loadPolicyFromFile } from "../../src/fs.ts";
 
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
 const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
@@ -128,5 +128,21 @@ describe("loadPolicyFromFile (issue #105)", () => {
 
     assert.ok(!rootEntry.includes("node:fs"), "root entry must not import node:fs");
     assert.ok(!rootEntry.includes('"./fs.ts"'), "root entry must not re-export the ./fs subpath");
+  });
+});
+
+describe("FileHeartbeatStateStore (issue #462)", () => {
+  it("treats a missing checkpoint as a fresh start and round-trips saved state", async () => {
+    const file = join(scratch, "heartbeat-state.json");
+    const store = new FileHeartbeatStateStore(file);
+
+    assert.equal(await store.load(), null);
+    await store.save({ at: 1_700_000_000_000, ledger: 123 });
+    assert.deepEqual(await store.load(), { at: 1_700_000_000_000, ledger: 123 });
+  });
+
+  it("rejects a malformed checkpoint instead of trusting it", async () => {
+    const file = writeTemp("bad-heartbeat-state.json", JSON.stringify({ at: "yesterday" }));
+    await assert.rejects(new FileHeartbeatStateStore(file).load(), /valid state object/);
   });
 });

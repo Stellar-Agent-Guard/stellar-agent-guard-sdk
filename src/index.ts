@@ -124,6 +124,7 @@ export {
   decodePolicyJson,
   encodePolicyJson,
   policyFromJson,
+  policyHash,
   policyToJson,
 } from "./policy-json.ts";
 
@@ -360,13 +361,25 @@ export {
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
   buildUnfreezeCall,
+  previewSetPolicy,
   submitFreeze,
   submitRotateAgentKey,
   submitSetPolicy,
   submitUnfreeze,
 } from "./admin.ts";
 
-export type { AdminOpParams, RotateAgentKeyParams, SetPolicyParams } from "./admin.ts";
+export type {
+  AdminInvokeOutcome,
+  AdminOpParams,
+  AdminOperation,
+  AdminOutcomeMetadata,
+  PolicyPreview,
+  PolicyPreviewFailure,
+  PolicyPreviewFailureSource,
+  PreviewSetPolicyParams,
+  RotateAgentKeyParams,
+  SetPolicyParams,
+} from "./admin.ts";
 
 export {
   GUARD_WASM_HASH,
@@ -381,6 +394,7 @@ export {
   HeartbeatBlockedError,
   HeartbeatDryRunError,
   HeartbeatIntervalError,
+  InMemoryHeartbeatStateStore,
   heartbeat,
   isRetryableHeartbeatFailure,
   readGuardStatus,
@@ -388,10 +402,13 @@ export {
   submitHeartbeat,
   type HeartbeatBeat,
   type HeartbeatHandle,
+  type HeartbeatLateBeat,
   type HeartbeatOptions,
   type HeartbeatParams,
   type HeartbeatResult,
   type HeartbeatRetryOptions,
+  type HeartbeatState,
+  type HeartbeatStateStore,
   type HeartbeatStopOptions,
   type HeartbeatStopResult,
   type HeartbeatSubmission,

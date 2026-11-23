@@ -180,6 +180,13 @@ PolicyDecodeError: cannot decode policy JSON field policy.per_tx_cap: expected a
 `policyFromJson()` does not require canonical input: key order and a leading
 `+` or leading zeros in a decimal string are accepted.
 
+`policyHash(policy)` is the SHA-256 of those exact canonical bytes, rendered as
+lower-case hex. It is a content fingerprint for audit metadata (including
+`outcome.admin.policyHash` on `submitSetPolicy`) and for before/after change
+reports. It is **not** a signature, and it does not replace validation: two
+policies that differ only by list order have different hashes but can be
+equivalent under `policyDiff()`'s set semantics.
+
 ## Error paths
 
 Every decoding failure is a `PolicyDecodeError` (a `GuardError`) whose `path`

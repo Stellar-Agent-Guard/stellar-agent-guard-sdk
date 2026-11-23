@@ -13,10 +13,14 @@ import {
   HeartbeatBlockedError,
   HeartbeatDryRunError,
   HeartbeatIntervalError,
+  InMemoryHeartbeatStateStore,
   isRetryableHeartbeatFailure,
   startHeartbeat,
   type HeartbeatBeat,
+  type HeartbeatLateBeat,
   type HeartbeatOptions,
+  type HeartbeatState,
+  type HeartbeatStateStore,
 } from "../../src/heartbeat.ts";
 import { BroadcastError, SimulationError } from "../../src/errors.ts";
 import { RpcTimeoutError, type InvokeOutcome } from "../../src/invoke.ts";
@@ -1389,5 +1393,232 @@ describe("heartbeat() one-shot (issue #75)", () => {
     const failed = new SimulationError("rpc down", { stage: "simulate" });
     const errored = { kind: "error", error: failed } as unknown as InvokeOutcome;
     await assert.rejects(heartbeatWith(errored, agent, server), (e: unknown) => e === failed);
+  });
+});
+
+describe("startHeartbeat onLateBeat (issue #463)", () => {
+  it("does not fire for an on-time beat or jitter within maxSkewMs", async () => {
+    const clock = fakeClock();
+    const late: HeartbeatLateBeat[] = [];
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        maxSkewMs: 100,
+        onLateBeat: (beat) => late.push(beat),
+      }),
+    );
+
+    await clock.tick(); // t=0, due=0
+    clock.advanceTo(1050);
+    await clock.tick(); // t=1050, due=1000 → 50ms of tolerated jitter
+    assert.deepEqual(late, []);
+    assert.equal(handle.missedBeats, 0);
+    await handle.stop();
+  });
+
+  it("fires after a late beat with the slot deadline and live missedBeats", async () => {
+    const clock = fakeClock();
+    const late: HeartbeatLateBeat[] = [];
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        maxSkewMs: 100,
+        onLateBeat: (beat) => late.push(beat),
+      }),
+    );
+
+    await clock.tick(); // first beat on time
+    clock.advanceTo(5000);
+    await clock.tick(); // due at t=1000, fired at t=5000
+
+    assert.deepEqual(late, [
+      { at: 5000, lateMs: 4000, deadline: 1000, missedBeats: handle.missedBeats },
+    ]);
+    assert.equal(handle.missedBeats, 5);
+    await handle.stop();
+  });
+
+  it("fires when the late submission fails, without swallowing the error", async () => {
+    const clock = fakeClock();
+    const late: HeartbeatLateBeat[] = [];
+    const errors: unknown[] = [];
+    let submissions = 0;
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        maxSkewMs: 100,
+        onLateBeat: (beat) => late.push(beat),
+        onError: (error) => errors.push(error),
+        submit: async () => {
+          submissions += 1;
+          if (submissions === 2) throw new Error("rpc down");
+          return {};
+        },
+      }),
+    );
+
+    await clock.tick();
+    clock.advanceTo(5000);
+    await clock.tick();
+
+    assert.equal(late.length, 1);
+    assert.equal(errors.length, 1);
+    assert.equal(late[0]!.missedBeats, handle.missedBeats);
+    await handle.stop();
+  });
+
+  it("isolates a throwing onLateBeat callback", async () => {
+    const clock = fakeClock();
+    let submissions = 0;
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        maxSkewMs: 100,
+        onLateBeat: () => {
+          throw new Error("observer bug");
+        },
+        submit: async () => {
+          submissions += 1;
+          return {};
+        },
+      }),
+    );
+
+    await clock.tick();
+    clock.advanceTo(5000);
+    await clock.tick();
+    await clock.tick(); // the loop is still alive after the throwing callback
+
+    assert.equal(submissions, 3);
+    await handle.stop();
+  });
+});
+
+describe("startHeartbeat stateStore (issue #462)", () => {
+  it("restores the previous beat, reports restart lateness and saves only accepted beats", async () => {
+    const clock = fakeClock();
+    clock.advanceTo(905_000);
+    const restored: HeartbeatState = { at: 900_000, ledger: 42 };
+    const saved: HeartbeatState[] = [];
+    const store: HeartbeatStateStore = {
+      load: async () => restored,
+      save: async (state) => {
+        saved.push(state);
+      },
+    };
+    const late: HeartbeatLateBeat[] = [];
+    let submissions = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        stateStore: store,
+        onLateBeat: (beat) => late.push(beat),
+        submit: async () => {
+          submissions += 1;
+          return { ledger: 43 };
+        },
+      }),
+    );
+
+    assert.equal(handle.lastBeatAt, 900_000, "the handle reports the previous accepted beat");
+    assert.deepEqual(late, [{ at: 905_000, lateMs: 4_000, deadline: 901_000, missedBeats: 5 }]);
+    assert.equal(submissions, 0, "the restored cadence is anchored to the previous beat");
+
+    await clock.tick(); // t=906_000, one interval after the restored beat
+    assert.equal(submissions, 1);
+    assert.deepEqual(saved, [{ at: 906_000, ledger: 43 }]);
+    assert.equal(handle.lastBeatAt, 906_000);
+    await handle.stop();
+  });
+
+  it("never blocks a beat on a load or save failure and warns about both", async () => {
+    const clock = fakeClock();
+    const warnings: string[] = [];
+    let submissions = 0;
+    const store: HeartbeatStateStore = {
+      load: async () => {
+        throw new Error("read failed");
+      },
+      save: async () => {
+        throw new Error("write failed");
+      },
+    };
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        stateStore: store,
+        onWarning: (message) => warnings.push(message),
+        submit: async () => {
+          submissions += 1;
+          return {};
+        },
+      }),
+    );
+
+    await clock.tick();
+    await flush();
+    await flush();
+    assert.equal(submissions, 1);
+    assert.ok(warnings.some((message) => /load failed.*read failed/.test(message)));
+    assert.ok(warnings.some((message) => /save failed.*write failed/.test(message)));
+
+    await clock.tick();
+    assert.equal(submissions, 2);
+    await handle.stop();
+  });
+
+  it("persists only accepted outcomes, never a refusal or a dry run", async () => {
+    const clock = fakeClock();
+    const saved: HeartbeatState[] = [];
+    const store: HeartbeatStateStore = {
+      load: async () => null,
+      save: async (state) => {
+        saved.push(state);
+      },
+    };
+    const blocked: InvokeOutcome = {
+      kind: "blocked",
+      reason: "paused",
+      detail: "policy paused",
+      diagnosticEvents: [],
+    };
+    let attempts = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        now: clock.now,
+        wait: clock.wait,
+        stateStore: store,
+        submit: async () => {
+          attempts += 1;
+          return attempts === 1 ? { outcome: blocked } : {};
+        },
+      }),
+    );
+
+    await clock.tick();
+    assert.deepEqual(saved, []);
+    await clock.tick();
+    assert.deepEqual(saved, [{ at: 1000 }]);
+    await handle.stop();
+  });
+
+  it("provides a copy-on-read in-memory store", () => {
+    const store = new InMemoryHeartbeatStateStore();
+    assert.equal(store.load(), null);
+    store.save({ at: 10, ledger: 2 });
+    const loaded = store.load()!;
+    loaded.at = 999;
+    assert.deepEqual(store.load(), { at: 10, ledger: 2 });
+    store.clear();
+    assert.equal(store.load(), null);
   });
 });
