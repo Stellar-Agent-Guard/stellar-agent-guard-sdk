@@ -348,3 +348,35 @@ node scripts/check-doc-links.ts
 
 The offline checks above passed; they do not substitute for the live-testnet
 scenarios.
+
+## Addendum — 2026-11-23 (PR #519: admin previews and heartbeat checkpointing)
+
+This PR touches `src/policy.ts`, so the enforcement-path evidence file is
+included as required. The change is confined to `fetchGuardPolicyAndWindow()`:
+contract-data entries are matched by ledger key (`Policy` / `Window`) before
+decoding, with a positional fallback for mocks that do not expose keys. This
+lets `previewSetPolicy()` report `current: null` for a guard with no installed
+policy instead of misreading the `Window` entry as a policy.
+
+No authorization-entry construction, signing, enforced simulation, policy
+encoding/decoding, or decision classification was changed. `src/tx.ts`,
+`src/invoke.ts` and `src/preflight.ts` are untouched by this PR.
+
+**The live suite was not run for this change.** The contributor checkout has no
+`.env.phase2` (only `.env.phase2.example`), so `npm run test:integration` was not
+executed and no fresh live enforcement result is claimed. A maintainer with
+`.env.phase2` should run the live suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm test
+node --import tsx --test tests/unit/policy.test.ts tests/unit/admin.test.ts tests/unit/heartbeat.test.ts tests/unit/fs.test.ts tests/unit/policy-diff.test.ts
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.
