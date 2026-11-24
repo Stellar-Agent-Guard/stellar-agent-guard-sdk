@@ -131,3 +131,125 @@ The arithmetic is `cap − spent − amount`, clamped at zero, and reported as
 present, absent, or stale, and the decision is identical either way. Blocked
 and undetermined outcomes always report `null`: they carry no priced ledger to
 tie a snapshot to.
+
+## Worked fee breakdown (real testnet numbers)
+
+This example uses the committed Phase 2 capture
+[`tests/fixtures/rpc/simulate-success-status.json`](../../tests/fixtures/rpc/simulate-success-status.json),
+recorded on **2026-09-27T14:30:52Z** against Stellar testnet and the Phase 2
+guard `CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44`, at
+`latestLedger` `4899176`. The same run's scenario evidence is in
+[`tests/fixtures/integration-evidence.md`](../../tests/fixtures/integration-evidence.md)
+(`npm run test:integration`).
+
+The capture is a read-only `guard.status()` simulation, so its footprint is
+smaller than a fund-moving `transfer`; the decomposition below is identical for
+any call because it is driven entirely by the simulation's `minResourceFee`.
+
+### 1. Raw simulation values
+
+From the captured `simulateTransaction` response:
+
+| Field | Value |
+| --- | --- |
+| `transactionData.resources.instructions` | `6,786,445` |
+| `transactionData.resources.diskReadBytes` | `40,068` |
+| `transactionData.resources.writeBytes` | `40,068` |
+| `transactionData.resources.footprint.readOnly` | 3 keys |
+| `transactionData.resources.footprint.readWrite` | 2 keys |
+| `transactionData.resourceFee` / `minResourceFee` | `115,480,421` stroops |
+| `latestLedger` | `4899176` |
+
+### 2. Formula
+
+`CostPreChecker` uses the simulation's price directly and adds the SDK's
+declared inclusion fee for a one-operation envelope (`INCLUSION_FEE` in
+`src/tx.ts`):
+
+```text
+resourceFeeStroops     = 115_480_421n   // BigInt(simulation.minResourceFee)
+inclusionFeeStroops    = 100n           // INCLUSION_FEE (one operation)
+totalFeeStroops        = 115_480_521n   // resourceFeeStroops + inclusionFeeStroops
+
+formatFee(totalFeeStroops) = "11.5480521" XLM
+```
+
+The quote is exact integer stroops; there is no floating-point step. This is the
+fee the envelope will declare, not a locally modelled estimate.
+
+### 3. The same call under a loose and a tight ceiling
+
+Loose ceiling (`maxFeeStroops: 200_000_000n`) — priced and allowed:
+
+```ts
+{
+  kind: "within_budget",
+  allowed: true,
+  resourceFeeStroops: 115_480_421n,
+  inclusionFeeStroops: 100n,
+  totalFeeStroops: 115_480_521n,
+  footprintKeys: 5,
+  feeCeilingStroops: 200_000_000n,
+  policyContext: null,
+  provenance: { ledger: 4899176 },
+  breakdown: {
+    instructions: 6_786_445,
+    diskReadBytes: 40_068,
+    writeBytes: 40_068,
+    readOnlyEntries: 3,
+    readWriteEntries: 2,
+    storageEntries: 5,
+  },
+}
+```
+
+Tight ceiling (`maxFeeStroops: 5_000_000n`) — same quote, refused on price:
+
+```ts
+{
+  kind: "over_budget",
+  allowed: false,
+  resourceFeeStroops: 115_480_421n,
+  inclusionFeeStroops: 100n,
+  totalFeeStroops: 115_480_521n,
+  footprintKeys: 5,
+  feeCeilingStroops: 5_000_000n,
+  policyContext: null,
+  provenance: { ledger: 4899176 },
+  breakdown: { /* same breakdown as above */ },
+}
+```
+
+`over_budget` is not a guard refusal: the guard may still allow the call. It
+means only that the quoted **total** exceeds the caller's ceiling, and nothing
+was submitted. A guard `blocked` and an `undetermined` enforcement run both
+report `resourceFeeStroops: 0n`, `inclusionFeeStroops: 0n`,
+`totalFeeStroops: 0n` and `provenance: null` — a pre-flight refusal happens
+before broadcast, so nothing is charged and there is no priced ledger.
+
+### 4. What is refundable
+
+| Component | Refundable? | Why |
+| --- | --- | --- |
+| `inclusionFeeStroops` (100) | **No** | The inclusion fee buys ledger space and is charged even when the transaction fails. |
+| Resource fee — instructions | **No** | CPU metering is non-refundable. |
+| Resource fee — ledger I/O and entries | **No** | Read/write bytes and entry accesses are non-refundable. |
+| Resource fee — transaction size | **No** | Bandwidth/history size is non-refundable. |
+| Resource fee — events and return value | **Yes** | Charged up front from the declared size, refunded for what was not produced. |
+| Resource fee — ledger rent / TTL bumps | **Yes** | Charged from the declared rent, refunded to actual consumption. |
+
+The SDK reports the resource fee as one aggregate (`resourceFeeStroops`); it does
+not split the refundable and non-refundable parts inside it, and this quote is
+the maximum the transaction may be charged. Any refund is settled by the network
+after execution. The pre-flight check itself is free: it is a simulation, never
+a broadcast, so a `blocked` or `over_budget` outcome spends no fee at all.
+
+### 5. This is a snapshot
+
+These numbers are a record, not a constant. Stellar's fee rates, the ledger's
+storage state and the transaction's resource declaration all move, so a re-run
+of the same call later will quote a different `minResourceFee` (and the
+refundable portion may settle to a different charged amount). Treat the example
+as an illustration of the decomposition; measure your own ceiling from a fresh
+`check()`/`checkWithCost()` and refresh the capture with
+`npm run capture:rpc-fixtures` rather than copying these figures into policy.
