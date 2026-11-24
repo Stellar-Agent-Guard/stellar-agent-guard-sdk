@@ -35,8 +35,8 @@
  * it was never allowed.
  */
 import { resolveLogger, type GuardLogger, type GuardLoggerInput } from "./logger.ts";
-import { SorobanDataBuilder, scValToNative, type xdr } from "@stellar/stellar-sdk";
-import { InvalidFeeCeilingError } from "./errors.ts";
+import { SorobanDataBuilder, scValToNative, type rpc, type xdr } from "@stellar/stellar-sdk";
+import { InvalidFeeCeilingError, InvalidInputError } from "./errors.ts";
 import { INCLUSION_FEE } from "./tx.ts";
 import type { PreFlightDecision, PreFlightInterceptor } from "./preflight.ts";
 import type { ContractCall } from "./tx.ts";
@@ -106,6 +106,120 @@ export interface WindowSpendSnapshot {
  * protocol — not a display choice.
  */
 export const STROOPS_PER_XLM = 10_000_000n;
+
+/**
+ * Where the **inclusion fee** part of a quote comes from.
+ *
+ * - `"fixed"` — the SDK's declared floor for a one-operation envelope
+ *   (`INCLUSION_FEE` in `tx.ts`). Offline and deterministic; the default.
+ * - `"rpc"` — the network's recent Soroban inclusion-fee distribution from
+ *   `getFeeStats`, read once per priced check at the configured percentile.
+ *   This is a prediction of the next ledger's fee market, not a guarantee.
+ */
+export type FeeSource = "fixed" | "rpc";
+
+/** Soroban inclusion-fee percentile accepted in `"rpc"` fee mode. */
+export type FeePercentile = "p50" | "p90" | "p99";
+
+/** The percentiles `CostPreChecker` accepts, in a stable order. */
+export const FEE_PERCENTILES: readonly FeePercentile[] = ["p50", "p90", "p99"];
+
+/**
+ * Structural view of the RPC `getFeeStats` response the pricing path reads.
+ *
+ * Deliberately minimal: only the Soroban inclusion-fee distribution and the
+ * ledger it was observed at are used. Values are accepted as decimal strings,
+ * safe integers or `bigint`s and validated before they reach the quote, so a
+ * malformed response falls back to the fixed fee instead of pricing nonsense.
+ *
+ * Passing a `feeStats` provider is also the offline test seam: a test injects
+ * fake stats without an RPC server.
+ */
+export interface FeeStatsResponse {
+  sorobanInclusionFee?: Record<string, unknown> | undefined;
+  latestLedger?: unknown;
+}
+
+/** Injectable `getFeeStats` source used when `feeSource` is `"rpc"`. */
+export type FeeStatsProvider = () => Promise<FeeStatsResponse>;
+
+/**
+ * Structured notice that a quote consumed at least `warnAtRatio` of its ceiling
+ * (issue #447). A warning is informational: it never changes `kind` and never
+ * turns `within_budget` into `over_budget`.
+ */
+export interface HeadroomWarning {
+  /** Discriminator, so a consumer can branch on the value's shape. */
+  kind: "headroom_warning";
+  /** The configured ratio that was reached, e.g. `0.9`. */
+  threshold: number;
+  /**
+   * `totalFeeStroops / feeCeilingStroops`, rounded to four decimal places for
+   * display. The exact values are carried in the stroop fields below; this is
+   * a convenience for logs and operator UIs, never an authorization input.
+   */
+  usedRatio: number;
+  /** The quoted total this warning was raised for, in stroops. */
+  totalFeeStroops: bigint;
+  /** The ceiling the quote was judged against, in stroops. */
+  feeCeilingStroops: bigint;
+  /** Remaining room under the ceiling, in stroops (never negative). */
+  surplusStroops: bigint;
+}
+
+/**
+ * Validate `warnAtRatio` without accepting a ratio that cannot mean "headroom".
+ *
+ * The useful range is `(0, 1]`: `0` would warn on every quote and a ratio above
+ * `1` can never be reached before the `over_budget` breach it is meant to
+ * pre-empt. `NaN` and infinities are rejected for the same reason.
+ */
+function validateWarnAtRatio(value: unknown): { ratio: number; numerator: bigint; scale: bigint } {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value > 1) {
+    throw new InvalidInputError(
+      "warnAtRatio",
+      "ratio_in_unit_interval",
+      `expected a number in (0, 1], received ${String(value)}`,
+    );
+  }
+  return { ratio: value, ...ratioToFraction(value) };
+}
+
+/**
+ * Convert a validated ratio to an exact fraction, so the comparison is bigint
+ * arithmetic and never a floating-point `>=` on money-adjacent numbers.
+ *
+ * `Number.prototype.toString()` is the shortest round-tripping decimal, so
+ * `0.9` becomes `9/10` and `1e-7` becomes `1/10^7` without any rounding step.
+ */
+function ratioToFraction(ratio: number): { numerator: bigint; scale: bigint } {
+  const [mantissa = "", exponentPart] = ratio.toString().split("e");
+  const exponent = exponentPart === undefined ? 0 : Number(exponentPart);
+  const [whole = "0", fraction = ""] = mantissa.split(".");
+  const digits = `${whole}${fraction}`;
+  const scaleExponent = fraction.length - exponent;
+  let numerator = BigInt(digits === "" ? "0" : digits);
+  let scale = 1n;
+  if (scaleExponent > 0) scale = 10n ** BigInt(scaleExponent);
+  else if (scaleExponent < 0) numerator *= 10n ** BigInt(-scaleExponent);
+  return { numerator, scale };
+}
+
+/** Read a non-negative ledger sequence from an RPC response, or `undefined`. */
+function feeStatsLedgerOf(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+/** One inclusion-fee decision for a single priced check. */
+interface ResolvedFeePricing {
+  inclusionFeeStroops: bigint;
+  feeSource: FeeSource;
+  percentile?: FeePercentile;
+  feeStatsLedger?: number;
+  fallbackReason?: string;
+  /** True when `"rpc"` mode was configured, even if it fell back. */
+  attemptedRpc: boolean;
+}
 /**
  * Validate a fee ceiling without collapsing "omitted" into "zero".
  *
@@ -383,6 +497,49 @@ export interface CostPreCheckConfig {
    * safe integer; invalid values throw a `TypeError` at construction.
    */
   windowSnapshotMaxAgeLedgers?: number | undefined;
+  /**
+   * Where the inclusion fee comes from. `"fixed"` (the default) uses the SDK's
+   * declared one-operation fee and needs no network call. `"rpc"` reads
+   * `getFeeStats` once per **priced** check and quotes the selected percentile
+   * (see `percentile`). A guard refusal or an unpriced run makes no fee-stats
+   * call, because there is no quote to price.
+   *
+   * In `"rpc"` mode a failed or malformed fee-stats response falls back to the
+   * fixed fee; the fallback is reported through `provenance.fallbackReason`, so
+   * it is visible rather than silent.
+   *
+   * Default: `"fixed"`.
+   */
+  feeSource?: FeeSource | undefined;
+  /**
+   * Soroban inclusion-fee percentile quoted in `"rpc"` mode: `"p50"`,
+   * `"p90"` or `"p99"`. Validated at construction even when `feeSource` is
+   * `"fixed"`, so a typo fails immediately. Default: `"p50"`.
+   */
+  percentile?: FeePercentile | undefined;
+  /**
+   * RPC server used to read fee stats in `"rpc"` mode. Supply this or
+   * `feeStats`; neither is needed in `"fixed"` mode.
+   */
+  server?: rpc.Server | undefined;
+  /**
+   * Injectable fee-stats provider for `"rpc"` mode. Wins over `server` when
+   * both are supplied, and is the offline test seam for injecting fake stats.
+   */
+  feeStats?: FeeStatsProvider | undefined;
+  /**
+   * Opt-in headroom warning (issue #447). When the quoted total reaches this
+   * fraction of the ceiling — `total / ceiling >= warnAtRatio` — the decision
+   * carries a structured `headroomWarning`. Must be in `(0, 1]`; invalid values
+   * throw `InvalidInputError` at construction.
+   *
+   * A warning never changes the decision `kind` and never turns an admissible
+   * price into `over_budget`: the ceiling still decides. The boundary is
+   * inclusive — a quote at exactly the ratio warns.
+   *
+   * Default: off (no warning).
+   */
+  warnAtRatio?: number | undefined;
 }
 
 /** The two fee components, kept separate so they are never conflated. */
@@ -405,12 +562,32 @@ export interface FeeBreakdown {
  */
 export interface CostProvenance {
   /**
-   * Ledger sequence the pricing simulation observed.
+   * Ledger sequence the quote describes.
    *
-   * Taken from that same simulation response (`latestLedger`), never from a
-   * second RPC read that could race ahead of the state that was actually priced.
+   * Normally taken from the pricing simulation's own `latestLedger`, never from
+   * a second RPC read that could race ahead of the state that was actually
+   * priced. In `"rpc"` fee mode it falls back to the `getFeeStats` ledger when
+   * the simulation did not expose one (`ledgerSource: "fee_stats"`), and is
+   * `null` when neither source established a usable sequence.
    */
-  ledger: number;
+  ledger: number | null;
+  /** Which observation supplied `ledger`; `"simulation"` when omitted. */
+  ledgerSource?: "simulation" | "fee_stats" | undefined;
+  /**
+   * Present in `"rpc"` fee mode: whether the inclusion fee was quoted from fee
+   * stats or fell back to the fixed fee.
+   */
+  feeSource?: FeeSource | undefined;
+  /** The percentile requested in `"rpc"` mode. */
+  percentile?: FeePercentile | undefined;
+  /** Ledger the fee-stats response was observed at, when it reported one. */
+  feeStatsLedger?: number | undefined;
+  /**
+   * Why the configured `"rpc"` fee source fell back to the fixed fee. An
+   * explicit, non-empty reason means the quote is the fixed floor, not a fee
+   * market observation.
+   */
+  fallbackReason?: string | undefined;
 }
 
 export type CostDecision =
@@ -421,6 +598,18 @@ export type CostDecision =
       footprintKeys: number;
       /** The ceiling this was judged against, or `null` when none was given. */
       feeCeilingStroops: bigint | null;
+      /**
+       * Room left under the ceiling in stroops: `ceiling - total`, never
+       * negative. `null` when no ceiling was configured — an absent ceiling is
+       * not a zero surplus, just as it is not a zero ceiling (issue #446).
+       */
+      surplusStroops: bigint | null;
+      /**
+       * Opt-in structured warning that this quote reached `warnAtRatio` of the
+       * ceiling (issue #447); `null` when warnings are off or the ratio was not
+       * reached. A non-null warning is still `within_budget`.
+       */
+      headroomWarning: HeadroomWarning | null;
       /** Additive policy-relative context when a policy source is configured; null otherwise. */
       policyContext: PolicyContext | null;
       /** Ledger snapshot this quote describes, or `null` when it was unavailable. */
@@ -433,6 +622,14 @@ export type CostDecision =
       allowed: false;
       footprintKeys: number;
       feeCeilingStroops: bigint;
+      /**
+       * Always `0n` here: the ceiling was exceeded, and a surplus is clamped at
+       * zero rather than reported as a negative number. The breach itself is
+       * reported by `kind: "over_budget"` (issue #446).
+       */
+      surplusStroops: 0n;
+      /** A breach is not a warning: the failure is already the decision's kind. */
+      headroomWarning: null;
       policyContext: PolicyContext | null;
       /** Ledger snapshot this quote describes, or `null` when it was unavailable. */
       provenance: CostProvenance | null;
@@ -449,6 +646,10 @@ export type CostDecision =
       resourceFeeStroops: bigint;
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
+      /** A refusal is not priced against a ceiling, so there is no surplus. */
+      surplusStroops: null;
+      /** Refusals are never headroom warnings. */
+      headroomWarning: null;
       policyContext: PolicyContext | null;
       /** A refusal is not simulation-priced, so there is no ledger provenance. */
       provenance: CostProvenance | null;
@@ -461,6 +662,10 @@ export type CostDecision =
       resourceFeeStroops: bigint;
       inclusionFeeStroops: bigint;
       totalFeeStroops: bigint;
+      /** An unpriced run has no ceiling judgement and therefore no surplus. */
+      surplusStroops: null;
+      /** An unpriced run is never a headroom warning. */
+      headroomWarning: null;
       policyContext: PolicyContext | null;
       /** No usable simulation means no ledger provenance. */
       provenance: CostProvenance | null;
@@ -529,13 +734,17 @@ export interface CostWithDecision {
 /**
  * Split a simulation's resource fee into the two components a caller is charged.
  *
- * Pure: no network, no configuration. The inclusion fee is the SDK's own
- * declared floor for a single-operation transaction (`INCLUSION_FEE` in `tx.ts`),
- * which is the same value the built envelope uses, so this cannot drift from what
- * is actually submitted.
+ * Pure: no network, no configuration. By default the inclusion fee is the SDK's
+ * own declared floor for a single-operation transaction (`INCLUSION_FEE` in
+ * `tx.ts`), which is the same value the built envelope uses, so this cannot
+ * drift from what is actually submitted. An explicit second argument overrides
+ * it for `feeSource: "rpc"` quotes, where the caller asked for a fee-market
+ * percentile instead of the floor.
  */
-export function feeBreakdown(resourceFeeStroops: bigint): FeeBreakdown {
-  const inclusionFeeStroops = BigInt(INCLUSION_FEE);
+export function feeBreakdown(
+  resourceFeeStroops: bigint,
+  inclusionFeeStroops: bigint = BigInt(INCLUSION_FEE),
+): FeeBreakdown {
   return {
     resourceFeeStroops,
     inclusionFeeStroops,
@@ -568,20 +777,29 @@ export function describeCostDecision(
         resourceFeeStroops?: bigint | undefined;
         inclusionFeeStroops?: bigint | undefined;
         feeCeilingStroops?: bigint | null | undefined;
+        surplusStroops?: bigint | null | undefined;
+        headroomWarning?: HeadroomWarning | null | undefined;
         reason?: string | undefined;
         policyContext?: PolicyContext | null | undefined;
       },
 ): string {
+  const surplusText =
+    decision.surplusStroops === null || decision.surplusStroops === undefined
+      ? "surplus unknown"
+      : `surplus ${decision.surplusStroops} stroops`;
   switch (decision.kind) {
     case "within_budget": {
       const ceiling =
         decision.feeCeilingStroops === null || decision.feeCeilingStroops === undefined
           ? "no ceiling"
           : `ceiling ${decision.feeCeilingStroops}`;
-      return `within budget: ${decision.totalFeeStroops} stroops (${decision.resourceFeeStroops ?? 0n} resource + ${decision.inclusionFeeStroops ?? 0n} inclusion), ${ceiling}`;
+      const warning = decision.headroomWarning
+        ? `, HEADROOM WARNING at ${decision.headroomWarning.usedRatio} of ceiling (threshold ${decision.headroomWarning.threshold})`
+        : "";
+      return `within budget: ${decision.totalFeeStroops} stroops (${decision.resourceFeeStroops ?? 0n} resource + ${decision.inclusionFeeStroops ?? 0n} inclusion), ${ceiling}, ${surplusText}${warning}`;
     }
     case "over_budget":
-      return `over budget: ${decision.totalFeeStroops} stroops exceeds ceiling ${decision.feeCeilingStroops}`;
+      return `over budget: ${decision.totalFeeStroops} stroops exceeds ceiling ${decision.feeCeilingStroops}, ${surplusText}`;
     case "blocked":
       return `blocked before broadcast (${decision.reason ?? "unknown"}): 0 stroops charged`;
     case "undetermined":
@@ -686,7 +904,7 @@ function estimateWindowRemaining(
   if (snapshot === null) return null;
   if (decision.kind !== "admissible") return null;
   const checkLedger = decision.provenance?.ledger;
-  if (checkLedger === undefined) return null;
+  if (checkLedger === undefined || checkLedger === null) return null;
   // The tie: the snapshot must describe the ledger context of this policy
   // check. A snapshot from the future is an upstream bookkeeping error; one
   // that is too old may predate spend this check accounted for.
@@ -791,6 +1009,11 @@ export class CostPreChecker {
   private readonly windowSnapshot: WindowSpendSnapshot | null;
   /** How far a snapshot may predate the check's ledger and still be used. */
   private readonly snapshotMaxAgeLedgers: number;
+  private readonly feeSource: FeeSource;
+  private readonly percentile: FeePercentile;
+  private readonly feeStatsProvider: FeeStatsProvider | undefined;
+  /** `null` when headroom warnings are off. */
+  private readonly warnAtRatio: { ratio: number; numerator: bigint; scale: bigint } | null;
 
   constructor(config: CostPreCheckConfig) {
     this.config = config;
@@ -806,6 +1029,41 @@ export class CostPreChecker {
       config.windowSnapshotMaxAgeLedgers === undefined
         ? 0
         : validateSnapshotMaxAge(config.windowSnapshotMaxAgeLedgers);
+
+    // Fee pricing is validated at construction too: an unusable percentile or a
+    // missing fee-stats source must fail here, not after a live simulation has
+    // already been spent on a quote that could never be honest.
+    this.feeSource = config.feeSource ?? "fixed";
+    if (this.feeSource !== "fixed" && this.feeSource !== "rpc") {
+      throw new InvalidInputError(
+        "feeSource",
+        "fixed_or_rpc",
+        `expected "fixed" or "rpc", received ${String(this.feeSource)}`,
+      );
+    }
+    this.percentile = config.percentile ?? "p50";
+    if (!FEE_PERCENTILES.includes(this.percentile)) {
+      throw new InvalidInputError(
+        "percentile",
+        "supported_percentile",
+        `expected one of ${FEE_PERCENTILES.join(", ")}, received ${String(this.percentile)}`,
+      );
+    }
+    const server = config.server;
+    this.feeStatsProvider =
+      config.feeStats ??
+      (server === undefined
+        ? undefined
+        : () => server.getFeeStats() as unknown as Promise<FeeStatsResponse>);
+    if (this.feeSource === "rpc" && this.feeStatsProvider === undefined) {
+      throw new InvalidInputError(
+        "feeSource",
+        "rpc_requires_fee_stats_source",
+        'feeSource "rpc" requires `server` or `feeStats` so fee stats can be read',
+      );
+    }
+    this.warnAtRatio =
+      config.warnAtRatio === undefined ? null : validateWarnAtRatio(config.warnAtRatio);
     this.logger = resolveLogger(config.logger);
   }
 
@@ -866,7 +1124,16 @@ export class CostPreChecker {
       windowSnapshot,
       this.snapshotMaxAgeLedgers,
     );
-    const cost = this.costOf(decision, policyContext, ceiling);
+    // An unpriced verdict has no quote to price, so it makes no fee-stats RPC.
+    const pricing =
+      decision.kind === "admissible"
+        ? await this.resolveFeePricing()
+        : {
+            inclusionFeeStroops: BigInt(INCLUSION_FEE),
+            feeSource: "fixed" as const,
+            attemptedRpc: false,
+          };
+    const cost = this.costOf(decision, policyContext, ceiling, pricing);
     // The one place a cost decision is produced, so the one place it is logged:
     // `check()` and both one-shot helpers funnel through here, and a second log
     // site would mean a caller could see the same decision twice.
@@ -874,6 +1141,12 @@ export class CostPreChecker {
       this.logger.warn(`call exceeds the fee ceiling: ${describeCostDecision(cost)}`, {
         totalFeeStroops: cost.totalFeeStroops.toString(),
         feeCeilingStroops: cost.feeCeilingStroops.toString(),
+      });
+    } else if (cost.kind === "within_budget" && cost.headroomWarning !== null) {
+      this.logger.warn(`call is close to the fee ceiling: ${describeCostDecision(cost)}`, {
+        totalFeeStroops: cost.totalFeeStroops.toString(),
+        feeCeilingStroops: cost.feeCeilingStroops?.toString() ?? "none",
+        surplusStroops: cost.surplusStroops?.toString() ?? "unknown",
       });
     } else if (cost.kind === "undetermined") {
       this.logger.warn(`call could not be priced: ${cost.detail}`);
@@ -883,16 +1156,123 @@ export class CostPreChecker {
     return { decision, cost };
   }
 
+  /**
+   * Resolve the inclusion fee for one priced check (issue #445).
+   *
+   * `"fixed"` is pure and offline. `"rpc"` reads fee stats exactly once and
+   * quotes the configured Soroban percentile; any failure — transport, malformed
+   * distribution, unusable value — falls back to the fixed fee with an explicit
+   * `fallbackReason`, never a silent substitution and never an exception that
+   * would turn a priced call into a crash.
+   */
+  private async resolveFeePricing(): Promise<ResolvedFeePricing> {
+    const provider = this.feeStatsProvider;
+    if (this.feeSource !== "rpc" || provider === undefined) {
+      return {
+        inclusionFeeStroops: BigInt(INCLUSION_FEE),
+        feeSource: "fixed",
+        attemptedRpc: false,
+      };
+    }
+    const percentile = this.percentile;
+    try {
+      const stats = await provider();
+      const raw = stats?.sorobanInclusionFee?.[percentile];
+      let inclusionFeeStroops: bigint;
+      if (typeof raw === "bigint" && raw >= 0n) inclusionFeeStroops = raw;
+      else if (typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 0)
+        inclusionFeeStroops = BigInt(raw);
+      else if (typeof raw === "string" && /^\d+$/.test(raw)) inclusionFeeStroops = BigInt(raw);
+      else
+        throw new Error(
+          `sorobanInclusionFee.${percentile} is not a non-negative integer (${JSON.stringify(raw)})`,
+        );
+
+      const feeStatsLedger = feeStatsLedgerOf(stats.latestLedger);
+      return {
+        inclusionFeeStroops,
+        feeSource: "rpc",
+        percentile,
+        attemptedRpc: true,
+        ...(feeStatsLedger !== undefined ? { feeStatsLedger } : {}),
+      };
+    } catch (error) {
+      return {
+        inclusionFeeStroops: BigInt(INCLUSION_FEE),
+        feeSource: "fixed",
+        percentile,
+        attemptedRpc: true,
+        fallbackReason: `fee stats unavailable: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+  }
+
+  /**
+   * Decide whether the quote reached `warnAtRatio` of its ceiling.
+   *
+   * The comparison is `total * scale >= ceiling * numerator` in `bigint`, so the
+   * boundary at exactly the ratio is inclusive and never depends on binary
+   * floating-point rounding. A zero ceiling cannot express a ratio and is always
+   * `over_budget` for a non-zero quote anyway.
+   */
+  private headroomWarningFor(
+    totalFeeStroops: bigint,
+    ceilingStroops: bigint,
+    surplusStroops: bigint,
+  ): HeadroomWarning | null {
+    const warnAtRatio = this.warnAtRatio;
+    if (warnAtRatio === null || ceilingStroops <= 0n) return null;
+    if (totalFeeStroops * warnAtRatio.scale < ceilingStroops * warnAtRatio.numerator) return null;
+    return {
+      kind: "headroom_warning",
+      threshold: warnAtRatio.ratio,
+      usedRatio: Number((totalFeeStroops * 10_000n) / ceilingStroops) / 10_000,
+      totalFeeStroops,
+      feeCeilingStroops: ceilingStroops,
+      surplusStroops,
+    };
+  }
+
+  /**
+   * Assemble the decision's provenance from the verdict and the fee source.
+   *
+   * In `"rpc"` fee mode the source and the fee-stats ledger are recorded even
+   * when the source fell back, so a fallback is never silent. Without `"rpc"`
+   * mode the provenance is exactly the simulation's, unchanged from before this
+   * option existed.
+   */
+  private provenanceFor(
+    decision: PreFlightDecision,
+    pricing: ResolvedFeePricing,
+  ): CostProvenance | null {
+    const simulated = decision.kind === "admissible" ? decision.provenance : undefined;
+    if (!pricing.attemptedRpc) return simulated ?? null;
+    const feeStatsLedger = pricing.feeStatsLedger;
+    const ledger = simulated?.ledger ?? feeStatsLedger ?? null;
+    return {
+      ledger,
+      feeSource: pricing.feeSource,
+      ...(simulated === undefined && feeStatsLedger !== undefined
+        ? { ledgerSource: "fee_stats" as const }
+        : {}),
+      ...(pricing.percentile !== undefined ? { percentile: pricing.percentile } : {}),
+      ...(feeStatsLedger !== undefined ? { feeStatsLedger } : {}),
+      ...(pricing.fallbackReason !== undefined ? { fallbackReason: pricing.fallbackReason } : {}),
+    };
+  }
+
   /** The pure cost view of an already-obtained verdict. No network, no state. */
   private costOf(
     decision: PreFlightDecision,
     policyContext: PolicyContext | null,
     ceiling: bigint | null,
+    pricing: ResolvedFeePricing,
   ): CostDecision {
-    // Provenance travels with the verdict from the same simulation. A block or
-    // an undetermined run has no priced snapshot, so it is explicitly null
-    // rather than an invented ledger marker.
-    const provenance = decision.kind === "admissible" ? (decision.provenance ?? null) : null;
+    // Provenance travels with the verdict from the same simulation, plus the fee
+    // source in `"rpc"` mode. A block or an undetermined run has no priced
+    // snapshot, so it is explicitly null rather than an invented ledger marker.
+    const provenance =
+      decision.kind === "admissible" ? this.provenanceFor(decision, pricing) : null;
     if (decision.kind === "blocked") {
       return {
         kind: "blocked",
@@ -903,6 +1283,8 @@ export class CostPreChecker {
         resourceFeeStroops: 0n,
         inclusionFeeStroops: 0n,
         totalFeeStroops: 0n,
+        surplusStroops: null,
+        headroomWarning: null,
         policyContext,
         provenance,
       };
@@ -915,12 +1297,14 @@ export class CostPreChecker {
         resourceFeeStroops: 0n,
         inclusionFeeStroops: 0n,
         totalFeeStroops: 0n,
+        surplusStroops: null,
+        headroomWarning: null,
         policyContext,
         provenance,
       };
     }
 
-    const fees = feeBreakdown(decision.estimatedResourceFee);
+    const fees = feeBreakdown(decision.estimatedResourceFee, pricing.inclusionFeeStroops);
     if (exceedsCeiling(fees.totalFeeStroops, ceiling)) {
       return {
         kind: "over_budget",
@@ -928,17 +1312,25 @@ export class CostPreChecker {
         ...fees,
         footprintKeys: decision.footprintKeys,
         feeCeilingStroops: ceiling as bigint,
+        surplusStroops: 0n,
+        headroomWarning: null,
         policyContext,
         provenance,
         ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),
       };
     }
+    const surplusStroops = ceiling === null ? null : ceiling - fees.totalFeeStroops;
     return {
       kind: "within_budget",
       allowed: true,
       ...fees,
       footprintKeys: decision.footprintKeys,
       feeCeilingStroops: ceiling,
+      surplusStroops,
+      headroomWarning:
+        surplusStroops === null
+          ? null
+          : this.headroomWarningFor(fees.totalFeeStroops, ceiling as bigint, surplusStroops),
       policyContext,
       provenance,
       ...(decision.resourceBreakdown ? { breakdown: decision.resourceBreakdown } : {}),

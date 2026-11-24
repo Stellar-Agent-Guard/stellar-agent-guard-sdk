@@ -18,6 +18,7 @@
   * [Invoke Pipeline](api/invoke-pipeline.md)
   * [Policy JSON](api/policy-json.md)
   * [Policy Schema Validation](api/policy-schema.md)
+* [Policy Cookbook](policy-cookbook.md)
 * [Running an Agent 24/7](agent-runtime.md)
 * [Production Readiness Checklist](production-readiness.md)
 * [Architecture](architecture.md)

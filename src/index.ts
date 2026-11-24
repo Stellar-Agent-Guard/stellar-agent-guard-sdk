@@ -246,6 +246,7 @@ export type {
 
 export {
   CostPreChecker,
+  FEE_PERCENTILES,
   STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
@@ -264,6 +265,11 @@ export type {
   CostProvenance,
   CostWithDecision,
   FeeBreakdown,
+  FeePercentile,
+  FeeSource,
+  FeeStatsProvider,
+  FeeStatsResponse,
+  HeadroomWarning,
   PolicyContext,
   ResourceBreakdown,
   WindowSpendSnapshot,
