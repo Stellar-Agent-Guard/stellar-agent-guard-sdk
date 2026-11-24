@@ -94,12 +94,16 @@ export {
   validatePolicyForEncoding,
 } from "./policy.ts";
 
+export { policyHash } from "./policy-hash.ts";
+
 export type { ActiveWindowState, DescribePolicyOptions } from "./policy.ts";
 
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
-export { policyDiff } from "./policy-diff.ts";
-export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
+export { formatPolicyDiff, policyDiff } from "./policy-diff.ts";
+export type { FormatPolicyDiffOptions, PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
+export { POLICY_PRESETS, getPolicyPreset } from "./policy-presets.ts";
+export type { PolicyPresetName } from "./policy-presets.ts";
 
 export type {
   AccountAddress,

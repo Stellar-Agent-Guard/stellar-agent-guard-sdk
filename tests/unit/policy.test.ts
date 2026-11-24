@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { mulberry32, randomUint } from "./seeded-random.ts";
 import { PolicyDecodeError, PolicyEncodeError } from "../../src/errors.ts";
+import { policyHash } from "../../src/policy-hash.ts";
 import { POLICY_JSON_VERSION, policyFromJson, policyToJson } from "../../src/policy-json.ts";
 import type { CheckResult } from "../../src/policy.ts";
 import {
@@ -2345,6 +2346,71 @@ describe("extractTransferAmount", () => {
       ],
     });
     assert.equal(amount, null);
+  });
+});
+
+describe("policyHash (issue #437)", () => {
+  it("returns a 64-character lowercase hex string", () => {
+    const h = policyHash(freezePolicy(samplePolicy()));
+    assert.match(h, /^[0-9a-f]{64}$/, "expected lower-case hex SHA-256");
+  });
+
+  it("same policy hashes identically on repeated calls", () => {
+    const p = freezePolicy(samplePolicy());
+    assert.equal(policyHash(p), policyHash(p));
+  });
+
+  it("permuting allowlists does not change the hash", () => {
+    const R2 = unsafeAccountAddress("GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H");
+    const R3 = unsafeAccountAddress("GCEZWKCA5VLDNRLN3RPRJMRZOX3Z6G5CHCGSNFHEYVXM3XOJMDS674JZ");
+    const a = freezePolicy(samplePolicy({ recipients: [RECIPIENT, R2, R3] }));
+    const b = freezePolicy(samplePolicy({ recipients: [R3, RECIPIENT, R2] }));
+    assert.equal(policyHash(a), policyHash(b));
+  });
+
+  it("changing a cap changes the hash", () => {
+    const a = freezePolicy(samplePolicy({ per_tx_cap: 1000n }));
+    const b = freezePolicy(samplePolicy({ per_tx_cap: 2000n }));
+    assert.notEqual(policyHash(a), policyHash(b));
+  });
+
+  it("adding a guardAddress changes the hash", () => {
+    const p = freezePolicy(samplePolicy());
+    assert.notEqual(policyHash(p), policyHash(p, GUARD));
+  });
+
+  it("same policy with two different guard addresses produces different hashes", () => {
+    const p = freezePolicy(samplePolicy());
+    const GUARD2 = unsafeContractAddress(
+      "CBVR6W5NX5ZQWCCAEKIQLMWCNLWTK7EQJLNNHP44LKFHQ2FY7BPQQFCM",
+    );
+    assert.notEqual(policyHash(p, GUARD), policyHash(p, GUARD2));
+  });
+
+  it("permuting protocol fns does not change the hash", () => {
+    const a = freezePolicy(
+      samplePolicy({
+        protocols: [{ contract: TOKEN, fns: ["swap", "deposit"] }],
+      }),
+    );
+    const b = freezePolicy(
+      samplePolicy({
+        protocols: [{ contract: TOKEN, fns: ["deposit", "swap"] }],
+      }),
+    );
+    assert.equal(policyHash(a), policyHash(b));
+  });
+
+  it("changing a boolean field changes the hash", () => {
+    const a = freezePolicy(samplePolicy({ paused: false }));
+    const b = freezePolicy(samplePolicy({ paused: true }));
+    assert.notEqual(policyHash(a), policyHash(b));
+  });
+
+  it("is exported from the package root", async () => {
+    const { policyHash: exported } = await import("../../src/index.ts");
+    assert.equal(typeof exported, "function");
+    assert.equal(exported(freezePolicy(samplePolicy())), policyHash(freezePolicy(samplePolicy())));
   });
 });
 
