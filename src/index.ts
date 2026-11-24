@@ -450,16 +450,19 @@ export type {
 // The operator alerting primitive every adapter shares (`onBlocked`).
 // Exported so a consumer can type its sink and build the payload itself.
 export {
+  DEFAULT_ADAPTER_TIMEOUT_MS,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
+  mergeAbortSignals,
   normalizeMappedCall,
   normalizeMappedCalls,
   runBlockedHook,
   runDecisionHook,
+  runMappingErrorHook,
 } from "./adapters/shared.ts";
 
 export type {
@@ -468,6 +471,8 @@ export type {
   GuardBlockedHook,
   GuardBlockedInfo,
   GuardCallMapper,
+  GuardMappingErrorHook,
+  GuardMappingErrorInfo,
 } from "./adapters/shared.ts";
 
 // Optional logging. `SILENT_LOGGER` is the default every config resolves to

@@ -1,8 +1,8 @@
 {
-  "_comment": "Bundle-size budget for the browser-consumer canary (issue #145). The dashboard imports the SDK client-side, so this number ships to every operator's browser. The check bundles scripts/bundle-size-entry.ts (the stable dashboard-shaped import) with esbuild (minify, ESM, browser platform, node:* external — each consumer's bundler supplies its own Node polyfills; the budget measures the SDK's own contribution), gzips the result, and fails CI over either limit. On breach: do NOT raise the budget in the same commit as the change that caused it — re-measure, justify the delta in the PR, and commit the new baseline separately (same protocol as the contracts repo's wasm-size issue).",
-  "_headroom": "Gzip headroom is 15% of the baseline (198,288 B -> 228,031 B): large enough that a normal feature commit (a decoder, a helper, a docblock-heavy module) does not churn CI, small enough that an accidental new dependency (+50 kB gzip for a mid-sized pure-JS lib) trips it loudly. Raw headroom is 10% (874,886 -> 962,374 B): raw grows more mechanically than gzip, so it gets less slack.",
+  "_comment": "Bundle-size budget for browser consumers and shape-specific imports (issue #145, #494). The dashboard imports the SDK client-side, so this number ships to every operator's browser. The check bundles each declared shape with esbuild (minify, ESM), gzips the result, and fails CI over any limit. On breach: do NOT raise the budget in the same commit as the change that caused it — re-measure, justify the delta in the PR, and commit the new baseline separately.",
+  "_headroom": "Gzip headroom is 15% of baseline. Raw headroom is 10% of baseline. Raw grows more mechanically than gzip, so it gets less slack.",
   "entry": "scripts/bundle-size-entry.ts",
-  "tool": "esbuild (devDependency, already in the tree via tsx) — bundle, minify, format=esm, platform=browser, external=[node:*]",
+  "tool": "esbuild (devDependency, already in the tree via tsx) — bundle, minify, format=esm",
   "baseline": {
     "sourceCommit": "18a6ba64d797e2f99a3726913213f9e6372724f0",
     "measuredAt": "2026-09-30T00:00:00.000Z",
@@ -12,5 +12,77 @@
   "budget": {
     "rawBytes": 962374,
     "gzipBytes": 228031
+  },
+  "shapes": {
+    "dashboard": {
+      "name": "dashboard import",
+      "entry": "scripts/bundle-size-entry.ts",
+      "platform": "browser",
+      "rationale": "Stable dashboard-shaped client import with named exports used by the operator console.",
+      "baseline": {
+        "rawBytes": 874886,
+        "gzipBytes": 198288
+      },
+      "budget": {
+        "rawBytes": 962374,
+        "gzipBytes": 228031
+      }
+    },
+    "root-full": {
+      "name": "root full import",
+      "entryCode": "export * from '../src/index.ts';",
+      "platform": "browser",
+      "rationale": "Measures the entire public root surface imported together. Ensures the full package size does not grow unchecked.",
+      "baseline": {
+        "rawBytes": 1012962,
+        "gzipBytes": 236378
+      },
+      "budget": {
+        "rawBytes": 1114258,
+        "gzipBytes": 271834
+      }
+    },
+    "preflight-interceptor": {
+      "name": "PreFlightInterceptor only",
+      "entryCode": "export { PreFlightInterceptor } from '../src/index.ts';",
+      "platform": "browser",
+      "rationale": "Consumers importing only PreFlightInterceptor should not pay for telemetry listeners or adapters. Preserves lean agent client weight.",
+      "baseline": {
+        "rawBytes": 891402,
+        "gzipBytes": 202448
+      },
+      "budget": {
+        "rawBytes": 980542,
+        "gzipBytes": 232815
+      }
+    },
+    "cost-pre-checker": {
+      "name": "CostPreChecker only",
+      "entryCode": "export { CostPreChecker } from '../src/index.ts';",
+      "platform": "browser",
+      "rationale": "Consumers performing only simulation cost pre-checks should pay only for BigNumber and minimal cost helpers. Verifies tree-shaking prevents leaking policy engine or telemetry into lightweight cost checkers.",
+      "baseline": {
+        "rawBytes": 90121,
+        "gzipBytes": 24008
+      },
+      "budget": {
+        "rawBytes": 99133,
+        "gzipBytes": 27609
+      }
+    },
+    "fs-subpath": {
+      "name": "./fs subpath (Node-only)",
+      "entryCode": "export * from '../src/fs.ts';",
+      "platform": "node",
+      "rationale": "Node-only filesystem adapter and policy storage subpath. Bundled with platform=node so node:* imports remain external and are not compared against browser budgets.",
+      "baseline": {
+        "rawBytes": 95030,
+        "gzipBytes": 24480
+      },
+      "budget": {
+        "rawBytes": 104533,
+        "gzipBytes": 28152
+      }
+    }
   }
 }

@@ -23,7 +23,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
-import { mapContractCalls } from "../../src/adapters/shared.ts";
+import { DEFAULT_ADAPTER_TIMEOUT_MS, mapContractCalls } from "../../src/adapters/shared.ts";
+import { DEFAULT_RPC_TIMEOUT_MS } from "../../src/invoke.ts";
 import { createGuardValidator } from "../../src/adapters/elizaos.ts";
 import { guardMcpToolHandler } from "../../src/adapters/mcp.ts";
 import { wrapToolWithGuard } from "../../src/adapters/vercelai.ts";
@@ -41,6 +42,7 @@ import type {
   BlockedHookLogger,
   GuardAdapterName,
   GuardBlockedInfo,
+  GuardMappingErrorInfo,
 } from "../../src/adapters/shared.ts";
 
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
@@ -203,6 +205,8 @@ function stub(decision: PreFlightDecision, throwsError?: Error): PreFlightInterc
 interface Observer {
   onBlocked?: ((info: GuardBlockedInfo) => unknown) | undefined;
   onDecision?: ((...args: unknown[]) => unknown) | undefined;
+  onMappingError?: ((info: GuardMappingErrorInfo) => unknown) | undefined;
+  includeMappingErrorRequest?: boolean | undefined;
   logger?: BlockedHookLogger | undefined;
 }
 
@@ -212,6 +216,8 @@ interface Controls {
   timeoutMs?: number | undefined;
   /** A signal the host hook itself supplies (LangChain request / MCP extra). */
   hostSignal?: AbortSignal | undefined;
+  /** A `RunnableConfig.signal` the LangChain middleware is invoked with. */
+  configSignal?: AbortSignal | undefined;
 }
 
 interface Outcome {
@@ -238,6 +244,12 @@ function baseOptions(scenario: Scenario, observer: Observer, controls: Controls)
   return {
     interceptor: interceptorFor(scenario, controls),
     ...(observer.logger ? { blockedHookLogger: observer.logger } : {}),
+    ...(observer.onMappingError
+      ? { onMappingError: observer.onMappingError as (info: GuardMappingErrorInfo) => void }
+      : {}),
+    ...(observer.includeMappingErrorRequest !== undefined
+      ? { includeMappingErrorRequest: observer.includeMappingErrorRequest }
+      : {}),
     ...(controls.signal ? { signal: controls.signal } : {}),
     ...(controls.timeoutMs !== undefined ? { timeoutMs: controls.timeoutMs } : {}),
   };
@@ -268,10 +280,14 @@ const HARNESSES: AdapterHarness[] = [
         toolCall: { name: "send_payment", id: "lc_1", args: {} },
         ...(controls.hostSignal ? { signal: controls.hostSignal } : {}),
       };
-      const result = await middleware.wrapToolCall(request, async () => {
-        entered += 1;
-        return { content: "sent" };
-      });
+      const result = await middleware.wrapToolCall(
+        request,
+        async () => {
+          entered += 1;
+          return { content: "sent" };
+        },
+        controls.configSignal ? { signal: controls.configSignal } : undefined,
+      );
       return {
         entered,
         halted: entered === 0,
@@ -286,6 +302,7 @@ const HARNESSES: AdapterHarness[] = [
       let entered = 0;
       const validate = createGuardValidator({
         ...baseOptions(scenario, observer, controls),
+        name: "send_payment",
         toContractCall: () => mapperFor(scenario)(),
         ...(observer.onBlocked
           ? { onBlocked: observer.onBlocked as (info: GuardBlockedInfo) => void }
@@ -499,6 +516,96 @@ describe("call-mapping failures fail closed (issue #316)", () => {
   });
 });
 
+describe("onMappingError parity (issue #453)", () => {
+  function mappingObserver(): {
+    observer: Observer;
+    seen: GuardMappingErrorInfo[];
+    blocked: GuardBlockedInfo[];
+  } {
+    const seen: GuardMappingErrorInfo[] = [];
+    const blocked: GuardBlockedInfo[] = [];
+    return {
+      seen,
+      blocked,
+      observer: {
+        onMappingError: (info) => {
+          seen.push(info);
+        },
+        onBlocked: (info) => {
+          blocked.push(info);
+        },
+      },
+    };
+  }
+
+  for (const adapter of HARNESSES) {
+    it(`${adapter.name}: fires exactly once on a mapper failure, with no raw request`, async () => {
+      const { observer, seen, blocked } = mappingObserver();
+      const outcome = await adapter.run(
+        SCENARIOS.find((scenario) => scenario.name === "mapping throws")!,
+        observer,
+      );
+
+      assert.equal(outcome.entered, 0, "a mapping failure resumed the action");
+      assert.equal(outcome.halted, true);
+      assert.equal(seen.length, 1, "onMappingError must fire exactly once");
+      assert.equal(seen[0]!.adapter, adapter.name);
+      assert.equal(seen[0]!.tool, "send_payment");
+      assert.equal(seen[0]!.errorClass, "AdapterMappingError");
+      assert.ok(seen[0]!.error instanceof AdapterMappingError);
+      assert.match(seen[0]!.error.message, /mapper exploded/);
+      assert.equal("request" in seen[0]!, false, "raw tool arguments must be omitted by default");
+      if (adapter.hasBlockedHook) {
+        assert.equal(blocked.length, 1, "onBlocked must keep firing for compatibility");
+        assert.equal(blocked[0]!.kind, "undetermined");
+      }
+    });
+
+    it(`${adapter.name}: a guard refusal does not fire onMappingError`, async () => {
+      const { observer, seen } = mappingObserver();
+      const outcome = await adapter.run(
+        SCENARIOS.find((scenario) => scenario.name === "blocked")!,
+        observer,
+      );
+      assert.equal(outcome.halted, true);
+      assert.equal(seen.length, 0, "a policy refusal was reported as a mapping failure");
+    });
+
+    it(`${adapter.name}: a throwing mapping hook cannot resume the action`, async () => {
+      const logged: unknown[][] = [];
+      const { observer } = mappingObserver();
+      const outcome = await adapter.run(
+        SCENARIOS.find((scenario) => scenario.name === "mapping throws")!,
+        {
+          ...observer,
+          onMappingError: () => {
+            throw new Error("mapping sink failure");
+          },
+          logger: {
+            error: (...args) => {
+              logged.push(args);
+            },
+          },
+        },
+      );
+      assert.equal(outcome.entered, 0);
+      assert.equal(outcome.halted, true);
+      assert.match(String(logged[0]?.[0] ?? ""), /onMappingError/);
+    });
+
+    it(`${adapter.name}: includeMappingErrorRequest opts in to the raw request`, async () => {
+      const { observer, seen } = mappingObserver();
+      await adapter.run(SCENARIOS.find((scenario) => scenario.name === "mapping throws")!, {
+        ...observer,
+        includeMappingErrorRequest: true,
+      });
+      assert.equal(seen.length, 1);
+      assert.equal("request" in seen[0]!, true);
+      assert.ok(seen[0]!.request !== undefined);
+    });
+  }
+});
+
 describe("observer isolation (issue #313)", () => {
   for (const adapter of HARNESSES) {
     it(`${adapter.name}: sync throws and rejected async hooks cannot change the halt`, async () => {
@@ -689,21 +796,102 @@ describe("cancellation and timeout forwarding (issue #315)", () => {
     assert.equal(seen[0]!.signal, host.signal);
   });
 
-  it("LangChain: a request-supplied signal takes precedence", async () => {
-    const host = new AbortController();
-    const configured = new AbortController();
-    const { seen, interceptor } = capturing(ADMISSIBLE);
+  it("every adapter resolves the shared default timeout", async () => {
+    for (const adapter of HARNESSES) {
+      const { seen, interceptor } = capturing(ADMISSIBLE);
+      await adapter.run(SCENARIOS[0]!, {}, { interceptor });
+      assert.equal(seen.length, 1);
+      assert.equal(
+        seen[0]!.timeoutMs,
+        DEFAULT_ADAPTER_TIMEOUT_MS,
+        `${adapter.name} did not resolve the shared default timeout`,
+      );
+    }
+    assert.equal(DEFAULT_ADAPTER_TIMEOUT_MS, DEFAULT_RPC_TIMEOUT_MS);
+    assert.equal(DEFAULT_ADAPTER_TIMEOUT_MS, 30_000);
+  });
+
+  it("every adapter forwards timeoutMs: 0 as an opt-out, not as omission", async () => {
+    for (const adapter of HARNESSES) {
+      const { seen, interceptor } = capturing(ADMISSIBLE);
+      await adapter.run(SCENARIOS[0]!, {}, { interceptor, timeoutMs: 0 });
+      assert.equal(seen[0]!.timeoutMs, 0, `${adapter.name} dropped the opt-out`);
+    }
+  });
+
+  it("LangChain: a request signal and a RunnableConfig signal are merged", async () => {
     const langchain = HARNESSES.find((candidate) => candidate.name === "langchain")!;
-    await langchain.run(
+
+    for (const which of ["request", "config", "adapter"] as const) {
+      const host = new AbortController();
+      const config = new AbortController();
+      const configured = new AbortController();
+      const { seen, interceptor } = capturing(ADMISSIBLE);
+      await langchain.run(
+        SCENARIOS[0]!,
+        {},
+        {
+          interceptor,
+          signal: configured.signal,
+          hostSignal: host.signal,
+          configSignal: config.signal,
+        },
+      );
+      const merged = seen[0]!.signal;
+      assert.ok(merged, "the adapter dropped every signal");
+      assert.equal(merged!.aborted, false);
+
+      // Either input alone must abort the merged bound.
+      if (which === "request") host.abort();
+      else if (which === "config") config.abort();
+      else configured.abort();
+      assert.equal(merged!.aborted, true, `the ${which} signal was not propagated`);
+    }
+  });
+
+  it("LangChain: an already-aborted RunnableConfig signal halts without an RPC", async () => {
+    const config = new AbortController();
+    config.abort();
+    const signalAware = {
+      check: async (_call: ContractCall, options?: PreFlightCheckOptions) =>
+        options?.signal?.aborted ? UNDETERMINED : ADMISSIBLE,
+    } as unknown as PreFlightInterceptor;
+    const langchain = HARNESSES.find((candidate) => candidate.name === "langchain")!;
+    const outcome = await langchain.run(
       SCENARIOS[0]!,
       {},
-      {
-        interceptor,
-        signal: configured.signal,
-        hostSignal: host.signal,
-      },
+      { interceptor: signalAware, configSignal: config.signal },
     );
-    assert.equal(seen[0]!.signal, host.signal);
+    assert.equal(outcome.entered, 0);
+    assert.equal(outcome.halted, true);
+  });
+
+  it("LangChain: cancelling the chain stops an in-flight check", async () => {
+    const config = new AbortController();
+    let started = 0;
+    const interceptor = {
+      check: (_call: ContractCall, options?: PreFlightCheckOptions) => {
+        started += 1;
+        const signal = options?.signal;
+        if (!signal) return Promise.resolve(ADMISSIBLE);
+        if (signal.aborted) return Promise.resolve(UNDETERMINED);
+        return new Promise<PreFlightDecision>((resolve) => {
+          signal.addEventListener("abort", () => resolve(UNDETERMINED), { once: true });
+        });
+      },
+    } as unknown as PreFlightInterceptor;
+    const langchain = HARNESSES.find((candidate) => candidate.name === "langchain")!;
+    const pending = langchain.run(SCENARIOS[0]!, {}, { interceptor, configSignal: config.signal });
+    setTimeout(() => config.abort(), 1);
+    const outcome = await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("cancelling the chain did not stop the check")), 200),
+      ),
+    ]);
+    assert.equal(started, 1);
+    assert.equal(outcome.entered, 0);
+    assert.equal(outcome.halted, true);
   });
 
   it("rejects a malformed signal or timeout at construction time", async () => {

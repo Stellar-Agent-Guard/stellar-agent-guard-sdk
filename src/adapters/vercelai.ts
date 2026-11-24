@@ -43,7 +43,9 @@ import {
   mapContractCalls,
   mappingFailureFor,
   runDecisionHook,
+  runMappingErrorHook,
   type BlockedHookLogger,
+  type GuardMappingErrorHook,
 } from "./shared.ts";
 
 /**
@@ -89,6 +91,20 @@ export interface VercelAIGuardOptions {
    */
   onDecision?: (call: VercelAIToolCallInput, decision: PreFlightDecision) => void;
   /**
+   * Integration-bug alerting (issue #453): called once when
+   * `toContractCall`/`toContractCalls` throws or returns a malformed call,
+   * immediately before the fail-closed `GuardUndeterminedError`. Unlike
+   * `onDecision` it can never fire for a guard verdict, so a broken mapper is
+   * not reported as a policy event. Raw tool input is omitted unless
+   * `includeMappingErrorRequest` is set.
+   */
+  onMappingError?: GuardMappingErrorHook;
+  /**
+   * Include the raw `{ toolName, input }` request on `onMappingError` payloads.
+   * Off by default because tool input can contain secrets.
+   */
+  includeMappingErrorRequest?: boolean;
+  /**
    * Explicit sink for a swallowed `onDecision` failure. Omitted (the default),
    * a throwing or rejecting observer is silent (issue #313/#314).
    */
@@ -132,7 +148,13 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
         // Fail closed on a mapper failure (issue #316). This adapter documents
         // `undetermined` as a thrown GuardUndeterminedError, so the mapping
         // failure keeps that shape with the AdapterMappingError as its cause.
-        const failure = mappingFailureFor("vercelai", error);
+        const failure = mappingFailureFor(
+          "vercelai",
+          error,
+          request.toolName,
+          options.includeMappingErrorRequest ? request : undefined,
+        );
+        runMappingErrorHook(options.onMappingError, failure.mapping, options.blockedHookLogger);
         throw new GuardUndeterminedError(failure.info.explanation, {
           cause: failure.decision.error,
         });
