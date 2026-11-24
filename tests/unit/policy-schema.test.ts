@@ -585,4 +585,52 @@ describe("policy schema consumption (issue #133)", () => {
       assert.equal(ruleForKeyword("additionalProperties"), "invalid_type");
     });
   });
+
+  describe("shipped ./schema export (issue #441)", () => {
+    const shippedPath = new URL("../../schema/policy.schema.json", import.meta.url);
+
+    it("is the vendored schema value, so the two cannot drift", async () => {
+      const [vendored, shippedText] = await Promise.all([
+        loadVendoredSchema(),
+        readFile(shippedPath, "utf-8"),
+      ]);
+      // Data equality, not byte equality: this file is formatter-owned JSON,
+      // while the vendored wrapper's formatting is the vendor script's. Key
+      // order is not meaningful to a JSON Schema consumer; content is.
+      assert.deepEqual(
+        JSON.parse(shippedText),
+        vendored.schema,
+        "schema/policy.schema.json drifted from tests/fixtures/vendor/policy.schema.json — " +
+          "regenerate the shipped copy from the vendored `schema` value and commit both",
+      );
+    });
+
+    it("declares the draft 2020-12 dialect and is self-contained", async () => {
+      const schema = JSON.parse(await readFile(shippedPath, "utf-8")) as Record<string, unknown>;
+      assert.equal(schema.$schema, "https://json-schema.org/draft/2020-12/schema");
+      assert.equal(schema.type, "object");
+      // No absolute $id: the file is addressed by the package subpath, which
+      // avoids a URL that would 404 until the package is published.
+      assert.equal(schema.$id, undefined);
+    });
+
+    it("is exported from the package root and included in the published files", async () => {
+      const manifest = JSON.parse(
+        await readFile(new URL("../../package.json", import.meta.url), "utf-8"),
+      ) as {
+        files?: string[];
+        exports?: Record<string, unknown>;
+      };
+      assert.equal(manifest.exports?.["./schema"], "./schema/policy.schema.json");
+      assert.ok(manifest.files?.includes("schema"), "the `files` whitelist must ship schema/");
+    });
+
+    it("keeps POLICY_SCHEMA_PATH pointing at the vendored repository copy", async () => {
+      const vendored = await readFile(
+        new URL("../../" + POLICY_SCHEMA_PATH, import.meta.url),
+        "utf-8",
+      );
+      assert.ok(vendored.length > 0);
+    });
+  });
 });

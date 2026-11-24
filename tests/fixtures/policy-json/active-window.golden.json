@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "per_tx_cap": "5000000000",
+  "window_secs": "86400",
+  "window_cap": "20000000000",
+  "assets": [
+    "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"
+  ],
+  "protocols": [
+    {
+      "contract": "CAJJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4LNU",
+      "fns": [
+        "transfer",
+        "approve"
+      ],
+      "paused": true
+    },
+    {
+      "contract": "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+      "fns": null
+    }
+  ],
+  "recipients": [
+    "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"
+  ],
+  "allow_any_recipient": false,
+  "active_from": "1700000000",
+  "active_until": "1700086400",
+  "paused": true,
+  "dms_grace_secs": "604800"
+}

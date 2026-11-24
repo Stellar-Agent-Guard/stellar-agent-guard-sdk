@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "per_tx_cap": "170141183460469231731687303715884105727",
+  "window_secs": "18446744073709551615",
+  "window_cap": "170141183460469231731687303715884105727",
+  "assets": [
+    "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"
+  ],
+  "protocols": [],
+  "recipients": [
+    "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH"
+  ],
+  "allow_any_recipient": false,
+  "active_from": "0",
+  "active_until": "0",
+  "paused": false,
+  "dms_grace_secs": "18446744073709551615"
+}

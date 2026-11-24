@@ -18,10 +18,12 @@
     "./fs": {
       "types": "./dist/fs.d.ts",
       "import": "./dist/fs.js"
-    }
+    },
+    "./schema": "./schema/policy.schema.json"
   },
   "files": [
     "dist",
+    "schema",
     "README.md",
     "LICENSE"
   ],

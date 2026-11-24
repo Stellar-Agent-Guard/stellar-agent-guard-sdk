@@ -24,14 +24,39 @@ Source: [`src/policy-schema.ts`](../../src/policy-schema.ts). Tests:
 | `SchemaPolicyFailure` | type | `PolicyFailure` plus `keyword` and `schemaPath`. |
 | `SchemaKeyword` | type | Union of the `SCHEMA_DIALECT` entries. |
 
-> **`POLICY_SCHEMA_PATH` is a repository path, not a packaged file.** The npm
-> tarball ships `dist/` only, so the schema is not readable from
-> `node_modules`. The schema is a **parameter** on purpose: the caller decides
-> which pinned copy is authoritative (a copy vendored into your own repo, or
-> the contracts repo's published file once
-> [contracts #61](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/61)
-> lands). Inside this repository the tests read the vendored file's `schema`
-> value.
+> **`POLICY_SCHEMA_PATH` is a repository path.** It stays `"tests/fixtures/vendor/policy.schema.json"`
+> for callers that vendor their own pinned copy. The published package also
+> ships the same schema at the `./schema` subpath — see
+> [Shipping the schema](#shipping-the-schema).
+
+## Shipping the schema
+
+The package tarball includes `schema/policy.schema.json`, and `package.json`
+exports it as `stellar-agent-guard-sdk/schema`. Import it as JSON with Node's
+standard import attribute:
+
+```ts
+import schema from "stellar-agent-guard-sdk/schema" with { type: "json" };
+
+const failures = validateGuardPolicyAgainstSchema(policy, schema);
+```
+
+- **Dialect:** the file declares `"$schema": "https://json-schema.org/draft/2020-12/schema"`.
+- **No absolute `$id`.** The document is addressed by the package subpath, not a
+  URL, so it never points at a host that has not published the version yet. A
+  tool that needs an identity should use the package specifier plus this SDK's
+  version.
+- **One source of truth:** `schema/policy.schema.json` is generated from the
+  `schema` value of the vendored `tests/fixtures/vendor/policy.schema.json`
+  wrapper. `tests/unit/policy-schema.test.ts` asserts the shipped bytes equal
+  the vendored bytes, so a vendored refresh that is not mirrored in the shipped
+  copy fails CI. `npm run test:pack` and `npm run test:exports` prove the file
+  is in the tarball and resolves from a packed install.
+
+The schema is still a **parameter** on purpose: a caller may pass a different
+pinned copy (their own vendored file, or the contracts repo's published file
+once [contracts #61](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/issues/61)
+lands).
 
 ## Usage
 
