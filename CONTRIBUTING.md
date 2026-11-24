@@ -69,6 +69,9 @@ part of it:
   (`workflow_dispatch`) to catch host/testnet drift. `PHASE2_ENV_FILE` is referenced
   only in that workflow, and it has no `pull_request` / `pull_request_target` trigger,
   so a pull request — including a forked one — can never reach the secret.
+- **`mutation`** (`.github/workflows/mutation.yml`) — a bounded, informational
+  mutation-test report on `schedule` and `workflow_dispatch` only. It has no pull
+  request trigger, never reports a required status check, and cannot fail `ci`.
 
 ### CI runner matrix
 
@@ -205,6 +208,7 @@ This is the one canonical table; the README links here rather than repeating it.
 | Coverage floor | `npm run test:coverage:floor` | no | no | Every PR touching `src/preflight.ts`, `src/policy.ts` or `src/invoke.ts` (the `ci` coverage gate). |
 | Packaging | `npm run build && npm run test:exports && npm run test:pack && npm run test:packed-install` | no | no | A PR that adds or moves an export, or changes `package.json` / the build. |
 | Live (integration) | `npm run test:integration` | **yes** (Stellar testnet) | `.env.phase2` (template `.env.phase2.example`), or an ephemeral instance the runner provisions when `GUARD_FIXTURE` is unset | **Only** a PR that touches the enforcement path (below). Also run weekly by `live-suite`; never on a PR. |
+| Mutation spike | `npm run test:mutation` | no | no | Never for a PR; scheduled/manual informational report only. See [mutation testing](docs/mutation-testing.md). |
 
 **The enforcement path** is exactly these four files, and it is the list `ci`'s
 `enforcement-path evidence gate` enforces (`scripts/check-enforcement-evidence.ts`):
@@ -352,6 +356,18 @@ Sequencing: the test-tier docs issue had already landed when the floor was
 added, so the floor command is documented in the test-tier table above. This
 subsection stays, because it carries the floor mechanics and the ratchet rule
 that the table cannot hold.
+
+### Mutation spike
+
+Coverage says a branch ran; mutation testing asks whether a test would detect
+the branch changing. `npm run test:mutation` runs a deterministic 60-mutant
+sample against `src/preflight.ts`, `src/policy.ts` and `src/invoke.ts`, then
+writes an actionable survivor report to `coverage/mutation/`. The measured
+baseline is 63.3% (seed 489, 2026-11-20), recorded in
+[`scripts/mutation.baseline.json`](scripts/mutation.baseline.json). It is a fact
+to track, not a threshold to enforce: the scheduled `mutation` workflow reports
+the score and uploads survivors but never gates a merge. See
+[docs/mutation-testing.md](docs/mutation-testing.md) for local commands and survivor triage.
 
 ## Secrets
 

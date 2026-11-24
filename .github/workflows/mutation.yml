@@ -1,0 +1,50 @@
+# Bounded, informational mutation testing for the verdict-critical modules.
+#
+# This workflow has deliberately no pull_request or push trigger: it is not a
+# status check and can never gate a merge. The only required check remains `ci`
+# in .github/workflows/ci.yml. The run step is continue-on-error because a
+# low score, or even a harness failure, is a report to triage — not a merge
+# gate. Reports are uploaded as an artifact and mirrored to the job summary.
+name: mutation
+
+on:
+  schedule:
+    - cron: "23 4 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency: mutation
+
+jobs:
+  mutation:
+    name: mutation (informational)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci
+
+      - name: sampled mutation report (informational, never gating)
+        run: npm run test:mutation
+        continue-on-error: true
+
+      - name: upload surviving-mutant report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: mutation-survivors
+          path: |
+            coverage/mutation/mutation.json
+            coverage/mutation/survivors.md
+            coverage/mutation/summary.md
+          if-no-files-found: warn
+          retention-days: 14
