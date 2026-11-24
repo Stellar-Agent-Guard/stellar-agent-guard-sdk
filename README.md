@@ -66,8 +66,9 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 > pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
 > known gaps in simulation fidelity, and what the SDK does about each.
 >
-> **If something breaks:** search the [troubleshooting playbook](docs/troubleshooting.md)
-> by error text or outcome.
+> **If something breaks:** search the [error catalog](docs/errors.md#error-classes)
+> by class name, or the [troubleshooting playbook](docs/troubleshooting.md) by
+> error text or outcome.
 
 New to the vocabulary (allowlist, DMS, admissible, pre-flight)? Start with the
 [glossary](docs/glossary.md).
@@ -286,10 +287,10 @@ Both framework adapters wrap the same `PreFlightInterceptor` but expose differen
 | `admissible` | Passes through; the wrapped tool handler runs. | Returns `true`; the action is a candidate for execution. |
 | `blocked(reason)` | Halts the tool call and returns a `ToolMessage` carrying the contract `reason` and explanation; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
 | `undetermined(cause)` | Halts the tool call with a formatted `ToolMessage` (fails closed); the tool handler never runs. | Returns `false` (fails closed); the action is excluded from candidate execution. |
-| Mapping failure (`toContractCall`/`toContractCalls` throws or returns a malformed call) | Halts with an error `ToolMessage` describing the mapping failure (reported to `onBlocked` as `undetermined`); the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
+| Mapping failure (`toContractCall`/`toContractCalls` throws or returns a malformed call) | Halts with an error `ToolMessage` describing the mapping failure (reported to `onMappingError`, then to `onBlocked` as `undetermined`); the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
 | Not fund-moving (`toContractCall` returns `null`) | Passes through untouched: `null` means "no funds move", not "allowed", so no verdict is invented. | Returns `true` for the same reason; the guard has no opinion. |
 
-Adapter callbacks (`onDecision`, `onBlocked`) are never awaited. A callback that throws, or returns a promise that rejects, is isolated — it is reported to the optional `blockedHookLogger` and can never resume a halted action or become an unhandled rejection (issue #313). Every adapter also accepts `signal` and `timeoutMs`, which are forwarded to the pre-flight check; an abort or a fired timeout yields the same fail-closed `undetermined` halt as any other enforcement failure (issue #315).
+Adapter callbacks (`onDecision`, `onBlocked`, `onMappingError`) are never awaited. A callback that throws, or returns a promise that rejects, is isolated — it is reported to the optional `blockedHookLogger` and can never resume a halted action or become an unhandled rejection (issue #313). Every adapter also accepts `signal` and `timeoutMs`, which are forwarded to the pre-flight check; an abort or a fired timeout yields the same fail-closed `undetermined` halt as any other enforcement failure (issue #315). `timeoutMs` defaults to the exported `DEFAULT_ADAPTER_TIMEOUT_MS`, and the LangChain adapter also merges a `RunnableConfig.signal` into its cancellation bound (issue #454).
 
 
 #### Branded Address Types (v0.2.0+)
@@ -806,6 +807,8 @@ const middleware = createLangChainGuardMiddleware({
 
 The payload is the same on every adapter (`{ adapter, kind, reason, call, explanation }`): `kind` is `"blocked"` when the guard refused and `"undetermined"` when enforcement could not decide (in which case `reason` is `null` and `explanation` carries the failure detail — the halt still happens, because the adapter fails closed). The callback is called *after* the halt is decided and its errors are swallowed, so a broken alerting sink can never turn a refusal into an executed action or a thrown error. A swallowed hook failure is silent by default; pass `blockedHookLogger: { error(...) }` when you want that diagnostic. Omit `onBlocked` for exactly the pre-existing behavior.
 
+A guard refusal and a broken mapper both halt, but they are not the same event. Every adapter also accepts `onMappingError`, which fires only when `toContractCall`/`toContractCalls` throws or returns a malformed call, immediately before the fail-closed halt (`onBlocked` still fires afterwards for compatibility). Its payload is `{ adapter, tool, errorClass, error }`; the raw request — and therefore the tool arguments — is included only when `includeMappingErrorRequest: true`, so a remote sink does not receive secrets by default.
+
 #### Ordered call batches (`toContractCalls`)
 
 A tool that performs several guarded contract calls can map the whole action with the additive `toContractCalls` mapper instead of `toContractCall`. The complete ordered batch is checked before the handler runs; if any call is blocked or undetermined, the action is refused and no handler side effect occurs (all-or-nothing). `onDecision` receives every per-call verdict in order, and a batch halt's `onBlocked` payload also carries `calls` and `verdicts`:
@@ -1049,7 +1052,9 @@ If you still see `cause: "rate_limited"`, **lower** `maxConcurrentSimulations`. 
 All operational SDK errors share a `GuardError` base. Invalid caller input is the
 deliberate exception: `InvalidInputError` (and `InvalidFeeCeilingError`) extend
 `TypeError`, keeping programmer errors distinct from transport, signing and policy
-failures. `invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
+failures. The [error catalog](docs/errors.md#error-classes) maps every exported
+class to its stage, meaning, retry and fail-closed behaviour, and first fix.
+`invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
 when `outcome.kind === "error"`.
 
 ```ts
@@ -1084,7 +1089,8 @@ and diagnostics. That charged outcome additionally carries `transactionHash` and
 `charged: true`; it is not flattened into a technical `BroadcastError`.
 
 `GuardBlockedError` keeps its published name, message, fields, and `instanceof` behavior
-and now extends `GuardError`; `PreFlightUndeterminedError` extends `SimulationError`.
+and now extends `GuardError`; `PreFlightUndeterminedError` is an alias of
+`GuardUndeterminedError`, not a subclass of `SimulationError`.
 The hierarchy, `decodePolicy`, and `verifyAgentSignature` are additive to 0.1.x callers.
 The one intentional behavior change is for callers already using `dryRun: true`: the old
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
@@ -1590,7 +1596,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**; which PRs must run it, and the exact enforcement-path file list, are defined once in [`CONTRIBUTING.md` § Which tests does my PR need?](CONTRIBUTING.md#which-tests-does-my-pr-need-canonical-matrix). It also runs on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift, with the committed evidence in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
-- **Integration failures**: use the [troubleshooting playbook](docs/troubleshooting.md) to map common errors and outcomes to causes and supported fixes.
+- **Integration failures**: use the [error catalog](docs/errors.md#error-classes) to identify an exported class, then the [troubleshooting playbook](docs/troubleshooting.md) to map common errors and outcomes to causes and supported fixes.
 
 ## Enforcement scope — read this before relying on the caps
 

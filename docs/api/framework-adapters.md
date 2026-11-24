@@ -65,6 +65,36 @@ non-empty `contract` and `fn` and an array of `args`. Because the mapping failed
 before any call existed, the `onBlocked` payload for this halt has
 `kind: "undetermined"`, `reason: null` and no `call` field.
 
+### `onMappingError` vs `onBlocked`
+
+A mapping failure is safe but ambiguous: it halts as `undetermined`, the same
+`kind` a failed enforcement run produces, so an operator alert cannot tell a
+broken integration from a guard that never ruled. `onMappingError` (issue #453)
+is the unambiguous signal. It fires once, immediately before the fail-closed
+halt, on every adapter; `onBlocked` still fires afterwards for compatibility.
+
+| Hook | Fires for | Payload | Use it for |
+| --- | --- | --- | --- |
+| `onMappingError` | Only a mapper that threw or returned a malformed call. Never for a guard verdict. | `{ adapter, tool, errorClass, error }`; `request` only when opted in. | Paging the team that owns the integration, grouping mapper bugs. |
+| `onBlocked` | Every halt: a `blocked` refusal, an `undetermined` enforcement run, and (for compatibility) a mapping failure. | `{ adapter, kind, reason, call?, explanation }`. | Policy/operator alerting and audit trails. |
+
+```ts
+createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall,
+  onMappingError: ({ adapter, tool, errorClass, error }) => {
+    // Tool arguments are deliberately absent by default: they may contain
+    // secrets and this sink is often a remote webhook.
+    reportIntegrationBug({ adapter, tool, errorClass, message: error.message });
+  },
+  includeMappingErrorRequest: true, // opt in only for a trusted local sink
+});
+```
+
+The hook is isolated exactly like `onBlocked`: a synchronous throw or a rejected
+promise is swallowed (and reported to `blockedHookLogger` when supplied) and can
+never resume the halted action.
+
 ```ts
 createLangChainGuardMiddleware({
   interceptor,
@@ -120,14 +150,24 @@ const validate = createGuardValidator({
 });
 ```
 
-Where the host hook exposes an invocation signal, it takes precedence over the
-adapter-level default: `guardMcpToolHandler` forwards `extra.signal` from the MCP
-SDK, and the LangChain middleware forwards a `signal` on the tool-call request
-(or on `request.runtime`). ElizaOS's `validate` hook exposes no invocation
-signal, so use the option-level `signal` there. A pre-aborted signal or a fired
-timeout produces an `undetermined` verdict, which every adapter fails closed on —
-it never becomes a silent pass. The forwarding itself is pinned by
-`tests/unit/adapter-conformance.test.ts`.
+`timeoutMs` defaults to the exported `DEFAULT_ADAPTER_TIMEOUT_MS`, which aliases
+the pre-flight pipeline's `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms per RPC call), so
+wrappers and documentation can reference the same number instead of hard-coding
+it. `timeoutMs: 0` is an explicit opt-out: the timeout is disabled and
+cancellation is left to `signal`.
+
+Where the host hook exposes an invocation signal, it is combined with the
+adapter-level one rather than replacing it: `guardMcpToolHandler` forwards
+`extra.signal` from the MCP SDK, and the LangChain middleware merges a `signal`
+on the tool-call request (or on `request.runtime`) **and** a
+`RunnableConfig.signal` passed to `wrapToolCall`. The merge uses
+`AbortSignal.any()` where available and a small linked `AbortController`
+otherwise; cancelling any one of them aborts the pre-flight check, so an
+already-cancelled chain can never issue an RPC. ElizaOS's `validate` hook exposes
+no invocation signal, so use the option-level `signal` there. A pre-aborted
+signal or a fired timeout produces an `undetermined` verdict, which every adapter
+fails closed on — it never becomes a silent pass. The forwarding itself is pinned
+by `tests/unit/adapter-conformance.test.ts`.
 
 ## Vercel AI SDK
 
