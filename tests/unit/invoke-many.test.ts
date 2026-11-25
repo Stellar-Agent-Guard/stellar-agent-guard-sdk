@@ -72,7 +72,7 @@ function blockedEventXdr(): xdr.DiagnosticEvent {
       body: xdr.ContractEventBody.v0(
         new xdr.ContractEventV0({
           topics: [
-            xdr.ScVal.scvSymbol("guard_auth"),
+            xdr.ScVal.scvSymbol("event_auth_checked"),
             xdr.ScVal.scvSymbol("blocked"),
             xdr.ScVal.scvSymbol("limit_exceeded"),
           ],
