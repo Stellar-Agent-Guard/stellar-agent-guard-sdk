@@ -26,6 +26,7 @@ constructor(options: PreFlightInterceptorOptions)
 | `cache` | `PreFlightCacheOptions` | none — no cache; every `check()` simulates fresh | ⚠️ Opt-in. A cached verdict can be staler than one admitted transfer, so a hit can report `admissible` for a call the next simulation would block. See the cache table below. |
 | `coalesceInFlight` | `boolean` | `true` | Concurrent identical `check()` calls share one in-flight run; the shared run keeps `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) and each waiter still applies its own `signal`/`timeoutMs`. The entry is dropped as soon as the run settles (it is not a cache). Checks that pass `onStep` are never coalesced. `false`: every call runs its own simulation (more RPC load, same verdicts). |
 | `logger` | `GuardLoggerInput` | none — silent (`SILENT_LOGGER`) | Log sink for verdicts and cache hits/stores/invalidations. A logger never changes a verdict. |
+| `onVerdict` | `(event: PreFlightVerdictEvent) => void` | none | **Observability only.** Invoked exactly once per verdict `check()` returns — admissible, blocked, undetermined, cache hit, coalesced or fail-closed timeout — after the decision is final. The event carries `kind`, `reason` (blocked only), `cached`, `durationMs`, `ledger` (when known) and `call` (`{ fn, contract }`, never arguments). A hook that throws, or rejects asynchronously, is caught and logged; the verdict and fee data are unchanged. Not invoked when input validation throws, because no verdict was produced. |
 | `clock` | `Clock` | `systemClock` | Time source for cache TTL expiry. ⚠️ A fake or skewed clock outside tests changes when cached verdicts expire. |
 
 #### `PreFlightCacheOptions` (`options.cache`)
@@ -47,6 +48,20 @@ Present only when you opt in. Entries are also discarded whenever the observed l
 | `signal` | `AbortSignal` | none | ⚠️ Caller cancellation. An already-aborted signal returns before any RPC; a fired signal returns the fail-closed `undetermined` verdict carrying `RpcTimeoutError`, never a throw and never `admissible`. |
 | `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout returns the same fail-closed `undetermined` verdict as an abort. `0` disables the per-call timeout: with no `signal`, a stalled RPC can then hold the check open. |
 
+#### `SimulationDiagnosticsOptions` / `SimulationDiagnostics` (`simulateForDiagnostics()`)
+
+`simulateForDiagnostics(call, options?)` runs the same probe and enforced simulation as `check()` but returns **no verdict** — `authoritative` is the literal `false`. It is a debugging surface: nothing is signed for submission, broadcast or cached.
+
+| Option | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `signal` | `AbortSignal` | none | Bounds the RPC calls exactly as `check()` does. |
+| `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` | Per-call bound, as in `check()`. |
+| `onStep` | `(step: InvokeStepEvent) => void` | none | Observes the enforcement-stage attempts. |
+| `includeRaw` | `boolean` | `false` | Retains the undecoded source payload on each decoded event. Off by default, so diagnostics are redacted. |
+
+The result carries `ok`, `detail`, `resources`, `resourceFeeStroops`, decoded `events`, the first `guardEvent`, and the typed `error` when the simulations could not complete. |
+| `forceFresh` | `boolean` | `false` | Bypasses the verdict cache for this call: a new simulation runs, no cached verdict is reused, and no coalesced run is joined. The cache is left untouched (nothing read, nothing stored). Use it before a high-value transfer when a hit's `ageMs`/`observedLedger` is older than you accept. |
+
 #### `CheckBatchOptions` (`checkBatch()` / `assertBatchAllowed()`)
 
 | Option | Type | Default | Meaning |
@@ -56,7 +71,7 @@ Present only when you opt in. Entries are also discarded whenever the observed l
 | `onStep` | `(step: InvokeStepEvent) => void` | none | Forwarded to each call's `check()`. |
 | `signal` | `AbortSignal` | none | ⚠️ Forwarded to each call's `check()`: once it fires, every remaining call returns a fail-closed `undetermined` verdict without issuing an RPC. It does **not** bound the initial `Policy`/`Window` ledger reads; supply `policy` and `initialWindowSpent` to avoid them. |
 | `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms), per call | Forwarded to each `check()`; a fired timeout makes that call `undetermined` and the batch continues. |
-| `deadlineMs` | `number` | none | Validated (must be positive and finite, otherwise `RangeError`). ⚠️ **Not currently enforced** in `checkBatch()`: the value is checked but no overall budget is applied. Bound a batch with `signal` (e.g. `AbortSignal.timeout(ms)`) and `timeoutMs` until it is. |
+| `deadlineMs` | `number` (> 0) | none | One absolute budget for the whole batch, measured on the injected `clock`. Once spent, no further call starts and every unfinished call is a fail-closed `undetermined` verdict carrying an `RpcTimeoutError` with `deadline: true`. A batch that exceeds its deadline is never `admissible`; `timeoutMs` stays per-call, capped by the remaining budget. |
 
 ### Optional cache
 
@@ -75,11 +90,51 @@ lookups still require a current-ledger, unexpired entry — so a bounded cache
 never returns an expired or cross-ledger verdict. Omit `maxEntries` for an
 unbounded cache.
 
+#### Staleness contract
+
+A cache hit is a real verdict computed against an earlier state. It is reused
+only inside the same ledger and inside its TTL, but inside that window it can be
+staler than the next admitted transfer — a hit may report `admissible` for a call
+a fresh simulation would block.
+
+Every hit says so on the verdict itself, in optional fields that are **absent on
+a fresh decision** and are never part of the cache key or equality:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `cached` | `true` | The verdict was served from the cache. Absent on a fresh simulation. |
+| `observedLedger` | `number` | The ledger the cached verdict was computed against. |
+| `ageMs` | `number` | Time elapsed since the verdict was stored, in milliseconds. Each hit reports its own age; earlier hits are not rewritten. |
+
+An agent loop can therefore decide per call: accept `ageMs` under its own
+threshold, or pass `forceFresh: true` before a high-value transfer. Existing
+consumers see exactly the fresh-decision shape they saw before the fields
+existed.
+
 ## Methods
 
 ### `check(call: ContractCall): Promise<PreFlightDecision>`
 
 Evaluates a contract call against the guard without throwing or broadcasting.
+
+Every failure it surfaces is a typed guard error. Invalid caller input rejects
+with `InvalidInputError` before any RPC (unwrapped). Any other throwable from the
+enforcement path — a custom `Clock`, an injected server, a mapper — never escapes:
+it becomes the fail-closed `undetermined` verdict with a `GuardError` whose
+`cause` is the original value (a `GuardUndeterminedError` when the pipeline had
+not already classified the failure). The verdict is never upgraded to
+`admissible`.
+
+### `warmCache(calls: ContractCall[], options?): Promise<WarmCacheSummary>`
+
+Runs each call through the same `check()` path to populate the opt-in cache
+deliberately — for example after a policy install or a restart — and returns
+`{ attempted, cached, blocked, undetermined, durationMs }`. It stores only the
+cacheable `admissible`/`blocked` verdicts, respects the same `maxEntries`, TTL and
+policy revision, and reports a blocked or undetermined call instead of throwing.
+With `cache` omitted, nothing is stored and `cached` is `0`. Warming is an
+optimization, not a guarantee: verdicts can be stale or evicted before use, and
+another process does not share this cache.
 
 ### `invalidate(call?: ContractCall): void`
 
@@ -183,6 +238,11 @@ below are every limitation the SDK documents, plus the opt-in cache's
 staleness caveat; each row names what can differ, the function that mitigates
 it, the test that pins that mitigation, the residual risk, and what to do
 instead. **None of these gaps is a capability the SDK claims to fix.**
+
+The verdict boundary is part of the contract: `InvalidInputError` is thrown
+before any RPC, everything the enforcement pipeline can throw is converted to a
+fail-closed `undetermined` verdict carrying a typed guard error (with the
+original value on `cause`), and no other throwable escapes `check()`.
 
 | Gap | What can differ | Mitigation (code + pinning test) | Residual risk | What to do instead |
 | --- | --- | --- | --- | --- |

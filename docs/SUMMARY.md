@@ -23,6 +23,7 @@
 * [Production Readiness Checklist](production-readiness.md)
 * [Architecture](architecture.md)
 * [Event Schema](event-schema.md)
+* [Which Integration Should I Use?](integration-decision-tree.md)
 * [Integration Hooks](integration-hooks.md)
 * [Testnet Verification](verification.md)
 * [Benchmarks](benchmarks.md)

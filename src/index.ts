@@ -184,6 +184,7 @@ export {
   INVOKE_ERROR_CAUSES,
   InvokeRetryError,
   invoke,
+  invokeQueueStats,
   RpcTimeoutError,
   topicSymbols,
   type EnforcementOutcome,
@@ -200,6 +201,8 @@ export {
   type InvokeParamsInput,
   type InvokePendingOutcome,
   type InvokePipelineStep,
+  type InvokeQueueEvent,
+  type InvokeQueueStats,
   type InvokeRetryAttempt,
   type InvokeRetryEvent,
   type InvokeRetryMetadata,
@@ -243,6 +246,10 @@ export type {
   PreFlightDecision,
   PreFlightInterceptorOptions,
   PreFlightUndeterminedCause,
+  SimulationDiagnostics,
+  SimulationDiagnosticsOptions,
+  WarmCacheOptions,
+  WarmCacheSummary,
 } from "./preflight.ts";
 
 export {

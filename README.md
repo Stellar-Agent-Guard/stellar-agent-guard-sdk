@@ -723,9 +723,9 @@ two optional caller-owned bounds on the RPC calls they make:
   action. Expiry is fail-closed and reported as an `RpcTimeoutError` with
   `deadline: true`; it can never become an `allowed` outcome. Pass `clock` to
   make the accounting deterministic in tests. See `docs/api/invoke-pipeline.md`.
-  ⚠️ `checkBatch()` accepts and validates `deadlineMs` but does not currently
-  enforce it; bound a batch with `signal` (for example `AbortSignal.timeout(ms)`)
-  and `timeoutMs`.
+  `checkBatch()` enforces it as one absolute budget for the whole batch: once it
+  is spent, no further call starts and every unfinished call is a fail-closed
+  `undetermined` verdict carrying an `RpcTimeoutError` with `deadline: true`.
 
 **Concurrent identical checks are coalesced.** `PreFlightInterceptor` shares one
 in-flight discovery/enforcement run when the same call and config are checked at
@@ -1214,7 +1214,7 @@ Present only when you opt in. Entries are also discarded whenever the observed l
 | `onStep` | `(step: InvokeStepEvent) => void` | none | Forwarded to each call's `check()`. |
 | `signal` | `AbortSignal` | none | ⚠️ Forwarded to each call's `check()`: once it fires, every remaining call returns a fail-closed `undetermined` verdict without issuing an RPC. It does **not** bound the initial `Policy`/`Window` ledger reads; supply `policy` and `initialWindowSpent` to avoid them. |
 | `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms), per call | Forwarded to each `check()`; a fired timeout makes that call `undetermined` and the batch continues. |
-| `deadlineMs` | `number` | none | Validated (must be positive and finite, otherwise `RangeError`). ⚠️ **Not currently enforced** in `checkBatch()`: the value is checked but no overall budget is applied. Bound a batch with `signal` (e.g. `AbortSignal.timeout(ms)`) and `timeoutMs` until it is. |
+| `deadlineMs` | `number` (> 0) | none | One absolute budget for the whole batch, measured on the injected `clock`. Once spent, no further call starts and every unfinished call is a fail-closed `undetermined` verdict carrying an `RpcTimeoutError` with `deadline: true`. A batch that exceeds its deadline is never `admissible`. `timeoutMs` stays per-call, capped by the remaining budget. |
 
 #### `CostPreCheckConfig` (`new CostPreChecker(config)`)
 
@@ -1299,7 +1299,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `pollAttempts` | `number` (integer ≥ 1) | `20` | Status polls after a broadcast. ⚠️ Exhausting them returns the `pending` outcome: the transaction was accepted but not confirmed. Do not rebroadcast without `server.getTransaction(hash)`. |
 | `pollIntervalMs` | `number` (≥ 0) | `3000` | Delay between status polls. |
 | `pollOptions` | `{ pollAttempts?, pollIntervalMs? }` | none — the top-level values apply | Nested spelling of the two poll options; must agree with the top-level values when both are set. |
-| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, and `initialInclusionFee` accepts a positive `bigint` or base-10 integer string in stroops. |
+| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, `initialInclusionFee` accepts a positive `bigint` or base-10 integer string in stroops, and optional `maxInclusionFee` (same shapes, greater than the initial fee) is a hard ceiling: a breach returns an `error` outcome carrying `FeeCapExceededError` without broadcasting the over-cap transaction. |
 | `maxRetries` | `number` (integer ≥ 0) | none — each retry class keeps its own budget | Overall cap across retry classes; `0` means a single attempt. The tighter of this and a per-class budget wins. |
 | `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
 | `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
@@ -1308,6 +1308,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `clock` | `Clock` | `systemClock` | Time source for deadline accounting and poll/backoff delays. Must have `now()` and `sleep()`. |
 | `onStep` | `(step: InvokeStepEvent) => void` | none | One event per stage attempt (probe → sign → simulate → broadcast). Exceptions are isolated. |
 | `onSubmitted` | `(event: SubmissionAcceptedEvent) => void` | none | Called once with the network's answer to the broadcast, before polling, so the transaction hash survives a failed poll. |
+| `onQueue` | `(event: InvokeQueueEvent) => void` | none | Per-source-account queue observability: `waiting` on join, `acquired` when the call runs, with `source`, `depth`, `waitedMs`, `acquired`. Isolated like `onStep`. Counters belong to the `rpc.Server` object's queue state, so `invokeQueueStats(server)` reports only that server's accounts and `invokeQueueStats()` sums the live server contexts in this process — the queue is per server object and process, never global. |
 | `logger` | `GuardLoggerInput` | none — silent | Stage attempts and retries at `debug`, a refusal at `info`, no-verdict outcomes at `warn`. Never changes behaviour. |
 
 ### Interception & Execution
@@ -1315,7 +1316,8 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 - `PreFlightInterceptor`
   - `constructor(options: PreFlightInterceptorOptions)` — Every option, default and safety note: [Constructor options](#preflightinterceptoroptions-alias-of-preflightconfig). Pass `cache: { ttlMs }` or `cache: { ttlLedgers }` to opt into the short-lived cache; omit it for fresh simulations. Concurrent identical `check()` calls share one in-flight run by default; pass `coalesceInFlight: false` to disable that.
   - `check(call: ContractCall, options?: PreFlightCheckOptions): Promise<PreFlightDecision>` — Returns `admissible | blocked | undetermined` without throwing or broadcasting. `options.signal` / `options.timeoutMs` bound the RPC calls it makes; a fired bound returns the fail-closed `undetermined` verdict carrying a typed `RpcTimeoutError` — see [Bounding a check or an invoke](#bounding-a-check-or-an-invoke-signal-and-timeoutms).
-  - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Returns one verdict per call with all-or-nothing `admissible` semantics. `options.signal` is forwarded to every call, so once it fires each remaining call is reported as `undetermined` without an RPC; `options.timeoutMs` stays per-call. `options.deadlineMs` is validated but not currently enforced — see [`CheckBatchOptions`](#checkbatchoptions-checkbatch--assertbatchallowed).
+  - `simulateForDiagnostics(call: ContractCall, options?: SimulationDiagnosticsOptions): Promise<SimulationDiagnostics>` — Runs the same probe and enforced simulation as `check()` but returns no verdict: `authoritative` is always `false`, and the result carries decoded guard events, resource usage and the resource fee, or the typed error. `includeRaw` opts into retaining raw event payloads. Nothing is signed for submission, broadcast or cached. See [Troubleshooting](docs/troubleshooting.md).
+  - `checkBatch(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision>` — Returns one verdict per call with all-or-nothing `admissible` semantics. `options.signal` is forwarded to every call, so once it fires each remaining call is reported as `undetermined` without an RPC; `options.timeoutMs` stays per-call, while `options.deadlineMs` is one absolute budget for the whole batch; once spent, no further call starts and unfinished calls are fail-closed `undetermined` verdicts — see [`CheckBatchOptions`](#checkbatchoptions-checkbatch--assertbatchallowed).
   - `assertAllowed(call: ContractCall): Promise<PreFlightDecision & { allowed: true }>` — Evaluates a call and returns the admissible decision, or throws `GuardBlockedError` (on policy block) or `GuardUndeterminedError` (on undetermined/transport failure). Never lets a raw transport error escape.
   - `assertBatchAllowed(calls: ContractCall[], options?: CheckBatchOptions): Promise<PreFlightBatchDecision & { admissible: true }>` — Batch throw-on-refusal form. Returns the batch decision if all calls are admissible, or throws `GuardBlockedError` on the first blocked call or `GuardUndeterminedError` on an undetermined call or transport failure.
   - `invalidate(call?: ContractCall): void` — Clears all cached decisions or only entries for one call.

@@ -13,6 +13,25 @@ returned; `N/A` means the error is rejected before any verdict or submission is
 possible; `Ambiguous` means a transaction may already be on the network and the
 caller must check before retrying.
 
+## Logging an error
+
+`JSON.stringify(error)` normally prints `{}` because `Error.message` is not
+enumerable. Every error exported by the SDK (and `HeartbeatIntervalError` /
+`InvokeRetryError` outside the `GuardError` root) implements `toJSON()`, so a
+structured logger needs no custom replacer:
+
+```ts
+JSON.stringify(error);
+// {"name":"PolicyValidationError","message":"…","path":"p.json","failures":[…]}
+```
+
+The result carries `name`, `message`, every class-specific field and a
+summarized `cause` (`{ name, message, code? }` for an `Error`, `{ type }` for a
+non-error object — never a full request object or stack). Bigints become decimal
+strings so `JSON.stringify` cannot throw. Diagnostic events, XDR envelopes,
+signatures and raw payloads are omitted at every depth, including nested fields
+such as `BroadcastError.failure.resultXdr`.
+
 For blocked verdicts, see the [reason messages](../README.md#reason-messages-issue-96)
 and [troubleshooting](troubleshooting.md#error-classes). For policy rule IDs,
 see the [policy rules table](api/policy-schema.md#schema-enforced-vs-code-enforced-rules);

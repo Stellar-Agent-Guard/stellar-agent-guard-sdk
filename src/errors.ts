@@ -15,11 +15,146 @@ function causeOptions(cause: unknown): ErrorOptions | undefined {
   return cause === undefined ? undefined : { cause };
 }
 
+/** The JSON-serializable shape `toJSON()` returns for a guard error. */
+export interface GuardErrorJSON {
+  name: string;
+  message: string;
+  [field: string]: unknown;
+}
+
+/**
+ * Fields that are never copied into a serialized error.
+ *
+ * Diagnostic events, raw events, XDR envelopes and signatures are large and
+ * may contain signed material; a log line is not the place for them. The
+ * check is applied at every depth, so a nested payload (for example
+ * `BroadcastError.failure.resultXdr`) is filtered too.
+ */
+const UNSERIALIZABLE_ERROR_KEYS = new Set([
+  "diagnosticEvents",
+  "diagnosticEventsXdr",
+  "rawEvent",
+  "resultXdr",
+  "envelopeXdr",
+  "resultMetaXdr",
+  "signatures",
+  "signature",
+  "authEntry",
+  "rawArguments",
+]);
+
+const MAX_SERIALIZE_DEPTH = 3;
+
+/** True for an XDR/ScVal-like value, which must never be dumped into a log. */
+function isXdrLike(value: object): boolean {
+  return typeof (value as { toXDR?: unknown }).toXDR === "function";
+}
+
+/**
+ * Convert one error field to a JSON-safe value.
+ *
+ * Bigints become decimal strings (`JSON.stringify` throws on a raw bigint),
+ * nested errors and XDR values are summarized instead of serialized, and
+ * anything past {@link MAX_SERIALIZE_DEPTH} is truncated so a hostile or deeply
+ * nested value cannot expand a log line without bound.
+ */
+function serializeErrorField(value: unknown, depth: number): unknown {
+  if (value === undefined || value === null) return value;
+  const type = typeof value;
+  if (type === "bigint") return (value as bigint).toString();
+  if (type === "string" || type === "number" || type === "boolean") return value;
+  if (type === "function" || type === "symbol") return undefined;
+  if (value instanceof Error) return summarizeCause(value, 0);
+  if (value instanceof Uint8Array) return "[binary omitted]";
+  if (Array.isArray(value)) {
+    if (depth >= MAX_SERIALIZE_DEPTH) return "[truncated]";
+    return value
+      .map((entry) => serializeErrorField(entry, depth + 1))
+      .filter((entry) => entry !== undefined);
+  }
+  if (typeof value === "object") {
+    if (isXdrLike(value)) return "[XDR omitted]";
+    if (depth >= MAX_SERIALIZE_DEPTH) return "[truncated]";
+    const out: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (UNSERIALIZABLE_ERROR_KEYS.has(key)) continue;
+      const serialized = serializeErrorField(entry, depth + 1);
+      if (serialized !== undefined) out[key] = serialized;
+    }
+    return out;
+  }
+  return String(value);
+}
+
+/**
+ * Summarize a `cause` instead of stringifying it blindly.
+ *
+ * An error keeps its `name`/`message` (and a string/number `code`, when it has
+ * one) but not its stack; a non-error object is reduced to its constructor name
+ * so a request/response object never leaks into a log.
+ */
+function summarizeCause(cause: unknown, depth: number): unknown {
+  if (cause === undefined || cause === null) return cause;
+  if (cause instanceof Error) {
+    const summary: Record<string, unknown> = { name: cause.name, message: cause.message };
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === "string" || typeof code === "number") summary.code = code;
+    const nested = (cause as { cause?: unknown }).cause;
+    if (depth < 2 && nested !== undefined) summary.cause = summarizeCause(nested, depth + 1);
+    return summary;
+  }
+  const type = typeof cause;
+  if (type === "string" || type === "number" || type === "boolean") return cause;
+  if (type === "bigint") return (cause as bigint).toString();
+  if (type === "object") {
+    const name = (cause as { constructor?: { name?: string } }).constructor?.name;
+    return { type: name && name !== "Object" ? name : "Object" };
+  }
+  return String(cause);
+}
+
+/**
+ * Build the JSON form of an error from its own enumerable fields.
+ *
+ * Shared by both error roots (`GuardError` and `InvalidInputError`), so every
+ * subclass — including ones this file does not know about — serializes its
+ * class-specific fields without a per-class method. `name` is included because
+ * `Error.message` and `stack` are non-enumerable and would otherwise vanish; the
+ * fields a subclass deliberately exposes (e.g. `stage`, `path`, `rule`,
+ * `failures`, `reason`) are copied as-is, minus payloads that must not be
+ * logged.
+ */
+export function guardErrorToJSON(error: Error): GuardErrorJSON {
+  const json: GuardErrorJSON = { name: error.name, message: error.message };
+  for (const [key, value] of Object.entries(error)) {
+    if (key === "name" || key === "message" || key === "cause") continue;
+    if (UNSERIALIZABLE_ERROR_KEYS.has(key)) continue;
+    const serialized = serializeErrorField(value, 0);
+    if (serialized !== undefined) json[key] = serialized;
+  }
+  const cause = (error as { cause?: unknown }).cause;
+  if (cause !== undefined) json.cause = summarizeCause(cause, 0);
+  return json;
+}
+
 /** Base class for every error deliberately produced by this SDK. */
 export class GuardError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = new.target.name;
+  }
+
+  /**
+   * JSON-safe representation for structured loggers.
+   *
+   * `JSON.stringify(error)` normally yields `{}` because `message` is not
+   * enumerable. This returns `name`, `message`, every class-specific field and
+   * a summarized `cause`, while excluding diagnostic events, XDR envelopes and
+   * signatures. Unknown subclasses inherit it, so no logger needs to know each
+   * class.
+   */
+  toJSON(): GuardErrorJSON {
+    return guardErrorToJSON(this);
   }
 }
 
@@ -75,6 +210,11 @@ export class InvalidInputError extends TypeError {
     if (detail !== undefined) {
       this.detail = detail;
     }
+  }
+
+  /** JSON-safe representation; same contract as `GuardError.toJSON()`. */
+  toJSON(): GuardErrorJSON {
+    return guardErrorToJSON(this);
   }
 }
 

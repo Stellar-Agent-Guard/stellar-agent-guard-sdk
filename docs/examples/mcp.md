@@ -93,53 +93,24 @@ const callTool = guardMcpCallTool(myClient.callTool.bind(myClient), {
 });
 ```
 
-## Registering Guarded Tools on a Server
+## A Complete Server
 
-`guardMcpServer` removes the repeated wrapping/registration wiring. It accepts a
-structural `registerTool(name, config, handler)` host — no MCP package is
-installed — and returns one descriptor per tool plus an idempotent `close()`:
+The snippet above shows the wrappers. For a whole server — tool registration,
+a JSON-RPC transport carrying `tools/list` and `tools/call`, and the
+admissible and blocked results as a client receives them — see
+[`examples/mcp-server.ts`](../../examples/mcp-server.ts). It runs with no
+network and no credentials:
 
-```typescript
-import {
-  guardMcpServer,
-  type McpToolHandler,
-} from "stellar-agent-guard-sdk";
-
-// A v2 MCP server, or any object with this shape. `unregisterTool` is optional;
-// `close()` is a no-op when the host cannot unregister.
-const registration = guardMcpServer({
-  server: mcpServer,
-  interceptor,
-  tools: {
-    transfer_tokens: async (args) => ({
-      content: [{ type: "text", text: `transferred ${args.amount}` }],
-    }),
-  },
-  toContractCall,
-  onBlocked: ({ kind, reason, explanation }) => {
-    console.warn(`[mcp] ${kind}: ${reason ?? "undetermined"} — ${explanation}`);
-  },
-});
-
-// Each descriptor carries the guarded handler actually installed, the original
-// handler, the config passed to registerTool, and registerTool's return value.
-const installed: McpToolHandler | undefined = registration.tools[0]?.handler;
-
-// On shutdown: unregisters every tool when the host supports it.
-await registration.close();
+```sh
+node --import tsx examples/mcp-server.ts
 ```
 
-The registered handler is exactly `guardMcpToolHandler(name, originalHandler,
-options)`, so the refusal shape below is unchanged. A tool whose mapper returns
-`null` is still passed through untouched: the original body receives the exact
-`args`/`extra` and its result is returned as-is. An ordered `toContractCalls`
-batch works here too — one refusal anywhere in the batch returns the `isError`
-result without entering any of the tool bodies. Misconfiguration (no
-`registerTool`, no tools, or a malformed entry) throws `AdapterConfigError`
-synchronously, before any tool is registered.
-
-The runnable version, including a structural in-memory host and the `close()`
-assertion, is in [`examples/mcp.ts`](../../examples/mcp.ts).
+It uses a minimal in-memory server with the same `registerTool(name, config,
+handler)` shape as `@modelcontextprotocol/server`. To serve over stdio, replace
+it with the SDK's `McpServer` and `StdioServerTransport`; the guarded handler is
+passed to `registerTool` unchanged. The MCP SDK remains your server's optional
+dependency, never this package's. `tests/unit/mcp-server-example.test.ts`
+exercises the server with a fake interceptor, so the example cannot drift.
 
 ## Blocked Result
 

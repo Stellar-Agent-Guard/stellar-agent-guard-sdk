@@ -32,6 +32,10 @@ attempt does not replace the recorded successful scenario evidence below.
 
 **Note** (security/issue-117-feat-telemetry-injectable-transport-custom-rpc, PR #373 for #117): `src/preflight.ts` and `src/invoke.ts` now take the shared `{ server? | url? }` transport config (`src/transport.ts`). The only new code on the enforcement path runs at the public boundary: it resolves the `rpc.Server` (an injected instance verbatim, or `new rpc.Server(url, rpcOptions)`) and throws `InvalidInputError` when both or neither are supplied, before any RPC. Simulation, signing, broadcast and the guard's block/admit decision are unchanged, so the scenario evidence below remains valid. A live re-run was attempted on 2026-10-24 against a freshly deployed instance (`npm run deploy:phase2`). It stopped at `set_policy` with `HostError: Error(Object, UnexpectedSize)`: the Phase-1 WASM does not decode the current `policyToScVal` ABI, which is the redeploy prerequisite recorded above. That deploy also showed `initialize` failing with `txBadAuthExtra` when the same key is both `source` and an `accountSigners` entry, reproduced on `main`; that is out of scope for this PR and is not fixed here. No scenario output from that attempt is recorded here.
 
+**Note** (feat/invoke-fee-cap-batch-deadline-diagnostics-reason-table, PR for #419/#411/#407/#406): `src/invoke.ts` adds an optional `maxFeeStroops` ceiling checked after the enforced simulation and before broadcast (over-budget calls stay local and unbroadcast), and `src/preflight.ts` now enforces `checkBatch()`'s `deadlineMs` as one fail-closed budget and exposes `simulateForDiagnostics()` without producing a verdict. These are local safety and observability bounds around the existing pipeline: the contract-side block/admit decision, the enforced simulation and the signed authorization entry are unchanged, so the five live scenarios recorded below remain valid. No fresh live run was performed for this change.
+
+**Note** (feat/onverdict-cache-provenance-error-tojson, PR for #408/#409/#477): `src/preflight.ts` now reports cache provenance on a pre-flight verdict (`cached`, `observedLedger`, `ageMs`), accepts `forceFresh` to bypass the opt-in cache for one call, and emits each final verdict once to an observability-only `onVerdict` hook (cached, coalesced and fail-closed paths included). The hook is invoked after the verdict is fixed and cannot change it, and caching/`forceFresh` only select whether the existing simulation runs — the contract-side block/admit decision is unchanged. In `src/invoke.ts` the only change is a JSON-safe `toJSON()` on `InvokeRetryError` for structured logging. The five live scenarios recorded below remain the correct proof; no fresh live run was performed for this change.
+
 ## Instance under test
 
 | | |
@@ -382,6 +386,50 @@ npm run test:coverage:floor
 npm run build
 npm run check:bundle-size
 node scripts/check-doc-links.ts
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.
+
+## Addendum — 2026-11-25 (PR: invoke queue observability, fee ceiling, preflight warmCache and typed failures; issues #423, #418, #413, #412)
+
+This PR touches `src/invoke.ts` and `src/preflight.ts`:
+
+- `onQueue` / `invokeQueueStats()` observe the existing per-source-account
+  queue. They add no new ordering, signing or RPC work: the queue semantics are
+  unchanged, and a throwing hook is swallowed.
+- `feeBump.maxInclusionFee` compares a fee-bump retry's already-computed
+  inclusion fee with a caller ceiling. A breach returns an `error` outcome
+  carrying `FeeCapExceededError` and never broadcasts the over-cap transaction;
+  it cannot turn a guard refusal into an approval.
+- `warmCache()` runs calls through the same `check()` path to populate the
+  opt-in cache. It stores only `admissible`/`blocked` verdicts, exactly as a
+  normal check does.
+- `check()` now converts an unexpected non-`GuardError` throw into the
+  fail-closed `undetermined` verdict with the original value on `cause`.
+  `InvalidInputError` stays unwrapped, and the verdict is never `admissible`.
+
+**The live suite was not run for this change.** No `.env.phase2` credentials
+were available, so `npm run test:integration` was not executed and no fresh live
+enforcement result is claimed. None of the changes alter the guard's
+block/admit decision; the recorded Phase-2 scenarios remain the contract-side
+proof for that decision. A maintainer with `.env.phase2` should run the live
+suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm run check:strict-ratchet
+npm run test:types
+npm test
+npm run test:coverage:floor
+npm run build
+npm run test:exports
+node scripts/check-doc-links.ts
+node scripts/check-enforcement-evidence.ts --check-structure
 ```
 
 The offline checks above passed; they do not substitute for the live-testnet
