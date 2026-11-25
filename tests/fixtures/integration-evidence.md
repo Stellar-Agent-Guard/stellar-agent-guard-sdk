@@ -352,3 +352,37 @@ node scripts/check-doc-links.ts
 
 The offline checks above passed; they do not substitute for the live-testnet
 scenarios.
+
+## Addendum — 2026-11-25 (PR: `waitForTransaction`, `onRetry`, SAC transfer helpers, fidelity table; issues #416, #415, #410, #414)
+
+This PR touches `src/tx.ts` (`waitForTransaction` — a new polling helper that
+only reads `getTransaction`; it never signs or broadcasts) and `src/invoke.ts`
+(the `onRetry` callback, invoked after the pipeline has already classified a
+retryable broadcast failure — it observes the retry, it does not change whether
+one happens). It also adds `src/transfer.ts` (SAC call builders plus their
+checking wrappers over the existing interceptor; no new decision logic) and a
+documentation table. The enforcement-path evidence file is included as required.
+
+**The live suite was not run for this change.** The author has no funded
+`.env.phase2` testnet credentials, so `npm run test:integration` was not executed
+and no fresh live enforcement result is claimed. None of the changes alter the
+guard's block/admit decision: the new code reads transaction status after
+submission, reports retries the pipeline already performed, and builds the
+transfer calls the existing interceptor already checks. A maintainer with
+`.env.phase2` should run the live suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+npm run check:bundle-size
+node scripts/check-doc-links.ts
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.

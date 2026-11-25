@@ -37,12 +37,14 @@ import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 import type {
   InvokeErrorCause,
   InvokeRetryAttempt,
+  InvokeRetryEvent,
   InvokeRetryMetadata,
   RetryableInvokeFailure,
 } from "./retry.ts";
 export type {
   InvokeErrorCause,
   InvokeRetryAttempt,
+  InvokeRetryEvent,
   InvokeRetryMetadata,
   RetryableInvokeFailure,
 } from "./retry.ts";
@@ -586,6 +588,21 @@ export interface InvokeParams {
    */
   onStep?: ((step: InvokeStepEvent) => void) | undefined;
   /**
+   * Optional hook called once per retry, never for the first attempt.
+   *
+   * It fires after the backoff has been chosen and before the next attempt
+   * starts, carrying the failed attempt, its retryable class and stage, the
+   * delay applied, and the attempt number that runs next. This is where a
+   * consumer emits a per-attempt metric or log line instead of waiting for the
+   * terminal outcome — a slow stale-ledger recovery would otherwise look like
+   * a hang.
+   *
+   * The hook is isolated exactly like `onStep`: it never alters retry counts,
+   * delays or outcomes, and a throwing hook is swallowed. Fee-bump retries
+   * re-prepare immediately, so their event reports `delayMs: 0`.
+   */
+  onRetry?: ((event: InvokeRetryEvent) => void) | undefined;
+  /**
    * Optional hook called **once**, with the network's answer to the
    * broadcast, before any status polling.
    *
@@ -934,6 +951,26 @@ function emitStep(
     hook(event);
   } catch {
     /* a broken consumer must not break the pipeline */
+  }
+}
+
+/**
+ * Emit one retry event to the caller's `onRetry` hook.
+ *
+ * A broken consumer must never break the retry loop: the hook is the caller's,
+ * so a throw is swallowed and the pipeline carries on with the same attempt
+ * count and delay it would have used anyway. The event is built by the caller
+ * from the values the loop already decided, so emitting it cannot change them.
+ */
+function emitRetry(
+  hook: ((event: InvokeRetryEvent) => void) | undefined,
+  event: InvokeRetryEvent,
+): void {
+  if (!hook) return;
+  try {
+    hook(event);
+  } catch {
+    /* a broken consumer must not change the retry budget */
   }
 }
 
@@ -1501,6 +1538,18 @@ async function invokeWithQueue(
               cause: RETRYABLE_CAUSES.min_fee,
               delayMs: 0,
             });
+            // A fee bump re-prepares immediately: no backoff, so the event
+            // reports `delayMs: 0` and the next attempt starts at once.
+            emitRetry(params.onRetry, {
+              attempt: generalAttempt,
+              failure: "min_fee",
+              cause: RETRYABLE_CAUSES.min_fee,
+              delayMs: 0,
+              nextAttempt: generalAttempt + 1,
+              // Retryable failures are classified from the broadcast's
+              // submission result, which is the stage this attempt failed at.
+              stage: "broadcast",
+            });
             const bumped = BigInt(
               Math.ceil(Number(currentInclusionFee) * feeOptions.feeMultiplier),
             );
@@ -1571,6 +1620,14 @@ async function invokeWithQueue(
           delayMs: sleepMs,
         });
         totalDelayMs += sleepMs;
+        emitRetry(params.onRetry, {
+          attempt: generalAttempt,
+          failure: outcome.retryable,
+          cause: RETRYABLE_CAUSES[outcome.retryable],
+          delayMs: sleepMs,
+          nextAttempt: generalAttempt + 1,
+          stage: "broadcast",
+        });
         const sleep = params.retry?.sleep ?? ((delayMs: number) => clock.sleep(delayMs));
         await sleep(sleepMs);
         if (deadline?.expired()) {

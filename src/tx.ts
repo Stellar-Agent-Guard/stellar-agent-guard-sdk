@@ -1140,6 +1140,274 @@ export async function submitAndPoll(
   };
 }
 
+/** Default overall wait for `waitForTransaction`, in milliseconds. */
+export const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
+/** Default delay between `waitForTransaction` status polls, in milliseconds. */
+export const DEFAULT_WAIT_POLL_INTERVAL_MS = 1_000;
+
+/** Input for {@link waitForTransaction}. */
+export interface WaitForTransactionParams {
+  /** RPC used for the status polls. */
+  server: rpc.Server;
+  /** Transaction hash the network assigned (`invoke()`'s `pending` outcome carries it). */
+  hash: string;
+  /**
+   * Overall budget for the wait, in milliseconds. Defaults to
+   * `DEFAULT_WAIT_TIMEOUT_MS`; must be a positive finite number.
+   */
+  timeoutMs?: number | undefined;
+  /**
+   * Delay between status polls, in milliseconds. Defaults to
+   * `DEFAULT_WAIT_POLL_INTERVAL_MS`; must be a positive finite number.
+   */
+  pollIntervalMs?: number | undefined;
+  /**
+   * Caller-owned cancellation. An already-aborted signal returns immediately;
+   * a mid-wait abort ends the wait at the next poll boundary. As with the rest
+   * of the SDK, the in-flight HTTP request itself is not cancelled.
+   */
+  signal?: AbortSignal | undefined;
+  /** Time source for polling delays and the timeout. Defaults to `systemClock`. */
+  clock?: Clock | undefined;
+}
+
+/**
+ * What the network said about a transaction, as a discriminated result.
+ *
+ * Only the `confirmed` arm is a successful inclusion. `failed` means the
+ * transaction was included and rejected; `pending` means the budget (or the
+ * caller's `signal`) ended the wait before a verdict; `undetermined` means an
+ * RPC error left the status unknown. The last two are deliberately not
+ * failures of the transaction — never rebroadcast on them; query again or
+ * reconcile out of band.
+ *
+ * `confirmed` says the transaction was included — it does **not** say the
+ * guard admitted the call. A guard refusal that reached inclusion is still an
+ * included transaction, so admissibility is read from the outcome/events, not
+ * from this result.
+ */
+export type WaitForTransactionResult =
+  | {
+      kind: "confirmed";
+      hash: string;
+      /** Ledger the transaction was included in, when the RPC reported one. */
+      ledger: number | null;
+      /** Contract events the transaction emitted, when reported. */
+      events: unknown[];
+    }
+  | {
+      kind: "failed";
+      hash: string;
+      ledger: number | null;
+      detail: string;
+      resultXdr: string | null;
+      resultCode: string | null;
+      diagnosticEvents: unknown[];
+    }
+  | {
+      kind: "pending";
+      hash: string;
+      /** Why the wait stopped: the timeout elapsed, or the caller aborted. */
+      reason: "timeout" | "aborted";
+      detail: string;
+    }
+  | {
+      kind: "undetermined";
+      hash: string;
+      detail: string;
+      /** The RPC failure that left the status unknown. */
+      cause: unknown;
+    };
+
+const ABORTED = Symbol("wait_for_transaction_aborted");
+const TIMED_OUT = Symbol("wait_for_transaction_timed_out");
+
+/** A promise that resolves only when the signal aborts (never otherwise). */
+function abortSignalPromise(signal: AbortSignal | undefined): Promise<typeof ABORTED> | null {
+  if (!signal) return null;
+  return new Promise((resolve) => {
+    signal.addEventListener("abort", () => resolve(ABORTED), { once: true });
+  });
+}
+
+function pendingWait(
+  hash: string,
+  reason: "timeout" | "aborted",
+  timeoutMs: number,
+): WaitForTransactionResult {
+  return {
+    kind: "pending",
+    hash,
+    reason,
+    detail:
+      reason === "aborted"
+        ? `wait for transaction ${hash} was aborted before a verdict`
+        : `transaction ${hash} was not confirmed within ${timeoutMs}ms`,
+  };
+}
+
+/**
+ * Poll `getTransaction` until the hash is confirmed, fails, times out or the
+ * caller aborts — the helper that turns `invoke()`'s `pending` outcome into a
+ * verdict without hand-rolled polling.
+ *
+ * It never throws on a non-confirmation: a timeout is `pending`, an RPC error
+ * is `undetermined` (carrying the cause), and a post-inclusion rejection is
+ * `failed`. Only invalid input throws — a malformed hash or a nonsensical
+ * timeout/poll interval is a programming error and is rejected synchronously,
+ * before any RPC, as a typed `InvalidInputError`.
+ *
+ * Timing comes from the injected `clock`, so tests can use a `FakeClock` and
+ * wait deterministically. The loop is bounded by `timeoutMs` measured from the
+ * start: the first poll happens immediately, and each poll is preceded by at
+ * most `pollIntervalMs` of the caller's budget, never past the deadline.
+ *
+ * **Confirmation is not admissibility.** A transaction can be included and
+ * still have been refused by the guard (a post-inclusion block, `charged:
+ * true` in `invoke()`'s vocabulary). Read the guard's decision from the
+ * outcome's reason/events; this helper only reports what the chain did with
+ * the transaction.
+ */
+export async function waitForTransaction(
+  params: WaitForTransactionParams,
+): Promise<WaitForTransactionResult> {
+  if (params === null || typeof params !== "object") {
+    throw new InvalidInputError("params", "required", "waitForTransaction expects an options object");
+  }
+  const { server, hash } = params;
+  if (
+    server === null ||
+    typeof server !== "object" ||
+    typeof (server as { getTransaction?: unknown }).getTransaction !== "function"
+  ) {
+    throw new InvalidInputError(
+      "server",
+      "rpc_server",
+      "server must be an rpc.Server with a getTransaction() method",
+    );
+  }
+  if (typeof hash !== "string" || !/^[0-9a-fA-F]{64}$/.test(hash)) {
+    throw new InvalidInputError(
+      "hash",
+      "hex_32_bytes",
+      `hash must be a 64-character hex transaction hash (received ${JSON.stringify(hash)})`,
+    );
+  }
+  const timeoutMs = params.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new InvalidInputError(
+      "timeoutMs",
+      "positive_finite",
+      `timeoutMs must be a positive finite number (received ${String(params.timeoutMs)})`,
+    );
+  }
+  const pollIntervalMs = params.pollIntervalMs ?? DEFAULT_WAIT_POLL_INTERVAL_MS;
+  if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+    throw new InvalidInputError(
+      "pollIntervalMs",
+      "positive_finite",
+      `pollIntervalMs must be a positive finite number (received ${String(params.pollIntervalMs)})`,
+    );
+  }
+  const clock = params.clock ?? systemClock;
+  if (
+    clock === null ||
+    typeof clock !== "object" ||
+    typeof clock.now !== "function" ||
+    typeof clock.sleep !== "function"
+  ) {
+    throw new InvalidInputError(
+      "clock",
+      "clock_shape",
+      "clock must be an object with now() and sleep()",
+    );
+  }
+  const signal = params.signal;
+  if (
+    signal !== undefined &&
+    (signal === null || typeof (signal as AbortSignal).addEventListener !== "function")
+  ) {
+    throw new InvalidInputError(
+      "signal",
+      "abort_signal",
+      "signal must be an AbortSignal",
+    );
+  }
+
+  const deadlineAt = clock.now() + timeoutMs;
+  const abortPromise = abortSignalPromise(signal);
+
+  while (true) {
+    if (signal?.aborted) return pendingWait(hash, "aborted", timeoutMs);
+    const remaining = deadlineAt - clock.now();
+    if (remaining <= 0) return pendingWait(hash, "timeout", timeoutMs);
+
+    // Bound a single status call by the caller's remaining budget and by the
+    // signal, so neither a stalled RPC nor an abort can hold the wait open.
+    const statusCall = Promise.resolve().then(() => server.getTransaction(hash));
+    // Mark a poll that loses the race as handled: the winner is the result we
+    // report, and a late rejection must not surface as an unhandled rejection.
+    statusCall.catch(() => undefined);
+    const racers: Array<Promise<unknown>> = [
+      statusCall,
+      clock.sleep(remaining).then(() => TIMED_OUT),
+    ];
+    if (abortPromise) racers.push(abortPromise);
+
+    let settled: unknown;
+    try {
+      settled = await Promise.race(racers);
+    } catch (cause) {
+      return {
+        kind: "undetermined",
+        hash,
+        detail: `could not read transaction ${hash}: ${cause instanceof Error ? cause.message : String(cause)}`,
+        cause,
+      };
+    }
+    if (settled === ABORTED) return pendingWait(hash, "aborted", timeoutMs);
+    if (settled === TIMED_OUT) return pendingWait(hash, "timeout", timeoutMs);
+
+    const result = settled as Awaited<ReturnType<rpc.Server["getTransaction"]>>;
+    if (result.status === rpc.Api.GetTransactionStatus.SUCCESS) {
+      return {
+        kind: "confirmed",
+        hash,
+        ledger: result.ledger ?? null,
+        events:
+          (result as { events?: { contractEventsXdr?: unknown[] } }).events?.contractEventsXdr ??
+          [],
+      };
+    }
+    if (result.status === rpc.Api.GetTransactionStatus.FAILED) {
+      const failed = result as unknown as {
+        resultXdr?: unknown;
+        diagnosticEventsXdr?: unknown[];
+      };
+      return {
+        kind: "failed",
+        hash,
+        ledger: result.ledger ?? null,
+        detail: `transaction ${hash} failed after inclusion`,
+        resultXdr: resultXdrToString(result),
+        resultCode: describeTransactionResult(failed.resultXdr),
+        diagnosticEvents: failed.diagnosticEventsXdr ?? [],
+      };
+    }
+
+    // NOT_FOUND (or any unrecognised status): the transaction is not in a
+    // ledger yet. Wait one interval — never past the deadline — and poll again.
+    const left = deadlineAt - clock.now();
+    if (left <= 0) return pendingWait(hash, "timeout", timeoutMs);
+    const racersAfter: Array<Promise<unknown>> = [
+      clock.sleep(Math.min(pollIntervalMs, left)).then(() => TIMED_OUT),
+    ];
+    if (abortPromise) racersAfter.push(abortPromise);
+    const waited = await Promise.race(racersAfter);
+    if (waited === ABORTED) return pendingWait(hash, "aborted", timeoutMs);
+  }
+}
+
 /** Convenience wrapper: build the initial (footprint-declaring) envelope. */
 export function buildInitialEnvelope(params: {
   source: Account;
