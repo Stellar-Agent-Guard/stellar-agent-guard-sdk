@@ -222,7 +222,10 @@ describe("invoke() normalised timing fields", () => {
     });
 
     assert.equal(outcome.kind, "error");
-    const timing = "timing" in outcome ? (outcome.timing as import("../../src/invoke.ts").InvokeTiming | undefined) : undefined;
+    const timing =
+      "timing" in outcome
+        ? (outcome.timing as import("../../src/invoke.ts").InvokeTiming | undefined)
+        : undefined;
     assert.ok(timing);
     assert.equal(timing.startedAt, new Date(4_000_000).toISOString());
     assert.equal(timing.submittedAt, undefined);
