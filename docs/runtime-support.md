@@ -66,6 +66,7 @@ published package.
 | CommonJS interop via dynamic `import()` | `tests/unit/exports.test.ts` |
 | Browser-safe root entry | `scripts/check-browser-entry.mjs` |
 | Browser bundle weight | `scripts/check-bundle-size.mjs` |
+| Browser dashboard example (root entry only, no `./fs`, no secrets, size reported) | [`examples/browser/`](../examples/browser/README.md), gated by `tests/unit/browser-example.test.ts` |
 | Packed tarball install/import/typecheck | `scripts/check-packed-install.ts`, `scripts/check-packed-types.ts`, `scripts/check-pack-contents.ts` |
 
 None of these fixtures depends on a runtime framework (no Next.js, no Vite, no

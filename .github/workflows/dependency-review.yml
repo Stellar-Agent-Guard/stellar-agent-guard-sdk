@@ -1,0 +1,55 @@
+# Dependency review — an advisory-based gate on what a pull request adds to the
+# dependency tree.
+#
+# WHY THIS AND NOT `npm audit`: `npm audit` reports against the whole installed
+# lockfile, so a PR that adds nothing cannot be cleanly distinguished from one
+# that introduces a vulnerable package, and it has no first-class allowlist —
+# the usual workaround is `|| true` or `--audit-level`, both of which either
+# swallow failures or suppress unrelated ones. This action diffs the dependency
+# changes a PR actually makes against the GitHub Advisory Database and fails on
+# a stated severity threshold, with an explicit allowlist mechanism (`allow-ghsas`
+# / `allow-dependencies-licenses`) for advisories a maintainer has reviewed and
+# accepted. It is a review-time gate, not a replacement for `npm audit`.
+#
+# THRESHOLD: `fail-on-severity: high`. A new direct or transitive dependency that
+# resolves to a high or critical advisory fails this check. Moderate and low are
+# surfaced in the job summary but do not fail the build.
+#
+# ALLOWLIST: if a flagged advisory is reviewed and accepted, add its GHSA id to
+# `allow-ghsas` below (a YAML list). This is the only sanctioned suppression —
+# never add `|| true`, `continue-on-error`, or drop the step.
+#
+# REQUIREMENTS: this action reads the GitHub Dependency graph, which is enabled
+# by default for public repositories (verify under Settings → Code security).
+# It runs ONLY on `pull_request`; do not add a `push` trigger — the action exits
+# non-zero on any other event.
+#
+# GATING: this is a separate workflow, deliberately not folded into `ci.yml`.
+# The `ci` job is documented as the single required, secret-free check; a
+# dependency gate is PR-scoped and reads the repository's advisory data. To make
+# it gating, add `dependency-review` to the branch-protection ruleset's required
+# status checks — the check itself already fails the job, no `|| true` anywhere.
+name: dependency-review
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  # Required to read the PR's changed files and the dependency graph.
+  pull-requests: read
+
+jobs:
+  dependency-review:
+    name: dependency-review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: review dependency changes
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          # Reviewed and accepted advisories go here as GHSA ids. Empty today.
+          allow-ghsas: []

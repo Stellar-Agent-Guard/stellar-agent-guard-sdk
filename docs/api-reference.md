@@ -4,6 +4,13 @@ The Stellar Agent Guard SDK exposes the following public surface. For the narrat
 
 > **0.x API Policy & Deprecations:** During `0.x`, this package adheres to an **additive-only within minor** policy (`0.1.x` releases are additive and fixes only; breaking changes and deprecation removals occur only at minor boundaries like `0.2.0`). For full policy details, deprecation mechanics, and the tracking table, see [`deprecations.md`](deprecations.md). Release process and versioning checklist: [`releasing.md`](releasing.md).
 
+### Policy JSON & schema validation
+
+- `policyToJson(policy)` / `policyFromJson(input)` (aliases `encodePolicyJson` / `decodePolicyJson`) and `POLICY_JSON_VERSION` — lossless JSON representation of a `PolicyConfig` with decimal-string integers, fixed key order and `PolicyDecodeError` paths. See [Policy JSON](api/policy-json.md).
+- `validateGuardPolicyAgainstSchema(policy, schema, options?)`, `POLICY_SCHEMA_PATH`, `SCHEMA_DIALECT`, `SCHEMA_RULE_ID_ANNOTATION`, `SCHEMA_VS_CODE_RULES`, `ruleForKeyword()`, `ruleFromAnnotation()` — schema-driven SPEC §8 validation with the shared rule vocabulary. See [Policy Schema Validation](api/policy-schema.md).
+
+Errors: use the [error catalog](errors.md#error-classes) for the class → cause → fix mapping, and [troubleshooting: error classes](troubleshooting.md#error-classes) for symptom-first guidance. Before going live, work through the [production readiness checklist](production-readiness.md).
+
 ### Constructor options
 
 Every constructor options object has a table (Option | Type | Default | Meaning) with source-verified defaults and ⚠️ safety notes: [`PreFlightInterceptorOptions` and its nested cache/check/batch options](api/interceptor.md#options), [`CostPreCheckConfig` / `CostPreCheckOptions`](api/cost-checker.md#options), [`GuardTelemetryConfig`](api/telemetry-listener.md#options), and [`InvokeOptions`](api/invoke-pipeline.md#options). The same tables appear in the README's [Constructor options](../README.md#constructor-options).
@@ -133,7 +140,9 @@ if (decision.kind === "within_budget" && decision.breakdown) {
 
 #### Ledger provenance
 
-Priced decisions carry `provenance: { ledger: number } | null`, read from the **same** simulation response that produced the quote. It identifies the ledger snapshot the quote describes; it is informational and is not a promise about where a transaction will land. When the simulation does not establish a usable ledger, provenance is `null` rather than a fabricated number. `blocked` and `undetermined` decisions always have `provenance: null`.
+Priced decisions carry `provenance: { ledger: number | null } | null`, read from the **same** simulation response that produced the quote (or, in `feeSource: "rpc"` mode, from the fee-stats response, marked `ledgerSource: "fee_stats"`). It identifies the ledger snapshot the quote describes; it is informational and is not a promise about where a transaction will land. When no source establishes a usable ledger, provenance is `null` rather than a fabricated number. `blocked` and `undetermined` decisions always have `provenance: null`.
+
+Every cost decision also reports `surplusStroops` (`ceiling - total`, clamped at zero, `null` without a ceiling; #446) and priced `within_budget` decisions may carry an opt-in structured `headroomWarning` from `warnAtRatio` (#447). `feeSource: "rpc"` with `percentile` quotes the inclusion fee from `getFeeStats`, with a visible `provenance.fallbackReason` when it falls back to the fixed fee (#445).
 
 #### One simulation per check: prefer `checkWithCost`
 
@@ -294,6 +303,10 @@ import { parseEventRecord, serializeEventRecord } from "stellar-agent-guard-sdk"
 logger.info(serializeEventRecord(event)); // {"v":1,"event":{…}}
 const { version, event: decoded } = parseEventRecord(storedLine); // version 0 = legacy
 ```
+
+#### Policy cookbook (issue #444)
+
+[`policy-cookbook.md`](policy-cookbook.md) has five complete, reviewed `ReadonlyPolicyConfig` recipes — single-recipient payer, hourly-capped trading agent, staged rollout, treasury with pause, and deny-all observer — each with its `describePolicy()` output, its deliberate limitations, and an example pinned to [`examples/policy-cookbook.ts`](../examples/policy-cookbook.ts) by a unit test.
 
 #### Describing a policy (issue #343)
 

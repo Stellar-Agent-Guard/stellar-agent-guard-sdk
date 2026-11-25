@@ -20,7 +20,13 @@
  */
 import { Keypair, Operation, rpc, scValToNative, TransactionBuilder } from "@stellar/stellar-sdk";
 import { DEFAULT_NETWORK_PASSPHRASE } from "./admin.ts";
-import { BroadcastError, GuardError, SimulationError } from "./errors.ts";
+import {
+  BroadcastError,
+  GuardError,
+  SimulationError,
+  guardErrorToJSON,
+  type GuardErrorJSON,
+} from "./errors.ts";
 import { invoke, RpcTimeoutError, type InvokeDryRunVerdict, type InvokeOutcome } from "./invoke.ts";
 import { unsafeContractAddress, type GuardStatus, type PolicyConfig } from "./policy.ts";
 import { explainReason, GuardBlockedError } from "./reasons.ts";
@@ -284,6 +290,11 @@ export class HeartbeatIntervalError extends Error {
     this.intervalMs = intervalMs;
     this.graceSecs = graceSecs;
     this.maxIntervalMs = maxIntervalMs;
+  }
+
+  /** JSON-safe representation for structured loggers. */
+  toJSON(): GuardErrorJSON {
+    return guardErrorToJSON(this);
   }
 }
 

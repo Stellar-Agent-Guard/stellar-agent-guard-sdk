@@ -15,6 +15,13 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Added
 
+- `surplusStroops: bigint | null` on every `CostDecision`: the room left under the configured ceiling (`ceiling - total`, clamped at zero), `null` when no ceiling exists (which is not the same as a zero surplus), and `0n` on an `over_budget` decision whose breach is reported separately. `describeCostDecision()` includes the value (#446).
+- `warnAtRatio` on `CostPreChecker` (off by default, must be in `(0, 1]`): when a quote reaches the ratio of its ceiling — inclusively, in exact bigint arithmetic — the decision carries a structured `headroomWarning` with the threshold, used ratio, exact fee, ceiling and surplus. A warning never changes `kind` or `allowed`; only a real breach is `over_budget` (#447).
+- `feeSource: "fixed" | "rpc"` and `percentile: "p50" | "p90" | "p99"` on `CostPreChecker`, plus `server` / `feeStats` for the fee-stats source: `"rpc"` quotes the Soroban inclusion fee from `getFeeStats` once per priced check while the resource fee stays tied to the same enforced simulation. Provenance records `feeSource`, `percentile` and `feeStatsLedger`; a failed or malformed response falls back to the fixed fee with an explicit `provenance.fallbackReason`. The fixed fee remains the offline default, and docs state the residual fee-market risk (#445).
+- `docs/policy-cookbook.md` and `examples/policy-cookbook.ts`: five complete, reviewed `ReadonlyPolicyConfig` recipes (single-recipient payer, hourly-capped trading agent, staged rollout, treasury with pause, deny-all observer), each with a `describePolicy()` summary, explicit limitations, and a unit test that imports and validates it and fails if the documented summary drifts (#444).
+- `onMappingError` on every framework adapter: a mapper that throws or returns a malformed call now fires this integration-bug hook once, with `{ adapter, tool, errorClass, error }` and no raw tool arguments unless `includeMappingErrorRequest` opts in, before the fail-closed halt. `onBlocked` keeps firing for compatibility, so a broken mapper is no longer indistinguishable from a guard refusal in operator alerts (#453).
+- `DEFAULT_ADAPTER_TIMEOUT_MS`: the adapter-level default per-RPC bound, aliasing the pre-flight `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) and resolved by all four adapters. `timeoutMs: 0` remains an explicit opt-out that relies on `signal` (#455).
+- A worked fee breakdown in `docs/api/cost-checker.md` using the committed Phase 2 testnet simulation: raw resource values, the exact stroop formula, the decision objects under a tight and a loose ceiling, and refundability per fee component (#452).
 - `DEFAULT_GUARD_POLICY`: a deep-frozen, deny-all safe-start policy (empty allowlists, `per_tx_cap` 100, 500 per hour, 7-day dead-man grace) with values pinned to the contracts policy templates by a unit test; README now has a "Start from the safe baseline" section (#59).
 - `maxConcurrentSimulations` (default 4) and `rateLimit: { backoffMs, maxBackoffMs }` on `PreFlightInterceptor`, plus `DEFAULT_MAX_CONCURRENT_SIMULATIONS`, `RateLimitedError` and `PreFlightUndeterminedCause`: simulations queue FIFO behind a concurrency limit, an HTTP 429 gets one bounded `Retry-After`-aware backoff and retry, and a persistent 429 yields `undetermined` with `cause: "rate_limited"`. Behaviour change: bursts above 4 simultaneous checks now queue instead of all hitting the RPC at once; set `maxConcurrentSimulations` higher to restore wider fan-out (#40).
 - `docs/agent-runtime.md` and `examples/agent-runtime.ts`: the complete 24/7 agent loop (heartbeat, pre-flight, telemetry alerts, DMS countdown) with a fail-closed failure-mode table (#74).
@@ -48,6 +55,8 @@ as the change — see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ### Changed
 
+- `CostProvenance.ledger` is now `number | null`: it stays the simulation ledger outside `"rpc"` fee mode, may come from the fee-stats response (marked `ledgerSource: "fee_stats"`) in that mode, and is `null` only when neither source established one. Existing quantified artefacts (`{ ledger: 512_345 }`) are unchanged (#445).
+- The LangChain adapter now merges a `RunnableConfig.signal` passed to `wrapToolCall` with any request signal and its own configured `signal` (`AbortSignal.any()`, or a linked controller where unavailable), so cancelling a chain aborts the pre-flight check instead of letting it run to completion. Either signal alone aborts, and an already-aborted framework signal issues no RPC (#454).
 - `formatFee()` is explicitly a non-negative fee formatter: a negative `bigint` or signed numeric string now throws `TypeError` instead of rendering an impossible negative XLM amount. Zero and every supported positive value format exactly as before (#346).
 - Committed telemetry pages now share one ordering rule across `poll()`, `watch()`, and `watchAll()`: ledger ascending, then transaction hash, topic, and stable id as tie-breakers for same-ledger events. Diagnostic observation order is unchanged (#289).
 - `GuardTelemetryListener` now rejects a concurrent `watch()`/`watchAll()` stream with `ConcurrentTelemetryStreamError` instead of letting two iterators race shared cursor, counter, and buffer state (#291).
@@ -134,3 +143,4 @@ None.
 
 [unreleased]: https://github.com/stellar-agent-guard/stellar-agent-guard-sdk/commits/main
 [0.1.0]: https://www.npmjs.com/package/stellar-agent-guard-sdk/v/0.1.0
+

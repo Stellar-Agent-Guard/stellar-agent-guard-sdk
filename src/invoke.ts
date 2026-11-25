@@ -21,9 +21,12 @@ import { feeBreakdown, type FeeBreakdown } from "./cost.ts";
 import {
   BroadcastError,
   ContractResponseError,
+  FeeCapExceededError,
   GuardError,
   SigningError,
   SimulationError,
+  guardErrorToJSON,
+  type GuardErrorJSON,
 } from "./errors.ts";
 import { GUARD_AUTH_RESULTS, decodeAuthDecision } from "./events.ts";
 import {
@@ -37,12 +40,14 @@ import { withResolvedServer, type WithRpcTransport } from "./transport.ts";
 import type {
   InvokeErrorCause,
   InvokeRetryAttempt,
+  InvokeRetryEvent,
   InvokeRetryMetadata,
   RetryableInvokeFailure,
 } from "./retry.ts";
 export type {
   InvokeErrorCause,
   InvokeRetryAttempt,
+  InvokeRetryEvent,
   InvokeRetryMetadata,
   RetryableInvokeFailure,
 } from "./retry.ts";
@@ -57,6 +62,7 @@ import {
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
+  normalizeFeeStroops,
   parseSimulationResourceFee,
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
@@ -358,6 +364,11 @@ export class InvokeRetryError extends Error {
       outcome: "error",
     };
   }
+
+  /** JSON-safe representation for structured loggers. */
+  toJSON(): GuardErrorJSON {
+    return guardErrorToJSON(this);
+  }
 }
 
 export type InvokeDryRunVerdict = "admissible" | "blocked" | "undetermined";
@@ -417,7 +428,18 @@ export interface FeeBumpConfig {
    * Initial inclusion fee in stroops to use on the first attempt.
    * Default: 100 stroops (`INCLUSION_FEE`).
    */
-  initialInclusionFee?: bigint | undefined;
+  initialInclusionFee?: bigint | string | undefined;
+  /**
+   * Absolute ceiling on the inclusion fee a fee-bump retry may broadcast, in
+   * stroops. Omit it for unbounded (multiplier-only) growth.
+   *
+   * Before a fee-bumped broadcast, the computed inclusion fee is compared with
+   * this ceiling. A breach stops retrying and returns an `error` outcome
+   * carrying {@link FeeCapExceededError}; the over-cap transaction is never
+   * broadcast. Must be a positive bigint (or base-10 integer string) greater
+   * than `initialInclusionFee`, validated at the `invoke()` boundary.
+   */
+  maxInclusionFee?: bigint | string | undefined;
 }
 
 /**
@@ -551,6 +573,16 @@ export interface InvokeParams {
    */
   signal?: AbortSignal | undefined;
   /**
+   * Optional total-fee ceiling for this invocation, in stroops. After the
+   * enforced simulation succeeds, the simulated resource fee plus the inclusion
+   * fee the attempt would declare is compared against this value; a total above
+   * the ceiling stops the pipeline before assembly or broadcast and returns an
+   * `error` outcome carrying `FeeCapExceededError`. A total exactly at the
+   * ceiling is allowed. Omitted by default, so existing behaviour is unchanged.
+   * Reuses the same resource/inclusion split as `CostPreChecker`.
+   */
+  maxFeeStroops?: bigint | string | undefined;
+  /**
    * Bound on each individual RPC call, in milliseconds. Defaults to
    * `DEFAULT_RPC_TIMEOUT_MS` (30s); pass `0` to disable the timeout and rely
    * solely on `signal`. A fired timeout produces the same `RpcTimeoutError`
@@ -584,6 +616,35 @@ export interface InvokeParams {
    * consumer does with the events is entirely the consumer's business.
    */
   onStep?: ((step: InvokeStepEvent) => void) | undefined;
+  /**
+   * Optional hook called once per retry, never for the first attempt.
+   *
+   * It fires after the backoff has been chosen and before the next attempt
+   * starts, carrying the failed attempt, its retryable class and stage, the
+   * delay applied, and the attempt number that runs next. This is where a
+   * consumer emits a per-attempt metric or log line instead of waiting for the
+   * terminal outcome — a slow stale-ledger recovery would otherwise look like
+   * a hang.
+   *
+   * The hook is isolated exactly like `onStep`: it never alters retry counts,
+   * delays or outcomes, and a throwing hook is swallowed. Fee-bump retries
+   * re-prepare immediately, so their event reports `delayMs: 0`.
+   */
+  onRetry?: ((event: InvokeRetryEvent) => void) | undefined;
+  /**
+   * Optional hook reporting the per-source-account queue of the RPC server
+   * handling the call.
+   *
+   * `waiting` fires when a call joins the queue (before its turn), and
+   * `acquired` when it starts running, so a busy fleet can be told apart from a
+   * slow RPC. Events are emitted in acquisition (FIFO) order. The hook is
+   * isolated like `onStep`: a throw is swallowed and can never stall the queue.
+   *
+   * The queue and its counters belong to that server object and process, not
+   * to a global: another process using the same source account is invisible
+   * here, and {@link invokeQueueStats} scopes to one server when given one.
+   */
+  onQueue?: ((event: InvokeQueueEvent) => void) | undefined;
   /**
    * Optional hook called **once**, with the network's answer to the
    * broadcast, before any status polling.
@@ -758,14 +819,23 @@ function validateInvokeOptions(params: InvokeParams): void {
       assertFiniteOption("feeBump.feeMultiplier", feeBump.feeMultiplier, 1, false);
     }
     if (feeBump.initialInclusionFee !== undefined) {
-      if (
-        typeof feeBump.initialInclusionFee !== "bigint" ||
-        feeBump.initialInclusionFee <= 0n
-      ) {
+      normalizeFeeStroops(feeBump.initialInclusionFee, "feeBump.initialInclusionFee", false);
+    }
+    if (feeBump.maxInclusionFee !== undefined) {
+      const ceiling = normalizeFeeStroops(
+        feeBump.maxInclusionFee,
+        "feeBump.maxInclusionFee",
+        false,
+      );
+      const initial =
+        feeBump.initialInclusionFee === undefined
+          ? BigInt(INCLUSION_FEE)
+          : normalizeFeeStroops(feeBump.initialInclusionFee, "feeBump.initialInclusionFee", false);
+      if (ceiling <= initial) {
         rejectOption(
-          "feeBump.initialInclusionFee",
-          "a positive bigint in stroops",
-          feeBump.initialInclusionFee,
+          "feeBump.maxInclusionFee",
+          `greater than feeBump.initialInclusionFee (${initial} stroops)`,
+          feeBump.maxInclusionFee,
         );
       }
     }
@@ -816,6 +886,9 @@ function validateInvokeOptions(params: InvokeParams): void {
     }
   }
 
+  if (params.maxFeeStroops !== undefined) {
+    normalizeFeeStroops(params.maxFeeStroops, "maxFeeStroops", false);
+  }
   if (params.timeoutMs !== undefined) {
     assertFiniteOption("timeoutMs", params.timeoutMs, 0);
   }
@@ -905,13 +978,29 @@ function resolveFeeBumpOptions(params: InvokeParams): {
   maxAttempts: number;
   feeMultiplier: number;
   initialInclusionFee: bigint;
+  maxInclusionFee: bigint | undefined;
 } {
   const requested = params.feeBump?.maxAttempts ?? 3;
   const overall = params.maxRetries !== undefined ? params.maxRetries + 1 : Number.POSITIVE_INFINITY;
   return {
     maxAttempts: Math.max(1, Math.min(requested, overall)),
     feeMultiplier: params.feeBump?.feeMultiplier ?? 2,
-    initialInclusionFee: params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE),
+    initialInclusionFee:
+      params.feeBump?.initialInclusionFee === undefined
+        ? BigInt(INCLUSION_FEE)
+        : normalizeFeeStroops(
+            params.feeBump.initialInclusionFee,
+            "feeBump.initialInclusionFee",
+            false,
+          ),
+    maxInclusionFee:
+      params.feeBump?.maxInclusionFee === undefined
+        ? undefined
+        : normalizeFeeStroops(
+            params.feeBump.maxInclusionFee,
+            "feeBump.maxInclusionFee",
+            false,
+          ),
   };
 }
 
@@ -935,6 +1024,26 @@ function emitStep(
     hook(event);
   } catch {
     /* a broken consumer must not break the pipeline */
+  }
+}
+
+/**
+ * Emit one retry event to the caller's `onRetry` hook.
+ *
+ * A broken consumer must never break the retry loop: the hook is the caller's,
+ * so a throw is swallowed and the pipeline carries on with the same attempt
+ * count and delay it would have used anyway. The event is built by the caller
+ * from the values the loop already decided, so emitting it cannot change them.
+ */
+function emitRetry(
+  hook: ((event: InvokeRetryEvent) => void) | undefined,
+  event: InvokeRetryEvent,
+): void {
+  if (!hook) return;
+  try {
+    hook(event);
+  } catch {
+    /* a broken consumer must not change the retry budget */
   }
 }
 
@@ -1252,20 +1361,137 @@ function fullJitterDelay(attempt: number, options: ResolvedRetryOptions): number
 type AccountState = {
   queue: Promise<void>;
   lastReservedSequence?: bigint;
+  /** Calls waiting for this account's turn (not counting the running one). */
+  waiting: number;
+  /** True while a call holds the account queue. */
+  running: boolean;
 };
 
-const accountStates = new WeakMap<object, Map<string, AccountState>>();
+/** One event from the per-account invoke queue. */
+export interface InvokeQueueEvent {
+  /** `waiting` when the call joins the queue; `acquired` when it starts. */
+  kind: "waiting" | "acquired";
+  /** Source account public key whose queue emitted the event. */
+  source: string;
+  /** Calls ahead of this one: queued waiters plus the running call; `0` once acquired. */
+  depth: number;
+  /** Time spent waiting, in milliseconds: `0` on `waiting`. */
+  waitedMs: number;
+  /** True only on `acquired`. */
+  acquired: boolean;
+}
+
+/** Snapshot of invoke queues. */
+export interface InvokeQueueStats {
+  /** Calls currently waiting for their turn across the measured accounts. */
+  depth: number;
+  /** Cumulative queue wait observed by the measured queues, in ms. */
+  totalWaitedMs: number;
+  /** Calls enqueued on the measured queues. */
+  enqueued: number;
+}
+
+/**
+ * Live counters for the queues of one `rpc.Server`.
+ *
+ * Owned by that server's queue context, not by the module, so two servers (or
+ * two tests) never share a counter and nothing leaks between unrelated runs.
+ */
+type QueueMetrics = {
+  depth: number;
+  totalWaitedMs: number;
+  enqueued: number;
+};
+
+/** The queue state owned by one `rpc.Server` object. */
+type ServerQueueState = {
+  accounts: Map<string, AccountState>;
+  metrics: QueueMetrics;
+};
+
+const serverQueues = new WeakMap<object, ServerQueueState>();
+
+// Live contexts, so the no-argument snapshot can sum this process's queues
+// without module-level counters. Weak refs keep an abandoned server collectable;
+// dead entries are pruned whenever the snapshot is taken.
+const liveServerQueues = new Set<WeakRef<ServerQueueState>>();
+
+function serverQueueFor(server: rpc.Server): ServerQueueState {
+  let state = serverQueues.get(server);
+  if (!state) {
+    state = {
+      accounts: new Map<string, AccountState>(),
+      metrics: { depth: 0, totalWaitedMs: 0, enqueued: 0 },
+    };
+    serverQueues.set(server, state);
+    liveServerQueues.add(new WeakRef(state));
+    // A transport that builds a server per call would otherwise leave one dead
+    // weak ref behind per call. Keep the registry proportional to live contexts.
+    if (liveServerQueues.size > 32) pruneDeadServerQueues();
+  }
+  return state;
+}
+
+function pruneDeadServerQueues(): void {
+  for (const ref of liveServerQueues) {
+    if (ref.deref() === undefined) liveServerQueues.delete(ref);
+  }
+}
+
+/**
+ * Snapshot invoke-queue depth and cumulative wait.
+ *
+ * Pass the `rpc.Server` whose queues you own to measure exactly its accounts:
+ * the counters live on that server's queue state, so another server — or a
+ * test that already ran — cannot contribute. Called without a server, the
+ * snapshot sums every server context still alive in this process.
+ *
+ * Per process by construction: a queue is owned by the process that holds the
+ * source account's sequence, so a second process is neither counted nor
+ * coordinated with here.
+ */
+export function invokeQueueStats(server?: rpc.Server): InvokeQueueStats {
+  const contexts = server === undefined ? liveServerQueueStates() : [serverQueueFor(server)];
+  let depth = 0;
+  let totalWaitedMs = 0;
+  let enqueued = 0;
+  for (const context of contexts) {
+    depth += context.metrics.depth;
+    totalWaitedMs += context.metrics.totalWaitedMs;
+    enqueued += context.metrics.enqueued;
+  }
+  return { depth, totalWaitedMs, enqueued };
+}
+
+function liveServerQueueStates(): ServerQueueState[] {
+  const live: ServerQueueState[] = [];
+  for (const ref of liveServerQueues) {
+    const context = ref.deref();
+    if (context === undefined) liveServerQueues.delete(ref);
+    else live.push(context);
+  }
+  return live;
+}
+
+/** Emit a queue event without letting a broken consumer stall the queue. */
+function emitQueue(
+  hook: ((event: InvokeQueueEvent) => void) | undefined,
+  event: InvokeQueueEvent,
+): void {
+  if (!hook) return;
+  try {
+    hook(event);
+  } catch {
+    /* a broken consumer must not stall or fail the queue */
+  }
+}
 
 function accountStateFor(server: rpc.Server, publicKey: string): AccountState {
-  let states = accountStates.get(server);
-  if (!states) {
-    states = new Map<string, AccountState>();
-    accountStates.set(server, states);
-  }
-  let state = states.get(publicKey);
+  const accounts = serverQueueFor(server).accounts;
+  let state = accounts.get(publicKey);
   if (!state) {
-    state = { queue: Promise.resolve() };
-    states.set(publicKey, state);
+    state = { queue: Promise.resolve(), waiting: 0, running: false };
+    accounts.set(publicKey, state);
   }
   return state;
 }
@@ -1282,8 +1508,22 @@ async function withAccountQueue<T>(
   server: rpc.Server,
   publicKey: string,
   task: () => Promise<T>,
+  onQueue?: ((event: InvokeQueueEvent) => void) | undefined,
 ): Promise<T> {
+  const metrics = serverQueueFor(server).metrics;
   const state = accountStateFor(server, publicKey);
+  const ahead = state.waiting + (state.running ? 1 : 0);
+  const queuedAt = performance.now();
+  state.waiting += 1;
+  metrics.depth += 1;
+  metrics.enqueued += 1;
+  emitQueue(onQueue, {
+    kind: "waiting",
+    source: publicKey,
+    depth: ahead,
+    waitedMs: 0,
+    acquired: false,
+  });
   const previous = state.queue;
   let release!: () => void;
   const current = new Promise<void>((resolve) => {
@@ -1291,9 +1531,22 @@ async function withAccountQueue<T>(
   });
   state.queue = current;
   await previous;
+  const waitedMs = performance.now() - queuedAt;
+  state.waiting -= 1;
+  metrics.depth -= 1;
+  metrics.totalWaitedMs += waitedMs;
+  state.running = true;
+  emitQueue(onQueue, {
+    kind: "acquired",
+    source: publicKey,
+    depth: 0,
+    waitedMs,
+    acquired: true,
+  });
   try {
     return await task();
   } finally {
+    state.running = false;
     release();
     if (state.queue === current) state.queue = Promise.resolve();
   }
@@ -1427,7 +1680,10 @@ async function invokeWithQueue(
   clock: Clock,
 ): Promise<InvokeOutcome> {
   const sourceKey = await params.source.publicKey();
-  return withAccountQueue(params.server, sourceKey, async () => {
+  return withAccountQueue(
+    params.server,
+    sourceKey,
+    async () => {
     const retry = resolveRetryOptions(params.retry);
     const logger = resolveLogger(params.logger);
     const poll = resolvePollOptions(params);
@@ -1502,10 +1758,52 @@ async function invokeWithQueue(
               cause: RETRYABLE_CAUSES.min_fee,
               delayMs: 0,
             });
-            const bumped = BigInt(
+            // A fee bump re-prepares immediately: no backoff, so the event
+            // reports `delayMs: 0` and the next attempt starts at once.
+            emitRetry(params.onRetry, {
+              attempt: generalAttempt,
+              failure: "min_fee",
+              cause: RETRYABLE_CAUSES.min_fee,
+              delayMs: 0,
+              nextAttempt: generalAttempt + 1,
+              // Retryable failures are classified from the broadcast's
+              // submission result, which is the stage this attempt failed at.
+              stage: "broadcast",
+            });
+            const scaled = BigInt(
               Math.ceil(Number(currentInclusionFee) * feeOptions.feeMultiplier),
             );
-            currentInclusionFee = bumped > currentInclusionFee ? bumped : currentInclusionFee + 100n;
+            const bumped = scaled > currentInclusionFee ? scaled : currentInclusionFee + 100n;
+            // A hard ceiling stops the retry loop before the over-cap
+            // transaction can be broadcast; the outcome carries the attempted
+            // fee and ceiling as a typed error.
+            if (feeOptions.maxInclusionFee !== undefined && bumped > feeOptions.maxInclusionFee) {
+              const capError = new FeeCapExceededError({
+                maxFeeCap: feeOptions.maxInclusionFee,
+                resourceFeeStroops: 0n,
+                inclusionFeeStroops: bumped,
+                attempt: generalAttempt,
+              });
+              const capped: InvokeErrorOutcome = {
+                kind: "error",
+                detail: capError.message,
+                error: capError,
+                diagnosticEvents: [],
+                retry: {
+                  ...metadata(
+                    "error",
+                    "min_fee",
+                    RETRYABLE_CAUSES.min_fee,
+                    true,
+                    feeOptions.maxAttempts,
+                  ),
+                  maxInclusionFeeStroops: feeOptions.maxInclusionFee.toString(),
+                },
+              };
+              logTerminalOutcome(logger, capped);
+              return capped;
+            }
+            currentInclusionFee = bumped;
             continue;
           }
 
@@ -1572,6 +1870,14 @@ async function invokeWithQueue(
           delayMs: sleepMs,
         });
         totalDelayMs += sleepMs;
+        emitRetry(params.onRetry, {
+          attempt: generalAttempt,
+          failure: outcome.retryable,
+          cause: RETRYABLE_CAUSES[outcome.retryable],
+          delayMs: sleepMs,
+          nextAttempt: generalAttempt + 1,
+          stage: "broadcast",
+        });
         const sleep = params.retry?.sleep ?? ((delayMs: number) => clock.sleep(delayMs));
         await sleep(sleepMs);
         if (deadline?.expired()) {
@@ -1582,7 +1888,9 @@ async function invokeWithQueue(
       if (error instanceof RpcTimeoutError) return deadlineErrorOutcome(error);
       throw error;
     }
-  });
+    },
+    params.onQueue,
+  );
 }
 
 /**
@@ -2368,6 +2676,37 @@ export async function enforceCall(
   // result: the caller has no time left to act on it, and `invokePipeline`
   // must not go on to assemble or broadcast.
   assertWithinDeadline(deadline, "simulate");
+
+  // A fee ceiling is enforced here, after the network has priced the call and
+  // before anything is assembled or broadcast. It shares `feeBreakdown` with
+  // `CostPreChecker`, so the two surfaces cannot disagree about what the total
+  // is; a total exactly at the ceiling is allowed (`exceeds` is strict).
+  if (params.maxFeeStroops !== undefined) {
+    const ceiling = normalizeFeeStroops(params.maxFeeStroops, "maxFeeStroops", false);
+    const resourceFeeStroops = parseSimulationResourceFee(
+      (enforced as rpc.Api.SimulateTransactionSuccessResponse).minResourceFee,
+      { stage: "simulate" },
+    );
+    const inclusionFeeStroops =
+      params.fee === undefined
+        ? BigInt(INCLUSION_FEE)
+        : normalizeFeeStroops(params.fee, "fee", false);
+    const fees = feeBreakdown(resourceFeeStroops, inclusionFeeStroops);
+    if (fees.totalFeeStroops > ceiling) {
+      const error = new FeeCapExceededError({
+        maxFeeCap: ceiling,
+        resourceFeeStroops: fees.resourceFeeStroops,
+        inclusionFeeStroops: fees.inclusionFeeStroops,
+        attempt,
+      });
+      return {
+        kind: "error",
+        detail: error.message,
+        error,
+        diagnosticEvents: [],
+      };
+    }
+  }
 
   return {
     kind: "admissible",

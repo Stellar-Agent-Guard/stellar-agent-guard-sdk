@@ -13,9 +13,12 @@
  * §5, not a pattern for core modules.
  */
 import { readFile } from "node:fs/promises";
-import { PolicyFileReadError, PolicyValidationError } from "./errors.ts";
+import { PolicyDecodeError, PolicyFileReadError, PolicyValidationError } from "./errors.ts";
+import { formatPolicyDiff, policyDiff, type PolicyChange } from "./policy-diff.ts";
 import { policyFromJson } from "./policy-json.ts";
 import { validateGuardPolicy, type GuardPolicy, type PolicyFailure } from "./policy.ts";
+
+export { formatPolicyDiff } from "./policy-diff.ts";
 
 /** Options for {@link loadPolicyFromFile}; the same knobs as `validateGuardPolicy`. */
 export interface LoadPolicyFromFileOptions {
@@ -23,6 +26,79 @@ export interface LoadPolicyFromFileOptions {
   guardAddress?: string;
   /** Maximum allowed recipient entries (default: 256 per SPEC §8). */
   maxRecipientEntries?: number;
+}
+
+/** Options for {@link diffPolicyFiles}. */
+export type DiffPolicyFilesOptions = LoadPolicyFromFileOptions;
+
+/** Result of comparing two policy files with {@link diffPolicyFiles}. */
+export interface PolicyFilesDiffResult {
+  /** The structured list of differences between the two policies. */
+  diff: PolicyChange[];
+  /** Alias for `diff`. */
+  changes: PolicyChange[];
+  /** Rendered human-readable summary of the differences via {@link formatPolicyDiff}. */
+  summary: string;
+}
+
+/**
+ * Read, parse, validate and diff two GuardPolicy JSON files.
+ *
+ * Both files are validated using {@link loadPolicyFromFile} before diffing.
+ * Throws the same typed errors as {@link loadPolicyFromFile} ({@link PolicyFileReadError},
+ * {@link PolicyDecodeError}, {@link PolicyValidationError}), naming whether the "left"
+ * or "right" policy file failed.
+ *
+ * Performs no network calls. Returns the structured differences and a rendered summary.
+ */
+export async function diffPolicyFiles(
+  leftPath: string,
+  rightPath: string,
+  options: DiffPolicyFilesOptions = {},
+): Promise<PolicyFilesDiffResult> {
+  const left = await loadSidePolicy("left", leftPath, options);
+  const right = await loadSidePolicy("right", rightPath, options);
+
+  const diff = policyDiff(left, right);
+  const summary = formatPolicyDiff(diff);
+
+  return {
+    diff,
+    changes: diff,
+    summary,
+  };
+}
+
+async function loadSidePolicy(
+  side: "left" | "right",
+  filePath: string,
+  options: DiffPolicyFilesOptions,
+): Promise<GuardPolicy> {
+  try {
+    return await loadPolicyFromFile(filePath, options);
+  } catch (error) {
+    if (error instanceof PolicyFileReadError) {
+      throw new PolicyFileReadError(`${side} policy file '${filePath}': ${error.message}`, {
+        path: error.path,
+        code: error.code,
+        cause: error.cause ?? error,
+      });
+    }
+    if (error instanceof PolicyDecodeError) {
+      throw new PolicyDecodeError(`${side} policy file '${filePath}': ${error.message}`, {
+        path: error.path,
+        cause: error.cause ?? error,
+      });
+    }
+    if (error instanceof PolicyValidationError) {
+      throw new PolicyValidationError(`${side} policy file '${filePath}': ${error.message}`, {
+        path: error.path,
+        failures: error.failures,
+        cause: error.cause ?? error,
+      });
+    }
+    throw error;
+  }
 }
 
 /**

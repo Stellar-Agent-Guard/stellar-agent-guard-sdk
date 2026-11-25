@@ -25,10 +25,21 @@ import {
   SorobanDataBuilder,
   xdr,
 } from "@stellar/stellar-sdk";
-import { DEFAULT_INVOKE_RETRY_OPTIONS, invoke, InvokeRetryError } from "../../src/invoke.ts";
+import {
+  DEFAULT_INVOKE_RETRY_OPTIONS,
+  invoke,
+  invokeQueueStats,
+  InvokeRetryError,
+  type InvokeQueueEvent,
+} from "../../src/invoke.ts";
 import type { InvokeParams } from "../../src/invoke.ts";
 import { BroadcastError } from "../../src/tx.ts";
-import { ContractResponseError, SimulationError } from "../../src/errors.ts";
+import {
+  ContractResponseError,
+  FeeCapExceededError,
+  InvalidInputError,
+  SimulationError,
+} from "../../src/errors.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
 import { FakeClock, type Clock } from "../../src/clock.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
@@ -786,6 +797,95 @@ describe("invoke sequence reservation", () => {
     assert.deepEqual(sent, ["8", "9"]);
     assert.deepEqual(simulated, ["8", "8", "9", "9"]);
   });
+
+  it("reports queue waiting/acquired in FIFO order and never stalls on a throwing hook", async () => {
+    const source = Keypair.random();
+    let releaseFirst!: () => void;
+    const firstSimulation = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let simulationsStarted = 0;
+    const simulation = {
+      transactionData: new SorobanDataBuilder().setResources(1, 0, 0).build(),
+      minResourceFee: "1",
+      result: { auth: [] },
+    };
+    const server = {
+      getAccount: async () => new Account(source.publicKey(), "7"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => {
+        simulationsStarted += 1;
+        if (simulationsStarted === 1) await firstSimulation;
+        return simulation;
+      },
+      sendTransaction: async () => ({ status: "PENDING", hash: "tx" }),
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.SUCCESS,
+        ledger: 101,
+        events: { contractEventsXdr: [] },
+      }),
+    } as unknown as rpc.Server;
+    const params = {
+      server,
+      source,
+      call: { contract: TOKEN, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+    };
+
+    const events: InvokeQueueEvent[] = [];
+    const onQueue = (event: InvokeQueueEvent) => {
+      events.push(event);
+    };
+    const before = invokeQueueStats(server);
+    const first = invoke({ ...params, onQueue });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const second = invoke({ ...params, onQueue });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    assert.deepEqual(
+      events.map((event) => event.kind),
+      ["waiting", "acquired", "waiting"],
+      "the second call joins the queue while the first is still running",
+    );
+    assert.equal(events[0]?.acquired, false);
+    assert.equal(events[2]?.depth, 1, "the second waiter sees one call ahead of it");
+    assert.equal(events[2]?.acquired, false);
+
+    releaseFirst();
+    const outcomes = await Promise.all([first, second]);
+    assert.deepEqual(
+      outcomes.map((outcome) => outcome.kind),
+      ["allowed", "allowed"],
+    );
+    assert.deepEqual(
+      events.filter((event) => event.kind === "acquired").map((event) => event.source),
+      [source.publicKey(), source.publicKey()],
+      "acquisition events fire in FIFO order",
+    );
+
+    const after = invokeQueueStats(server);
+    assert.equal(after.depth, 0);
+    assert.equal(after.enqueued - before.enqueued, 2);
+    assert.ok(after.totalWaitedMs >= before.totalWaitedMs);
+
+    // A throwing hook is isolated: the queue still grants and the call still runs.
+    const third = await invoke({
+      ...params,
+      onQueue: () => {
+        throw new Error("hook boom");
+      },
+    });
+    assert.equal(third.kind, "allowed");
+    assert.equal(invokeQueueStats(server).depth, 0);
+
+    // Counters live on the server's queue state, not the module: another
+    // server sees none of this run's numbers (no cross-test contamination).
+    assert.deepEqual(
+      invokeQueueStats({} as unknown as rpc.Server),
+      { depth: 0, totalWaitedMs: 0, enqueued: 0 },
+      "a second server starts from zero",
+    );
+  });
 });
 
 /**
@@ -1042,7 +1142,7 @@ describe("invoke() fee-bump retry lifecycle", () => {
       source,
       call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
       networkPassphrase: PASSPHRASE,
-      feeBump: { maxAttempts: 3, feeMultiplier: 2 },
+      feeBump: { maxAttempts: 3, feeMultiplier: 2, initialInclusionFee: "500" },
       pollOptions: FAST_POLL,
     });
 
@@ -1132,6 +1232,57 @@ describe("invoke() fee-bump retry lifecycle", () => {
     // Re-simulation blocked by policy -> halts pipeline immediately without broadcast
     assert.equal(outcome.kind, "blocked");
     assert.equal(sendCalls.length, 1, "must never broadcast if re-simulation is policy-blocked");
+  });
+
+  it("Test 4 — a maxInclusionFee ceiling stops retries before an over-cap broadcast", async () => {
+    const source = Keypair.random();
+    let seq = 100n;
+    const sendCalls: xdr.Transaction[] = [];
+
+    const mockServer = {
+      getAccount: async () => ({ sequenceNumber: () => (seq++).toString() }),
+      getLatestLedger: async () => ({ sequence: 1000 }),
+      simulateTransaction: async () => createSuccessSimulationResponse("500"),
+      sendTransaction: async (tx: xdr.Transaction) => {
+        sendCalls.push(tx);
+        return createMinFeeErrorResponse("hash-attempt-1");
+      },
+      getTransaction: async () => ({
+        status: rpc.Api.GetTransactionStatus.FAILED,
+        ledger: 1001,
+      }),
+    };
+
+    const outcome = await invoke({
+      server: mockServer as unknown as rpc.Server,
+      source,
+      call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
+      networkPassphrase: PASSPHRASE,
+      feeBump: {
+        maxAttempts: 3,
+        feeMultiplier: 2,
+        initialInclusionFee: "500",
+        maxInclusionFee: 700n,
+      },
+      pollOptions: FAST_POLL,
+    });
+
+    // The first attempt (500) is allowed; the 2x bump to 1000 breaches the
+    // ceiling, so it is never broadcast.
+    assert.equal(sendCalls.length, 1);
+    assert.equal(outcome.kind, "error");
+    const capError = outcome.kind === "error" ? outcome.error : undefined;
+    assert.ok(capError instanceof FeeCapExceededError);
+    assert.equal(capError.code, "fee_cap_exceeded");
+    assert.equal(capError.maxFeeCap, 700n);
+    assert.equal(capError.inclusionFeeStroops, 1_000n);
+    assert.match(capError.message, /maxFeeCap 700/, "the ceiling is in the error message");
+    assert.equal(
+      outcome.kind === "error" ? outcome.retry?.maxInclusionFeeStroops : undefined,
+      "700",
+      "the ceiling travels with the retry metadata",
+    );
+    assert.equal(outcome.kind === "error" ? outcome.retry?.outcome : undefined, "error");
   });
 
   it("Regression: happy path without fee bump still broadcasts once and succeeds", async () => {
@@ -1404,6 +1555,41 @@ describe("invoke() option validation", () => {
         overrides: { feeBump: { initialInclusionFee: 0n } },
         field: /feeBump\.initialInclusionFee/,
       },
+      {
+        label: "feeBump.maxInclusionFee zero",
+        overrides: { feeBump: { maxInclusionFee: 0n } },
+        field: /feeBump\.maxInclusionFee/,
+      },
+      {
+        label: "feeBump.maxInclusionFee decimal string",
+        overrides: { feeBump: { maxInclusionFee: "1.5" } },
+        field: /feeBump\.maxInclusionFee/,
+      },
+      {
+        label: "feeBump.maxInclusionFee not above the initial fee",
+        overrides: { feeBump: { initialInclusionFee: 500n, maxInclusionFee: 500n } },
+        field: /feeBump\.maxInclusionFee/,
+      },
+      {
+        label: "feeBump.initialInclusionFee decimal string",
+        overrides: { feeBump: { initialInclusionFee: "1.5" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
+      {
+        label: "feeBump.initialInclusionFee exponent string",
+        overrides: { feeBump: { initialInclusionFee: "5e4" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
+      {
+        label: "feeBump.initialInclusionFee whitespace string",
+        overrides: { feeBump: { initialInclusionFee: " 1" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
+      {
+        label: "feeBump.initialInclusionFee negative string",
+        overrides: { feeBump: { initialInclusionFee: "-1" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
       { label: "pollAttempts zero", overrides: { pollAttempts: 0 }, field: /pollAttempts/ },
       { label: "pollAttempts fractional", overrides: { pollAttempts: 2.5 }, field: /pollAttempts/ },
       {
@@ -1448,7 +1634,15 @@ describe("invoke() option validation", () => {
     for (const testCase of cases) {
       const { server, calls } = createUntouchableServer();
       await assert.rejects(invoke(makeParams(server, testCase.overrides)), (error: unknown) => {
-        assert.ok(error instanceof RangeError, testCase.label);
+        const feeShape =
+          testCase.label.startsWith("feeBump.initialInclusionFee") ||
+          (testCase.label.startsWith("feeBump.maxInclusionFee") &&
+            !testCase.label.includes("not above"));
+        if (feeShape) {
+          assert.ok(error instanceof InvalidInputError, testCase.label);
+        } else {
+          assert.ok(error instanceof RangeError, testCase.label);
+        }
         assert.match(error.message, testCase.field, testCase.label);
         return true;
       });
@@ -2283,5 +2477,59 @@ describe("invoke() pending outcome (issue #299)", () => {
     assert.equal(outcome.kind, "error");
     if (outcome.kind !== "error") throw new Error("unreachable");
     assert.equal(outcome.transactionHash, HASH, "the deadline error keeps the hash");
+  });
+});
+
+describe("invoke() maxFeeStroops: fail closed before broadcast", () => {
+  it("returns a FeeCapExceededError and makes zero broadcast attempts when over budget", async () => {
+    const server = createMockServer();
+
+    const outcome = await invoke(makeParams(server, { maxFeeStroops: 199n }));
+
+    assert.equal(outcome.kind, "error");
+    if (outcome.kind !== "error") throw new Error("unreachable");
+    assert.ok(outcome.error instanceof FeeCapExceededError);
+    assert.equal(outcome.error.totalFeeStroops, 200n);
+    assert.equal(outcome.error.resourceFeeStroops, 100n);
+    assert.equal(outcome.error.inclusionFeeStroops, 100n);
+    assert.equal(outcome.error.maxFeeCap, 199n);
+    assert.equal(server.sendCount, 0, "nothing may be broadcast");
+    assert.equal(outcome.detail?.includes("nothing was broadcast"), true);
+  });
+
+  it("allows a total exactly at the ceiling", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const server = createMockServer();
+
+    const pending = invoke(makeParams(server, { maxFeeStroops: 200n }));
+    await drainWithMockedTimers(t.mock.timers, pending);
+    const outcome = await pending;
+
+    assert.equal(outcome.kind, "allowed");
+    assert.equal(server.sendCount, 1);
+  });
+
+  it("uses the same comparison for a dry run, without broadcasting", async () => {
+    const server = createMockServer();
+
+    const outcome = await invoke(makeParams(server, { maxFeeStroops: 199n, dryRun: true }));
+
+    assert.equal(outcome.kind, "dry_run");
+    if (outcome.kind !== "dry_run") throw new Error("unreachable");
+    assert.equal(outcome.admissible, false);
+    assert.equal(outcome.verdict, "undetermined");
+    assert.ok(outcome.error instanceof FeeCapExceededError);
+    assert.equal(server.sendCount, 0);
+  });
+
+  it("leaves behaviour unchanged when the option is omitted", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const server = createMockServer();
+
+    const pending = invoke(makeParams(server));
+    await drainWithMockedTimers(t.mock.timers, pending);
+    const outcome = await pending;
+
+    assert.equal(outcome.kind, "allowed");
   });
 });

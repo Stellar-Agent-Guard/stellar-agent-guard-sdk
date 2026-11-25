@@ -16,6 +16,7 @@ import {
   validateContractCall,
   type PreFlightCacheOptions,
   type PreFlightDecision,
+  type PreFlightVerdictEvent,
 } from "../../src/preflight.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
 import {
@@ -1095,6 +1096,146 @@ function callWithAmount(amount: bigint): ContractCall {
   };
 }
 
+describe("PreFlightInterceptor warmCache (issue #413)", () => {
+  it("warms the same cache path and reports counts that match it", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+    const calls = [harness.call, callWithAmount(7n)];
+
+    const first = await interceptor.warmCache(calls);
+    assert.deepEqual(first, {
+      attempted: 2,
+      cached: 2,
+      blocked: 0,
+      undetermined: 0,
+      durationMs: first.durationMs,
+    });
+    assert.equal(harness.simulations, 4);
+    assert.equal(interceptor.getCacheStats().size, 2);
+
+    // A second warm reuses the stored verdicts rather than simulating again.
+    const second = await interceptor.warmCache(calls);
+    assert.equal(second.cached, 2);
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("reports a blocked call without throwing and caches the verdict", async () => {
+    const blockedErrorResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const server = createMockServer({ enforcedSimulateResponse: blockedErrorResponse });
+    const interceptor = new PreFlightInterceptor({
+      server,
+      networkPassphrase: "Test SDF Network ; September 2015",
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      cache: { ttlMs: 5_000 },
+    });
+
+    const summary = await interceptor.warmCache([validTransferCall(5_000n)]);
+    assert.equal(summary.attempted, 1);
+    assert.equal(summary.blocked, 1);
+    assert.equal(summary.cached, 1);
+    assert.equal(summary.undetermined, 0);
+    assert.equal(interceptor.getCacheStats().size, 1);
+  });
+
+  it("stores nothing when the cache is disabled by config", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness);
+
+    const summary = await interceptor.warmCache([harness.call]);
+    assert.equal(summary.attempted, 1);
+    assert.equal(summary.cached, 0);
+    assert.equal(summary.blocked, 0);
+    assert.equal(summary.undetermined, 0);
+    assert.equal(interceptor.getCacheStats().size, 0);
+    assert.equal(harness.simulations, 2);
+  });
+});
+
+describe("check() typed-failure boundary (issue #412)", () => {
+  it("turns a server rejecting with a string or plain object into undetermined, preserving cause", async () => {
+    for (const thrown of ["boom", { code: "injected" }]) {
+      const source = Keypair.random();
+      const server = {
+        getAccount: async () => new Account(source.publicKey(), "1"),
+        getLatestLedger: async () => {
+          throw thrown;
+        },
+        simulateTransaction: async () => {
+          throw thrown;
+        },
+      } as unknown as rpc.Server;
+      const interceptor = new PreFlightInterceptor({
+        server,
+        networkPassphrase: "Test SDF Network ; September 2015",
+        guard: VALID_GUARD,
+        agent: source,
+        source,
+      });
+
+      // Never rejects, and never reports admissible. The pipeline already
+      // classifies a failed probe as a typed `SimulationError`; the original
+      // string/object survives as its `cause` rather than being stringified.
+      const decision = await interceptor.check(validTransferCall());
+      assert.equal(decision.kind, "undetermined");
+      assert.equal(decision.allowed, false);
+      assert.ok(decision.error instanceof GuardError);
+      assert.equal(decision.error.cause, thrown);
+    }
+  });
+
+  it("keeps InvalidInputError unwrapped and preserves the original value from a throwing clock", async () => {
+    const harness = makeHarness();
+    const thrown: unknown = "clock boom";
+    const clock: Clock = {
+      now: () => {
+        throw thrown;
+      },
+      sleep: async () => {},
+    };
+    const interceptor = new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache: { ttlMs: 5_000 },
+      clock,
+    });
+
+    const decision = await interceptor.check(harness.call);
+    assert.equal(decision.kind, "undetermined");
+    assert.ok(decision.error instanceof GuardUndeterminedError);
+    assert.equal(decision.error.cause, "clock boom");
+
+    await assert.rejects(
+      async () =>
+        interceptor.check({ contract: unsafeContractAddress(""), fn: "transfer", args: [] }),
+      InvalidInputError,
+    );
+  });
+});
+
 describe("PreFlightInterceptor simulation cache", () => {
   it("does not cache unless explicitly enabled", async () => {
     const harness = makeHarness();
@@ -1117,7 +1258,10 @@ describe("PreFlightInterceptor simulation cache", () => {
 
     assert.equal(harness.simulations, 2);
     assert.equal(harness.latestLedgerCalls, 3);
-    assert.equal(second, first);
+    // A hit carries cache provenance (#409), so it is a new object with the
+    // same decision, not the same reference. `storedAt` makes the age exact.
+    assert.equal(second.kind, first.kind);
+    assert.equal(second.cached, true);
 
     const stats = interceptor.getCacheStats();
     assert.equal(stats.hits, 1);
@@ -1583,7 +1727,8 @@ describe("PreFlightInterceptor cached checks honour the caller's bound", () => {
     const second = await interceptor.check(harness.call, { timeoutMs: 1_000 });
 
     assert.equal(first.kind, "admissible");
-    assert.equal(second, first);
+    assert.equal(second.kind, first.kind);
+    assert.equal(second.cached, true);
     // The second check reused the cached verdict: one ledger read for the
     // cache context, one inside the enforcement run, and no new simulation.
     assert.equal(harness.latestLedgerCalls, 3);
@@ -2642,5 +2787,724 @@ describe("PreFlightInterceptor concurrency limit and 429 handling (issue #40)", 
     assert.ok(decision.kind === "undetermined" && decision.cause === undefined);
     assert.equal(calls, 1);
     assert.deepEqual(slept, []);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*      Cache provenance / forceFresh (#409) and onVerdict observer (#408)    */
+/* -------------------------------------------------------------------------- */
+
+function observedInterceptor(
+  server: rpc.Server,
+  events: PreFlightVerdictEvent[],
+  extra: { cache?: PreFlightCacheOptions; clock?: Clock; onVerdict?: () => void } = {},
+): PreFlightInterceptor {
+  return new PreFlightInterceptor({
+    server,
+    networkPassphrase: NETWORK_PASSPHRASE,
+    guard: CONTRACT,
+    agent: Keypair.random(),
+    source: Keypair.random(),
+    onVerdict: extra.onVerdict ? extra.onVerdict : (event) => events.push(event),
+    ...(extra.cache ? { cache: extra.cache } : {}),
+    ...(extra.clock ? { clock: extra.clock } : {}),
+  });
+}
+
+describe("cached verdict provenance and forceFresh (#409)", () => {
+  it("leaves a fresh decision's shape unchanged", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    const decision = await interceptor.check(harness.call);
+
+    assert.equal(decision.cached, undefined);
+    assert.equal(decision.observedLedger, undefined);
+    assert.equal(decision.ageMs, undefined);
+  });
+
+  it("reports the ledger and exact age on a cache hit", async () => {
+    const harness = makeHarness();
+    const clock = new FakeClock(1_000);
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 }, clock });
+
+    await interceptor.check(harness.call);
+    clock.advance(250);
+    const hit = await interceptor.check(harness.call);
+
+    assert.equal(hit.kind, "admissible");
+    assert.equal(hit.cached, true);
+    assert.equal(hit.observedLedger, 100);
+    assert.equal(hit.ageMs, 250);
+  });
+
+  it("ages a hit from its own store time, not the first hit's", async () => {
+    const harness = makeHarness();
+    const clock = new FakeClock(1_000);
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 }, clock });
+
+    await interceptor.check(harness.call);
+    clock.advance(100);
+    const firstHit = await interceptor.check(harness.call);
+    clock.advance(200);
+    const secondHit = await interceptor.check(harness.call);
+
+    assert.equal(firstHit.ageMs, 100);
+    assert.equal(secondHit.ageMs, 300);
+    assert.equal(firstHit.ageMs, 100, "an earlier hit's age must not be rewritten");
+  });
+
+  it("does not treat the provenance fields as part of the decision", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    const fresh = await interceptor.check(harness.call);
+    const hit = await interceptor.check(harness.call);
+    const { cached, observedLedger, ageMs, ...hitDecision } = hit;
+
+    assert.equal(cached, true);
+    assert.ok(observedLedger !== undefined);
+    assert.ok(ageMs !== undefined);
+    assert.deepEqual(hitDecision, fresh);
+  });
+
+  it("forceFresh always simulates and leaves the cache untouched", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    await interceptor.check(harness.call);
+    assert.equal(harness.simulations, 2);
+
+    const fresh = await interceptor.check(harness.call, { forceFresh: true });
+    assert.equal(harness.simulations, 4, "forceFresh must run a new simulation");
+    assert.equal(fresh.cached, undefined);
+    assert.equal(interceptor.getCacheStats().hits, 0);
+
+    const hit = await interceptor.check(harness.call);
+    assert.equal(hit.cached, true, "forceFresh must not evict the cached verdict");
+    assert.equal(harness.simulations, 4);
+  });
+
+  it("forceFresh works with no cache configured", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness);
+
+    const decision = await interceptor.check(harness.call, { forceFresh: true });
+
+    assert.equal(decision.kind, "admissible");
+    assert.equal(decision.cached, undefined);
+    assert.equal(harness.simulations, 2);
+  });
+
+  it("TTL expiry and ledger advance return fresh decisions without provenance", async () => {
+    const harness = makeHarness();
+    const clock = new FakeClock(1_000);
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 100 }, clock });
+
+    await interceptor.check(harness.call);
+    clock.advance(500);
+    const afterTtl = await interceptor.check(harness.call);
+    assert.equal(afterTtl.cached, undefined);
+
+    harness.advanceLedger();
+    const afterLedger = await interceptor.check(harness.call);
+    assert.equal(afterLedger.cached, undefined);
+    assert.equal(harness.simulations, 6);
+  });
+});
+
+describe("onVerdict observer (#408)", () => {
+  it("fires once for an admissible verdict with call identity and no arguments", async () => {
+    const events: PreFlightVerdictEvent[] = [];
+    const interceptor = observedInterceptor(createMockServer(), events);
+    const call = validTransferCall();
+
+    await interceptor.check(call);
+
+    assert.equal(events.length, 1);
+    const [event] = events;
+    assert.equal(event?.kind, "admissible");
+    assert.equal(event?.cached, false);
+    assert.deepEqual(event?.call, { contract: call.contract, fn: call.fn });
+    assert.equal(Object.keys(event!.call).includes("args"), false);
+    assert.equal(typeof event?.durationMs, "number");
+    assert.ok(event!.durationMs >= 0);
+    assert.equal(event?.reason, undefined);
+  });
+
+  it("fires once for a blocked verdict with the contract reason", async () => {
+    const blockedResponse = {
+      error: "transaction failed",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvMap([]),
+              },
+            },
+          },
+        },
+      ],
+    };
+    const events: PreFlightVerdictEvent[] = [];
+    const interceptor = observedInterceptor(
+      createMockServer({ enforcedSimulateResponse: blockedResponse }),
+      events,
+    );
+
+    const decision = await interceptor.check(validTransferCall());
+
+    assert.equal(decision.kind, "blocked");
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.kind, "blocked");
+    assert.equal(events[0]?.reason, "per_tx_cap_exceeded");
+  });
+
+  it("fires once for an undetermined verdict", async () => {
+    const server = {
+      async getAccount() {
+        return { sequenceNumber: () => "100" };
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        throw new Error("rpc down");
+      },
+    } as unknown as rpc.Server;
+    const events: PreFlightVerdictEvent[] = [];
+    const interceptor = observedInterceptor(server, events);
+
+    const decision = await interceptor.check(validTransferCall());
+
+    assert.equal(decision.kind, "undetermined");
+    assert.equal(events.length, 1);
+    assert.equal(events[0]?.kind, "undetermined");
+  });
+
+  it("fires on a cache hit and reports it as cached with the ledger", async () => {
+    const harness = makeHarness();
+    const events: PreFlightVerdictEvent[] = [];
+    const interceptor = new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: CONTRACT,
+      agent: harness.source,
+      source: harness.source,
+      cache: { ttlMs: 5_000 },
+      onVerdict: (event) => events.push(event),
+    });
+
+    await interceptor.check(harness.call);
+    await interceptor.check(harness.call);
+
+    assert.equal(events.length, 2);
+    assert.equal(events[0]?.cached, false);
+    assert.equal(events[1]?.cached, true);
+    assert.equal(events[1]?.ledger, 100);
+  });
+
+  it("fires once per waiter on a coalesced path", async () => {
+    const events: PreFlightVerdictEvent[] = [];
+    const interceptor = observedInterceptor(createMockServer({ simulateDelayMs: 10 }), events);
+
+    const [first, second] = await Promise.all([
+      interceptor.check(validTransferCall()),
+      interceptor.check(validTransferCall()),
+    ]);
+
+    assert.equal(first.kind, "admissible");
+    assert.equal(second.kind, "admissible");
+    assert.equal(events.length, 2, "each returned verdict is reported exactly once");
+    assert.deepEqual(
+      events.map((event) => event.cached),
+      [false, false],
+    );
+  });
+
+  it("does not fire when input validation throws", async () => {
+    const events: PreFlightVerdictEvent[] = [];
+    const interceptor = observedInterceptor(createMockServer(), events);
+
+    await assert.rejects(
+      async () =>
+        interceptor.check({ contract: unsafeContractAddress(""), fn: "transfer", args: [] }),
+      InvalidInputError,
+    );
+    assert.equal(events.length, 0);
+  });
+
+  it("a throwing hook cannot change the verdict or its fee data", async () => {
+    const interceptor = observedInterceptor(createMockServer(), [], {
+      onVerdict: () => {
+        throw new Error("observer exploded");
+      },
+    });
+
+    const decision = await interceptor.check(validTransferCall());
+
+    assert.equal(decision.kind, "admissible");
+    assert.equal(decision.allowed, true);
+    assert.ok(decision.kind === "admissible" && decision.estimatedResourceFee > 0n);
+  });
+
+  it("a rejected async hook is swallowed instead of becoming an unhandled rejection", async () => {
+    const interceptor = new PreFlightInterceptor({
+      server: createMockServer(),
+      networkPassphrase: NETWORK_PASSPHRASE,
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      onVerdict: async () => {
+        throw new Error("async observer exploded");
+      },
+    });
+
+    const decision = await interceptor.check(validTransferCall());
+    await new Promise((resolve) => setImmediate(resolve));
+
+    assert.equal(decision.kind, "admissible");
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Batch deadline (#407): `deadlineMs` is one absolute budget for the whole
+ * batch, not a per-call value and not documentation-only. Time is advanced by
+ * the mock server so the test never sleeps.
+ */
+describe("PreFlightInterceptor.checkBatch() deadline enforcement (#407)", () => {
+  function deadlineServer(onSimulate: (clock: { advance: (ms: number) => void }) => void) {
+    let simulations = 0;
+    const clock = {
+      now: 0,
+      advance(ms: number) {
+        this.now += ms;
+      },
+    };
+    const server = {
+      getAccount: async () => new Account(Keypair.random().publicKey(), "1"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        onSimulate(clock);
+        return {
+          result: { auth: [] },
+          minResourceFee: "10",
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+        };
+      },
+    } as unknown as rpc.Server;
+    return {
+      server,
+      clock: { now: () => clock.now, sleep: async (ms: number) => clock.advance(ms) },
+      simulations: () => simulations,
+    };
+  }
+
+  const batchOptions = { policy: null, initialWindowSpent: 0n };
+
+  it("starts no further calls once the budget is spent and fails them closed", async () => {
+    const harness = deadlineServer((clock) => clock.advance(40));
+    const interceptor = new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: "Test SDF Network ; September 2015",
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      clock: harness.clock,
+    });
+
+    const decision = await interceptor.checkBatch(
+      [validTransferCall(1n), validTransferCall(2n), validTransferCall(3n)],
+      { ...batchOptions, deadlineMs: 100 },
+    );
+
+    // Call 1 finishes at 80ms (admissible); call 2 starts at 80 and lands at
+    // 120 (after the deadline, so it is replaced); call 3 never starts.
+    assert.equal(decision.admissible, false);
+    assert.equal(decision.kind, "undetermined");
+    assert.equal(decision.verdicts.length, 3);
+    assert.equal(decision.verdicts[0]?.kind, "admissible", "completed verdicts keep their kind");
+    for (const verdict of decision.verdicts.slice(1)) {
+      assert.equal(verdict.kind, "undetermined");
+      if (verdict.kind !== "undetermined") throw new Error("unreachable");
+      assert.ok(verdict.error instanceof RpcTimeoutError);
+      assert.equal(verdict.error.deadline, true);
+    }
+    assert.equal(harness.simulations(), 4, "the third call must issue no RPC");
+  });
+
+  it("never returns admissible when the last started call overruns the budget", async () => {
+    const harness = deadlineServer((clock) => clock.advance(60));
+    const interceptor = new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: "Test SDF Network ; September 2015",
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      clock: harness.clock,
+    });
+
+    const decision = await interceptor.checkBatch([validTransferCall()], {
+      ...batchOptions,
+      deadlineMs: 100,
+    });
+
+    assert.equal(decision.admissible, false);
+    const verdict = decision.verdicts[0];
+    assert.equal(verdict?.kind, "undetermined");
+    if (verdict?.kind !== "undetermined") throw new Error("unreachable");
+    assert.ok(verdict.error instanceof RpcTimeoutError);
+    assert.equal(verdict.error.deadline, true);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Diagnostics-only simulation (#411): exposes the enforced pipeline without
+ * producing a verdict, with redaction controlled by `includeRaw`.
+ */
+describe("PreFlightInterceptor.simulateForDiagnostics() (#411)", () => {
+  function diagnosticsInterceptor(enforced: unknown) {
+    let simulations = 0;
+    const server = {
+      getAccount: async () => new Account(Keypair.random().publicKey(), "1"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        if (simulations % 2 === 0) return enforced;
+        return {
+          result: { auth: [] },
+          minResourceFee: "10",
+          transactionData: { getReadOnly: () => [], getReadWrite: () => [] },
+        };
+      },
+    } as unknown as rpc.Server;
+    return {
+      interceptor: new PreFlightInterceptor({
+        server,
+        networkPassphrase: "Test SDF Network ; September 2015",
+        guard: VALID_GUARD,
+        agent: Keypair.random(),
+        source: Keypair.random(),
+      }),
+      simulations: () => simulations,
+    };
+  }
+
+  function blockedSimulation() {
+    return {
+      error: "blocked",
+      events: [
+        {
+          event: {
+            contractId: VALID_GUARD,
+            body: {
+              v0: {
+                topics: [
+                  xdr.ScVal.scvSymbol("event_auth_checked"),
+                  xdr.ScVal.scvSymbol("blocked"),
+                  xdr.ScVal.scvSymbol("per_tx_cap_exceeded"),
+                ],
+                data: xdr.ScVal.scvVoid(),
+              },
+            },
+          },
+        },
+      ],
+    };
+  }
+
+  it("returns no verdict, decodes the guard event and redacts raw payloads by default", async () => {
+    const harness = diagnosticsInterceptor(blockedSimulation());
+
+    const diagnostics = await harness.interceptor.simulateForDiagnostics(validTransferCall());
+
+    assert.equal(diagnostics.authoritative, false);
+    assert.equal("allowed" in diagnostics, false);
+    assert.equal("admissible" in diagnostics, false);
+    assert.equal(diagnostics.ok, false);
+    assert.equal(diagnostics.guardEvent?.decision?.result, "blocked");
+    assert.equal(diagnostics.guardEvent?.decision?.reason, "per_tx_cap_exceeded");
+    assert.equal(diagnostics.events[0]?.raw, undefined, "raw payloads are redacted by default");
+    // Both probe and enforced simulation ran; no broadcast path exists here.
+    assert.equal(harness.simulations(), 2);
+  });
+
+  it("retains raw payloads when includeRaw is set", async () => {
+    const harness = diagnosticsInterceptor(blockedSimulation());
+
+    const diagnostics = await harness.interceptor.simulateForDiagnostics(validTransferCall(), {
+      includeRaw: true,
+    });
+
+    assert.notEqual(diagnostics.events[0]?.raw, undefined);
+  });
+
+  it("reports a network failure as a typed error, not a verdict", async () => {
+    const harness = diagnosticsInterceptor(blockedSimulation());
+    // Make the probe fail before any decision can be reached.
+    const failing = new PreFlightInterceptor({
+      server: {
+        getAccount: async () => {
+          throw new Error("network down");
+        },
+      } as unknown as rpc.Server,
+      networkPassphrase: "Test SDF Network ; September 2015",
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+    });
+
+    const diagnostics = await failing.simulateForDiagnostics(validTransferCall());
+
+    assert.equal(diagnostics.authoritative, false);
+    assert.equal(diagnostics.ok, false);
+    assert.ok(diagnostics.error instanceof GuardError);
+    assert.equal(diagnostics.guardEvent, null);
+    assert.equal(harness.simulations(), 0);
+  });
+
+  it("bounds the run with timeoutMs and signs nothing for submission", async () => {
+    let simulations = 0;
+    const stalled = {
+      getAccount: async () => new Account(Keypair.random().publicKey(), "1"),
+      getLatestLedger: async () => ({ sequence: 100 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        return new Promise(() => {});
+      },
+    } as unknown as rpc.Server;
+    const interceptor = new PreFlightInterceptor({
+      server: stalled,
+      networkPassphrase: "Test SDF Network ; September 2015",
+      guard: VALID_GUARD,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+    });
+
+    const diagnostics = await interceptor.simulateForDiagnostics(validTransferCall(), {
+      timeoutMs: 10,
+    });
+
+    assert.equal(diagnostics.authoritative, false);
+    assert.equal(diagnostics.ok, false);
+    assert.ok(diagnostics.error instanceof RpcTimeoutError);
+    assert.equal(simulations, 1);
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*   Cache key collision resistance across calls, configs and networks        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A cached verdict is reused only on an exact key match: the interceptor's
+ * config identity (network, guard, agent, source, authorizers), the canonical
+ * call fingerprint and the policy revision. A collision would serve an
+ * `admissible` verdict for a different call, so these tests pin the observable
+ * behaviour — a variation misses and is re-simulated, an identical call hits —
+ * without asserting anything about the digest itself.
+ */
+describe("PreFlightInterceptor cache key collision resistance (issue #417)", () => {
+  /** Counts every simulation so a cache hit is observable as "no new work". */
+  function countingHarness() {
+    let simulations = 0;
+    const server = {
+      getAccount: async (publicKey: string) => new Account(publicKey, "1"),
+      getLatestLedger: async () => ({ sequence: 7_000 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        return {
+          result: { auth: [] },
+          minResourceFee: "17",
+          transactionData: {
+            getReadOnly: () => [],
+            getReadWrite: () => [{}],
+          },
+        };
+      },
+    } as unknown as rpc.Server;
+    return {
+      server,
+      get simulations() {
+        return simulations;
+      },
+    };
+  }
+
+  const baseAgent = Keypair.random();
+  const baseSource = Keypair.random();
+
+  function build(
+    harness: ReturnType<typeof countingHarness>,
+    overrides: Partial<{
+      networkPassphrase: string;
+      guard: typeof CONTRACT;
+      agent: Keypair;
+      source: Keypair;
+    }> = {},
+    cache: PreFlightCacheOptions = { ttlMs: 5_000 },
+  ): PreFlightInterceptor {
+    return new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: overrides.networkPassphrase ?? NETWORK_PASSPHRASE,
+      guard: overrides.guard ?? CONTRACT,
+      agent: overrides.agent ?? baseAgent,
+      source: overrides.source ?? baseSource,
+      cache,
+    });
+  }
+
+  const otherGuard = unsafeContractAddress(Address.contract(Buffer.alloc(32, 1)).toString());
+
+  /**
+   * The key of the single entry a check writes. Each interceptor owns a private
+   * Map, so "two instances never share an entry" holds even if the namespace
+   * were constant; asserting the keys themselves is what pins config identity.
+   */
+  function onlyCacheKey(interceptor: PreFlightInterceptor): string {
+    const keys = [...(interceptor as unknown as { cache: Map<string, unknown> }).cache.keys()];
+    assert.equal(keys.length, 1);
+    return keys[0]!;
+  }
+
+  const configCases: Array<{
+    name: string;
+    overrides: Parameters<typeof build>[1];
+  }> = [
+    {
+      name: "network passphrase",
+      overrides: { networkPassphrase: "Public Global Stellar Network ; September 2015" },
+    },
+    { name: "guard", overrides: { guard: otherGuard } },
+    { name: "agent", overrides: { agent: Keypair.random() } },
+    { name: "source", overrides: { source: Keypair.random() } },
+  ];
+
+  for (const { name, overrides } of configCases) {
+    it(`does not reuse a verdict when only the ${name} differs`, async () => {
+      const harness = countingHarness();
+      const shared = build(harness);
+      const varied = build(harness, overrides);
+
+      await shared.check(CALL);
+      assert.equal(harness.simulations, 2);
+      await shared.check(CALL);
+      assert.equal(harness.simulations, 2); // the identical call hits its entry
+
+      await varied.check(CALL);
+      assert.equal(harness.simulations, 4); // a different config misses
+      await varied.check(CALL);
+      assert.equal(harness.simulations, 4); // then hits its own entry
+
+      await shared.check(CALL);
+      assert.equal(harness.simulations, 4); // each config keeps its own verdict
+
+      // The call and revision are identical, so a different key can only come
+      // from the interceptor identity: a constant namespace would collide here.
+      assert.notEqual(onlyCacheKey(shared), onlyCacheKey(varied));
+    });
+  }
+
+  // A literal lowercase strkey is rejected by the address parser, so "address
+  // case" cannot vary; the equivalent dimensions are pinned instead: the same
+  // 32-byte payload under a different address type, and a payload one byte off.
+  const payload = Buffer.alloc(32, 7);
+  const otherPayload = Buffer.from(payload);
+  otherPayload[31] = 8;
+  const contractAddress = Address.contract(payload).toScVal();
+  const samePayloadAccount = Address.account(payload).toScVal();
+  const otherAccount = Address.account(otherPayload).toScVal();
+  const secondArg = nativeToScVal(9n, { type: "i128" });
+  const baseCall: ContractCall = {
+    contract: CONTRACT,
+    fn: "noop",
+    args: [contractAddress, secondArg],
+  };
+
+  const callVariants: Array<{ name: string; call: ContractCall }> = [
+    { name: "the function name", call: { ...baseCall, fn: "noopTwo" } },
+    {
+      name: "a single argument byte",
+      call: { ...baseCall, args: [contractAddress, nativeToScVal(10n, { type: "i128" })] },
+    },
+    {
+      name: "i128 versus u128 for the same value",
+      call: { ...baseCall, args: [contractAddress, nativeToScVal(9n, { type: "u128" })] },
+    },
+    { name: "the address type", call: { ...baseCall, args: [samePayloadAccount, secondArg] } },
+    { name: "an address byte", call: { ...baseCall, args: [otherAccount, secondArg] } },
+    { name: "the argument order", call: { ...baseCall, args: [secondArg, contractAddress] } },
+  ];
+
+  for (const { name, call } of callVariants) {
+    it(`re-simulates when only ${name} differs`, async () => {
+      const harness = countingHarness();
+      const interceptor = build(harness);
+
+      await interceptor.check(baseCall);
+      assert.equal(harness.simulations, 2);
+      await interceptor.check(baseCall);
+      assert.equal(harness.simulations, 2); // the identical call hits
+
+      await interceptor.check(call);
+      assert.equal(harness.simulations, 4); // the variation misses
+      await interceptor.check(call);
+      assert.equal(harness.simulations, 4); // and then hits its own entry
+
+      await interceptor.check(baseCall);
+      assert.equal(harness.simulations, 4); // the original entry is untouched
+    });
+  }
+
+  it("treats a policy revision change as a different key", async () => {
+    const harness = countingHarness();
+    let revision: 1 | 2 | "1" = 1;
+    const interceptor = build(harness, {}, { ttlMs: 5_000, policyRevision: () => revision });
+
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 2);
+
+    revision = 2;
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 4); // an ordinary revision bump misses
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 4);
+
+    revision = "1";
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 6); // `1` and `"1"` must not alias
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 6);
+  });
+
+  it("re-simulates a key evicted by maxEntries instead of aliasing another entry", async () => {
+    const harness = countingHarness();
+    const interceptor = build(harness, {}, { ttlMs: 5_000, maxEntries: 1 });
+    const other: ContractCall = {
+      contract: CONTRACT,
+      fn: "noop",
+      args: [nativeToScVal(1n, { type: "i128" })],
+    };
+
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 2);
+    await interceptor.check(other);
+    assert.equal(harness.simulations, 4); // CALL is evicted to make room
+
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 6); // the evicted key misses, not aliases
+    assert.equal(interceptor.getCacheStats().size, 1);
   });
 });

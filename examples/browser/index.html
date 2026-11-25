@@ -1,0 +1,28 @@
+<!doctype html>
+<!--
+  Minimal page for examples/browser/dashboard.ts (issue #482).
+  Build the module first (see README.md in this directory):
+
+    npx esbuild examples/browser/main.ts --bundle --format=esm \
+      --platform=browser --outfile=examples/browser/dist/main.js
+
+  then serve this directory with any static file server.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Guard dashboard example</title>
+  </head>
+  <body>
+    <h1>Guard status</h1>
+    <form id="lookup">
+      <label>RPC URL <input name="rpc" value="https://soroban-testnet.stellar.org" /></label>
+      <label>Guard (C…) <input name="guard" required /></label>
+      <label>Source account (G…) <input name="source" required /></label>
+      <button type="submit">Load</button>
+    </form>
+    <pre id="output">Enter a guard address to load its status.</pre>
+    <script type="module" src="./dist/main.js"></script>
+  </body>
+</html>

@@ -32,7 +32,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `pollAttempts` | `number` (integer ≥ 1) | `20` | Status polls after a broadcast. ⚠️ Exhausting them returns the `pending` outcome: the transaction was accepted but not confirmed. Do not rebroadcast without `server.getTransaction(hash)`. |
 | `pollIntervalMs` | `number` (≥ 0) | `3000` | Delay between status polls. |
 | `pollOptions` | `{ pollAttempts?, pollIntervalMs? }` | none — the top-level values apply | Nested spelling of the two poll options; must agree with the top-level values when both are set. |
-| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, `initialInclusionFee` is a positive `bigint` in stroops. |
+| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, `initialInclusionFee` accepts a positive `bigint` or base-10 integer string in stroops, and optional `maxInclusionFee` (same shapes, greater than the initial fee) is a hard ceiling: a breach stops retrying and returns an `error` outcome carrying `FeeCapExceededError` instead of broadcasting the over-cap transaction. |
 | `maxRetries` | `number` (integer ≥ 0) | none — each retry class keeps its own budget | Overall cap across retry classes; `0` means a single attempt. The tighter of this and a per-class budget wins. |
 | `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
 | `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
@@ -40,7 +40,9 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `deadlineMs` | `number` (> 0) | none — only the per-call `timeoutMs` applies | ⚠️ One budget for discovery, signing, simulation, retry backoff, broadcast and polling. Expiry is fail-closed (`RpcTimeoutError` with `deadline: true`), even after the guard approved the call; a dry run reports `undetermined`. |
 | `clock` | `Clock` | `systemClock` | Time source for deadline accounting and poll/backoff delays. Must have `now()` and `sleep()`. |
 | `onStep` | `(step: InvokeStepEvent) => void` | none | One event per stage attempt (probe → sign → simulate → broadcast). Exceptions are isolated. |
+| `onRetry` | `(event: InvokeRetryEvent) => void` | none | Called once per retry, never for the first attempt, after the delay is chosen and before the next attempt starts. Carries `attempt`, `failure`, `cause`, `delayMs`, `nextAttempt`, and the `stage` that failed. Fee-bump retries report `delayMs: 0`. Exceptions are isolated: the hook cannot change the outcome, retry count or delay. |
 | `onSubmitted` | `(event: SubmissionAcceptedEvent) => void` | none | Called once with the network's answer to the broadcast, before polling, so the transaction hash survives a failed poll. |
+| `onQueue` | `(event: InvokeQueueEvent) => void` | none | Reports the per-source-account queue: `waiting` when a call joins, `acquired` when it runs, with `source`, `depth`, `waitedMs` and `acquired`. Events fire in acquisition order; a throwing hook is isolated. Counters belong to the `rpc.Server` object's queue state, so `invokeQueueStats(server)` reports only that server's accounts; without an argument it sums live server contexts in this process. The queue is per server object and process — another process using the same account is invisible. |
 | `logger` | `GuardLoggerInput` | none — silent | Stage attempts and retries at `debug`, a refusal at `info`, no-verdict outcomes at `warn`. Never changes behaviour. |
 
 ### Fee-Bump Configuration (`feeBump`)
@@ -56,7 +58,8 @@ const outcome = await invoke({
   feeBump: {
     maxAttempts: 3,        // Maximum attempts before returning BroadcastError (default: 3)
     feeMultiplier: 2,      // Multiplier applied to inclusion fee per retry (default: 2)
-    initialInclusionFee: 100n, // Base inclusion fee in stroops (default: 100 stroops)
+    initialInclusionFee: "100", // Base inclusion fee in stroops (default: 100 stroops)
+    maxInclusionFee: 1_600n,    // Optional hard ceiling: never broadcast above it
   },
 });
 ```
@@ -65,6 +68,7 @@ const outcome = await invoke({
 * **Default behavior**: Enabled by default with up to 3 attempts, a 2x fee multiplier, and base inclusion fee of 100 stroops.
 * **How attempts are bounded**: Configured via `maxAttempts` (default: 3) or overall `maxRetries`. When both are supplied the tighter bound wins. When exhausted, returns a typed `BroadcastError` containing attempt count, the last attempted fee, and structured retry metadata.
 * **How the fee multiplier works**: On each retry, the inclusion fee is scaled by `feeMultiplier` (e.g. 100 stroops → 200 stroops → 400 stroops) and re-added to the simulated resource fee. The multiplier must be a finite number greater than `1`.
+* **Hard ceiling**: `maxInclusionFee` bounds the inclusion fee a fee-bumped broadcast may declare. The computed fee is compared with the ceiling *before* the broadcast; on a breach the SDK stops retrying and returns an `error` outcome whose `error` is a `FeeCapExceededError` (attempted fee, ceiling, and `retry.maxInclusionFeeStroops`), so the over-cap transaction is never sent. The ceiling is validated synchronously at the `invoke()` boundary: a positive bigint or base-10 integer string, greater than `initialInclusionFee`.
 * **Guard and Simulation Invariant**: **Every fee-bump attempt is re-prepared, re-simulated, and re-evaluated by the guard policy.** A fee bump NEVER bypasses simulation or guard enforcement. If re-simulation causes a policy block, the policy block is immediately surfaced and the transaction is never broadcast.
 
 ### The transaction hash, as soon as the server accepts the submission
@@ -117,6 +121,30 @@ A `deadline` that fires while the pipeline is waiting for an inclusion does
 not un-send the transaction: it may still land. The hash travels with the
 `RpcTimeoutError` for exactly that reason.
 
+### Observing retries as they happen (`onRetry`)
+
+`invoke()` already attaches structured retry metadata to the terminal outcome. `onRetry` reports the same events *while* they happen, so a slow recovery does not look like a hang:
+
+```ts
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  onRetry: (event) => {
+    // event.attempt     — 1-based attempt that failed
+    // event.failure     — "stale_ledger_resource_limit" | "sequence_number_collision" | "min_fee"
+    // event.cause       — the coarse cause the terminal outcome would report
+    // event.stage       — shared TRACE_STEP_NAMES stage where the failure was observed
+    // event.delayMs     — backoff before the next attempt; 0 for a fee bump
+    // event.nextAttempt — 1-based attempt that starts next
+    metrics.increment("guard.invoke.retry", { failure: event.failure });
+  },
+});
+```
+
+The hook fires once per retry and never for the first attempt, so its events line up one-to-one, in order, with `outcome.retry.retries`. Retryable failures are classified from the broadcast's submission result, so `stage` is `"broadcast"` today. A throwing hook is swallowed — exactly like `onStep` — and cannot alter the retry budget, delays or outcome.
+
 ### The pending outcome: accepted, not confirmed
 
 When the network has accepted the submission but the polling budget runs out
@@ -145,6 +173,53 @@ exported by name so an adapter can narrow on it without re-declaring the shape.
 pipeline still owns the whole invocation and returns the fail-closed `error`
 outcome carrying `RpcTimeoutError`. `pending` means the submission itself
 completed and only the confirmation polling ran out of budget.
+
+### Resolving a pending outcome: `waitForTransaction()`
+
+Rather than hand-rolling `getTransaction` polling, pass the hash to the
+bounded helper. It reports what the chain did with the transaction as a
+discriminated result and never throws on a non-confirmation:
+
+```ts
+import { waitForTransaction } from "stellar-agent-guard-sdk";
+
+const outcome = await invoke({ server, source, call, networkPassphrase });
+if (outcome.kind === "pending") {
+  const status = await waitForTransaction({
+    server,
+    hash: outcome.transactionHash,
+    timeoutMs: 30_000,    // overall budget; default 30s
+    pollIntervalMs: 1_000, // delay between polls; default 1s
+    signal,                // optional cancellation
+    clock,                 // optional Clock (use FakeClock in tests)
+  });
+
+  switch (status.kind) {
+    case "confirmed":
+      status.ledger; // included in a ledger
+      status.events; // contract events, when reported
+      break;
+    case "failed":
+      status.resultCode; // the transaction was included and rejected
+      break;
+    case "pending":
+      status.reason; // "timeout" | "aborted" — query again; do NOT resend
+      break;
+    case "undetermined":
+      status.cause; // the RPC error that left the status unknown
+      break;
+  }
+}
+```
+
+| Result | Meaning |
+| --- | --- |
+| `confirmed` | Included in a ledger. **Confirmation is not admissibility**: a guard refusal that reached inclusion is also an included transaction, so read the guard's decision from the original outcome/events. |
+| `failed` | Included and rejected; carries `resultXdr`, `resultCode` and `diagnosticEvents`. |
+| `pending` | The budget (`reason: "timeout"`) or the caller's signal (`reason: "aborted"`) ended the wait before a verdict. The transaction may still land — never rebroadcast on this result. |
+| `undetermined` | An RPC error left the status unknown; `cause` carries the failure. |
+
+Only invalid input throws — a malformed hash, or a non-positive `timeoutMs`/`pollIntervalMs` — synchronously and before any RPC, as a typed `InvalidInputError`. The first poll happens immediately, and every poll is bounded by the remaining budget, so the wait cannot outlive `timeoutMs`.
 
 ### Malformed simulation data
 
@@ -183,7 +258,8 @@ called. The validated fields are:
 | `maxRetries` | integer `>= 0`; `0` means one attempt |
 | `feeBump.maxAttempts` | integer `>= 1` |
 | `feeBump.feeMultiplier` | finite `> 1` |
-| `feeBump.initialInclusionFee` | positive `bigint` stroops |
+| `feeBump.initialInclusionFee` | positive `bigint` or base-10 integer string in stroops (through the Stellar u64 fee limit) |
+| `feeBump.maxInclusionFee` | positive `bigint` or base-10 integer string in stroops, greater than `feeBump.initialInclusionFee` |
 | `pollAttempts` | integer `>= 1` |
 | `pollIntervalMs` | finite `>= 0` |
 | `pollOptions.*` | same rules; nested and top-level values must agree when both are supplied |
