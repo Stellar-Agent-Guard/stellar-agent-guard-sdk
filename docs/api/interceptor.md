@@ -39,6 +39,15 @@ Present only when you opt in. Entries are also discarded whenever the observed l
 | `policyRevision` | `PolicyRevision \| () => PolicyRevision \| Promise<PolicyRevision>` | none — the revision is not part of the key | Value or getter mixed into the cache key, so a policy change invalidates entries before the TTL elapses. ⚠️ Without it, a policy change inside the TTL is not seen until expiry, the next ledger, or `invalidate()`. A getter that throws or returns `undefined` bypasses the cache for that check (fresh simulation), never a reused verdict. |
 | `maxEntries` | `number` (positive integer) | none — unbounded | Least-recently-used eviction once full. Eviction only removes entries, so it can never return an expired or cross-ledger verdict. Unbounded means memory grows with the number of distinct calls. |
 
+Cache-served decisions include `cached: true`, `observedLedger`, and `ageMs`.
+`observedLedger` is the ledger marker used when the cached observation was
+recorded, and `ageMs` is the elapsed time since that observation. Fresh
+decisions leave all three fields undefined. Pass `forceFresh: true` to
+`check()` to bypass the cache for one call; that result is fresh and does not
+replace the existing cached entry. Cache freshness is bounded by the configured
+TTL and ledger checks, but it cannot guarantee that network state will not
+change immediately afterward.
+
 #### `PreFlightCheckOptions` (`check(call, options)`)
 
 | Option | Type | Default | Meaning |
@@ -46,6 +55,7 @@ Present only when you opt in. Entries are also discarded whenever the observed l
 | `onStep` | `(step: InvokeStepEvent) => void` | none | One event per enforcement-stage attempt (probe → sign → simulate). Supplying it opts this check out of coalescing. |
 | `signal` | `AbortSignal` | none | ⚠️ Caller cancellation. An already-aborted signal returns before any RPC; a fired signal returns the fail-closed `undetermined` verdict carrying `RpcTimeoutError`, never a throw and never `admissible`. |
 | `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout returns the same fail-closed `undetermined` verdict as an abort. `0` disables the per-call timeout: with no `signal`, a stalled RPC can then hold the check open. |
+| `forceFresh` | `boolean` | `false` | Bypass the optional verdict cache for this call only. The fresh result does not carry cache metadata and does not replace the cached entry. |
 
 #### `CheckBatchOptions` (`checkBatch()` / `assertBatchAllowed()`)
 

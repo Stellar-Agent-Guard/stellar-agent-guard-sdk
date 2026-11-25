@@ -1035,6 +1035,7 @@ function makeHarness() {
   let simulations = 0;
   let latestLedgerCalls = 0;
   let ledger = 100;
+  let simulationFailure = false;
   const source = Keypair.random();
   const server = {
     getAccount: async () => new Account(source.publicKey(), "1"),
@@ -1044,6 +1045,7 @@ function makeHarness() {
     },
     simulateTransaction: async () => {
       simulations += 1;
+      if (simulationFailure) throw new Error("forced simulation failure");
       return {
         result: { auth: [] },
         minResourceFee: "17",
@@ -1067,6 +1069,9 @@ function makeHarness() {
     },
     advanceLedger() {
       ledger += 1;
+    },
+    failSimulations() {
+      simulationFailure = true;
     },
   };
 }
@@ -1117,7 +1122,12 @@ describe("PreFlightInterceptor simulation cache", () => {
 
     assert.equal(harness.simulations, 2);
     assert.equal(harness.latestLedgerCalls, 3);
-    assert.equal(second, first);
+    assert.notEqual(second, first);
+    const { cached, observedLedger, ageMs, ...cachedCore } = second;
+    assert.deepEqual(cachedCore, first);
+    assert.equal(cached, true);
+    assert.equal(observedLedger, 100);
+    assert.equal(ageMs, 0);
 
     const stats = interceptor.getCacheStats();
     assert.equal(stats.hits, 1);
@@ -1138,13 +1148,16 @@ describe("PreFlightInterceptor simulation cache", () => {
 
   it("does not reuse a verdict after its TTL expires", async () => {
     const harness = makeHarness();
-    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 1 } });
+    const clock = new FakeClock(1_000);
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 1_000 }, clock });
 
-    await interceptor.check(harness.call);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    await interceptor.check(harness.call);
+    const first = await interceptor.check(harness.call);
+    clock.advance(1_000);
+    const second = await interceptor.check(harness.call);
 
     assert.equal(harness.simulations, 4);
+    assert.equal(first.cached, undefined);
+    assert.equal(second.cached, undefined);
   });
 
   it("invalidates the complete cache explicitly", async () => {
@@ -1197,6 +1210,64 @@ describe("PreFlightInterceptor simulation cache", () => {
     assert.equal(stats.misses, 2);
     assert.equal(stats.size, 1);
     assert.equal(stats.invalidations, 0);
+  });
+
+  it("leaves cache metadata undefined on a fresh simulation", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    const decision = await interceptor.check(harness.call);
+
+    assert.equal(decision.cached, undefined);
+    assert.equal(decision.observedLedger, undefined);
+    assert.equal(decision.ageMs, undefined);
+  });
+
+  it("reports the cached ledger and elapsed observation age", async () => {
+    const harness = makeHarness();
+    const clock = new FakeClock(10_000);
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 }, clock });
+
+    await interceptor.check(harness.call);
+    clock.advance(250);
+    const cached = await interceptor.check(harness.call);
+
+    assert.equal(cached.cached, true);
+    assert.equal(cached.observedLedger, 100);
+    assert.equal(cached.ageMs, 250);
+  });
+
+  it("bypasses and preserves the cache for a forced-fresh check", async () => {
+    const harness = makeHarness();
+    const clock = new FakeClock(10_000);
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 }, clock });
+
+    await interceptor.check(harness.call);
+    const fresh = await interceptor.check(harness.call, { forceFresh: true });
+    const cached = await interceptor.check(harness.call);
+
+    assert.equal(harness.simulations, 4);
+    assert.equal(fresh.cached, undefined);
+    assert.equal(fresh.observedLedger, undefined);
+    assert.equal(fresh.ageMs, undefined);
+    assert.equal(cached.cached, true);
+    assert.equal(cached.observedLedger, 100);
+    assert.equal(cached.ageMs, 0);
+  });
+
+  it("does not fall back to a cached verdict when a forced-fresh simulation fails", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+    await interceptor.check(harness.call);
+    harness.failSimulations();
+    const failedFresh = await interceptor.check(harness.call, { forceFresh: true });
+
+    assert.equal(failedFresh.kind, "undetermined");
+    assert.equal(failedFresh.cached, undefined);
+    assert.equal(failedFresh.observedLedger, undefined);
+    assert.equal(failedFresh.ageMs, undefined);
+    assert.equal(harness.simulations, 3);
   });
 
   it("invalidates when the policy revision changes", async () => {
@@ -1583,7 +1654,12 @@ describe("PreFlightInterceptor cached checks honour the caller's bound", () => {
     const second = await interceptor.check(harness.call, { timeoutMs: 1_000 });
 
     assert.equal(first.kind, "admissible");
-    assert.equal(second, first);
+    assert.notEqual(second, first);
+    const { cached, observedLedger, ageMs, ...cachedCore } = second;
+    assert.deepEqual(cachedCore, first);
+    assert.equal(cached, true);
+    assert.equal(observedLedger, 100);
+    assert.equal(ageMs, 0);
     // The second check reused the cached verdict: one ledger read for the
     // cache context, one inside the enforcement run, and no new simulation.
     assert.equal(harness.latestLedgerCalls, 3);

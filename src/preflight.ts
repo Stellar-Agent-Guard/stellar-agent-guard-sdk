@@ -164,8 +164,18 @@ export function validateContractCall(call: ContractCall): void {
 export const PreFlightUndeterminedError = GuardUndeterminedError;
 export type PreFlightUndeterminedError = GuardUndeterminedError;
 
+export interface PreFlightDecisionCacheMetadata {
+  /** True only when this decision was served from the optional cache. */
+  cached?: boolean;
+  /** Ledger associated with the cached observation. */
+  observedLedger?: number;
+  /** Milliseconds elapsed since the cached observation was recorded. */
+  ageMs?: number;
+}
+
 export type PreFlightDecision =
-  | {
+  (
+    | {
       allowed: true;
       kind: "admissible";
       /** The network's own resource fee estimate for this call, in stroops. */
@@ -204,7 +214,8 @@ export type PreFlightDecision =
        * HTTP 429 (see `maxConcurrentSimulations`). Absent otherwise.
        */
       cause?: PreFlightUndeterminedCause;
-    };
+    }
+  ) & PreFlightDecisionCacheMetadata;
 
 /** Causes an `undetermined` pre-flight verdict can carry (additive). */
 export type PreFlightUndeterminedCause = "rate_limited";
@@ -373,6 +384,8 @@ export type PolicyRevision = string | number | bigint | boolean | null | undefin
  * `DEFAULT_RPC_TIMEOUT_MS` for the timeout.
  */
 export interface PreFlightCheckOptions {
+  /** Bypass the optional verdict cache for this check only. */
+  forceFresh?: boolean;
   onStep?: (step: InvokeStepEvent) => void;
   /**
    * Caller-owned cancellation; aborts the RPC calls the check makes. A fired
@@ -559,6 +572,7 @@ interface CacheEntry {
   decision: PreFlightDecision;
   ledger: number;
   expiresAt: number;
+  recordedAt: number;
 }
 
 interface CacheContext {
@@ -859,6 +873,16 @@ export class PreFlightInterceptor {
       return timeoutDecision(new RpcTimeoutError({ stage: "pre-flight", aborted: true }));
     }
 
+    // A forced-fresh check must not consult or update the cache, and must not
+    // share a coalesced run with an ordinary check. This keeps the option a
+    // one-call observation without disturbing the established cache contents.
+    if (options?.forceFresh) {
+      return this.computeDecision(call, null, options.onStep, {
+        signal: options.signal,
+        timeoutMs: options.timeoutMs,
+      });
+    }
+
     const lookup = await this.cacheContext(call, {
       signal: options?.signal,
       timeoutMs: options?.timeoutMs,
@@ -894,7 +918,12 @@ export class PreFlightInterceptor {
             ledger: context.ledger,
           });
           this._hits++;
-          return cached.decision;
+          return {
+            ...cached.decision,
+            cached: true,
+            observedLedger: cached.ledger,
+            ageMs: Math.max(0, now - cached.recordedAt),
+          };
         }
         this.cache.delete(context.key);
       }
@@ -1123,6 +1152,7 @@ export class PreFlightInterceptor {
         decision,
         ledger: context.ledger,
         expiresAt: context.expiresAt,
+        recordedAt: this.clock.now(),
       });
       this.logger.debug("pre-flight verdict cached", {
         kind: decision.kind,
