@@ -246,6 +246,8 @@ export type {
   PreFlightDecision,
   PreFlightInterceptorOptions,
   PreFlightUndeterminedCause,
+  SimulationDiagnostics,
+  SimulationDiagnosticsOptions,
   WarmCacheOptions,
   WarmCacheSummary,
 } from "./preflight.ts";
