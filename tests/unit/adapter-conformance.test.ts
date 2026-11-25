@@ -23,7 +23,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
-import { mapContractCalls } from "../../src/adapters/shared.ts";
+import { DEFAULT_ADAPTER_TIMEOUT_MS, mapContractCalls } from "../../src/adapters/shared.ts";
+import { DEFAULT_RPC_TIMEOUT_MS } from "../../src/invoke.ts";
 import { createGuardValidator } from "../../src/adapters/elizaos.ts";
 import { guardMcpToolHandler } from "../../src/adapters/mcp.ts";
 import { wrapToolWithGuard } from "../../src/adapters/vercelai.ts";
@@ -40,7 +41,9 @@ import type { ContractCall } from "../../src/tx.ts";
 import type {
   BlockedHookLogger,
   GuardAdapterName,
+  GuardBatchDecisionInfo,
   GuardBlockedInfo,
+  GuardMappingErrorInfo,
 } from "../../src/adapters/shared.ts";
 
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
@@ -203,6 +206,8 @@ function stub(decision: PreFlightDecision, throwsError?: Error): PreFlightInterc
 interface Observer {
   onBlocked?: ((info: GuardBlockedInfo) => unknown) | undefined;
   onDecision?: ((...args: unknown[]) => unknown) | undefined;
+  onMappingError?: ((info: GuardMappingErrorInfo) => unknown) | undefined;
+  includeMappingErrorRequest?: boolean | undefined;
   logger?: BlockedHookLogger | undefined;
 }
 
@@ -212,6 +217,8 @@ interface Controls {
   timeoutMs?: number | undefined;
   /** A signal the host hook itself supplies (LangChain request / MCP extra). */
   hostSignal?: AbortSignal | undefined;
+  /** A `RunnableConfig.signal` the LangChain middleware is invoked with. */
+  configSignal?: AbortSignal | undefined;
 }
 
 interface Outcome {
@@ -238,6 +245,12 @@ function baseOptions(scenario: Scenario, observer: Observer, controls: Controls)
   return {
     interceptor: interceptorFor(scenario, controls),
     ...(observer.logger ? { blockedHookLogger: observer.logger } : {}),
+    ...(observer.onMappingError
+      ? { onMappingError: observer.onMappingError as (info: GuardMappingErrorInfo) => void }
+      : {}),
+    ...(observer.includeMappingErrorRequest !== undefined
+      ? { includeMappingErrorRequest: observer.includeMappingErrorRequest }
+      : {}),
     ...(controls.signal ? { signal: controls.signal } : {}),
     ...(controls.timeoutMs !== undefined ? { timeoutMs: controls.timeoutMs } : {}),
   };
@@ -268,10 +281,14 @@ const HARNESSES: AdapterHarness[] = [
         toolCall: { name: "send_payment", id: "lc_1", args: {} },
         ...(controls.hostSignal ? { signal: controls.hostSignal } : {}),
       };
-      const result = await middleware.wrapToolCall(request, async () => {
-        entered += 1;
-        return { content: "sent" };
-      });
+      const result = await middleware.wrapToolCall(
+        request,
+        async () => {
+          entered += 1;
+          return { content: "sent" };
+        },
+        controls.configSignal ? { signal: controls.configSignal } : undefined,
+      );
       return {
         entered,
         halted: entered === 0,
@@ -286,6 +303,7 @@ const HARNESSES: AdapterHarness[] = [
       let entered = 0;
       const validate = createGuardValidator({
         ...baseOptions(scenario, observer, controls),
+        name: "send_payment",
         toContractCall: () => mapperFor(scenario)(),
         ...(observer.onBlocked
           ? { onBlocked: observer.onBlocked as (info: GuardBlockedInfo) => void }
@@ -499,6 +517,96 @@ describe("call-mapping failures fail closed (issue #316)", () => {
   });
 });
 
+describe("onMappingError parity (issue #453)", () => {
+  function mappingObserver(): {
+    observer: Observer;
+    seen: GuardMappingErrorInfo[];
+    blocked: GuardBlockedInfo[];
+  } {
+    const seen: GuardMappingErrorInfo[] = [];
+    const blocked: GuardBlockedInfo[] = [];
+    return {
+      seen,
+      blocked,
+      observer: {
+        onMappingError: (info) => {
+          seen.push(info);
+        },
+        onBlocked: (info) => {
+          blocked.push(info);
+        },
+      },
+    };
+  }
+
+  for (const adapter of HARNESSES) {
+    it(`${adapter.name}: fires exactly once on a mapper failure, with no raw request`, async () => {
+      const { observer, seen, blocked } = mappingObserver();
+      const outcome = await adapter.run(
+        SCENARIOS.find((scenario) => scenario.name === "mapping throws")!,
+        observer,
+      );
+
+      assert.equal(outcome.entered, 0, "a mapping failure resumed the action");
+      assert.equal(outcome.halted, true);
+      assert.equal(seen.length, 1, "onMappingError must fire exactly once");
+      assert.equal(seen[0]!.adapter, adapter.name);
+      assert.equal(seen[0]!.tool, "send_payment");
+      assert.equal(seen[0]!.errorClass, "AdapterMappingError");
+      assert.ok(seen[0]!.error instanceof AdapterMappingError);
+      assert.match(seen[0]!.error.message, /mapper exploded/);
+      assert.equal("request" in seen[0]!, false, "raw tool arguments must be omitted by default");
+      if (adapter.hasBlockedHook) {
+        assert.equal(blocked.length, 1, "onBlocked must keep firing for compatibility");
+        assert.equal(blocked[0]!.kind, "undetermined");
+      }
+    });
+
+    it(`${adapter.name}: a guard refusal does not fire onMappingError`, async () => {
+      const { observer, seen } = mappingObserver();
+      const outcome = await adapter.run(
+        SCENARIOS.find((scenario) => scenario.name === "blocked")!,
+        observer,
+      );
+      assert.equal(outcome.halted, true);
+      assert.equal(seen.length, 0, "a policy refusal was reported as a mapping failure");
+    });
+
+    it(`${adapter.name}: a throwing mapping hook cannot resume the action`, async () => {
+      const logged: unknown[][] = [];
+      const { observer } = mappingObserver();
+      const outcome = await adapter.run(
+        SCENARIOS.find((scenario) => scenario.name === "mapping throws")!,
+        {
+          ...observer,
+          onMappingError: () => {
+            throw new Error("mapping sink failure");
+          },
+          logger: {
+            error: (...args) => {
+              logged.push(args);
+            },
+          },
+        },
+      );
+      assert.equal(outcome.entered, 0);
+      assert.equal(outcome.halted, true);
+      assert.match(String(logged[0]?.[0] ?? ""), /onMappingError/);
+    });
+
+    it(`${adapter.name}: includeMappingErrorRequest opts in to the raw request`, async () => {
+      const { observer, seen } = mappingObserver();
+      await adapter.run(SCENARIOS.find((scenario) => scenario.name === "mapping throws")!, {
+        ...observer,
+        includeMappingErrorRequest: true,
+      });
+      assert.equal(seen.length, 1);
+      assert.equal("request" in seen[0]!, true);
+      assert.ok(seen[0]!.request !== undefined);
+    });
+  }
+});
+
 describe("observer isolation (issue #313)", () => {
   for (const adapter of HARNESSES) {
     it(`${adapter.name}: sync throws and rejected async hooks cannot change the halt`, async () => {
@@ -689,21 +797,102 @@ describe("cancellation and timeout forwarding (issue #315)", () => {
     assert.equal(seen[0]!.signal, host.signal);
   });
 
-  it("LangChain: a request-supplied signal takes precedence", async () => {
-    const host = new AbortController();
-    const configured = new AbortController();
-    const { seen, interceptor } = capturing(ADMISSIBLE);
+  it("every adapter resolves the shared default timeout", async () => {
+    for (const adapter of HARNESSES) {
+      const { seen, interceptor } = capturing(ADMISSIBLE);
+      await adapter.run(SCENARIOS[0]!, {}, { interceptor });
+      assert.equal(seen.length, 1);
+      assert.equal(
+        seen[0]!.timeoutMs,
+        DEFAULT_ADAPTER_TIMEOUT_MS,
+        `${adapter.name} did not resolve the shared default timeout`,
+      );
+    }
+    assert.equal(DEFAULT_ADAPTER_TIMEOUT_MS, DEFAULT_RPC_TIMEOUT_MS);
+    assert.equal(DEFAULT_ADAPTER_TIMEOUT_MS, 30_000);
+  });
+
+  it("every adapter forwards timeoutMs: 0 as an opt-out, not as omission", async () => {
+    for (const adapter of HARNESSES) {
+      const { seen, interceptor } = capturing(ADMISSIBLE);
+      await adapter.run(SCENARIOS[0]!, {}, { interceptor, timeoutMs: 0 });
+      assert.equal(seen[0]!.timeoutMs, 0, `${adapter.name} dropped the opt-out`);
+    }
+  });
+
+  it("LangChain: a request signal and a RunnableConfig signal are merged", async () => {
     const langchain = HARNESSES.find((candidate) => candidate.name === "langchain")!;
-    await langchain.run(
+
+    for (const which of ["request", "config", "adapter"] as const) {
+      const host = new AbortController();
+      const config = new AbortController();
+      const configured = new AbortController();
+      const { seen, interceptor } = capturing(ADMISSIBLE);
+      await langchain.run(
+        SCENARIOS[0]!,
+        {},
+        {
+          interceptor,
+          signal: configured.signal,
+          hostSignal: host.signal,
+          configSignal: config.signal,
+        },
+      );
+      const merged = seen[0]!.signal;
+      assert.ok(merged, "the adapter dropped every signal");
+      assert.equal(merged!.aborted, false);
+
+      // Either input alone must abort the merged bound.
+      if (which === "request") host.abort();
+      else if (which === "config") config.abort();
+      else configured.abort();
+      assert.equal(merged!.aborted, true, `the ${which} signal was not propagated`);
+    }
+  });
+
+  it("LangChain: an already-aborted RunnableConfig signal halts without an RPC", async () => {
+    const config = new AbortController();
+    config.abort();
+    const signalAware = {
+      check: async (_call: ContractCall, options?: PreFlightCheckOptions) =>
+        options?.signal?.aborted ? UNDETERMINED : ADMISSIBLE,
+    } as unknown as PreFlightInterceptor;
+    const langchain = HARNESSES.find((candidate) => candidate.name === "langchain")!;
+    const outcome = await langchain.run(
       SCENARIOS[0]!,
       {},
-      {
-        interceptor,
-        signal: configured.signal,
-        hostSignal: host.signal,
-      },
+      { interceptor: signalAware, configSignal: config.signal },
     );
-    assert.equal(seen[0]!.signal, host.signal);
+    assert.equal(outcome.entered, 0);
+    assert.equal(outcome.halted, true);
+  });
+
+  it("LangChain: cancelling the chain stops an in-flight check", async () => {
+    const config = new AbortController();
+    let started = 0;
+    const interceptor = {
+      check: (_call: ContractCall, options?: PreFlightCheckOptions) => {
+        started += 1;
+        const signal = options?.signal;
+        if (!signal) return Promise.resolve(ADMISSIBLE);
+        if (signal.aborted) return Promise.resolve(UNDETERMINED);
+        return new Promise<PreFlightDecision>((resolve) => {
+          signal.addEventListener("abort", () => resolve(UNDETERMINED), { once: true });
+        });
+      },
+    } as unknown as PreFlightInterceptor;
+    const langchain = HARNESSES.find((candidate) => candidate.name === "langchain")!;
+    const pending = langchain.run(SCENARIOS[0]!, {}, { interceptor, configSignal: config.signal });
+    setTimeout(() => config.abort(), 1);
+    const outcome = await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) =>
+        setTimeout(() => reject(new Error("cancelling the chain did not stop the check")), 200),
+      ),
+    ]);
+    assert.equal(started, 1);
+    assert.equal(outcome.entered, 0);
+    assert.equal(outcome.halted, true);
   });
 
   it("rejects a malformed signal or timeout at construction time", async () => {
@@ -784,4 +973,493 @@ describe("framework-specific refusal shapes stay distinct (issue #317)", () => {
         error instanceof GuardUndeterminedError && error instanceof PreFlightUndeterminedError,
     );
   });
+});
+
+describe("simultaneous guarded tool calls concurrency (issue #502)", () => {
+  interface Deferred<T> {
+    promise: Promise<T>;
+    resolve: (value: T) => void;
+    reject: (error: unknown) => void;
+  }
+
+  function defer<T>(): Deferred<T> {
+    let resolve!: (value: T) => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  }
+
+  it("handles ten simultaneous distinct calls through one adapter without cross-talk or cancellation leakage", async () => {
+    // 10 distinct calls:
+    // 0..3: admissible
+    // 4..6: blocked (distinct reasons)
+    // 7..8: undetermined (distinct details)
+    // 9: cancelled via AbortSignal
+    const totalCalls = 10;
+    const deferreds: Deferred<PreFlightDecision>[] = Array.from({ length: totalCalls }, () =>
+      defer<PreFlightDecision>(),
+    );
+
+    const callsSeenInCheck: ContractCall[] = [];
+    const fakeInterceptor: PreFlightInterceptor = {
+      check: async (call: ContractCall, options?: PreFlightCheckOptions) => {
+        callsSeenInCheck.push(call);
+        const index = Number(call.fn.replace("call_", ""));
+        const d = deferreds[index]!;
+
+        if (options?.signal?.aborted) {
+          return { allowed: false, kind: "undetermined", detail: "aborted before check" };
+        }
+
+        if (options?.signal) {
+          options.signal.addEventListener("abort", () => {
+            d.resolve({ allowed: false, kind: "undetermined", detail: "cancelled in-flight" });
+          });
+        }
+
+        return d.promise;
+      },
+    } as unknown as PreFlightInterceptor;
+
+    const decisionsRecorded: Array<{ request: unknown; decision: PreFlightDecision }> = [];
+    const blockedRecorded: GuardBlockedInfo[] = [];
+    const handlersEntered: number[] = new Array(totalCalls).fill(0);
+
+    const middleware = createLangChainGuardMiddleware({
+      interceptor: fakeInterceptor,
+      toContractCall: (req) => ({
+        contract: GUARD,
+        fn: req.toolCall.name,
+        args: [],
+      }),
+      onDecision: (request, decision) => {
+        decisionsRecorded.push({ request, decision });
+      },
+      onBlocked: (info) => {
+        blockedRecorded.push(info);
+      },
+    });
+
+    const controller9 = new AbortController();
+
+    // Launch all 10 calls simultaneously
+    const callPromises = Array.from({ length: totalCalls }, (_, i) => {
+      const request = {
+        toolCall: { name: `call_${i}`, id: `id_${i}`, args: { index: i } },
+        ...(i === 9 ? { signal: controller9.signal } : {}),
+      };
+      return middleware.wrapToolCall(request, async () => {
+        handlersEntered[i] = (handlersEntered[i] ?? 0) + 1;
+        return { content: `executed_${i}` };
+      });
+    });
+
+    // Verify all 10 reached the fake interceptor
+    assert.equal(callsSeenInCheck.length, 10);
+    // None has completed yet
+    assert.deepEqual(handlersEntered, new Array(10).fill(0));
+
+    // Cancel call 9 while in flight
+    controller9.abort();
+
+    // Controllable resolution with distinct verdicts in arbitrary order (reverse order)
+    // 7, 8: undetermined
+    deferreds[8]!.resolve({ allowed: false, kind: "undetermined", detail: "rpc error 8" });
+    deferreds[7]!.resolve({ allowed: false, kind: "undetermined", detail: "rpc error 7" });
+
+    // 4, 5, 6: blocked
+    deferreds[6]!.resolve({
+      allowed: false,
+      kind: "blocked",
+      reason: "paused",
+      explanation: explainReason("paused"),
+      detail: "guard paused",
+      diagnosticEvents: [],
+    });
+    deferreds[5]!.resolve({
+      allowed: false,
+      kind: "blocked",
+      reason: "blocked_recipient",
+      explanation: explainReason("blocked_recipient"),
+      detail: "recipient blocked",
+      diagnosticEvents: [],
+    });
+    deferreds[4]!.resolve({
+      allowed: false,
+      kind: "blocked",
+      reason: "per_tx_cap_exceeded",
+      explanation: explainReason("per_tx_cap_exceeded"),
+      detail: "cap exceeded",
+      diagnosticEvents: [],
+    });
+
+    // 0..3: admissible
+    deferreds[3]!.resolve(ADMISSIBLE);
+    deferreds[2]!.resolve(ADMISSIBLE);
+    deferreds[1]!.resolve(ADMISSIBLE);
+    deferreds[0]!.resolve(ADMISSIBLE);
+
+    // Wait for all 10 calls to finish
+    const results = await Promise.all(callPromises);
+
+    // 1. Assert each handler ran or halted correctly
+    // Only 0..3 were admissible -> entered === 1; all others -> entered === 0
+    assert.deepEqual(handlersEntered, [1, 1, 1, 1, 0, 0, 0, 0, 0, 0]);
+
+    // 2. Results match their own calls
+    for (let i = 0; i < 4; i++) {
+      const res = results[i] as { content: string };
+      assert.equal(res.content, `executed_${i}`);
+    }
+    for (let i = 4; i < 10; i++) {
+      const res = results[i] as { status: string; content: string };
+      assert.equal(res.status, "error");
+    }
+
+    // 3. Hook counts match the calls
+    // onDecision fires for every call (10 calls)
+    assert.equal(decisionsRecorded.length, 10);
+    // onBlocked fires only for non-admissible calls (calls 4, 5, 6, 7, 8, 9 = 6 calls)
+    assert.equal(blockedRecorded.length, 6);
+
+    // 4. Assert NO cross-talk in onDecision
+    for (const rec of decisionsRecorded) {
+      const req = rec.request as { toolCall: { name: string; args: { index: number } } };
+      const idx = req.toolCall.args.index;
+      if (idx < 4) {
+        assert.equal(rec.decision.kind, "admissible");
+      } else if (idx === 4) {
+        assert.equal(rec.decision.kind, "blocked");
+        assert.equal((rec.decision as { reason?: string }).reason, "per_tx_cap_exceeded");
+      } else if (idx === 5) {
+        assert.equal(rec.decision.kind, "blocked");
+        assert.equal((rec.decision as { reason?: string }).reason, "blocked_recipient");
+      } else if (idx === 6) {
+        assert.equal(rec.decision.kind, "blocked");
+        assert.equal((rec.decision as { reason?: string }).reason, "paused");
+      } else if (idx === 7) {
+        assert.equal(rec.decision.kind, "undetermined");
+        assert.equal(rec.decision.detail, "rpc error 7");
+      } else if (idx === 8) {
+        assert.equal(rec.decision.kind, "undetermined");
+        assert.equal(rec.decision.detail, "rpc error 8");
+      } else if (idx === 9) {
+        assert.equal(rec.decision.kind, "undetermined");
+        assert.match(rec.decision.detail, /cancelled/);
+      }
+    }
+
+    // 5. Assert NO cross-talk in onBlocked
+    const blockedMap = new Map(blockedRecorded.map((info) => [info.call?.fn, info]));
+    assert.equal(blockedMap.size, 6);
+
+    const info4 = blockedMap.get("call_4")!;
+    assert.equal(info4.kind, "blocked");
+    assert.equal(info4.reason, "per_tx_cap_exceeded");
+    assert.equal(info4.call?.fn, "call_4");
+
+    const info5 = blockedMap.get("call_5")!;
+    assert.equal(info5.kind, "blocked");
+    assert.equal(info5.reason, "blocked_recipient");
+
+    const info6 = blockedMap.get("call_6")!;
+    assert.equal(info6.kind, "blocked");
+    assert.equal(info6.reason, "paused");
+
+    const info7 = blockedMap.get("call_7")!;
+    assert.equal(info7.kind, "undetermined");
+    assert.equal(info7.reason, null);
+    assert.match(info7.explanation, /rpc error 7/);
+
+    const info8 = blockedMap.get("call_8")!;
+    assert.equal(info8.kind, "undetermined");
+    assert.equal(info8.reason, null);
+    assert.match(info8.explanation, /rpc error 8/);
+
+    const info9 = blockedMap.get("call_9")!;
+    assert.equal(info9.kind, "undetermined");
+    assert.equal(info9.reason, null);
+    assert.match(info9.explanation, /cancelled/);
+
+    // 6. Cancellation isolation: call 9 was cancelled without cancelling calls 0..8
+    assert.equal(handlersEntered[9], 0);
+    assert.deepEqual(handlersEntered.slice(0, 4), [1, 1, 1, 1]);
+  });
+});
+
+describe("onBatchDecision summary callback parity (issue #498)", () => {
+  const CALL_A: ContractCall = { contract: GUARD, fn: "transfer_a", args: [] };
+  const CALL_B: ContractCall = { contract: GUARD, fn: "transfer_b", args: [] };
+  const BATCH_CALLS = [CALL_A, CALL_B];
+
+  function makeBatchInterceptor(verdicts: PreFlightDecision[]): PreFlightInterceptor {
+    const admissible = verdicts.every((v) => v.allowed);
+    return {
+      check: async () => verdicts[0]!,
+      checkBatch: async () => ({
+        admissible,
+        overallAdmissible: admissible,
+        verdicts,
+        calls: verdicts,
+        totalEstimatedResourceFee: 100n,
+      }),
+    } as unknown as PreFlightInterceptor;
+  }
+
+  const ADAPTERS_WITH_BATCH: Array<{
+    name: GuardAdapterName;
+    runBatch: (
+      interceptor: PreFlightInterceptor,
+      onBatchDecision?: (info: GuardBatchDecisionInfo) => unknown,
+      onDecision?: () => void,
+    ) => Promise<boolean>;
+    runSingle: (
+      interceptor: PreFlightInterceptor,
+      onBatchDecision?: (info: GuardBatchDecisionInfo) => unknown,
+    ) => Promise<boolean>;
+  }> = [
+    {
+      name: "langchain",
+      runBatch: async (interceptor, onBatchDecision, onDecision) => {
+        let entered = false;
+        const middleware = createLangChainGuardMiddleware({
+          interceptor,
+          toContractCalls: () => BATCH_CALLS,
+          ...(onBatchDecision
+            ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+            : {}),
+          ...(onDecision ? { onDecision: onDecision as () => void } : {}),
+        });
+        const res = await middleware.wrapToolCall(
+          { toolCall: { name: "batch_tool", id: "batch_id", args: {} } },
+          async () => {
+            entered = true;
+            return { content: "ok" };
+          },
+        );
+        return entered && !("status" in res && res.status === "error");
+      },
+      runSingle: async (interceptor, onBatchDecision) => {
+        let entered = false;
+        const middleware = createLangChainGuardMiddleware({
+          interceptor,
+          toContractCall: () => CALL_A,
+          ...(onBatchDecision
+            ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+            : {}),
+        });
+        const res = await middleware.wrapToolCall(
+          { toolCall: { name: "single_tool", id: "single_id", args: {} } },
+          async () => {
+            entered = true;
+            return { content: "ok" };
+          },
+        );
+        return entered && !("status" in res && res.status === "error");
+      },
+    },
+    {
+      name: "mcp",
+      runBatch: async (interceptor, onBatchDecision, onDecision) => {
+        let entered = false;
+        const handler = guardMcpToolHandler(
+          "batch_tool",
+          async () => {
+            entered = true;
+            return { content: [{ type: "text", text: "ok" }] };
+          },
+          {
+            interceptor,
+            toContractCalls: () => BATCH_CALLS,
+            ...(onBatchDecision
+              ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+              : {}),
+            ...(onDecision ? { onDecision: onDecision as () => void } : {}),
+          },
+        );
+        const res = await handler({});
+        return entered && !((res as { isError?: boolean }).isError === true);
+      },
+      runSingle: async (interceptor, onBatchDecision) => {
+        let entered = false;
+        const handler = guardMcpToolHandler(
+          "single_tool",
+          async () => {
+            entered = true;
+            return { content: [{ type: "text", text: "ok" }] };
+          },
+          {
+            interceptor,
+            toContractCall: () => CALL_A,
+            ...(onBatchDecision
+              ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+              : {}),
+          },
+        );
+        const res = await handler({});
+        return entered && !((res as { isError?: boolean }).isError === true);
+      },
+    },
+    {
+      name: "vercelai",
+      runBatch: async (interceptor, onBatchDecision, onDecision) => {
+        let entered = false;
+        const tool = wrapToolWithGuard(
+          {
+            execute: async () => {
+              entered = true;
+              return "ok";
+            },
+          },
+          {
+            interceptor,
+            toContractCalls: () => BATCH_CALLS,
+            ...(onBatchDecision
+              ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+              : {}),
+            ...(onDecision ? { onDecision: onDecision as () => void } : {}),
+          },
+          { toolName: "batch_tool", input: {} },
+        );
+        try {
+          await tool.execute!();
+          return entered;
+        } catch {
+          return false;
+        }
+      },
+      runSingle: async (interceptor, onBatchDecision) => {
+        let entered = false;
+        const tool = wrapToolWithGuard(
+          {
+            execute: async () => {
+              entered = true;
+              return "ok";
+            },
+          },
+          {
+            interceptor,
+            toContractCall: () => CALL_A,
+            ...(onBatchDecision
+              ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+              : {}),
+          },
+          { toolName: "single_tool", input: {} },
+        );
+        try {
+          await tool.execute!();
+          return entered;
+        } catch {
+          return false;
+        }
+      },
+    },
+    {
+      name: "elizaos",
+      runBatch: async (interceptor, onBatchDecision, onDecision) => {
+        const validate = createGuardValidator({
+          interceptor,
+          toContractCalls: () => BATCH_CALLS,
+          ...(onBatchDecision
+            ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+            : {}),
+          ...(onDecision ? { onDecision: onDecision as () => void } : {}),
+        });
+        return validate({}, {}, {});
+      },
+      runSingle: async (interceptor, onBatchDecision) => {
+        const validate = createGuardValidator({
+          interceptor,
+          toContractCall: () => CALL_A,
+          ...(onBatchDecision
+            ? { onBatchDecision: onBatchDecision as (info: GuardBatchDecisionInfo) => void }
+            : {}),
+        });
+        return validate({}, {}, {});
+      },
+    },
+  ];
+
+  for (const adapter of ADAPTERS_WITH_BATCH) {
+    describe(adapter.name, () => {
+      it("fires onBatchDecision exactly once for an admissible batch", async () => {
+        const summaries: GuardBatchDecisionInfo[] = [];
+        let decisions = 0;
+        const interceptor = makeBatchInterceptor([ADMISSIBLE, ADMISSIBLE]);
+
+        const allowed = await adapter.runBatch(
+          interceptor,
+          (info) => summaries.push(info),
+          () => {
+            decisions += 1;
+          },
+        );
+
+        assert.equal(allowed, true);
+        assert.equal(summaries.length, 1, "exactly one summary per batch");
+        assert.equal(decisions, 2, "onDecision still fires per call");
+        assert.equal(summaries[0]!.adapter, adapter.name);
+        assert.equal(summaries[0]!.kind, "admissible");
+        assert.equal(summaries[0]!.calls.length, 2);
+        assert.equal(summaries[0]!.verdicts.length, 2);
+        if (adapter.name === "langchain") {
+          assert.equal(summaries[0]!.correlationId, "batch_id");
+        }
+      });
+
+      it("fires onBatchDecision with kind blocked when any call in the batch is blocked", async () => {
+        const summaries: GuardBatchDecisionInfo[] = [];
+        const interceptor = makeBatchInterceptor([ADMISSIBLE, BLOCKED]);
+
+        const allowed = await adapter.runBatch(interceptor, (info) => summaries.push(info));
+
+        assert.equal(allowed, false);
+        assert.equal(summaries.length, 1);
+        assert.equal(summaries[0]!.kind, "blocked");
+      });
+
+      it("fires onBatchDecision with kind undetermined when batch check is undetermined", async () => {
+        const summaries: GuardBatchDecisionInfo[] = [];
+        const interceptor = makeBatchInterceptor([ADMISSIBLE, UNDETERMINED]);
+
+        const allowed = await adapter.runBatch(interceptor, (info) => summaries.push(info));
+
+        assert.equal(allowed, false);
+        assert.equal(summaries.length, 1);
+        assert.equal(summaries[0]!.kind, "undetermined");
+      });
+
+      it("a single-call mapping does not fire onBatchDecision", async () => {
+        const summaries: GuardBatchDecisionInfo[] = [];
+        const interceptor = makeBatchInterceptor([ADMISSIBLE]);
+
+        await adapter.runSingle(interceptor, (info) => summaries.push(info));
+
+        assert.equal(summaries.length, 0, "single-call must not fire onBatchDecision");
+      });
+
+      it("a throwing onBatchDecision callback cannot change the verdict", async () => {
+        const interceptor = makeBatchInterceptor([ADMISSIBLE, ADMISSIBLE]);
+
+        const allowed = await adapter.runBatch(interceptor, () => {
+          throw new Error("hook exploded");
+        });
+
+        assert.equal(allowed, true, "handler still ran despite throwing callback");
+      });
+
+      it("a rejecting async onBatchDecision callback cannot change the verdict", async () => {
+        const interceptor = makeBatchInterceptor([ADMISSIBLE, ADMISSIBLE]);
+
+        const allowed = await adapter.runBatch(interceptor, async () => {
+          throw new Error("async hook rejected");
+        });
+
+        assert.equal(allowed, true, "handler still ran despite rejecting callback");
+      });
+    });
+  }
 });

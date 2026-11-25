@@ -66,8 +66,9 @@ Enforcement happens **inside the account itself**, via Soroban's native Custom A
 > pre-flight approval, read [Fidelity & limits](#fidelity--limits) — the four
 > known gaps in simulation fidelity, and what the SDK does about each.
 >
-> **If something breaks:** search the [troubleshooting playbook](docs/troubleshooting.md)
-> by error text or outcome.
+> **If something breaks:** search the [error catalog](docs/errors.md#error-classes)
+> by class name, or the [troubleshooting playbook](docs/troubleshooting.md) by
+> error text or outcome.
 
 New to the vocabulary (allowlist, DMS, admissible, pre-flight)? Start with the
 [glossary](docs/glossary.md).
@@ -286,10 +287,10 @@ Both framework adapters wrap the same `PreFlightInterceptor` but expose differen
 | `admissible` | Passes through; the wrapped tool handler runs. | Returns `true`; the action is a candidate for execution. |
 | `blocked(reason)` | Halts the tool call and returns a `ToolMessage` carrying the contract `reason` and explanation; the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
 | `undetermined(cause)` | Halts the tool call with a formatted `ToolMessage` (fails closed); the tool handler never runs. | Returns `false` (fails closed); the action is excluded from candidate execution. |
-| Mapping failure (`toContractCall`/`toContractCalls` throws or returns a malformed call) | Halts with an error `ToolMessage` describing the mapping failure (reported to `onBlocked` as `undetermined`); the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
+| Mapping failure (`toContractCall`/`toContractCalls` throws or returns a malformed call) | Halts with an error `ToolMessage` describing the mapping failure (reported to `onMappingError`, then to `onBlocked` as `undetermined`); the tool handler never runs. | Returns `false`; the action is excluded from candidate execution. |
 | Not fund-moving (`toContractCall` returns `null`) | Passes through untouched: `null` means "no funds move", not "allowed", so no verdict is invented. | Returns `true` for the same reason; the guard has no opinion. |
 
-Adapter callbacks (`onDecision`, `onBlocked`) are never awaited. A callback that throws, or returns a promise that rejects, is isolated — it is reported to the optional `blockedHookLogger` and can never resume a halted action or become an unhandled rejection (issue #313). Every adapter also accepts `signal` and `timeoutMs`, which are forwarded to the pre-flight check; an abort or a fired timeout yields the same fail-closed `undetermined` halt as any other enforcement failure (issue #315).
+Adapter callbacks (`onDecision`, `onBlocked`, `onMappingError`) are never awaited. A callback that throws, or returns a promise that rejects, is isolated — it is reported to the optional `blockedHookLogger` and can never resume a halted action or become an unhandled rejection (issue #313). Every adapter also accepts `signal` and `timeoutMs`, which are forwarded to the pre-flight check; an abort or a fired timeout yields the same fail-closed `undetermined` halt as any other enforcement failure (issue #315). `timeoutMs` defaults to the exported `DEFAULT_ADAPTER_TIMEOUT_MS`, and the LangChain adapter also merges a `RunnableConfig.signal` into its cancellation bound (issue #454).
 
 
 #### Branded Address Types (v0.2.0+)
@@ -788,7 +789,7 @@ Plug-and-play middleware intercepts agent actions before tools are executed:
   - LangChain: [`createLangChainGuardMiddleware`](docs/examples/langchain.md) wraps tool calls using `AgentMiddleware.wrap_tool_call`. If the guard refuses (`blocked`) or the verdict is `undetermined`, execution is halted client-side with a formatted `ToolMessage` carrying the contract reason code and explanation (fails closed). The tool handler never runs, avoiding network submission fees. See the [full runnable LangChain example](docs/examples/langchain.md) ([`examples/langchain.ts`](examples/langchain.ts)).
   - ElizaOS: [`createGuardValidator`](docs/examples/elizaos.md) and [`guardAction`](docs/examples/elizaos.md) compose pre-flight simulation into `Action.validate`. Refused (`blocked`) and `undetermined` actions both return boolean `false` (fails closed), excluding them from candidate execution. See the [full runnable ElizaOS example](docs/examples/elizaos.md) ([`examples/elizaos.ts`](examples/elizaos.ts)).
   - MCP: [`guardMcpToolHandler`](docs/examples/mcp.md) wraps a Model Context Protocol tool handler (`registerTool` / `tool` / `setRequestHandler(CallToolRequestSchema)`), and [`guardMcpCallTool`](docs/examples/mcp.md) wraps a client's `callTool` before the request leaves the process. A refusal is returned as an `isError: true` result and the tool body never runs. See [the MCP integration example](docs/examples/mcp.md).
-  - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency.
+  - Vercel AI SDK: [`createVercelAIGuard`](docs/api/framework-adapters.md#vercel-ai-sdk) wraps a tool's own `execute` function — the earliest pre-execution point the `ai` package exposes. `admissible` → the tool runs; `blocked` → `GuardBlockedError` thrown before `execute`; `undetermined` → `PreFlightUndeterminedError` thrown before `execute` (fail-closed, matching the other adapters' refusal behavior). Crucially, `execute` never runs on a refusal. Written structurally against the `Tool` shape, so `ai` stays an optional peer, not a dependency. See the [full runnable Vercel AI SDK example](examples/vercelai.ts) ([`examples/vercelai.ts`](examples/vercelai.ts)).
 
 #### Operator alerting on every halt (`onBlocked`)
 
@@ -805,6 +806,8 @@ const middleware = createLangChainGuardMiddleware({
 ```
 
 The payload is the same on every adapter (`{ adapter, kind, reason, call, explanation }`): `kind` is `"blocked"` when the guard refused and `"undetermined"` when enforcement could not decide (in which case `reason` is `null` and `explanation` carries the failure detail — the halt still happens, because the adapter fails closed). The callback is called *after* the halt is decided and its errors are swallowed, so a broken alerting sink can never turn a refusal into an executed action or a thrown error. A swallowed hook failure is silent by default; pass `blockedHookLogger: { error(...) }` when you want that diagnostic. Omit `onBlocked` for exactly the pre-existing behavior.
+
+A guard refusal and a broken mapper both halt, but they are not the same event. Every adapter also accepts `onMappingError`, which fires only when `toContractCall`/`toContractCalls` throws or returns a malformed call, immediately before the fail-closed halt (`onBlocked` still fires afterwards for compatibility). Its payload is `{ adapter, tool, errorClass, error }`; the raw request — and therefore the tool arguments — is included only when `includeMappingErrorRequest: true`, so a remote sink does not receive secrets by default.
 
 #### Ordered call batches (`toContractCalls`)
 
@@ -1049,7 +1052,9 @@ If you still see `cause: "rate_limited"`, **lower** `maxConcurrentSimulations`. 
 All operational SDK errors share a `GuardError` base. Invalid caller input is the
 deliberate exception: `InvalidInputError` (and `InvalidFeeCeilingError`) extend
 `TypeError`, keeping programmer errors distinct from transport, signing and policy
-failures. `invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
+failures. The [error catalog](docs/errors.md#error-classes) maps every exported
+class to its stage, meaning, retry and fail-closed behaviour, and first fix.
+`invoke()` remains result-oriented: inspect `outcome.error` with `instanceof`
 when `outcome.kind === "error"`.
 
 ```ts
@@ -1084,7 +1089,8 @@ and diagnostics. That charged outcome additionally carries `transactionHash` and
 `charged: true`; it is not flattened into a technical `BroadcastError`.
 
 `GuardBlockedError` keeps its published name, message, fields, and `instanceof` behavior
-and now extends `GuardError`; `PreFlightUndeterminedError` extends `SimulationError`.
+and now extends `GuardError`; `PreFlightUndeterminedError` is an alias of
+`GuardUndeterminedError`, not a subclass of `SimulationError`.
 The hierarchy, `decodePolicy`, and `verifyAgentSignature` are additive to 0.1.x callers.
 The one intentional behavior change is for callers already using `dryRun: true`: the old
 success sentinel (`kind: "error"`) is replaced by the structured `kind: "dry_run"` result
@@ -1231,7 +1237,9 @@ The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `Cos
 | Option | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `interceptor` | `Pick<PreFlightInterceptor, "check">` | required | Its `check()` supplies both the verdict and the price, from one enforced simulation. ⚠️ If that interceptor has `cache` enabled, the price can come from a cached verdict (up to one ledger / 5 s old). |
-| `maxFeeStroops` | `bigint` | none — no ceiling; the price is reported, never objected to | Ceiling on the estimated **total** fee (resource + inclusion). Must be a non-negative `bigint`, otherwise `InvalidFeeCeilingError` at construction. `0n` is a real ceiling (every quote is then `over_budget`). ⚠️ Omitting it disables the fee check entirely. |
+| `maxFeeStroops` | `bigint \| string` | none — no ceiling; the price is reported, never objected to | Ceiling on the estimated **total** fee (resource + inclusion). Accepts a non-negative `bigint` or base-10 integer string through the Stellar u64 fee limit. Malformed strings and out-of-range values throw `InvalidInputError`. `0n` / `"0"` is a real ceiling. ⚠️ Omitting it disables the fee check entirely. |
+| `networkPassphrase` | `string` | none | Required by `checkTransaction()` to reject a transaction built for a different network. |
+| `server` | `rpc.Server` | none | Required by `checkTransaction()` only when no simulation response is supplied. |
 | `policySource` | `string \| PolicyConfig \| null` | none — `policyContext` is `null` | Contract address or policy enabling the additive `policyContext`. Informational only: it never changes the cost decision. |
 | `policy` | `string \| PolicyConfig \| null` | none | Alias for `policySource`. Per-call values win over constructor values; `policySource` wins over `policy` at each level. |
 | `logger` | `GuardLoggerInput` | none — silent | Log sink for the priced verdict and ceiling breaches. Never changes the decision. |
@@ -1244,7 +1252,7 @@ The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `Cos
 | --- | --- | --- | --- |
 | `policySource` | `string \| PolicyConfig \| null` | the constructor's `policySource` / `policy` | Per-call policy source for `policyContext`. |
 | `policy` | `string \| PolicyConfig \| null` | as above | Alias for `policySource`. |
-| `maxFeeStroops` | `bigint` | the constructor's `maxFeeStroops` | Per-call ceiling, validated before the interceptor runs (`InvalidFeeCeilingError`). `0n` is kept, not treated as omission. |
+| `maxFeeStroops` | `bigint \| string` | the constructor's `maxFeeStroops` | Per-call ceiling, validated before simulation. `0n` / `"0"` is kept, not treated as omission. |
 | `windowSnapshot` | `WindowSpendSnapshot \| null` | the constructor's `windowSnapshot` | Per-call snapshot; an explicit `null` clears the configured one for this check. |
 | `signal` | `AbortSignal` | none | ⚠️ Forwarded to the interceptor: a fired signal yields an `undetermined` verdict and therefore an `undetermined` cost decision carrying `RpcTimeoutError`. |
 | `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is reported exactly like an abort, never as `within_budget`. `0` disables it. |
@@ -1305,7 +1313,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `pollAttempts` | `number` (integer ≥ 1) | `20` | Status polls after a broadcast. ⚠️ Exhausting them returns the `pending` outcome: the transaction was accepted but not confirmed. Do not rebroadcast without `server.getTransaction(hash)`. |
 | `pollIntervalMs` | `number` (≥ 0) | `3000` | Delay between status polls. |
 | `pollOptions` | `{ pollAttempts?, pollIntervalMs? }` | none — the top-level values apply | Nested spelling of the two poll options; must agree with the top-level values when both are set. |
-| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, `initialInclusionFee` is a positive `bigint` in stroops. |
+| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, and `initialInclusionFee` accepts a positive `bigint` or base-10 integer string in stroops. |
 | `maxRetries` | `number` (integer ≥ 0) | none — each retry class keeps its own budget | Overall cap across retry classes; `0` means a single attempt. The tighter of this and a per-class budget wins. |
 | `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
 | `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
@@ -1328,7 +1336,9 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 - `CostPreChecker`
   - `constructor(config: CostPreCheckConfig)` — Accepts `interceptor`, optional `maxFeeStroops`, and optional `policySource` (contract address or `GuardPolicy`). Full table: [`CostPreCheckConfig`](#costprecheckconfig-new-costprecheckerconfig).
   - `check(call: ContractCall, options?: CostPreCheckOptions): Promise<CostPreCheckResult>` — Returns `within_budget | over_budget | blocked | undetermined` with additive `policyContext`.
-  - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.  - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run; `options.deadlineMs` bounds the whole action including retries and polling. Either bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`. Terminal outcomes also carry additive `retry` metadata (attempt count, retryable classes, delays and exhaustion) with no payloads or XDR.
+  - `checkWithCost(call: ContractCall): Promise<{ decision, cost }>` — Returns the interceptor verdict and the cost of the **same** single simulation. Prefer this over calling `check()` on both classes.
+  - `invoke(options: InvokeOptions): Promise<InvokeResult>` — End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing. `options.signal` / `options.timeoutMs` stop a stalled run; `options.deadlineMs` bounds the whole action including retries and polling. Either bound is reported through `invoke`'s `error` outcome as a typed `RpcTimeoutError`. Terminal outcomes also carry additive `retry` metadata (attempt count, retryable classes, delays and exhaustion) with no payloads or XDR.
+  - `checkTransaction(transaction, options?: CostTransactionCheckOptions): Promise<CostDecision>` — Prices the exact already-built envelope using its supplied simulation or the configured RPC server, checks the network passphrase, and marks provenance as `source: "transaction"`.
 - `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). See “Keep the dead-man switch alive”.
 - `heartbeat(params): Promise<HeartbeatResult>` — Signs, submits and confirms a single `heartbeat()`: returns the transaction hash, ledger and a `status()` re-read (`lastHeartbeat`, `verified`), and throws `HeartbeatBlockedError` (`heartbeat_expired`, `admin_frozen`, …) instead of returning on a refusal. `readGuardStatus()` is the underlying `status()` read. See “Send one heartbeat”.
 - `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses.
@@ -1590,7 +1600,7 @@ Complete run output and assertion logs are preserved in [`tests/fixtures/integra
 - **AutoGPT integration**: AutoGPT lacks an extensible pre-execution interceptor hook at the surveyed revision; findings and future integration paths are documented in [`docs/integration-hooks.md`](docs/integration-hooks.md).
 - **Testnet signing credentials**: Running `npm run test:integration` requires `.env.phase2` populated with funded testnet keypairs. The live suite is **not run on every PR**; which PRs must run it, and the exact enforcement-path file list, are defined once in [`CONTRIBUTING.md` § Which tests does my PR need?](CONTRIBUTING.md#which-tests-does-my-pr-need-canonical-matrix). It also runs on a weekly schedule ([`.github/workflows/live-suite.yml`](.github/workflows/live-suite.yml)) to catch host/testnet drift, with the committed evidence in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). A green `ci` therefore means the required checks ran — not that the live suite ran against this change.
 - **Pre-flight is a prediction, not a settlement guarantee**: the four known pre-flight fidelity limits (moving window state, a moving fee market, simulation not executing, approximated batch semantics) are enumerated with their mitigations, residual risks, and code citations in [Fidelity & limits](#fidelity--limits).
-- **Integration failures**: use the [troubleshooting playbook](docs/troubleshooting.md) to map common errors and outcomes to causes and supported fixes.
+- **Integration failures**: use the [error catalog](docs/errors.md#error-classes) to identify an exported class, then the [troubleshooting playbook](docs/troubleshooting.md) to map common errors and outcomes to causes and supported fixes.
 
 ## Enforcement scope — read this before relying on the caps
 

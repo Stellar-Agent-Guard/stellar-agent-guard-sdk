@@ -57,6 +57,7 @@ import {
 import {
   BroadcastError,
   ContractResponseError,
+  InvalidInputError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -68,7 +69,48 @@ import type { ContractAddress } from "./policy.ts";
 const SIG_EXPIRATION_LEDGERS = 10_000;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
-const MAX_RESOURCE_FEE = 2n ** 64n - 1n;
+export const MAX_FEE_STROOPS = 2n ** 64n - 1n;
+
+/** Normalize a caller-provided fee without passing through floating point. */
+export function normalizeFeeStroops(
+  value: unknown,
+  field: string,
+  allowZero: boolean,
+): bigint {
+  const received =
+    typeof value === "bigint"
+      ? `${value}n`
+      : typeof value === "string"
+        ? JSON.stringify(value)
+        : String(value);
+  let stroops: bigint;
+  if (typeof value === "bigint") {
+    stroops = value;
+  } else if (typeof value === "string" && /^\d+$/.test(value)) {
+    stroops = BigInt(value);
+  } else {
+    throw new InvalidInputError(
+      field,
+      "base10_integer",
+      `expected a ${allowZero ? "non-negative" : "positive"} bigint or base-10 integer string, got ${received}`,
+    );
+  }
+  if (stroops < 0n || (!allowZero && stroops === 0n)) {
+    throw new InvalidInputError(
+      field,
+      allowZero ? "non_negative" : "positive",
+      `expected a ${allowZero ? "non-negative" : "positive"} fee in stroops, got ${received}`,
+    );
+  }
+  if (stroops > MAX_FEE_STROOPS) {
+    throw new InvalidInputError(
+      field,
+      "u64",
+      `fee ${received} exceeds the maximum supported value of ${MAX_FEE_STROOPS} stroops`,
+    );
+  }
+  return stroops;
+}
 
 export interface ContractCall {
   /** Contract address (C…) to invoke. */
@@ -112,7 +154,7 @@ export function parseSimulationResourceFee(
     );
   }
 
-  if (value < 0n || value > MAX_RESOURCE_FEE) {
+  if (value < 0n || value > MAX_FEE_STROOPS) {
     throw new ContractResponseError(
       `simulation resource fee ${value} is outside the u64 range`,
       { field: "minResourceFee", ...(stage !== undefined ? { stage } : {}) },

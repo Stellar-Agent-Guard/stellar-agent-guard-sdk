@@ -79,11 +79,12 @@ export class InvalidInputError extends TypeError {
 }
 
 /**
- * A fee ceiling was not a non-negative `bigint` in stroops.
+ * A fee ceiling violated the legacy bigint-only input contract.
  *
  * Fee ceilings describe a spend policy, not a signed delta: a negative value
- * would make every real quote appear over budget, and routing a `number` or a
- * string through would hide the precision loss the SDK deliberately refuses.
+ * would make every real quote appear over budget, and routing a `number`
+ * through would hide the precision loss the SDK deliberately refuses. Valid
+ * base-10 integer strings are normalized before this error can be thrown.
  * Rejected at the configuration boundary (constructor) and again before a
  * per-call override is used, so neither path can silently become a policy.
  */

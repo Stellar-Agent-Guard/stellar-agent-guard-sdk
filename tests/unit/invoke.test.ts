@@ -28,7 +28,7 @@ import {
 import { DEFAULT_INVOKE_RETRY_OPTIONS, invoke, InvokeRetryError } from "../../src/invoke.ts";
 import type { InvokeParams } from "../../src/invoke.ts";
 import { BroadcastError } from "../../src/tx.ts";
-import { ContractResponseError, SimulationError } from "../../src/errors.ts";
+import { ContractResponseError, InvalidInputError, SimulationError } from "../../src/errors.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
 import { FakeClock, type Clock } from "../../src/clock.ts";
 import { TRACE_STEP_NAMES, type TraceStepName } from "../../src/trace.ts";
@@ -1042,7 +1042,7 @@ describe("invoke() fee-bump retry lifecycle", () => {
       source,
       call: { contract: FEE_BUMP_CONTRACT_ID, fn: "transfer", args: [] },
       networkPassphrase: PASSPHRASE,
-      feeBump: { maxAttempts: 3, feeMultiplier: 2 },
+      feeBump: { maxAttempts: 3, feeMultiplier: 2, initialInclusionFee: "500" },
       pollOptions: FAST_POLL,
     });
 
@@ -1404,6 +1404,26 @@ describe("invoke() option validation", () => {
         overrides: { feeBump: { initialInclusionFee: 0n } },
         field: /feeBump\.initialInclusionFee/,
       },
+      {
+        label: "feeBump.initialInclusionFee decimal string",
+        overrides: { feeBump: { initialInclusionFee: "1.5" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
+      {
+        label: "feeBump.initialInclusionFee exponent string",
+        overrides: { feeBump: { initialInclusionFee: "5e4" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
+      {
+        label: "feeBump.initialInclusionFee whitespace string",
+        overrides: { feeBump: { initialInclusionFee: " 1" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
+      {
+        label: "feeBump.initialInclusionFee negative string",
+        overrides: { feeBump: { initialInclusionFee: "-1" } },
+        field: /feeBump\.initialInclusionFee/,
+      },
       { label: "pollAttempts zero", overrides: { pollAttempts: 0 }, field: /pollAttempts/ },
       { label: "pollAttempts fractional", overrides: { pollAttempts: 2.5 }, field: /pollAttempts/ },
       {
@@ -1448,7 +1468,11 @@ describe("invoke() option validation", () => {
     for (const testCase of cases) {
       const { server, calls } = createUntouchableServer();
       await assert.rejects(invoke(makeParams(server, testCase.overrides)), (error: unknown) => {
-        assert.ok(error instanceof RangeError, testCase.label);
+        if (testCase.label.startsWith("feeBump.initialInclusionFee")) {
+          assert.ok(error instanceof InvalidInputError, testCase.label);
+        } else {
+          assert.ok(error instanceof RangeError, testCase.label);
+        }
         assert.match(error.message, testCase.field, testCase.label);
         return true;
       });

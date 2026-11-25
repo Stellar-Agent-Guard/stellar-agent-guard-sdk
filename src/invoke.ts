@@ -57,6 +57,7 @@ import {
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
   isStaleLedgerResourceFailure,
+  normalizeFeeStroops,
   parseSimulationResourceFee,
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
@@ -417,7 +418,7 @@ export interface FeeBumpConfig {
    * Initial inclusion fee in stroops to use on the first attempt.
    * Default: 100 stroops (`INCLUSION_FEE`).
    */
-  initialInclusionFee?: bigint | undefined;
+  initialInclusionFee?: bigint | string | undefined;
 }
 
 /**
@@ -758,16 +759,7 @@ function validateInvokeOptions(params: InvokeParams): void {
       assertFiniteOption("feeBump.feeMultiplier", feeBump.feeMultiplier, 1, false);
     }
     if (feeBump.initialInclusionFee !== undefined) {
-      if (
-        typeof feeBump.initialInclusionFee !== "bigint" ||
-        feeBump.initialInclusionFee <= 0n
-      ) {
-        rejectOption(
-          "feeBump.initialInclusionFee",
-          "a positive bigint in stroops",
-          feeBump.initialInclusionFee,
-        );
-      }
+      normalizeFeeStroops(feeBump.initialInclusionFee, "feeBump.initialInclusionFee", false);
     }
   }
 
@@ -911,7 +903,14 @@ function resolveFeeBumpOptions(params: InvokeParams): {
   return {
     maxAttempts: Math.max(1, Math.min(requested, overall)),
     feeMultiplier: params.feeBump?.feeMultiplier ?? 2,
-    initialInclusionFee: params.feeBump?.initialInclusionFee ?? BigInt(INCLUSION_FEE),
+    initialInclusionFee:
+      params.feeBump?.initialInclusionFee === undefined
+        ? BigInt(INCLUSION_FEE)
+        : normalizeFeeStroops(
+            params.feeBump.initialInclusionFee,
+            "feeBump.initialInclusionFee",
+            false,
+          ),
   };
 }
 

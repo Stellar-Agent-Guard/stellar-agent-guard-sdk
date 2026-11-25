@@ -4,6 +4,10 @@ Record of the enforcement suite running against the real Phase 2 testnet
 instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
+**Attempted** (feat/cost-issues-448-451, 2026-11-24): `npm run test:integration`
+matched the Phase 1 artifact identity, then stopped while funding the ephemeral
+test fixture because Friendbot returned HTTP 400. No live scenarios ran, so this
+attempt does not replace the recorded successful scenario evidence below.
 **Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
 **Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
 **Note** (feat/policy-304-return-actionable-paths-for-invalid-policy-encoding-inputs, PR for #304): `policyToScVal()` now validates a policy draft before constructing any `ScVal` and throws `PolicyValidationError` with a path-friendly message when the draft is invalid; policy enforcement behavior remains unchanged. Evidence remains valid.

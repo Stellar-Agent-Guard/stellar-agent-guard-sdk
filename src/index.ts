@@ -97,7 +97,7 @@ export {
 export type { ActiveWindowState, DescribePolicyOptions } from "./policy.ts";
 
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
-export { policyDiff } from "./policy-diff.ts";
+export { formatPolicyDiff, policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
 
@@ -246,6 +246,7 @@ export type {
 
 export {
   CostPreChecker,
+  FEE_PERCENTILES,
   STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
@@ -258,14 +259,22 @@ export {
 
 export type {
   CostDecision,
+  CostDecisionProvenance,
   CostPreCheckConfig,
   CostPreCheckOptions,
   CostPreCheckResult,
   CostProvenance,
+  CostTransactionCheckOptions,
   CostWithDecision,
   FeeBreakdown,
+  FeePercentile,
+  FeeSource,
+  FeeStatsProvider,
+  FeeStatsResponse,
+  HeadroomWarning,
   PolicyContext,
   ResourceBreakdown,
+  TransactionCostProvenance,
   WindowSpendSnapshot,
 } from "./cost.ts";
 
@@ -450,24 +459,32 @@ export type {
 // The operator alerting primitive every adapter shares (`onBlocked`).
 // Exported so a consumer can type its sink and build the payload itself.
 export {
+  DEFAULT_ADAPTER_TIMEOUT_MS,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
+  mergeAbortSignals,
   normalizeMappedCall,
   normalizeMappedCalls,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
+  runMappingErrorHook,
 } from "./adapters/shared.ts";
 
 export type {
   BlockedHookLogger,
   GuardAdapterName,
+  GuardBatchDecisionHook,
+  GuardBatchDecisionInfo,
   GuardBlockedHook,
   GuardBlockedInfo,
   GuardCallMapper,
+  GuardMappingErrorHook,
+  GuardMappingErrorInfo,
 } from "./adapters/shared.ts";
 
 // Optional logging. `SILENT_LOGGER` is the default every config resolves to

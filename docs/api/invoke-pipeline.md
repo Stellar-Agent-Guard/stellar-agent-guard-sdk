@@ -32,7 +32,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `pollAttempts` | `number` (integer ≥ 1) | `20` | Status polls after a broadcast. ⚠️ Exhausting them returns the `pending` outcome: the transaction was accepted but not confirmed. Do not rebroadcast without `server.getTransaction(hash)`. |
 | `pollIntervalMs` | `number` (≥ 0) | `3000` | Delay between status polls. |
 | `pollOptions` | `{ pollAttempts?, pollIntervalMs? }` | none — the top-level values apply | Nested spelling of the two poll options; must agree with the top-level values when both are set. |
-| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, `initialInclusionFee` is a positive `bigint` in stroops. |
+| `feeBump` | `FeeBumpConfig` | `maxAttempts: 3`, `feeMultiplier: 2`, `initialInclusionFee: 100n` | Bounded fee-increase retry on minimum-fee broadcast rejections. Every attempt is re-simulated and re-enforced by the guard. `maxAttempts` is an integer ≥ 1, `feeMultiplier` is finite and > 1, and `initialInclusionFee` accepts a positive `bigint` or base-10 integer string in stroops. |
 | `maxRetries` | `number` (integer ≥ 0) | none — each retry class keeps its own budget | Overall cap across retry classes; `0` means a single attempt. The tighter of this and a per-class budget wins. |
 | `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
 | `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
@@ -56,7 +56,7 @@ const outcome = await invoke({
   feeBump: {
     maxAttempts: 3,        // Maximum attempts before returning BroadcastError (default: 3)
     feeMultiplier: 2,      // Multiplier applied to inclusion fee per retry (default: 2)
-    initialInclusionFee: 100n, // Base inclusion fee in stroops (default: 100 stroops)
+    initialInclusionFee: "100", // Base inclusion fee in stroops (default: 100 stroops)
   },
 });
 ```
@@ -183,7 +183,7 @@ called. The validated fields are:
 | `maxRetries` | integer `>= 0`; `0` means one attempt |
 | `feeBump.maxAttempts` | integer `>= 1` |
 | `feeBump.feeMultiplier` | finite `> 1` |
-| `feeBump.initialInclusionFee` | positive `bigint` stroops |
+| `feeBump.initialInclusionFee` | positive `bigint` or base-10 integer string in stroops (through the Stellar u64 fee limit) |
 | `pollAttempts` | integer `>= 1` |
 | `pollIntervalMs` | finite `>= 0` |
 | `pollOptions.*` | same rules; nested and top-level values must agree when both are supplied |
