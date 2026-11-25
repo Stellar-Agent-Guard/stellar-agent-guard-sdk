@@ -36,6 +36,8 @@ attempt does not replace the recorded successful scenario evidence below.
 
 **Note** (feat/onverdict-cache-provenance-error-tojson, PR for #408/#409/#477): `src/preflight.ts` now reports cache provenance on a pre-flight verdict (`cached`, `observedLedger`, `ageMs`), accepts `forceFresh` to bypass the opt-in cache for one call, and emits each final verdict once to an observability-only `onVerdict` hook (cached, coalesced and fail-closed paths included). The hook is invoked after the verdict is fixed and cannot change it, and caching/`forceFresh` only select whether the existing simulation runs — the contract-side block/admit decision is unchanged. In `src/invoke.ts` the only change is a JSON-safe `toJSON()` on `InvokeRetryError` for structured logging. The five live scenarios recorded below remain the correct proof; no fresh live run was performed for this change.
 
+**Note** (feat(invoke)/add-invokemany-for-sequential-multi-call-actions, PR #540 for #425): `src/invoke.ts` adds `invokeMany()` as a sequential orchestration wrapper over `invoke()` (preserving input order, sharing a single `deadlineMs` budget, forwarding `signal` and fee ceilings, and stopping on the first `blocked` outcome by default). Each call still runs through the unchanged `invoke()` pipeline, so the contract-side block/admit decision and the five live scenarios recorded below remain valid. A live `npm run test:integration` run was attempted on 2026-11-25: it matched the Phase 1 artifact identity (`f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63`), deployed the SAC token and guard instance, and stopped at `initialize` with `txBadAuthExtra` (the pre-existing `main` issue noted above).
+
 ## Instance under test
 
 | | |
