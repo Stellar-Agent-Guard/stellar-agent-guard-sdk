@@ -3450,8 +3450,8 @@ describe("PreFlightInterceptor cache key collision resistance (issue #417)", () 
 
   for (const { name, call } of callVariants) {
     it(`re-simulates when only ${name} differs`, async () => {
-      const harness = makeHarness();
-      const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+      const harness = countingHarness();
+      const interceptor = build(harness);
 
       await interceptor.check(baseCall);
       assert.equal(harness.simulations, 2);
@@ -3469,11 +3469,9 @@ describe("PreFlightInterceptor cache key collision resistance (issue #417)", () 
   }
 
   it("treats a policy revision change as a different key", async () => {
-    const harness = makeHarness();
+    const harness = countingHarness();
     let revision: 1 | 2 | "1" = 1;
-    const interceptor = makeInterceptor(harness, {
-      cache: { ttlMs: 5_000, policyRevision: () => revision },
-    });
+    const interceptor = build(harness, {}, { ttlMs: 5_000, policyRevision: () => revision });
 
     await interceptor.check(CALL);
     assert.equal(harness.simulations, 2);
@@ -3492,11 +3490,13 @@ describe("PreFlightInterceptor cache key collision resistance (issue #417)", () 
   });
 
   it("re-simulates a key evicted by maxEntries instead of aliasing another entry", async () => {
-    const harness = makeHarness();
-    const interceptor = makeInterceptor(harness, {
-      cache: { ttlMs: 5_000, maxEntries: 1 },
-    });
-    const other = callWithAmount(1n);
+    const harness = countingHarness();
+    const interceptor = build(harness, {}, { ttlMs: 5_000, maxEntries: 1 });
+    const other: ContractCall = {
+      contract: CONTRACT,
+      fn: "noop",
+      args: [nativeToScVal(1n, { type: "i128" })],
+    };
 
     await interceptor.check(CALL);
     assert.equal(harness.simulations, 2);
