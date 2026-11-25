@@ -3303,3 +3303,208 @@ describe("PreFlightInterceptor.simulateForDiagnostics() (#411)", () => {
     assert.equal(simulations, 1);
   });
 });
+
+/* -------------------------------------------------------------------------- */
+/*   Cache key collision resistance across calls, configs and networks        */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * A cached verdict is reused only on an exact key match: the interceptor's
+ * config identity (network, guard, agent, source, authorizers), the canonical
+ * call fingerprint and the policy revision. A collision would serve an
+ * `admissible` verdict for a different call, so these tests pin the observable
+ * behaviour — a variation misses and is re-simulated, an identical call hits —
+ * without asserting anything about the digest itself.
+ */
+describe("PreFlightInterceptor cache key collision resistance (issue #417)", () => {
+  /** Counts every simulation so a cache hit is observable as "no new work". */
+  function countingHarness() {
+    let simulations = 0;
+    const server = {
+      getAccount: async (publicKey: string) => new Account(publicKey, "1"),
+      getLatestLedger: async () => ({ sequence: 7_000 }),
+      simulateTransaction: async () => {
+        simulations += 1;
+        return {
+          result: { auth: [] },
+          minResourceFee: "17",
+          transactionData: {
+            getReadOnly: () => [],
+            getReadWrite: () => [{}],
+          },
+        };
+      },
+    } as unknown as rpc.Server;
+    return {
+      server,
+      get simulations() {
+        return simulations;
+      },
+    };
+  }
+
+  const baseAgent = Keypair.random();
+  const baseSource = Keypair.random();
+
+  function build(
+    harness: ReturnType<typeof countingHarness>,
+    overrides: Partial<{
+      networkPassphrase: string;
+      guard: typeof CONTRACT;
+      agent: Keypair;
+      source: Keypair;
+    }> = {},
+    cache: PreFlightCacheOptions = { ttlMs: 5_000 },
+  ): PreFlightInterceptor {
+    return new PreFlightInterceptor({
+      server: harness.server,
+      networkPassphrase: overrides.networkPassphrase ?? NETWORK_PASSPHRASE,
+      guard: overrides.guard ?? CONTRACT,
+      agent: overrides.agent ?? baseAgent,
+      source: overrides.source ?? baseSource,
+      cache,
+    });
+  }
+
+  const otherGuard = unsafeContractAddress(Address.contract(Buffer.alloc(32, 1)).toString());
+
+  /**
+   * The key of the single entry a check writes. Each interceptor owns a private
+   * Map, so "two instances never share an entry" holds even if the namespace
+   * were constant; asserting the keys themselves is what pins config identity.
+   */
+  function onlyCacheKey(interceptor: PreFlightInterceptor): string {
+    const keys = [...(interceptor as unknown as { cache: Map<string, unknown> }).cache.keys()];
+    assert.equal(keys.length, 1);
+    return keys[0]!;
+  }
+
+  const configCases: Array<{
+    name: string;
+    overrides: Parameters<typeof build>[1];
+  }> = [
+    {
+      name: "network passphrase",
+      overrides: { networkPassphrase: "Public Global Stellar Network ; September 2015" },
+    },
+    { name: "guard", overrides: { guard: otherGuard } },
+    { name: "agent", overrides: { agent: Keypair.random() } },
+    { name: "source", overrides: { source: Keypair.random() } },
+  ];
+
+  for (const { name, overrides } of configCases) {
+    it(`does not reuse a verdict when only the ${name} differs`, async () => {
+      const harness = countingHarness();
+      const shared = build(harness);
+      const varied = build(harness, overrides);
+
+      await shared.check(CALL);
+      assert.equal(harness.simulations, 2);
+      await shared.check(CALL);
+      assert.equal(harness.simulations, 2); // the identical call hits its entry
+
+      await varied.check(CALL);
+      assert.equal(harness.simulations, 4); // a different config misses
+      await varied.check(CALL);
+      assert.equal(harness.simulations, 4); // then hits its own entry
+
+      await shared.check(CALL);
+      assert.equal(harness.simulations, 4); // each config keeps its own verdict
+
+      // The call and revision are identical, so a different key can only come
+      // from the interceptor identity: a constant namespace would collide here.
+      assert.notEqual(onlyCacheKey(shared), onlyCacheKey(varied));
+    });
+  }
+
+  // A literal lowercase strkey is rejected by the address parser, so "address
+  // case" cannot vary; the equivalent dimensions are pinned instead: the same
+  // 32-byte payload under a different address type, and a payload one byte off.
+  const payload = Buffer.alloc(32, 7);
+  const otherPayload = Buffer.from(payload);
+  otherPayload[31] = 8;
+  const contractAddress = Address.contract(payload).toScVal();
+  const samePayloadAccount = Address.account(payload).toScVal();
+  const otherAccount = Address.account(otherPayload).toScVal();
+  const secondArg = nativeToScVal(9n, { type: "i128" });
+  const baseCall: ContractCall = {
+    contract: CONTRACT,
+    fn: "noop",
+    args: [contractAddress, secondArg],
+  };
+
+  const callVariants: Array<{ name: string; call: ContractCall }> = [
+    { name: "the function name", call: { ...baseCall, fn: "noopTwo" } },
+    {
+      name: "a single argument byte",
+      call: { ...baseCall, args: [contractAddress, nativeToScVal(10n, { type: "i128" })] },
+    },
+    {
+      name: "i128 versus u128 for the same value",
+      call: { ...baseCall, args: [contractAddress, nativeToScVal(9n, { type: "u128" })] },
+    },
+    { name: "the address type", call: { ...baseCall, args: [samePayloadAccount, secondArg] } },
+    { name: "an address byte", call: { ...baseCall, args: [otherAccount, secondArg] } },
+    { name: "the argument order", call: { ...baseCall, args: [secondArg, contractAddress] } },
+  ];
+
+  for (const { name, call } of callVariants) {
+    it(`re-simulates when only ${name} differs`, async () => {
+      const harness = makeHarness();
+      const interceptor = makeInterceptor(harness, { cache: { ttlMs: 5_000 } });
+
+      await interceptor.check(baseCall);
+      assert.equal(harness.simulations, 2);
+      await interceptor.check(baseCall);
+      assert.equal(harness.simulations, 2); // the identical call hits
+
+      await interceptor.check(call);
+      assert.equal(harness.simulations, 4); // the variation misses
+      await interceptor.check(call);
+      assert.equal(harness.simulations, 4); // and then hits its own entry
+
+      await interceptor.check(baseCall);
+      assert.equal(harness.simulations, 4); // the original entry is untouched
+    });
+  }
+
+  it("treats a policy revision change as a different key", async () => {
+    const harness = makeHarness();
+    let revision: 1 | 2 | "1" = 1;
+    const interceptor = makeInterceptor(harness, {
+      cache: { ttlMs: 5_000, policyRevision: () => revision },
+    });
+
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 2);
+
+    revision = 2;
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 4); // an ordinary revision bump misses
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 4);
+
+    revision = "1";
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 6); // `1` and `"1"` must not alias
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 6);
+  });
+
+  it("re-simulates a key evicted by maxEntries instead of aliasing another entry", async () => {
+    const harness = makeHarness();
+    const interceptor = makeInterceptor(harness, {
+      cache: { ttlMs: 5_000, maxEntries: 1 },
+    });
+    const other = callWithAmount(1n);
+
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 2);
+    await interceptor.check(other);
+    assert.equal(harness.simulations, 4); // CALL is evicted to make room
+
+    await interceptor.check(CALL);
+    assert.equal(harness.simulations, 6); // the evicted key misses, not aliases
+    assert.equal(interceptor.getCacheStats().size, 1);
+  });
+});
