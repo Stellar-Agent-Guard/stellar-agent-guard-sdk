@@ -13,6 +13,62 @@ Executes an end-to-end transaction through the guard:
 
 Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, `{ kind: "pending", transactionHash, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
 
+### Pipeline State Machine
+
+The diagram below shows every stage, retry loop, dry-run exit, and terminal outcome in `invoke()`. All failure, timeout, abort, and fee-cap transitions are **fail-closed** and can never produce `allowed`.
+
+```mermaid
+stateDiagram-v2
+    [*] --> probe: start (deadlineMs / signal checked)
+
+    probe --> sign: auth entries discovered
+    probe --> error: RPC / SimulationError / timeout / abort (fail-closed)
+    probe --> dry_run_undetermined: dryRun && probe error (fail-closed)
+
+    sign --> simulate: entries signed
+    sign --> error: SigningError / timeout / abort (fail-closed)
+
+    simulate --> dry_run_admissible: dryRun && enforced sim ok
+    simulate --> dry_run_blocked: dryRun && guard denied (fail-closed)
+    simulate --> dry_run_undetermined: dryRun && sim/fee error (fail-closed)
+
+    simulate --> blocked: guard denied (__check_auth) (fail-closed)
+    simulate --> probe: scecExceededLimit [retry: maxAttempts=3, full-jitter]
+    simulate --> error: FeeCapExceededError / SimulationError / timeout / abort (fail-closed)
+    simulate --> broadcast: enforced sim ok & fee <= maxFeeStroops
+
+    broadcast --> poll: accepted (PENDING / onSubmitted)
+    broadcast --> probe: tx_insufficient_fee [feeBump: maxAttempts=3, 2x fee]
+    broadcast --> probe: txBadSeq [bounded sequence retry]
+    broadcast --> error: BroadcastError / retry_exhausted / timeout / abort (fail-closed)
+
+    poll --> allowed: SUCCESS
+    poll --> blocked: post-inclusion guard refusal (charged=true) (fail-closed)
+    poll --> error: FAILED / ContractResponseError / timeout / abort (fail-closed)
+    poll --> pending: pollAttempts exhausted (unconfirmed; never allowed)
+
+    dry_run_admissible --> [*]
+    dry_run_blocked --> [*]
+    dry_run_undetermined --> [*]
+    allowed --> [*]
+    blocked --> [*]
+    pending --> [*]
+    error --> [*]
+```
+
+#### Transition & Test Reference
+
+| Transition | Trigger / Guard | Verified in `tests/unit/invoke.test.ts` |
+| --- | --- | --- |
+| `probe → sign → simulate → broadcast → poll → allowed` | Happy path | `records every stage in order on a clean allowed run` |
+| `simulate → blocked` | Guard `__check_auth` refusal | `stops at simulate and never broadcasts when the guard blocks` |
+| `simulate → probe` (`retry`) | `scecExceededLimit` (budget: `retry.maxAttempts`, default 3) | `tracks the retry attempt index on stale-ledger re-runs` |
+| `broadcast → probe` (`feeBump`) | `tx_insufficient_fee` (budget: `feeBump.maxAttempts`, default 3) | `retries with fee bump on tx_insufficient_fee` |
+| `simulate → error` (`FeeCapExceededError`) | Simulated/bumped fee exceeds `maxFeeStroops` / `maxInclusionFee` | `returns FeeCapExceededError when maxFeeStroops is exceeded` |
+| `poll → pending` | `pollAttempts` exhausted | `returns pending when pollAttempts are exhausted` |
+| `any → error` (fail-closed) | `signal` abort, `timeoutMs`, or `deadlineMs` expiry | `returns RpcTimeoutError when deadlineMs expires` |
+| `dryRun` (`admissible` / `blocked` / `undetermined`) | `dryRun: true` stops before broadcast | `dryRun returns admissible without broadcasting` |
+
 ### Options
 
 #### `InvokeOptions` (alias of `InvokeParams`; `invoke(options)`)
