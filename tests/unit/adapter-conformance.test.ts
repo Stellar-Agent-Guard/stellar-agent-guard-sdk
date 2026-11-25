@@ -1,10 +1,12 @@
 /**
- * Shared cross-framework conformance matrix (issue #317).
+ * Shared cross-framework conformance matrix (issues #317 and #458).
  *
  * Every adapter is driven through the same fixture table — admissible, blocked,
- * undetermined, mapping failures and failing observers — so a divergence in the
- * invariants that are supposed to hold everywhere shows up as one failing row
- * rather than as four unrelated test files drifting apart.
+ * undetermined, ordered batches (one blocked/undetermined call, empty batches),
+ * mapping failures and failing observers — so a divergence in the invariants
+ * that are supposed to hold everywhere shows up as one failing row rather than
+ * as four unrelated test files drifting apart. The rows live in
+ * `./adapter-matrix.ts`, which also renders the docs table.
  *
  * The shared invariants are deliberately framework-agnostic:
  *
@@ -21,6 +23,7 @@
  * difference the docs spell out.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
 import { DEFAULT_ADAPTER_TIMEOUT_MS, mapContractCalls } from "../../src/adapters/shared.ts";
@@ -41,10 +44,20 @@ import type { ContractCall } from "../../src/tx.ts";
 import type {
   BlockedHookLogger,
   GuardAdapterName,
+  GuardBatchDecisionHook,
   GuardBatchDecisionInfo,
   GuardBlockedInfo,
   GuardMappingErrorInfo,
 } from "../../src/adapters/shared.ts";
+import {
+  ADAPTER_LIST,
+  ADAPTER_MATRIX,
+  expectsBatchBlockedPayload,
+  mappedCallCount,
+  renderAdapterMatrix,
+  type AdapterMatrixRow,
+  type MatrixVerdict,
+} from "./adapter-matrix.ts";
 
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 
@@ -72,119 +85,86 @@ const UNDETERMINED: PreFlightDecision = {
   detail: "rpc unreachable",
 };
 
-/** The fixtures every adapter must agree on. */
-interface Scenario {
-  name: string;
-  /** Verdict the stub interceptor returns; never consulted for mapper failures. */
+/** One shared expectation row, plus the concrete verdict/error fixtures it names. */
+interface Scenario extends AdapterMatrixRow {
   decision: PreFlightDecision;
-  /** Optional error the stub interceptor throws instead of returning a decision. */
   throwsError?: Error;
-  /** `maps` = one valid call, `null` = not fund-moving, failures halt. */
-  mapping: "maps" | "null" | "throws" | "malformed";
-  /** Whether the handler must be kept from running. */
-  halts: boolean;
-  /** Expected `onDecision` calls. */
-  decisions: number;
-  /** Expected `onBlocked` calls (adapters that expose the hook). */
-  blockedHooks: number;
 }
 
-const SCENARIOS: Scenario[] = [
-  {
-    name: "admissible",
-    decision: ADMISSIBLE,
-    mapping: "maps",
-    halts: false,
-    decisions: 1,
-    blockedHooks: 0,
-  },
-  {
-    name: "blocked",
-    decision: BLOCKED,
-    mapping: "maps",
-    halts: true,
-    decisions: 1,
-    blockedHooks: 1,
-  },
-  {
-    name: "undetermined",
-    decision: UNDETERMINED,
-    mapping: "maps",
-    halts: true,
-    decisions: 1,
-    blockedHooks: 1,
-  },
-  {
-    name: "mapping throws",
-    decision: ADMISSIBLE,
-    mapping: "throws",
-    halts: true,
-    decisions: 0,
-    blockedHooks: 1,
-  },
-  {
-    name: "mapping malformed",
-    decision: ADMISSIBLE,
-    mapping: "malformed",
-    halts: true,
-    decisions: 0,
-    blockedHooks: 1,
-  },
-  {
-    name: "mapping null (not fund-moving)",
-    decision: ADMISSIBLE,
-    mapping: "null",
-    halts: false,
-    decisions: 0,
-    blockedHooks: 0,
-  },
-  {
-    name: "interceptor throws GuardBlockedError",
-    decision: BLOCKED,
-    throwsError: new GuardBlockedError({
-      stage: "preflight",
-      reason: "per_tx_cap_exceeded",
-      detail: "enforced simulation refused the transfer",
-      diagnosticEvents: [],
-      rawEvent: null,
-      call: CALL,
-    } as unknown as import("../../src/reasons.ts").GuardBlockedErrorParams),
-    mapping: "maps",
-    halts: true,
-    decisions: 1,
-    blockedHooks: 1,
-  },
-  {
-    name: "interceptor throws GuardUndeterminedError",
-    decision: UNDETERMINED,
-    throwsError: new GuardUndeterminedError("simulation failed: rpc unreachable", {
-      stage: "preflight",
-      cause: new Error("rpc unreachable"),
-    }),
-    mapping: "maps",
-    halts: true,
-    decisions: 1,
-    blockedHooks: 1,
-  },
-];
+const DECISIONS: Record<MatrixVerdict, PreFlightDecision> = {
+  admissible: ADMISSIBLE,
+  blocked: BLOCKED,
+  undetermined: UNDETERMINED,
+};
 
-function mapperFor(scenario: Scenario): () => ContractCall | null {
+const THROWN: Record<"blocked" | "undetermined", Error> = {
+  blocked: new GuardBlockedError({
+    stage: "preflight",
+    reason: "per_tx_cap_exceeded",
+    detail: "enforced simulation refused the transfer",
+    diagnosticEvents: [],
+    rawEvent: null,
+    call: CALL,
+  } as unknown as import("../../src/reasons.ts").GuardBlockedErrorParams),
+  undetermined: new GuardUndeterminedError("simulation failed: rpc unreachable", {
+    stage: "preflight",
+    cause: new Error("rpc unreachable"),
+  }),
+};
+
+/**
+ * The matrix and the docs table both come from `ADAPTER_MATRIX`, so a new row
+ * cannot be tested here without becoming visible in the docs drift test.
+ */
+const SCENARIOS: Scenario[] = ADAPTER_MATRIX.map((row) => ({
+  ...row,
+  decision: DECISIONS[row.verdicts[0] ?? "admissible"],
+  ...(row.throws ? { throwsError: THROWN[row.throws] } : {}),
+}));
+
+function callFor(scenario: Scenario): ContractCall | null {
   switch (scenario.mapping) {
     case "null":
-      return () => null;
+      return null;
     case "throws":
-      return () => {
-        throw new Error("mapper exploded");
-      };
+      throw new Error("mapper exploded");
     case "malformed":
       // Structurally not a contract call: empty contract, no usable args.
-      return () => ({ contract: "", fn: "transfer", args: [] }) as unknown as ContractCall;
+      return { contract: "", fn: "transfer", args: [] } as unknown as ContractCall;
     default:
-      return () => CALL;
+      return CALL;
   }
 }
 
-function stub(decision: PreFlightDecision, throwsError?: Error): PreFlightInterceptor {
+function batchFor(scenario: Scenario): readonly ContractCall[] | null {
+  switch (scenario.mapping) {
+    case "null":
+      return null;
+    case "throws":
+      throw new Error("mapper exploded");
+    case "malformed":
+      // One malformed entry in an otherwise valid ordered batch.
+      return [{ contract: GUARD, fn: "", args: [] }] as ContractCall[];
+    default:
+      return scenario.verdicts.map((_verdict, index) => ({
+        contract: GUARD,
+        fn: `transfer_${index}`,
+        args: [],
+      }));
+  }
+}
+
+/** Every harness takes the same mapper shape from the same row. */
+function mappingOptions(scenario: Scenario) {
+  if (scenario.mode === "batch") return { toContractCalls: () => batchFor(scenario) };
+  return { toContractCall: () => callFor(scenario) };
+}
+
+function stub(
+  decision: PreFlightDecision,
+  throwsError?: Error,
+  verdicts?: readonly PreFlightDecision[],
+): PreFlightInterceptor {
   return {
     check: async () => {
       if (throwsError) throw throwsError;
@@ -192,11 +172,13 @@ function stub(decision: PreFlightDecision, throwsError?: Error): PreFlightInterc
     },
     checkBatch: async (calls: readonly ContractCall[]) => {
       if (throwsError) throw throwsError;
+      const returned = verdicts ? [...verdicts] : calls.map(() => decision);
+      const admissible = returned.every((verdict) => verdict.allowed);
       return {
-        admissible: decision.allowed,
-        overallAdmissible: decision.allowed,
-        verdicts: calls.map(() => decision),
-        calls: calls.map(() => decision),
+        admissible,
+        overallAdmissible: admissible,
+        verdicts: returned,
+        calls: [...calls],
         totalEstimatedResourceFee: 0n,
       };
     },
@@ -205,6 +187,7 @@ function stub(decision: PreFlightDecision, throwsError?: Error): PreFlightInterc
 
 interface Observer {
   onBlocked?: ((info: GuardBlockedInfo) => unknown) | undefined;
+  onBatchDecision?: ((info: GuardBatchDecisionInfo) => unknown) | undefined;
   onDecision?: ((...args: unknown[]) => unknown) | undefined;
   onMappingError?: ((info: GuardMappingErrorInfo) => unknown) | undefined;
   includeMappingErrorRequest?: boolean | undefined;
@@ -237,7 +220,14 @@ interface AdapterHarness {
 }
 
 function interceptorFor(scenario: Scenario, controls?: Controls): PreFlightInterceptor {
-  return controls?.interceptor ?? stub(scenario.decision, scenario.throwsError);
+  return (
+    controls?.interceptor ??
+    stub(
+      scenario.decision,
+      scenario.throwsError,
+      scenario.verdicts.map((verdict) => DECISIONS[verdict]),
+    )
+  );
 }
 
 /** Options every adapter shares; `onBlocked` is added only where the API has it. */
@@ -256,6 +246,13 @@ function baseOptions(scenario: Scenario, observer: Observer, controls: Controls)
   };
 }
 
+/** All four adapters accept the same batch-summary hook shape. */
+function batchObserverOptions(observer: Observer) {
+  return observer.onBatchDecision
+    ? { onBatchDecision: observer.onBatchDecision as GuardBatchDecisionHook }
+    : {};
+}
+
 const HARNESSES: AdapterHarness[] = [
   {
     name: "langchain",
@@ -264,7 +261,8 @@ const HARNESSES: AdapterHarness[] = [
       let entered = 0;
       const middleware = createLangChainGuardMiddleware({
         ...baseOptions(scenario, observer, controls),
-        toContractCall: mapperFor(scenario),
+        ...mappingOptions(scenario),
+        ...batchObserverOptions(observer),
         ...(observer.onBlocked
           ? { onBlocked: observer.onBlocked as (info: GuardBlockedInfo) => void }
           : {}),
@@ -304,7 +302,8 @@ const HARNESSES: AdapterHarness[] = [
       const validate = createGuardValidator({
         ...baseOptions(scenario, observer, controls),
         name: "send_payment",
-        toContractCall: () => mapperFor(scenario)(),
+        ...mappingOptions(scenario),
+        ...batchObserverOptions(observer),
         ...(observer.onBlocked
           ? { onBlocked: observer.onBlocked as (info: GuardBlockedInfo) => void }
           : {}),
@@ -330,7 +329,8 @@ const HARNESSES: AdapterHarness[] = [
         },
         {
           ...baseOptions(scenario, observer, controls),
-          toContractCall: () => mapperFor(scenario)(),
+          ...mappingOptions(scenario),
+          ...batchObserverOptions(observer),
           ...(observer.onBlocked
             ? { onBlocked: observer.onBlocked as (info: GuardBlockedInfo) => void }
             : {}),
@@ -370,7 +370,8 @@ const HARNESSES: AdapterHarness[] = [
         },
         {
           ...baseOptions(scenario, observer, controls),
-          toContractCall: () => mapperFor(scenario)(),
+          ...mappingOptions(scenario),
+          ...batchObserverOptions(observer),
           ...(observer.onDecision
             ? {
                 onDecision: observer.onDecision as (
@@ -397,31 +398,46 @@ const HARNESSES: AdapterHarness[] = [
 function observing(): {
   observer: Observer;
   blocked: GuardBlockedInfo[];
+  batches: GuardBatchDecisionInfo[];
   decisionCount: () => number;
 } {
   const blocked: GuardBlockedInfo[] = [];
+  const batches: GuardBatchDecisionInfo[] = [];
   let decisions = 0;
   return {
     observer: {
       onBlocked: (info) => {
         blocked.push(info);
       },
+      onBatchDecision: (info) => {
+        batches.push(info);
+      },
       onDecision: () => {
         decisions += 1;
       },
     },
     blocked,
+    batches,
     decisionCount: () => decisions,
   };
 }
 
-describe("cross-framework conformance matrix (issue #317)", () => {
+describe("cross-framework conformance matrix (issues #317, #458)", () => {
+  it("every adapter named by GuardAdapterName is driven through the matrix", () => {
+    assert.deepEqual(
+      [...HARNESSES.map((harness) => harness.name)].sort(),
+      [...ADAPTER_LIST].sort(),
+      "a new adapter must be added to the shared matrix",
+    );
+  });
+
   for (const adapter of HARNESSES) {
     describe(adapter.name, () => {
       for (const scenario of SCENARIOS) {
         it(`${scenario.name}: handler entered ${scenario.halts ? 0 : 1} time(s)`, async () => {
-          const { observer, blocked, decisionCount } = observing();
+          const { observer, blocked, batches, decisionCount } = observing();
           const outcome = await adapter.run(scenario, observer);
+          const count = mappedCallCount(scenario);
 
           assert.equal(
             outcome.entered,
@@ -437,10 +453,66 @@ describe("cross-framework conformance matrix (issue #317)", () => {
               `${scenario.name}: onBlocked calls`,
             );
           }
+
+          // Batch rows must produce exactly one all-calls summary, whether the
+          // action ran or was refused; mapping failures produce no summary at all.
+          if (scenario.mode === "batch" && count > 0) {
+            assert.equal(batches.length, 1, `${scenario.name}: onBatchDecision calls`);
+            assert.equal(batches[0]!.adapter, adapter.name);
+            assert.equal(batches[0]!.calls.length, count, `${scenario.name}: summary calls`);
+            assert.equal(batches[0]!.verdicts.length, count, `${scenario.name}: summary verdicts`);
+            const kind = scenario.verdicts.includes("blocked")
+              ? "blocked"
+              : scenario.verdicts.includes("undetermined")
+                ? "undetermined"
+                : "admissible";
+            assert.equal(batches[0]!.kind, kind, `${scenario.name}: summary kind`);
+          } else {
+            assert.equal(batches.length, 0, `${scenario.name}: unexpected batch summary`);
+          }
+
+          // A batch halt names every checked call and verdict on adapters that
+          // expose `onBlocked`; a mapping-failure halt names neither.
+          if (adapter.hasBlockedHook && scenario.halts && blocked[0]) {
+            if (expectsBatchBlockedPayload(scenario)) {
+              assert.equal(blocked[0]!.calls?.length, count, `${scenario.name}: onBlocked.calls`);
+              assert.equal(
+                blocked[0]!.verdicts?.length,
+                count,
+                `${scenario.name}: onBlocked.verdicts`,
+              );
+            } else {
+              assert.equal(blocked[0]!.calls, undefined, `${scenario.name}: no calls to report`);
+              assert.equal(
+                blocked[0]!.verdicts,
+                undefined,
+                `${scenario.name}: no verdicts to report`,
+              );
+            }
+          }
         });
       }
     });
   }
+});
+
+describe("the docs parity table is derived from the matrix (issue #458)", () => {
+  it("contains the exact table rendered from the shared expectations", () => {
+    const docs = readFileSync(
+      new URL("../../docs/api/framework-adapters.md", import.meta.url),
+      "utf8",
+    );
+    const startMarker = "<!-- adapter-matrix:start -->";
+    const endMarker = "<!-- adapter-matrix:end -->";
+    const start = docs.indexOf(startMarker);
+    const end = docs.indexOf(endMarker, start);
+    assert.ok(start >= 0 && end > start, "the docs table markers are missing or inverted");
+    assert.equal(
+      docs.slice(start + startMarker.length, end).trim(),
+      renderAdapterMatrix(),
+      "the docs table drifted from the shared adapter expectations",
+    );
+  });
 });
 
 describe("call-mapping failures fail closed (issue #316)", () => {

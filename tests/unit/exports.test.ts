@@ -61,6 +61,8 @@ describe("package module format and export-map", () => {
       "GUARD_REASONS",
       "isGuardReason",
       "GuardBlockedError",
+      // MCP server-level registration (issue #456) is part of the public API.
+      "guardMcpServer",
       // Typed failure hierarchy, the canonical policy decoder, the dry-run
       // trace, and the verify-only agent-auth check. These are published API:
       // each is documented in the README and each is the whole point of the

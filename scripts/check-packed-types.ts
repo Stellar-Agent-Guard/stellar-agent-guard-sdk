@@ -69,6 +69,7 @@ import {
   createGuardValidator,
   createLangChainGuardMiddleware,
   createVercelAIGuard,
+  guardMcpServer,
   guardMcpToolHandler,
   mapContractCalls,
   preflightBatch,
@@ -76,6 +77,8 @@ import {
   type ContractCall,
   type ElizaGuardOptions,
   type GuardBlockedInfo,
+  type GuardMcpServerOptions,
+  type McpToolRegistrar,
   type LangChainGuardOptions,
   type McpGuardOptions,
   type PreFlightBatchDecision,
@@ -115,6 +118,15 @@ const eliza: ElizaGuardOptions = { interceptor, toContractCall: () => call };
 const vercel: VercelAIGuardOptions = { interceptor, toContractCalls: () => [call] };
 
 const guarded = guardMcpToolHandler("fixture", async () => ({ content: [] }), mcp);
+declare const registrar: McpToolRegistrar;
+const mcpServerOptions: GuardMcpServerOptions = {
+  server: registrar,
+  interceptor,
+  tools: { fixture: async () => ({ content: [] }) },
+  toContractCall: () => call,
+};
+const serverRegistration = guardMcpServer(mcpServerOptions);
+void serverRegistration.close();
 runBlockedHook(undefined, info, { error: () => {} });
 
 void [
@@ -128,6 +140,7 @@ void [
   eliza,
   vercel,
   guarded,
+  serverRegistration,
 ];
 `;
 

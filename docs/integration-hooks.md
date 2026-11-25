@@ -447,11 +447,17 @@ exposes a real pre-execution point to third-party code in both generations.
 
 1. `guardMcpToolHandler(toolName, handler, options)` wraps a registered handler
    and asks the guard before invoking it.
-2. `guardMcpCallTool(callTool, options)` wraps a client's `callTool` and refuses
+2. `guardMcpServer({ server, tools, ...options })` wraps and registers several
+   tools at once through a structural `registerTool(name, config, handler)` host
+   (issue #456). It returns a descriptor per tool and an idempotent `close()`
+   that calls `unregisterTool(name)` where the host exposes it. A v1
+   `server.tool(name, schema, handler)` host needs only a three-line shim; no
+   MCP package is imported either way.
+3. `guardMcpCallTool(callTool, options)` wraps a client's `callTool` and refuses
    before the request is sent.
-3. On block, both return `{ content: [{ type: "text", text: refusal }], isError:
-   true }` without invoking the wrapped handler/call, and fire the shared
-   `onBlocked` operator hook (`src/adapters/shared.ts`).
+4. On block, all three return `{ content: [{ type: "text", text: refusal }],
+   isError: true }` without invoking the wrapped handler/call, and fire the
+   shared `onBlocked` operator hook (`src/adapters/shared.ts`).
 
 ### Dependency stance
 
@@ -459,8 +465,9 @@ Both generations require Zod (v1) or a Standard Schema library (v2) at the host,
 and the packages are large. The adapter is therefore written **structurally**
 against the handler / `callTool` shape, so neither package becomes a dependency of
 this SDK and no lazy peer dep is required — the same zero-dependency stance the
-LangChain and ElizaOS adapters take. No speculative code: both wrappers are
-covered by `tests/unit/adapters.test.ts`.
+LangChain and ElizaOS adapters take. No speculative code: the wrappers and the
+server-level registrar are covered by `tests/unit/adapters.test.ts` and the
+v1/v2 host shapes by `tests/unit/adapter-compat.test.ts`.
 
 ---
 

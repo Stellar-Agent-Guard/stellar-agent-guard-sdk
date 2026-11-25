@@ -446,13 +446,19 @@ export {
   type VercelAIToolLike,
 } from "./adapters/vercelai.ts";
 
-export { guardMcpCallTool, guardMcpToolHandler } from "./adapters/mcp.ts";
+export { guardMcpCallTool, guardMcpServer, guardMcpToolHandler } from "./adapters/mcp.ts";
 
 export type {
+  GuardMcpServerOptions,
+  GuardedMcpServer,
+  GuardedMcpToolDescriptor,
   McpCallTool,
   McpGuardOptions,
+  McpServerToolDefinition,
+  McpServerTools,
   McpToolCallRequest,
   McpToolHandler,
+  McpToolRegistrar,
   McpToolResult,
 } from "./adapters/mcp.ts";
 

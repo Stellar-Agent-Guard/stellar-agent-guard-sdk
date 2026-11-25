@@ -93,6 +93,54 @@ const callTool = guardMcpCallTool(myClient.callTool.bind(myClient), {
 });
 ```
 
+## Registering Guarded Tools on a Server
+
+`guardMcpServer` removes the repeated wrapping/registration wiring. It accepts a
+structural `registerTool(name, config, handler)` host — no MCP package is
+installed — and returns one descriptor per tool plus an idempotent `close()`:
+
+```typescript
+import {
+  guardMcpServer,
+  type McpToolHandler,
+} from "stellar-agent-guard-sdk";
+
+// A v2 MCP server, or any object with this shape. `unregisterTool` is optional;
+// `close()` is a no-op when the host cannot unregister.
+const registration = guardMcpServer({
+  server: mcpServer,
+  interceptor,
+  tools: {
+    transfer_tokens: async (args) => ({
+      content: [{ type: "text", text: `transferred ${args.amount}` }],
+    }),
+  },
+  toContractCall,
+  onBlocked: ({ kind, reason, explanation }) => {
+    console.warn(`[mcp] ${kind}: ${reason ?? "undetermined"} — ${explanation}`);
+  },
+});
+
+// Each descriptor carries the guarded handler actually installed, the original
+// handler, the config passed to registerTool, and registerTool's return value.
+const installed: McpToolHandler | undefined = registration.tools[0]?.handler;
+
+// On shutdown: unregisters every tool when the host supports it.
+await registration.close();
+```
+
+The registered handler is exactly `guardMcpToolHandler(name, originalHandler,
+options)`, so the refusal shape below is unchanged. A tool whose mapper returns
+`null` is still passed through untouched: the original body receives the exact
+`args`/`extra` and its result is returned as-is. An ordered `toContractCalls`
+batch works here too — one refusal anywhere in the batch returns the `isError`
+result without entering any of the tool bodies. Misconfiguration (no
+`registerTool`, no tools, or a malformed entry) throws `AdapterConfigError`
+synchronously, before any tool is registered.
+
+The runnable version, including a structural in-memory host and the `close()`
+assertion, is in [`examples/mcp.ts`](../../examples/mcp.ts).
+
 ## Blocked Result
 
 A refusal is returned in MCP's own error-result form, so the model sees it as a

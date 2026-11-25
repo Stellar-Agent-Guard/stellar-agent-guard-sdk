@@ -22,7 +22,9 @@ import { guardAction } from "../../src/adapters/elizaos.ts";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
 import {
   guardMcpCallTool,
+  guardMcpServer,
   guardMcpToolHandler,
+  type McpToolHandler,
   type McpToolResult,
 } from "../../src/adapters/mcp.ts";
 import { createVercelAIGuard } from "../../src/adapters/vercelai.ts";
@@ -195,6 +197,70 @@ describe("MCP hook shapes — registered handler and client callTool", () => {
     const result = await callTool({ name: "send_payment", arguments: {} });
     assert.equal(sent, 0);
     assert.equal((result as McpToolResult).isError, true);
+  });
+
+  it("guardMcpServer drives a v2-style registerTool host through the same continuation", async () => {
+    let entered = 0;
+    const installed = new Map<string, McpToolHandler>();
+    const v2Server = {
+      registerTool(name: string, _config: unknown, handler: McpToolHandler) {
+        installed.set(name, handler);
+      },
+      unregisterTool(name: string) {
+        installed.delete(name);
+      },
+    };
+    const registration = guardMcpServer({
+      server: v2Server,
+      interceptor: stub(BLOCKED),
+      tools: {
+        send_payment: async () => {
+          entered += 1;
+          return { content: [{ type: "text", text: "sent" }] };
+        },
+      },
+      toContractCall: () => CALL,
+    });
+
+    const result = await installed.get("send_payment")!({ amount: "10" }, {});
+    assert.equal(entered, 0, "the registered tool body is the continuation the guard must stop");
+    assert.equal((result as McpToolResult).isError, true);
+    await registration.close();
+    assert.equal(installed.size, 0, "close() used the host's unregisterTool");
+  });
+
+  it("a v1-style server.tool host works through a structural registerTool shim", async () => {
+    let entered = 0;
+    const installed = new Map<string, McpToolHandler>();
+    const v1Server = {
+      tool(name: string, _schema: unknown, handler: McpToolHandler) {
+        installed.set(name, handler);
+      },
+    };
+    // A host on the v1 registration shape needs no SDK import and no wrapper
+    // library: the registrar interface is just `registerTool(name, config, fn)`.
+    const registration = guardMcpServer({
+      server: {
+        registerTool: (name, config, handler) => v1Server.tool(name, config, handler),
+      },
+      interceptor: stub(BLOCKED),
+      tools: [
+        {
+          name: "send_payment",
+          config: { description: "moves funds" },
+          handler: async () => {
+            entered += 1;
+            return { content: [{ type: "text", text: "sent" }] };
+          },
+        },
+      ],
+      toContractCall: () => CALL,
+    });
+
+    const result = await installed.get("send_payment")!({ amount: "10" }, {});
+    assert.equal(entered, 0);
+    assert.equal((result as McpToolResult).isError, true);
+    assert.equal(registration.tools[0]!.name, "send_payment");
   });
 });
 
