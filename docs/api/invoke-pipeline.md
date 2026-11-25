@@ -13,6 +13,17 @@ Executes an end-to-end transaction through the guard:
 
 Returns discriminated union: `{ kind: "allowed", submission, ... }`, `{ kind: "blocked", reason, ... }`, `{ kind: "pending", transactionHash, ... }`, or `{ kind: "error", detail, ... }` (or throws/returns `BroadcastError` on retry exhaustion).
 
+### Normalised Timing (`timing`)
+
+Every terminal `PipelineOutcome` (`allowed`, `blocked`, `pending`, `error`) carries an optional JSON-safe `timing: InvokeTiming` object. Unknown timestamps are omitted rather than zeroed:
+
+| Outcome `kind` | `startedAt` | `submittedAt` | `confirmedAt` | `durationMs` |
+| --- | --- | --- | --- | --- |
+| `allowed` | ISO string | ISO string | ISO string | number (ms) |
+| `blocked` | ISO string | ISO string if post-broadcast, else omitted | omitted | number (ms) |
+| `pending` | ISO string | ISO string | omitted | number (ms) |
+| `error` | ISO string | ISO string if broadcast before failure, else omitted | omitted | number (ms) |
+
 ### Options
 
 #### `InvokeOptions` (alias of `InvokeParams`; `invoke(options)`)

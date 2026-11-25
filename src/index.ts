@@ -207,6 +207,7 @@ export {
   type InvokeRetryEvent,
   type InvokeRetryMetadata,
   type InvokeStepEvent,
+  type InvokeTiming,
   type RetryableInvokeFailure,
   type SubmissionAcceptedEvent,
 } from "./invoke.ts";

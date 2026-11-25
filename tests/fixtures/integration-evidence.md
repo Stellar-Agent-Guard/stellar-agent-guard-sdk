@@ -36,6 +36,8 @@ attempt does not replace the recorded successful scenario evidence below.
 
 **Note** (feat/onverdict-cache-provenance-error-tojson, PR for #408/#409/#477): `src/preflight.ts` now reports cache provenance on a pre-flight verdict (`cached`, `observedLedger`, `ageMs`), accepts `forceFresh` to bypass the opt-in cache for one call, and emits each final verdict once to an observability-only `onVerdict` hook (cached, coalesced and fail-closed paths included). The hook is invoked after the verdict is fixed and cannot change it, and caching/`forceFresh` only select whether the existing simulation runs — the contract-side block/admit decision is unchanged. In `src/invoke.ts` the only change is a JSON-safe `toJSON()` on `InvokeRetryError` for structured logging. The five live scenarios recorded below remain the correct proof; no fresh live run was performed for this change.
 
+**Note** (feat(invoke)/normalise-timing-fields-on-every-terminal-outcome, PR for #420): `src/invoke.ts` attaches an additive, JSON-safe `timing: InvokeTiming` object (`startedAt`, optional `submittedAt`, optional `confirmedAt`, `durationMs`) to every terminal `PipelineOutcome` (`allowed`, `blocked`, `pending`, `error`). Simulation, signing, broadcast, and the guard's block/admit decision are unchanged, so the five live scenarios recorded below remain valid.
+
 ## Instance under test
 
 | | |
