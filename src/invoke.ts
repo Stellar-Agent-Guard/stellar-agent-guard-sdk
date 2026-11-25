@@ -2744,3 +2744,168 @@ export function timeoutOutcome(error: RpcTimeoutError): InvokeErrorOutcome {
     ...(error.transactionHash !== undefined ? { transactionHash: error.transactionHash } : {}),
   };
 }
+
+/**
+ * A single call entry in {@link InvokeManyParams.calls}. Inherits any shared
+ * options from {@link InvokeManyParams} and may override them per call.
+ */
+export type InvokeManyCall = Omit<Partial<InvokeParamsInput>, "call"> & {
+  call: ContractCall;
+};
+
+/** Input parameters for {@link invokeMany}. */
+export type InvokeManyParams = Partial<Omit<InvokeParamsInput, "call">> & {
+  /** Ordered list of calls to execute sequentially. */
+  calls: ReadonlyArray<InvokeManyCall>;
+  /**
+   * Stop executing further calls as soon as a call returns a `blocked` outcome
+   * (or a `blocked` dry-run verdict). Defaults to `true`.
+   */
+  stopOnBlocked?: boolean | undefined;
+};
+
+/** Per-call result entry returned by {@link invokeMany}, preserving input order. */
+export interface InvokeManyItemResult {
+  /** 0-based index of the call in the input `calls` array. */
+  index: number;
+  status: "completed" | "skipped";
+  /** Present when `status === "completed"`. */
+  outcome?: InvokeOutcome | undefined;
+  /** Present when `status === "skipped"`. */
+  skippedReason?: "stopped_on_blocked" | "deadline_exceeded" | "aborted" | undefined;
+}
+
+/** Aggregate summary across all calls in an {@link invokeMany} run. */
+export interface InvokeManySummary {
+  total: number;
+  completed: number;
+  skipped: number;
+  allowed: number;
+  blocked: number;
+  pending: number;
+  error: number;
+  dryRun: number;
+  stopped: boolean;
+  stopReason?: "blocked" | "deadline_exceeded" | "aborted" | undefined;
+}
+
+/** Result returned by {@link invokeMany}. */
+export interface InvokeManyResult {
+  results: InvokeManyItemResult[];
+  summary: InvokeManySummary;
+}
+
+function isBlockedOutcome(outcome: InvokeOutcome): boolean {
+  if ("verdict" in outcome) return outcome.verdict === "blocked";
+  if (outcome instanceof BroadcastError) return false;
+  return outcome.kind === "blocked";
+}
+
+function combineSignals(
+  a: AbortSignal | undefined,
+  b: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (a && b) return AbortSignal.any([a, b]);
+  return a ?? b;
+}
+
+/**
+ * Execute multiple guarded calls sequentially through {@link invoke},
+ * preserving input order, sharing a single overall `deadlineMs` budget,
+ * forwarding `signal` and fee ceilings (`maxFeeStroops`, `feeBump`, `fee`),
+ * and stopping on the first blocked outcome by default (`stopOnBlocked: true`).
+ */
+export async function invokeMany(params: InvokeManyParams): Promise<InvokeManyResult> {
+  const { calls, stopOnBlocked = true, ...shared } = params;
+  const clock = shared.clock ?? systemClock;
+  const deadline =
+    shared.deadlineMs !== undefined
+      ? makeDeadline({ deadlineMs: shared.deadlineMs } as InvokeParams, clock)
+      : undefined;
+
+  const results: InvokeManyItemResult[] = [];
+  const summary: InvokeManySummary = {
+    total: calls.length,
+    completed: 0,
+    skipped: 0,
+    allowed: 0,
+    blocked: 0,
+    pending: 0,
+    error: 0,
+    dryRun: 0,
+    stopped: false,
+  };
+
+  let stopReason: InvokeManySummary["stopReason"];
+  let skippedReason: InvokeManyItemResult["skippedReason"];
+
+  for (let i = 0; i < calls.length; i++) {
+    if (skippedReason !== undefined) {
+      results.push({ index: i, status: "skipped", skippedReason });
+      summary.skipped += 1;
+      continue;
+    }
+
+    const callItem = calls[i]!;
+    const mergedSignal = combineSignals(shared.signal, callItem.signal);
+    if (mergedSignal?.aborted) {
+      stopReason = "aborted";
+      skippedReason = "aborted";
+      results.push({ index: i, status: "skipped", skippedReason });
+      summary.skipped += 1;
+      continue;
+    }
+
+    if (deadline !== undefined && deadline.expired()) {
+      stopReason = "deadline_exceeded";
+      skippedReason = "deadline_exceeded";
+      results.push({ index: i, status: "skipped", skippedReason });
+      summary.skipped += 1;
+      continue;
+    }
+
+    const remainingDeadlineMs =
+      deadline !== undefined
+        ? callItem.deadlineMs !== undefined
+          ? Math.min(deadline.remainingMs(), callItem.deadlineMs)
+          : deadline.remainingMs()
+        : callItem.deadlineMs;
+
+    const callParams = {
+      ...shared,
+      ...callItem,
+      ...(mergedSignal !== undefined ? { signal: mergedSignal } : {}),
+      ...(remainingDeadlineMs !== undefined ? { deadlineMs: remainingDeadlineMs } : {}),
+    } as InvokeParamsInput;
+
+    const outcome = await invoke(callParams);
+    results.push({ index: i, status: "completed", outcome });
+    summary.completed += 1;
+
+    if ("verdict" in outcome) {
+      summary.dryRun += 1;
+    } else if (outcome instanceof BroadcastError) {
+      summary.error += 1;
+    } else if (outcome.kind === "allowed") {
+      summary.allowed += 1;
+    } else if (outcome.kind === "blocked") {
+      summary.blocked += 1;
+    } else if (outcome.kind === "pending") {
+      summary.pending += 1;
+    } else {
+      summary.error += 1;
+    }
+
+    if (stopOnBlocked && isBlockedOutcome(outcome)) {
+      stopReason = "blocked";
+      skippedReason = "stopped_on_blocked";
+    }
+  }
+
+  if (stopReason !== undefined) {
+    summary.stopped = true;
+    summary.stopReason = stopReason;
+  }
+
+  return { results, summary };
+}
