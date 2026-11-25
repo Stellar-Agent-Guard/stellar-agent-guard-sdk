@@ -40,6 +40,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `deadlineMs` | `number` (> 0) | none — only the per-call `timeoutMs` applies | ⚠️ One budget for discovery, signing, simulation, retry backoff, broadcast and polling. Expiry is fail-closed (`RpcTimeoutError` with `deadline: true`), even after the guard approved the call; a dry run reports `undetermined`. |
 | `clock` | `Clock` | `systemClock` | Time source for deadline accounting and poll/backoff delays. Must have `now()` and `sleep()`. |
 | `onStep` | `(step: InvokeStepEvent) => void` | none | One event per stage attempt (probe → sign → simulate → broadcast). Exceptions are isolated. |
+| `onRetry` | `(event: InvokeRetryEvent) => void` | none | Called once per retry, never for the first attempt, after the delay is chosen and before the next attempt starts. Carries `attempt`, `failure`, `cause`, `delayMs`, `nextAttempt`, and the `stage` that failed. Fee-bump retries report `delayMs: 0`. Exceptions are isolated: the hook cannot change the outcome, retry count or delay. |
 | `onSubmitted` | `(event: SubmissionAcceptedEvent) => void` | none | Called once with the network's answer to the broadcast, before polling, so the transaction hash survives a failed poll. |
 | `logger` | `GuardLoggerInput` | none — silent | Stage attempts and retries at `debug`, a refusal at `info`, no-verdict outcomes at `warn`. Never changes behaviour. |
 
@@ -117,6 +118,30 @@ A `deadline` that fires while the pipeline is waiting for an inclusion does
 not un-send the transaction: it may still land. The hash travels with the
 `RpcTimeoutError` for exactly that reason.
 
+### Observing retries as they happen (`onRetry`)
+
+`invoke()` already attaches structured retry metadata to the terminal outcome. `onRetry` reports the same events *while* they happen, so a slow recovery does not look like a hang:
+
+```ts
+const outcome = await invoke({
+  server,
+  source,
+  call,
+  networkPassphrase,
+  onRetry: (event) => {
+    // event.attempt     — 1-based attempt that failed
+    // event.failure     — "stale_ledger_resource_limit" | "sequence_number_collision" | "min_fee"
+    // event.cause       — the coarse cause the terminal outcome would report
+    // event.stage       — shared TRACE_STEP_NAMES stage where the failure was observed
+    // event.delayMs     — backoff before the next attempt; 0 for a fee bump
+    // event.nextAttempt — 1-based attempt that starts next
+    metrics.increment("guard.invoke.retry", { failure: event.failure });
+  },
+});
+```
+
+The hook fires once per retry and never for the first attempt, so its events line up one-to-one, in order, with `outcome.retry.retries`. Retryable failures are classified from the broadcast's submission result, so `stage` is `"broadcast"` today. A throwing hook is swallowed — exactly like `onStep` — and cannot alter the retry budget, delays or outcome.
+
 ### The pending outcome: accepted, not confirmed
 
 When the network has accepted the submission but the polling budget runs out
@@ -145,6 +170,53 @@ exported by name so an adapter can narrow on it without re-declaring the shape.
 pipeline still owns the whole invocation and returns the fail-closed `error`
 outcome carrying `RpcTimeoutError`. `pending` means the submission itself
 completed and only the confirmation polling ran out of budget.
+
+### Resolving a pending outcome: `waitForTransaction()`
+
+Rather than hand-rolling `getTransaction` polling, pass the hash to the
+bounded helper. It reports what the chain did with the transaction as a
+discriminated result and never throws on a non-confirmation:
+
+```ts
+import { waitForTransaction } from "stellar-agent-guard-sdk";
+
+const outcome = await invoke({ server, source, call, networkPassphrase });
+if (outcome.kind === "pending") {
+  const status = await waitForTransaction({
+    server,
+    hash: outcome.transactionHash,
+    timeoutMs: 30_000,    // overall budget; default 30s
+    pollIntervalMs: 1_000, // delay between polls; default 1s
+    signal,                // optional cancellation
+    clock,                 // optional Clock (use FakeClock in tests)
+  });
+
+  switch (status.kind) {
+    case "confirmed":
+      status.ledger; // included in a ledger
+      status.events; // contract events, when reported
+      break;
+    case "failed":
+      status.resultCode; // the transaction was included and rejected
+      break;
+    case "pending":
+      status.reason; // "timeout" | "aborted" — query again; do NOT resend
+      break;
+    case "undetermined":
+      status.cause; // the RPC error that left the status unknown
+      break;
+  }
+}
+```
+
+| Result | Meaning |
+| --- | --- |
+| `confirmed` | Included in a ledger. **Confirmation is not admissibility**: a guard refusal that reached inclusion is also an included transaction, so read the guard's decision from the original outcome/events. |
+| `failed` | Included and rejected; carries `resultXdr`, `resultCode` and `diagnosticEvents`. |
+| `pending` | The budget (`reason: "timeout"`) or the caller's signal (`reason: "aborted"`) ended the wait before a verdict. The transaction may still land — never rebroadcast on this result. |
+| `undetermined` | An RPC error left the status unknown; `cause` carries the failure. |
+
+Only invalid input throws — a malformed hash, or a non-positive `timeoutMs`/`pollIntervalMs` — synchronously and before any RPC, as a typed `InvalidInputError`. The first poll happens immediately, and every poll is bounded by the remaining budget, so the wait cannot outlive `timeoutMs`.
 
 ### Malformed simulation data
 

@@ -120,6 +120,78 @@ The throw-on-refusal form: returns the batch decision if all calls are admissibl
 member, or `GuardUndeterminedError` for an undetermined member, an
 unavailable staging state, or transport failure.
 
+## SAC transfer helpers
+
+`checkTransfer()` and `checkTransferFrom()` build the two SAC calls most
+integrations guard and run them through the ordinary `check()` path. Building
+the `ContractCall` by hand is where argument order and `i128` encoding go
+wrong, so the helpers own both: `transfer` is `[from, to, amount]` and
+`transfer_from` is `[spender, from, to, amount]`.
+
+Both validate their input synchronously, before any RPC, and throw
+`InvalidInputError` for a malformed token/spender/from/to address or a lossy
+amount (a non-safe-integer `number`, a negative value, or one outside the
+`i128` range). The verdict is the same `PreFlightDecision` `check()` returns,
+including its fail-closed `undetermined` arm.
+
+```ts
+import { checkTransfer } from "stellar-agent-guard-sdk";
+
+const decision = await checkTransfer(
+  { server, networkPassphrase, guard, agent, source },
+  {
+    token: USDC_SAC,   // C...
+    from: GUARD,       // G... (the guarded account)
+    to: RECIPIENT,     // G... or C...
+    amount: 1_001n,    // bigint in the token's smallest unit
+  },
+);
+// decision.kind: "admissible" | "blocked" | "undetermined"
+```
+
+```ts
+try {
+  const decision = await checkTransferFrom(
+    { server, networkPassphrase, guard, agent, source },
+    {
+      token: USDC_SAC,
+      spender: SPENDER, // allowance owner / first argument
+      from: GUARD,
+      to: RECIPIENT,
+      amount: 1_001n,
+    },
+  );
+} catch (error) {
+  // InvalidInputError — thrown before any RPC, never an undetermined verdict.
+}
+```
+
+For repeated checks, build the call once and reuse an interceptor:
+
+```ts
+import { buildTransferCall, PreFlightInterceptor } from "stellar-agent-guard-sdk";
+
+const interceptor = new PreFlightInterceptor({ server, networkPassphrase, guard, agent, source });
+const call = buildTransferCall({ token: USDC_SAC, from: GUARD, to: RECIPIENT, amount: 1_001n });
+await interceptor.check(call);
+```
+
+## Simulation fidelity: decision table
+
+Pre-flight is a prediction made against one ledger snapshot. The four gaps
+below are every limitation the SDK documents, plus the opt-in cache's
+staleness caveat; each row names what can differ, the function that mitigates
+it, the test that pins that mitigation, the residual risk, and what to do
+instead. **None of these gaps is a capability the SDK claims to fix.**
+
+| Gap | What can differ | Mitigation (code + pinning test) | Residual risk | What to do instead |
+| --- | --- | --- | --- | --- |
+| **1. Window state moves** between `check` and broadcast | Another spender consumes the rolling window after the simulation, so an `admissible` transfer is refused on-chain. | `check()` never broadcasts; [`enforceCall()`](../../src/invoke.ts) runs the real `__check_auth` against live state. Under `invoke()`, [`withAccountQueue()`](../../src/invoke.ts) serializes fetch → build → submit per source account (pinned by “serializes concurrent calls and gives each transaction a distinct sequence” in [invoke.test.ts](../../tests/unit/invoke.test.ts)); a post-inclusion refusal is still reported `blocked` with `charged: true` (pinned in [invoke-dry-run.test.ts](../../tests/unit/invoke-dry-run.test.ts)). | **Unfixable client-side.** A spender outside this SDK's queue, or one using a different source account, can move the window after the verdict. | Treat `admissible` as advisory; rely on the on-chain refusal, and route all spend from the account through one process/queue. |
+| **2. Fee market moves** | The inclusion/resource fee at broadcast differs from the quote (surge pricing, base-fee change), producing `txInsufficientFee` or a different real price. | The quote comes from the same enforced simulation that produced the verdict ([`CostPreChecker` / `costOf()`](../../src/cost.ts)); [`feeBreakdown()`](../../src/tx.ts) uses the same `INCLUSION_FEE` the envelope declares; min-fee broadcast rejections retry with a bounded fee bump (`invoke()`'s `feeBump` in [invoke.ts](../../src/invoke.ts)). Pinned by the `feeBreakdown`/`feeSource` suites in [cost.test.ts](../../tests/unit/cost.test.ts) and the fee-bump lifecycle in [invoke.test.ts](../../tests/unit/invoke.test.ts). | **Unfixable client-side.** Fees are dynamic; `maxFeeStroops` is a pre-flight ceiling, not a network guarantee, and a fee bump changes the price you pay. | Budget for the ceiling, not the quote; use `feeBump` for min-fee rejections and `onRetry` to observe them. |
+| **3. Simulation does not execute** | Simulation rolls back its writes, and cannot reveal effects that depend on a return value or on state another call would have produced (oracle price, swap quote, mid-transaction balance). | The enforced simulation runs the real `__check_auth` ([`enforceCall()`](../../src/invoke.ts)), and refusals are recovered from diagnostics by [`reasonFromDiagnosticEvents()`](../../src/invoke.ts) and [`decodeAuthDecision()`](../../src/events.ts). Pinned by the guard-block tests in [invoke.test.ts](../../tests/unit/invoke.test.ts) and the `decodeAuthDecision` suite in [events.test.ts](../../tests/unit/events.test.ts). | **Unfixable client-side** — it is inherent to simulation. Such a call can be `admissible` pre-flight and still behave differently on-chain; only the decision event is observable, not the call's return value. | Verify return-value-dependent behaviour after inclusion (events/balances), and guard the *next* call rather than assuming the first one's effect. |
+| **4. Batch semantics are approximated** | [`checkBatch()`](../../src/preflight.ts) simulates each call in sequence with staged window accounting; it is not an atomic batch. State mutations between calls other than guard window spend are not observed, intra-batch window expiry is not modelled, and `totalEstimatedResourceFee` is a sum of per-call estimates. | [`checkBatch()` / `preflightBatch()`](../../src/preflight.ts) stage positive SAC transfer amounts and report `window_cap_exceeded` for a call that passes alone but pushes cumulative spend past the cap. Pinned by the staged-batch tests in [preflight.test.ts](../../tests/unit/preflight.test.ts). | **Unfixable client-side.** Atomicity and intra-batch state cannot be reproduced by sequential simulations. | Use the batch verdict for destructive pre-screening only; keep the on-chain all-or-nothing auth check as the decision. A contract-side `check_batch` is the intended fix. |
+| **Cache staleness** (opt-in) | A cached `admissible` can be staler than one admitted transfer: the window or policy can change while the verdict is reused. | Cache entries are keyed on ledger + policy revision, capped at one ledger-close TTL, dropped when the ledger advances, and cleared by `invalidate()` ([preflight.ts](../../src/preflight.ts)). Pinned by “PreFlightInterceptor simulation cache” in [preflight.test.ts](../../tests/unit/preflight.test.ts). | Bounded by the TTL (and by the supplied `policyRevision`), never eliminated. | Leave caching off when a stale verdict is unacceptable; otherwise supply `policyRevision` and invalidate after policy/account-state changes. |
+
 ## CheckResult decoding and fallback behavior
 
 The interceptor reads the guard contract's `CheckResult` value from the

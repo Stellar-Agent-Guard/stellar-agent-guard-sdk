@@ -8,6 +8,8 @@
  * secrets, signed payloads, diagnostic events or transaction XDR.
  */
 
+import type { TraceStepName } from "./trace.ts";
+
 /** Failures the invocation pipeline knows how to retry. */
 export type RetryableInvokeFailure =
   | "stale_ledger_resource_limit"
@@ -40,6 +42,40 @@ export interface InvokeRetryAttempt {
    * Fee-bump retries re-prepare immediately, so their delay is `0`.
    */
   delayMs: number;
+}
+
+/**
+ * One retry, as reported to `invoke()`'s `onRetry` hook.
+ *
+ * Delivered after the backoff has been chosen and **before** the next attempt
+ * starts, so an operator can emit a metric or structured log line per retry
+ * while the pipeline is still waiting — not only once the call finishes. The
+ * event mirrors the corresponding `InvokeRetryMetadata.retries` entry and adds
+ * the stage that failed plus the attempt number that runs next.
+ *
+ * It is safe to log: like the retry metadata, it carries only attempt numbers,
+ * retryable-class names and delays — never payloads, XDR or hashes.
+ */
+export interface InvokeRetryEvent {
+  /** 1-based attempt number that failed. */
+  attempt: number;
+  /** Retryable class observed on that attempt. */
+  failure: RetryableInvokeFailure;
+  /** Coarse cause the terminal outcome would report for this failure. */
+  cause: InvokeErrorCause;
+  /**
+   * Backoff applied before the next attempt, in milliseconds. Fee-bump retries
+   * re-prepare immediately, so their delay is `0`.
+   */
+  delayMs: number;
+  /** 1-based attempt number that will start next. */
+  nextAttempt: number;
+  /**
+   * Pipeline stage where the failure was observed, from the shared
+   * `TRACE_STEP_NAMES` vocabulary. Every retryable failure is classified from
+   * the broadcast's submission result, so this is `"broadcast"` today.
+   */
+  stage: TraceStepName;
 }
 
 /**

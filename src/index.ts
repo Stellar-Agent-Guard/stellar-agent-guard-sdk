@@ -201,6 +201,7 @@ export {
   type InvokePendingOutcome,
   type InvokePipelineStep,
   type InvokeRetryAttempt,
+  type InvokeRetryEvent,
   type InvokeRetryMetadata,
   type InvokeStepEvent,
   type RetryableInvokeFailure,
@@ -334,6 +335,8 @@ export {
 } from "./telemetry.ts";
 
 export {
+  DEFAULT_WAIT_POLL_INTERVAL_MS,
+  DEFAULT_WAIT_TIMEOUT_MS,
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
@@ -351,6 +354,7 @@ export {
   toAgentSigner,
   validateAgentPublicKey,
   verifyAgentSignature,
+  waitForTransaction,
 } from "./tx.ts";
 
 export type {
@@ -360,7 +364,18 @@ export type {
   GuardCredentialType,
   SimulationOutcome,
   SubmissionResult,
+  WaitForTransactionParams,
+  WaitForTransactionResult,
 } from "./tx.ts";
+
+export {
+  buildTransferCall,
+  buildTransferFromCall,
+  checkTransfer,
+  checkTransferFrom,
+} from "./transfer.ts";
+
+export type { TransferFromRequest, TransferRequest } from "./transfer.ts";
 
 export {
   DEFAULT_NETWORK_PASSPHRASE,
