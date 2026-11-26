@@ -19,6 +19,7 @@ import { Account, Address, Keypair, Operation, rpc, scValToNative, xdr } from "@
 import { systemClock, type Clock } from "./clock.ts";
 import { feeBreakdown, type FeeBreakdown } from "./cost.ts";
 import {
+  AuthRefreshError,
   BroadcastError,
   ContractResponseError,
   FeeCapExceededError,
@@ -52,6 +53,7 @@ export type {
   RetryableInvokeFailure,
 } from "./retry.ts";
 import {
+  DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
   buildGuardAuthEntry,
@@ -64,6 +66,7 @@ import {
   isStaleLedgerResourceFailure,
   normalizeFeeStroops,
   parseSimulationResourceFee,
+  refreshNearExpiryAuthEntries,
   signAccountAuthEntry,
   summarizeDiagnosticEvents,
   submitAndPoll,
@@ -590,6 +593,21 @@ export interface InvokeParams {
    */
   timeoutMs?: number | undefined;
   /**
+   * Ledger margin below which a signed auth entry is rebuilt and re-signed
+   * before the enforced simulation (issue #422). Default:
+   * `DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS` (5 ledgers); `0` disables the refresh
+   * check entirely.
+   *
+   * The check compares each signed entry's `signatureExpirationLedger` with the
+   * ledger current *after* signing (one `getLatestLedger` read), so a pipeline
+   * that stalled in a long planning loop or a busy account queue does not hand
+   * the host an entry that expires before broadcast. A comfortable entry is not
+   * re-signed, and an entry is never extended after the contract rejected the
+   * call for another reason: retries start a new pipeline pass and re-sign from
+   * the discovery probe.
+   */
+  authRefreshMarginLedgers?: number | undefined;
+  /**
    * Overall time budget for the whole invocation, in milliseconds, measured
    * from the moment `invoke()` starts. It bounds discovery, signing, enforced
    * simulation, retry backoff, assembly, broadcast and post-submit polling in
@@ -894,6 +912,9 @@ function validateInvokeOptions(params: InvokeParams): void {
   }
   if (params.deadlineMs !== undefined) {
     assertFiniteOption("deadlineMs", params.deadlineMs, 0, false);
+  }
+  if (params.authRefreshMarginLedgers !== undefined) {
+    assertIntegerOption("authRefreshMarginLedgers", params.authRefreshMarginLedgers, 0);
   }
 
   const clock = params.clock as Clock | null | undefined;
@@ -2545,6 +2566,101 @@ export async function enforceCall(
         throw new SigningStageError(detail, new SigningError(detail, { address, cause: error }));
       }
     }
+    // ── Step 2b: refresh entries that are close to expiration (issue #422) ──
+    // A long planning loop, a busy account queue or a stalled host can let the
+    // chain advance past the entry's signed validity after it was built. Check
+    // against the *current* ledger, not the probe's, and rebuild before the
+    // enforced simulation — never after a rejection, when the entry being
+    // extended would be the one the contract already refused.
+    const marginLedgers =
+      params.authRefreshMarginLedgers ?? DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS;
+    // Nothing signed means nothing can be near expiry: skip the extra ledger
+    // read entirely so callers without auth entries pay no RPC for the check.
+    if (marginLedgers > 0 && signedAuth.length > 0) {
+      assertWithinDeadline(deadline, "sign");
+      let currentLedger: number;
+      try {
+        currentLedger = (await server.getLatestLedger()).sequence;
+      } catch (cause) {
+        if (cause instanceof RpcTimeoutError) throw cause;
+        throw new SigningStageError(
+          `could not read the current ledger to refresh auth entries: ${
+            cause instanceof Error ? cause.message : String(cause)
+          }`,
+          new AuthRefreshError("could not read the current ledger to refresh auth entries", {
+            currentLedger: null,
+            marginLedgers,
+            cause,
+          }),
+        );
+      }
+      assertWithinDeadline(deadline, "sign");
+      try {
+        const refreshed = await refreshNearExpiryAuthEntries({
+          entries: signedAuth,
+          currentLedger,
+          marginLedgers,
+          refresh: async (entry, signatureExpirationLedger) => {
+            const addressCredentials = addressCredentialsOf(entry.credentials);
+            if (!addressCredentials) {
+              throw new SigningError("auth entry has no address credentials to refresh");
+            }
+            const address = Address.fromScAddress(addressCredentials.address).toString();
+            const credentialType = entry.credentials.type;
+            if (params.guardAuth && address === params.guardAuth.guard) {
+              if (
+                credentialType !== "sorobanCredentialsAddress" &&
+                credentialType !== "sorobanCredentialsAddressV2"
+              ) {
+                throw new SigningError(
+                  `unsupported credential type in near-expiry auth entry: ${credentialType}`,
+                  { address },
+                );
+              }
+              return await buildGuardAuthEntry({
+                guard: params.guardAuth.guard,
+                call,
+                signer: params.guardAuth.agent,
+                nonce: BigInt(nextSeq),
+                signatureExpirationLedger,
+                networkPassphrase,
+                credentialType,
+              });
+            }
+            let signer: Keypair | AdminSigner | undefined;
+            for (const candidate of params.accountSigners ?? []) {
+              if ((await candidate.publicKey()) === address) {
+                signer = candidate;
+                break;
+              }
+            }
+            if (!signer) {
+              const detail = `near-expiry auth entry requires authorization from ${address}, but no matching key was provided`;
+              throw new SigningError(detail, { address });
+            }
+            return await signAccountAuthEntry({
+              entry,
+              signer,
+              signatureExpirationLedger,
+              networkPassphrase,
+            });
+          },
+        });
+        return refreshed.entries;
+      } catch (error) {
+        if (error instanceof RpcTimeoutError) throw error;
+        const detail = `could not refresh a near-expiry auth entry: ${
+          error instanceof Error ? error.message : String(error)
+        }`;
+        throw new SigningStageError(
+          detail,
+          error instanceof AuthRefreshError
+            ? error
+            : new AuthRefreshError(detail, { currentLedger, marginLedgers, cause: error }),
+        );
+      }
+    }
+
     assertWithinDeadline(deadline, "sign");
     return signedAuth;
   };

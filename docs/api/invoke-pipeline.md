@@ -37,6 +37,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
 | `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
 | `timeoutMs` | `number` (≥ 0) | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is the same fail-closed `error` outcome as an abort. `0` disables the per-call timeout (a `deadlineMs` still applies). |
+| `authRefreshMarginLedgers` | `number` (integer ≥ 0) | `DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS` (5) | Ledger margin below which a signed auth entry is rebuilt and re-signed before the enforced simulation. The check reads the current ledger once after signing; a comfortable entry is not re-signed, and `0` disables the check. A failed refresh is a fail-closed `error` outcome carrying `AuthRefreshError`. |
 | `deadlineMs` | `number` (> 0) | none — only the per-call `timeoutMs` applies | ⚠️ One budget for discovery, signing, simulation, retry backoff, broadcast and polling. Expiry is fail-closed (`RpcTimeoutError` with `deadline: true`), even after the guard approved the call; a dry run reports `undetermined`. |
 | `clock` | `Clock` | `systemClock` | Time source for deadline accounting and poll/backoff delays. Must have `now()` and `sleep()`. |
 | `onStep` | `(step: InvokeStepEvent) => void` | none | One event per stage attempt (probe → sign → simulate → broadcast). Exceptions are isolated. |
@@ -265,6 +266,7 @@ called. The validated fields are:
 | `pollOptions.*` | same rules; nested and top-level values must agree when both are supplied |
 | `timeoutMs` | finite `>= 0` (`0` disables the per-call bound) |
 | `deadlineMs` | finite `> 0` |
+| `authRefreshMarginLedgers` | integer `>= 0` (`0` disables the refresh check) |
 | `clock` | object with `now()` and `sleep()` |
 
 A jitter source that returns `NaN`, `Infinity`, a negative value, or `1` or above
