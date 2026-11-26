@@ -331,13 +331,16 @@ export {
   type GuardTelemetryHealthSnapshot,
   type GuardTelemetryStreamState,
   type GuardTelemetryUnifiedParams,
+  type GuardTelemetryStateChange,
   type GuardTelemetryWatchParams,
   type GuardUnknownTopic,
+  NOOP_METRICS_SINK,
   type ParsedGuardEventRecord,
   type PollResult,
   type PollSleep,
   type RecentEventFilter,
   type TelemetryJitter,
+  type TelemetryMetricsSink,
   type TelemetryRetryOptions,
 } from "./telemetry.ts";
 

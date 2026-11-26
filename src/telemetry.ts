@@ -32,7 +32,7 @@
  * `docs/event-schema.md` and implemented by `guardEventId` below.
  */
 import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
-import { GuardError } from "./errors.ts";
+import { GuardError, InvalidInputError } from "./errors.ts";
 import {
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
@@ -505,6 +505,41 @@ export interface RecentEventFilter {
   fromLedger?: number;
   /** Only events at or before this ledger (committed events only). */
   toLedger?: number;
+  /**
+   * Only events with a wall-clock timestamp at or after this value (issue #430).
+   *
+   * For committed events the timestamp is `ledgerClosedAt`; for diagnostic
+   * events it is `observedAt`. An event with a `null` timestamp is excluded
+   * when this filter is set.
+   *
+   * Throws `InvalidInputError` on the first call when the value cannot be
+   * parsed as a valid date.
+   */
+  since?: string | Date;
+  /**
+   * Only events with a wall-clock timestamp at or before this value (issue #430).
+   *
+   * Same timestamp selection as `since`.
+   * Throws `InvalidInputError` on the first call when the value cannot be
+   * parsed as a valid date.
+   */
+  until?: string | Date;
+}
+
+/**
+ * Parse a `since`/`until` time-filter bound into a millisecond epoch value,
+ * throwing `InvalidInputError` when the value is not a valid date.
+ */
+function resolveTimeBound(value: string | Date, field: string): number {
+  const ts = value instanceof Date ? value.getTime() : new Date(value as string).getTime();
+  if (!Number.isFinite(ts)) {
+    throw new InvalidInputError(
+      field,
+      "valid_date",
+      `'${String(value)}' is not a valid date`,
+    );
+  }
+  return ts;
 }
 
 /** True when an event satisfies every field set in `filter`. */
@@ -521,6 +556,18 @@ function matchesRecentFilter(event: GuardEvent, filter: RecentEventFilter): bool
   }
   if (filter.toLedger !== undefined && (event.ledger === null || event.ledger > filter.toLedger)) {
     return false;
+  }
+  // Wall-clock time filters (issue #430): committed events use ledgerClosedAt,
+  // diagnostic events use observedAt. A null timestamp excludes the event.
+  if (filter.since !== undefined) {
+    const sinceTs = resolveTimeBound(filter.since, "filter.since");
+    const eventTime = event.ledgerClosedAt ?? event.observedAt;
+    if (eventTime === null || new Date(eventTime).getTime() < sinceTs) return false;
+  }
+  if (filter.until !== undefined) {
+    const untilTs = resolveTimeBound(filter.until, "filter.until");
+    const eventTime = event.ledgerClosedAt ?? event.observedAt;
+    if (eventTime === null || new Date(eventTime).getTime() > untilTs) return false;
   }
   return true;
 }
@@ -767,6 +814,17 @@ export interface GuardTelemetryConfig {
    * mixing the two streams' cursors would replay or skip failed transactions.
    */
   failedTxCursorStore?: CursorStore;
+  /**
+   * Opt-in: a pluggable metrics sink for per-poll and state-transition counters
+   * (issue #431). Omitted — the default — no metrics are emitted.
+   *
+   * The listener emits the following metric names:
+   *   - `guard_telemetry_events_observed` (gauge): committed events on a poll.
+   *   - `guard_telemetry_poll_errors` (counter): failed poll attempts.
+   *   - `guard_telemetry_state_transitions` (counter): health state changes,
+   *     labelled `{ from, to }`.
+   */
+  metrics?: TelemetryMetricsSink;
 }
 
 /**
@@ -852,6 +910,59 @@ export interface PollResult {
  * can no longer be retrieved from it. See `docs/event-schema.md` for the rule.
  */
 export type GuardTelemetryGapReason = "history_pruned";
+
+/**
+ * Pluggable metrics exporter interface (issue #431).
+ *
+ * Implement this to integrate with any metrics backend (Prometheus, StatsD,
+ * OpenTelemetry, etc.). The listener calls `counter` on each successful poll and
+ * on each health state transition; `gauge` is called for per-poll event counts.
+ * A throwing implementation is not isolated — keep the methods non-throwing.
+ */
+export interface TelemetryMetricsSink {
+  /**
+   * Increment a counter metric.
+   *
+   * @param name   - Metric name, e.g. `"guard_telemetry_state_transitions"`.
+   * @param value  - Amount to add; typically `1`.
+   * @param labels - Key-value label set, e.g. `{ from: "recovering", to: "running" }`.
+   */
+  counter(name: string, value: number, labels?: Record<string, string>): void;
+  /**
+   * Set a gauge metric.
+   *
+   * @param name   - Metric name, e.g. `"guard_telemetry_events_observed"`.
+   * @param value  - Current value.
+   * @param labels - Key-value label set.
+   */
+  gauge(name: string, value: number, labels?: Record<string, string>): void;
+}
+
+/**
+ * No-op implementation of {@link TelemetryMetricsSink} (issue #431).
+ *
+ * Drop-in for tests or when you want the listener's other features without a
+ * real metrics backend. Assign to `metrics` in `GuardTelemetryConfig`.
+ */
+export const NOOP_METRICS_SINK: TelemetryMetricsSink = {
+  counter() {},
+  gauge() {},
+};
+
+/**
+ * A health-state transition emitted via {@link GuardTelemetryWatchParams.onStateChange}
+ * (issue #429).
+ */
+export interface GuardTelemetryStateChange {
+  /** The state the listener was in before this transition. */
+  from: GuardTelemetryStreamState;
+  /** The state the listener entered. */
+  to: GuardTelemetryStreamState;
+  /** ISO-8601 wall-clock time of the transition. */
+  at: string;
+  /** Machine-readable reason code, e.g. `"poll_succeeded"` or `"signal_aborted"`. */
+  reason: string;
+}
 
 /**
  * A provable gap in event coverage: a ledger range whose events are gone.
@@ -1560,6 +1671,16 @@ export interface GuardTelemetryWatchParams {
    * `lastError` on the listener.
    */
   onStreamError?: (error: unknown) => void;
+  /**
+   * Called once on every health state transition while this stream is running
+   * (issue #429). Fires only when the state **actually changes** — a poll that
+   * keeps the stream in `running` does not fire it again.
+   *
+   * Useful for dashboards or alerting that want push notification of state
+   * changes rather than polling `health()`. A throwing callback is isolated
+   * so an observability sink cannot stop the stream.
+   */
+  onStateChange?: (change: GuardTelemetryStateChange) => void;
 }
 
 /**
@@ -2261,6 +2382,31 @@ export class GuardTelemetryListener {
     return this.lastError;
   }
 
+  /**
+   * Fire `onStateChange` and emit a `guard_telemetry_state_transitions` metric
+   * when the health state has changed from `from` to `this.healthState`.
+   *
+   * Call this immediately **after** assigning `this.healthState`: the method
+   * reads the new state from the field rather than taking it as an argument, so
+   * the caller does not need to know about the state machine.
+   */
+  private emitStateChange(
+    from: GuardTelemetryStreamState,
+    onStateChange: ((change: GuardTelemetryStateChange) => void) | undefined,
+    reason: string,
+  ): void {
+    const to = this.healthState;
+    if (from === to) return;
+    this.config.metrics?.counter("guard_telemetry_state_transitions", 1, { from, to });
+    if (onStateChange !== undefined) {
+      try {
+        onStateChange({ from, to, at: this.nowIso(), reason });
+      } catch {
+        // observer isolation: a throwing callback cannot stop the stream
+      }
+    }
+  }
+
   // ── Health state (issue #286) ────────────────────────────────────────────
   /** Committed stream state, surfaced by `health()`. */
   private healthState: GuardTelemetryStreamState = "idle";
@@ -2844,7 +2990,7 @@ export class GuardTelemetryListener {
         (cursor) => this.activeFailedTxCursorStore.save(cursor, this.cursorScope("failed_tx")),
       );
     } finally {
-      this.finishHealthStream(params.signal);
+      this.finishHealthStream(params.signal, params.onStateChange);
       this.healthStream = null;
       this.releaseStreamLease(lease);
     }
@@ -2854,12 +3000,17 @@ export class GuardTelemetryListener {
    * Settle the state of a stream that has just ended (#286): an abort wins,
    * while a stream that ended on its own is `stopped`; `failed` is preserved.
    */
-  private finishHealthStream(signal: AbortSignal | undefined): void {
+  private finishHealthStream(
+    signal: AbortSignal | undefined,
+    onStateChange?: (change: GuardTelemetryStateChange) => void,
+  ): void {
+    const from = this.healthState;
     if (signal?.aborted) {
       this.healthState = "aborted";
     } else if (this.healthState === "running" || this.healthState === "recovering") {
       this.healthState = "stopped";
     }
+    this.emitStateChange(from, onStateChange, signal?.aborted ? "signal_aborted" : "stream_ended");
   }
 
   /**
@@ -2893,7 +3044,7 @@ export class GuardTelemetryListener {
     // Honor a pre-aborted signal before every startup request (issue #281).
     if (signal?.aborted) return;
 
-    this.healthState = "running";
+    { const _prevState = this.healthState; this.healthState = "running"; this.emitStateChange(_prevState, params.onStateChange, "stream_started"); }
     this.healthStartedAt = this.nowIso();
 
     if (cursor === undefined && startLedger === undefined) {
@@ -2932,7 +3083,8 @@ export class GuardTelemetryListener {
             });
             return;
           }
-          this.recordFailedPoll();
+          { const _prevState = this.healthState; this.recordFailedPoll(); this.emitStateChange(_prevState, params.onStateChange, "poll_failed"); }
+          this.config.metrics?.counter("guard_telemetry_poll_errors", 1);
           let terminal: unknown = error;
           let attempts = 0;
           let recovered = false;
@@ -2949,7 +3101,8 @@ export class GuardTelemetryListener {
             } catch (retryError) {
               if (signal?.aborted) return;
               terminal = retryError;
-              this.recordFailedPoll();
+              { const _prevState = this.healthState; this.recordFailedPoll(); this.emitStateChange(_prevState, params.onStateChange, "poll_failed"); }
+              this.config.metrics?.counter("guard_telemetry_poll_errors", 1);
             }
           }
           if (!recovered) {
@@ -2959,7 +3112,7 @@ export class GuardTelemetryListener {
             );
             this.lastError = terminal;
             this.lastErrorAt = this.nowIso();
-            this.healthState = "failed";
+            { const _prevState = this.healthState; this.healthState = "failed"; this.emitStateChange(_prevState, params.onStateChange, "startup_failed"); }
             if (params.onStreamError) params.onStreamError(terminal);
             return;
           }
@@ -2982,9 +3135,11 @@ export class GuardTelemetryListener {
           ...(params.limit !== undefined ? { limit: params.limit } : {}),
           ...(params.onMalformedEvent ? { onMalformedEvent: params.onMalformedEvent } : {}),
         });
-        this.recordHealthyPoll(page);
+        { const _prevState = this.healthState; this.recordHealthyPoll(page); this.emitStateChange(_prevState, params.onStateChange, "poll_succeeded"); }
+        this.config.metrics?.gauge("guard_telemetry_events_observed", page.events.length);
       } catch (error) {
-        this.recordFailedPoll();
+        { const _prevState = this.healthState; this.recordFailedPoll(); this.emitStateChange(_prevState, params.onStateChange, "poll_failed"); }
+        this.config.metrics?.counter("guard_telemetry_poll_errors", 1);
         // Abort landed while this request was in flight. The request itself
         // cannot be cancelled — `@stellar/stellar-sdk`'s `getEvents` accepts no
         // signal — so the caller's stop request usually shows up here, as the
@@ -3026,7 +3181,8 @@ export class GuardTelemetryListener {
           } catch (retryError) {
             if (signal?.aborted) return;
             terminal = retryError;
-            this.recordFailedPoll();
+            { const _prevState = this.healthState; this.recordFailedPoll(); this.emitStateChange(_prevState, params.onStateChange, "poll_failed"); }
+            this.config.metrics?.counter("guard_telemetry_poll_errors", 1);
           }
         }
         if (recovered === null) {
@@ -3036,11 +3192,12 @@ export class GuardTelemetryListener {
           );
           this.lastError = terminal;
           this.lastErrorAt = this.nowIso();
-          this.healthState = "failed";
+          { const _prevState = this.healthState; this.healthState = "failed"; this.emitStateChange(_prevState, params.onStateChange, "poll_failed_terminal"); }
           if (params.onStreamError) params.onStreamError(terminal);
           return;
         }
-        this.recordHealthyPoll(recovered);
+        { const _prevState = this.healthState; this.recordHealthyPoll(recovered); this.emitStateChange(_prevState, params.onStateChange, "poll_recovered"); }
+        this.config.metrics?.gauge("guard_telemetry_events_observed", recovered.events.length);
         page = recovered;
       }
       cursor = page.cursor;
@@ -3221,7 +3378,7 @@ export class GuardTelemetryListener {
         yield event;
       }
     } finally {
-      this.finishHealthStream(params.signal);
+      this.finishHealthStream(params.signal, params.onStateChange);
       this.healthStream = null;
       this.releaseStreamLease(lease);
     }
