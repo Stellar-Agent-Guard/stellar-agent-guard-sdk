@@ -32,6 +32,7 @@ import {
   PreFlightUndeterminedError,
   RateLimitedError,
   RpcTimeoutError,
+  SignerTimeoutError,
   SigningError,
   SimulationError,
   decodeCheckResult,
@@ -43,6 +44,7 @@ describe("typed guard errors", () => {
   it("puts every public SDK error under one GuardError base", () => {
     const errors: GuardError[] = [
       new SimulationError("simulation", { stage: "probe" }),
+      new SignerTimeoutError({ timeoutMs: 10, address: "GABC" }),
       new SigningError("signing"),
       new BroadcastError("broadcast"),
       new ContractResponseError("response", { field: "result" }),
@@ -95,6 +97,17 @@ describe("typed guard errors", () => {
     assert.equal(error.stage, "preflight");
     assert.equal(error.detail, "could not classify");
     assert.equal(error.cause, cause);
+  });
+
+  it("keeps a signer timeout inside the SigningError hierarchy with its own code", () => {
+    const error = new SignerTimeoutError({ timeoutMs: 25, address: "GABC" });
+    assert.ok(error instanceof SigningError);
+    assert.ok(error instanceof GuardError);
+    assert.equal(error.name, "SignerTimeoutError");
+    assert.equal(error.code, "signer_timeout");
+    assert.equal(error.timeoutMs, 25);
+    assert.equal(error.address, "GABC");
+    assert.match(error.message, /25ms/);
   });
 
   it("preserves the original cause for programmatic classification", () => {
@@ -263,6 +276,7 @@ const ERROR_CASES: Array<[string, () => Error]> = [
       }),
   ],
   ["ConcurrentTelemetryStreamError", () => new ConcurrentTelemetryStreamError("watch")],
+  ["SignerTimeoutError", () => new SignerTimeoutError({ timeoutMs: 25, address: "GABC" })],
 ];
 
 describe("guard error JSON serialization (#477)", () => {

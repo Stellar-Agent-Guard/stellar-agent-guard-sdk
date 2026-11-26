@@ -308,6 +308,31 @@ export class SigningError extends GuardError {
 }
 
 /**
+ * An `AgentSigner.signDigest()` call exceeded its per-signer bound (issue #472).
+ *
+ * Extends `SigningError` so existing signing checks still match, but keeps its
+ * own class so a remote-signer stall is distinguishable from a policy refusal,
+ * a broken signer, or the generic `RpcTimeoutError` produced by `deadlineMs`.
+ * Like `RpcTimeoutError`, the bound is local: it stops the SDK from waiting but
+ * cannot cancel work already running inside the host's signer.
+ */
+export class SignerTimeoutError extends SigningError {
+  /** Stable discriminant for callers that branch without `instanceof`. */
+  readonly code = "signer_timeout" as const;
+  /** The bound that fired, in milliseconds. */
+  readonly timeoutMs: number;
+
+  constructor(params: { timeoutMs: number; address?: string | null; cause?: unknown }) {
+    super(`agent signer did not produce a signature within ${params.timeoutMs}ms`, {
+      ...(params.address !== undefined ? { address: params.address } : {}),
+      cause: params.cause,
+    });
+    this.name = "SignerTimeoutError";
+    this.timeoutMs = params.timeoutMs;
+  }
+}
+
+/**
  * A guard auth entry was close to its signature expiration and could not be
  * rebuilt and re-signed (issue #422).
  *

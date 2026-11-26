@@ -16,7 +16,7 @@ import {
 } from "./policy.ts";
 
 /** A value appearing in a {@link PolicyChange}. */
-export type PolicyValue = bigint | boolean | string | readonly string[] | null;
+export type PolicyValue = bigint | boolean | number | string | readonly string[] | null;
 
 /**
  * One difference between two policies.
@@ -50,7 +50,8 @@ type ScalarField =
   | "active_from"
   | "active_until"
   | "paused"
-  | "dms_grace_secs";
+  | "dms_grace_secs"
+  | "protocol_calls_per_window";
 
 type AddressSetField = "assets" | "recipients" | "blocked_recipients";
 
@@ -90,6 +91,12 @@ export function policyDiff(a: ReadonlyPolicyConfig, b: ReadonlyPolicyConfig): Po
   scalar(changes, "active_until", a.active_until, b.active_until);
   scalar(changes, "paused", a.paused, b.paused);
   scalar(changes, "dms_grace_secs", a.dms_grace_secs, b.dms_grace_secs);
+  scalar(
+    changes,
+    "protocol_calls_per_window",
+    a.protocol_calls_per_window ?? 0,
+    b.protocol_calls_per_window ?? 0,
+  );
   windowCaps(changes, a, b);
   addressSet(changes, "blocked_recipients", a.blocked_recipients ?? [], b.blocked_recipients ?? []);
 
@@ -127,8 +134,8 @@ function formatPolicyValue(value: PolicyValue | undefined): string {
 function scalar(
   changes: PolicyChange[],
   field: ScalarField,
-  before: bigint | boolean,
-  after: bigint | boolean,
+  before: bigint | boolean | number,
+  after: bigint | boolean | number,
 ): void {
   if (before !== after) changes.push({ field, path: field, kind: "changed", before, after });
 }

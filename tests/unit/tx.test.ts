@@ -24,7 +24,12 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { AuthRefreshError, ContractResponseError, SigningError } from "../../src/errors.ts";
+import {
+  AuthRefreshError,
+  ContractResponseError,
+  SignerTimeoutError,
+  SigningError,
+} from "../../src/errors.ts";
 import {
   BroadcastError,
   DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
@@ -719,6 +724,91 @@ describe("AgentSigner", () => {
       credentialType: "sorobanCredentialsAddressV2",
     });
     assert.equal(entry.credentials.type, "sorobanCredentialsAddressV2");
+  });
+});
+
+describe("signerTimeoutMs bounds remote signer callbacks (issue #472)", () => {
+  const networkPassphrase = "Test SDF Network ; September 2015";
+  const base = {
+    guard: GUARD,
+    call: CALL,
+    nonce: 1n,
+    signatureExpirationLedger: 100,
+    networkPassphrase,
+  };
+
+  function remoteSigner(signDigest: AgentSigner["signDigest"]): AgentSigner {
+    return { publicKey: Keypair.random().publicKey(), signDigest };
+  }
+
+  it("leaves a fast signer untouched and calls it exactly once", async () => {
+    const keypair = Keypair.random();
+    let calls = 0;
+    const signer = remoteSigner((digest) => {
+      calls += 1;
+      return keypair.sign(Buffer.from(digest));
+    });
+
+    const entry = await buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 1_000 });
+    const credentials = (entry.credentials as unknown as { address: xdr.SorobanAddressCredentials })
+      .address;
+    assert.equal(calls, 1);
+    assert.equal((scValToNative(credentials.signature) as Uint8Array).length, 64);
+  });
+
+  it("fails a hanging signer with a typed SigningError, not an RpcTimeoutError", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let calls = 0;
+    const signer = remoteSigner(() => {
+      calls += 1;
+      return new Promise<Uint8Array>(() => {});
+    });
+
+    const pending = buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 25 });
+    t.mock.timers.tick(25);
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof SignerTimeoutError);
+      assert.ok(error instanceof SigningError);
+      assert.equal(error.timeoutMs, 25);
+      assert.equal(error.address, GUARD);
+      assert.match(error.name, /SignerTimeoutError/);
+      return true;
+    });
+    assert.equal(calls, 1, "the bound stops waiting without re-invoking the signer");
+  });
+
+  it("preserves a signer rejection as the typed error's cause", async () => {
+    const cause = new Error("remote HSM refused");
+    const signer = remoteSigner(() => Promise.reject(cause));
+
+    await assert.rejects(
+      buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 1_000 }),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.ok(!(error instanceof SignerTimeoutError));
+        assert.equal(error.cause, cause);
+        return true;
+      },
+    );
+  });
+
+  it("rejects an invalid bound before calling the signer", async () => {
+    let calls = 0;
+    const signer = remoteSigner(() => {
+      calls += 1;
+      return new Uint8Array(64);
+    });
+    for (const signerTimeoutMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assert.rejects(
+        buildGuardAuthEntry({ ...base, signer, signerTimeoutMs }),
+        (error: unknown) => {
+          assert.ok(error instanceof RangeError);
+          assert.match(error.message, /signerTimeoutMs/);
+          return true;
+        },
+      );
+    }
+    assert.equal(calls, 0);
   });
 });
 

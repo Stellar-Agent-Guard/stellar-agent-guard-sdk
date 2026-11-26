@@ -33,11 +33,12 @@ import {
   type InvokeQueueEvent,
 } from "../../src/invoke.ts";
 import type { InvokeParams } from "../../src/invoke.ts";
-import { BroadcastError } from "../../src/tx.ts";
+import { BroadcastError, type AgentSigner } from "../../src/tx.ts";
 import {
   ContractResponseError,
   FeeCapExceededError,
   InvalidInputError,
+  SignerTimeoutError,
   SimulationError,
 } from "../../src/errors.ts";
 import { RpcTimeoutError } from "../../src/invoke.ts";
@@ -1633,6 +1634,16 @@ describe("invoke() option validation", () => {
         field: /pollOptions\.pollIntervalMs/,
       },
       { label: "timeoutMs negative", overrides: { timeoutMs: -1 }, field: /timeoutMs/ },
+      {
+        label: "signerTimeoutMs negative",
+        overrides: { signerTimeoutMs: -1 },
+        field: /signerTimeoutMs/,
+      },
+      {
+        label: "signerTimeoutMs NaN",
+        overrides: { signerTimeoutMs: Number.NaN },
+        field: /signerTimeoutMs/,
+      },
       { label: "deadlineMs zero", overrides: { deadlineMs: 0 }, field: /deadlineMs/ },
       {
         label: "deadlineMs infinite",
@@ -2487,6 +2498,57 @@ describe("invoke() pending outcome (issue #299)", () => {
     assert.equal(outcome.kind, "error");
     if (outcome.kind !== "error") throw new Error("unreachable");
     assert.equal(outcome.transactionHash, HASH, "the deadline error keeps the hash");
+  });
+});
+
+describe("invoke signerTimeoutMs (issue #472)", () => {
+  it("does not change a fast signer's dry run", async () => {
+    let signs = 0;
+    const agent: AgentSigner = {
+      publicKey: Keypair.random().publicKey(),
+      signDigest: (digest) => {
+        signs += 1;
+        return Keypair.random().sign(Buffer.from(digest));
+      },
+    };
+    const server = createMockServer();
+
+    const outcome = await invoke(
+      makeParams(server, {
+        dryRun: true,
+        signerTimeoutMs: 1_000,
+        guardAuth: { guard: GUARD, agent },
+      }),
+    );
+
+    assert.equal(outcome.kind, "dry_run");
+    assert.equal(signs, 1);
+    assert.equal(server.sendCount, 0);
+  });
+
+  it("reports a hanging signer as a non-retryable SigningError before broadcast", async () => {
+    const agent: AgentSigner = {
+      publicKey: Keypair.random().publicKey(),
+      signDigest: () => new Promise<Uint8Array>(() => {}),
+    };
+    const server = createMockServer();
+
+    const outcome = await invoke(
+      makeParams(server, {
+        signerTimeoutMs: 5,
+        guardAuth: { guard: GUARD, agent },
+        retry: { maxAttempts: 3, sleep: async () => undefined },
+      }),
+    );
+
+    assert.equal(outcome.kind, "error", "the pipeline resolves to a typed failure");
+    if (outcome.kind !== "error") throw new Error("unreachable");
+    assert.ok(outcome.error instanceof SignerTimeoutError);
+    assert.ok(!(outcome.error instanceof SimulationError));
+    assert.ok(!(outcome.error instanceof RpcTimeoutError));
+    assert.equal(outcome.error.timeoutMs, 5);
+    assert.equal(server.simulationCount, 1, "a signer timeout is never retried");
+    assert.equal(server.sendCount, 0);
   });
 });
 

@@ -217,6 +217,18 @@ export RPC_URL=https://soroban-testnet.stellar.org
   console.error(error.address, isValidAgentPublicKey(signer.publicKey), error.cause);
   ```
 
+### `SignerTimeoutError`
+
+- **Extends:** `SigningError` → `GuardError`. `code` is `"signer_timeout"`.
+- **Typical messages:** `agent signer did not produce a signature within <n>ms`.
+- **Stage:** auth-entry signing inside `invoke()` / `heartbeat()`; nothing was broadcast.
+- **Retry:** No — the signer did not answer within its bound, so retrying it blindly adds no signature and cannot be classified as a transient RPC failure.
+- **First diagnostic:** check `error.timeoutMs` and the remote signer's health, then raise `signerTimeoutMs` deliberately if the signer is merely slow:
+
+  ```ts
+  console.error(error.timeoutMs, error.address, error.cause);
+  ```
+
 ### `AuthRefreshError`
 
 - **Extends:** `SigningError` (and therefore `GuardError`). It is raised before the enforced simulation, so nothing was broadcast.

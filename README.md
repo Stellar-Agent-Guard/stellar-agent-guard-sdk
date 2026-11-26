@@ -722,7 +722,7 @@ two optional caller-owned bounds on the RPC calls they make:
 - `deadlineMs?: number` — **`invoke()`**: one overall budget for the whole
   action. Expiry is fail-closed and reported as an `RpcTimeoutError` with
   `deadline: true`; it can never become an `allowed` outcome. Pass `clock` to
-  make the accounting deterministic in tests. See `docs/api/invoke-pipeline.md`.
+  make the accounting deterministic in tests. See [`docs/api/invoke-pipeline.md`](docs/api/invoke-pipeline.md) and its [Pipeline State Machine](docs/api/invoke-pipeline.md#pipeline-state-machine).
   `checkBatch()` enforces it as one absolute budget for the whole batch: once it
   is spent, no further call starts and every unfinished call is a fail-closed
   `undetermined` verdict carrying an `RpcTimeoutError` with `deadline: true`.

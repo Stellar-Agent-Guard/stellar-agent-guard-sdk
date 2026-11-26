@@ -36,6 +36,8 @@ import { invoke, InvokeRetryError } from "../../src/invoke.ts";
 import {
   GUARD_LOG_LEVELS,
   SILENT_LOGGER,
+  createRedactingLogger,
+  redactLogMeta,
   resolveLogger,
   type GuardLogMeta,
   type GuardLoggerInput,
@@ -290,6 +292,75 @@ describe("resolveLogger", () => {
 
     for (const level of GUARD_LOG_LEVELS) {
       assert.doesNotThrow(() => logger[level]("must not escape"));
+    }
+  });
+});
+
+describe("createRedactingLogger (issue #471)", () => {
+  const sensitiveMeta: GuardLogMeta = {
+    safe: "kept",
+    privateKey: "private-key",
+    nested: { visible: true, secret: "nested-secret" },
+    list: [{ apiKey: "array-secret", visible: true }],
+  };
+
+  it("matches the SDK's own metadata redaction exactly", () => {
+    const lines: Array<GuardLogMeta | undefined> = [];
+    const logger = createRedactingLogger({
+      debug: (_message, meta) => lines.push(meta),
+    });
+    logger.debug("diagnostics", sensitiveMeta);
+
+    assert.deepEqual(lines, [redactLogMeta(sensitiveMeta)]);
+    assert.equal(
+      (sensitiveMeta.nested as { secret: string }).secret,
+      "nested-secret",
+      "caller metadata is not mutated",
+    );
+  });
+
+  it("preserves the host logger's receiver and message", () => {
+    class HostLogger {
+      readonly lines: string[] = [];
+      prefix = "host";
+      info(message: string): void {
+        this.lines.push(`${this.prefix}:${message}`);
+      }
+    }
+    const host = new HostLogger();
+    const logger = createRedactingLogger(host);
+
+    logger.info("started", { privateKey: "do-not-leak" });
+    assert.deepEqual(host.lines, ["host:started"]);
+  });
+
+  it("drops missing levels and contains throwing sinks on every level", () => {
+    const seen: string[] = [];
+    const partial = createRedactingLogger({ warn: (message) => seen.push(message) });
+    assert.doesNotThrow(() => {
+      partial.debug("debug");
+      partial.info("info");
+      partial.error("error");
+      partial.warn("warn");
+    });
+    assert.deepEqual(seen, ["warn"]);
+
+    const throwing = createRedactingLogger({
+      debug: () => {
+        throw new Error("debug sink down");
+      },
+      info: () => {
+        throw new Error("info sink down");
+      },
+      warn: () => {
+        throw new Error("warn sink down");
+      },
+      error: () => {
+        throw new Error("error sink down");
+      },
+    });
+    for (const level of GUARD_LOG_LEVELS) {
+      assert.doesNotThrow(() => throwing[level]("must not escape", sensitiveMeta));
     }
   });
 });

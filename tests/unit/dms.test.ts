@@ -8,7 +8,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "../../src/dms.ts";
+import { DMS_WARN_RATIO_DEFAULT, dmsUrgency, formatDmsCountdown } from "../../src/dms.ts";
 import {
   deadManRemaining,
   unsafeAccountAddress,
@@ -128,5 +128,70 @@ describe("dmsUrgency", () => {
   it("an admin freeze is not a dead-man expiry", () => {
     const s = status({ now: 1010n, heartbeat_expired: true, admin_frozen: true });
     assert.equal(dmsUrgency(s, policy(grace)), "ok");
+  });
+});
+
+describe("formatDmsCountdown (issue #467)", () => {
+  it("is exported from the package root", () => {
+    assert.equal(sdk.formatDmsCountdown, formatDmsCountdown);
+  });
+
+  it("gives each countdown state its own operator-facing wording", () => {
+    const rendered = [
+      formatDmsCountdown(status({ now: 1000n }), null),
+      formatDmsCountdown(status({ now: 1000n }), policy(0n)),
+      formatDmsCountdown(
+        status({ now: 1000n, last_heartbeat: 0n, heartbeat_expired: true }),
+        policy(grace),
+      ),
+      formatDmsCountdown(at(0n), policy(grace)),
+      formatDmsCountdown(at(80n), policy(grace)),
+      formatDmsCountdown(at(100n), policy(grace)),
+    ];
+
+    assert.deepEqual(
+      rendered.map((entry) => entry.state),
+      ["no_policy", "disabled", "never", "ok", "warn", "expired"],
+    );
+    assert.deepEqual(
+      rendered.map((entry) => entry.urgency),
+      ["unknown", "unknown", "unknown", "ok", "warn", "expired"],
+    );
+    assert.equal(new Set(rendered.map((entry) => entry.short)).size, rendered.length);
+    assert.equal(new Set(rendered.map((entry) => entry.long)).size, rendered.length);
+
+    for (const entry of rendered.slice(0, 3)) {
+      assert.equal(entry.remainingSecs, null);
+      assert.ok(!entry.long.includes("0 seconds"), entry.long);
+      assert.ok(!entry.long.includes("expired"), entry.long);
+    }
+  });
+
+  it("uses deadManRemaining for displayed seconds, including boundary seconds", () => {
+    const p = policy(grace);
+    for (const elapsed of [0n, 1n, 79n, 80n, 99n, 100n]) {
+      const s = at(elapsed);
+      const countdown = formatDmsCountdown(s, p);
+      assert.equal(countdown.remainingSecs, deadManRemaining(s, p));
+      assert.equal(countdown.urgency, dmsUrgency(s, p));
+    }
+
+    const ok = formatDmsCountdown(at(0n), p);
+    assert.equal(ok.short, "ok · 1m 40s left");
+    assert.match(ok.long, /1m 40s remaining/);
+
+    const warn = formatDmsCountdown(at(80n), p);
+    assert.equal(warn.short, "warn · 20s left");
+    assert.match(warn.long, /20s remaining/);
+  });
+
+  it("honours nowSecs and warnRatio overrides without locale dependencies", () => {
+    const p = policy(grace);
+    const countdown = formatDmsCountdown(at(10n), p, { nowSecs: 1085n, warnRatio: 0.9 });
+    assert.equal(countdown.state, "ok");
+    assert.equal(countdown.remainingSecs, 15n);
+    assert.equal(countdown.short, "ok · 15s left");
+
+    assert.throws(() => formatDmsCountdown(at(10n), p, { nowSecs: 1085 as never }), TypeError);
   });
 });

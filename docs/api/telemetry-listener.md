@@ -588,3 +588,94 @@ Every decoded `GuardEvent` already carries one — the non-null `id` described i
 [Event identity](#event-identity) — which supersedes the older
 `(ledger, transactionHash)` pair fallback. Never assume a cursor in the store
 has already been fully drained.
+
+### Restart and resume sequence (#435)
+
+The diagram below shows the full lifecycle of a listener that starts, polls,
+saves a cursor, crashes, and resumes exactly where it left off — without
+re-emitting already-processed events or silently skipping new ones.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant L as GuardTelemetryListener
+    participant CS as CursorStore (durable)
+    participant RPC as Soroban RPC
+
+    Note over App,RPC: First run — no stored cursor
+
+    App->>L: watch({ startLedger: N })
+    L->>CS: load(scope)
+    CS-->>L: null (first run)
+    L->>RPC: getEvents(from: N)
+    RPC-->>L: page { events, cursor: C1, latestLedger }
+    L->>CS: save(C1, scope)
+    L-->>App: yield events (page 1)
+    L->>RPC: getEvents(cursor: C1)
+    RPC-->>L: page { events, cursor: C2 }
+    L->>CS: save(C2, scope)
+    L-->>App: yield events (page 2)
+
+    Note over App,RPC: Crash — cursor C2 is in the store
+
+    App->>L: watch() [new listener, same cursorStore]
+    L->>CS: load(scope)
+    CS-->>L: C2
+    L->>RPC: getEvents(cursor: C2)
+    RPC-->>L: page { events, cursor: C3 }
+    L->>CS: save(C3, scope)
+    L-->>App: yield events (page 3, no replay of pages 1–2)
+```
+
+**Guarantees:**
+
+- **At-least-once:** `save()` runs *before* the page is yielded, so a crash
+  between delivery and the next save re-fetches that page. Consumers must
+  deduplicate by `GuardEvent.id` for exactly-once semantics.
+- **Never-lose-the-tail:** pages buffered but not yet delivered when a consumer
+  stops (`break`) are not saved, so a restart re-reads them from the last
+  confirmed position — no events are silently dropped.
+- **Pruned-cursor protection:** if the RPC's retention window has advanced past
+  the stored cursor, `watch()` detects the gap, fires `onGap`, and logs via
+  `describeGap()`. It then resumes from the oldest retained ledger rather than
+  stalling.
+
+#### Committed vs. failed-tx cursor independence
+
+The committed-event cursor (`cursorStore`) and the failed-transaction cursor
+(`failedTxCursorStore`) are stored **independently and are never
+interchangeable**. The two streams use different RPC methods (`getEvents` vs.
+`getTransactions`), so their cursors are opaque to each other; a restart resumes
+each stream from its own last confirmed position:
+
+```mermaid
+sequenceDiagram
+    participant L as GuardTelemetryListener
+    participant ECS as cursorStore
+    participant FCS as failedTxCursorStore
+    participant RPC as Soroban RPC
+
+    Note over L,RPC: Normal poll cycle (failedTx: true)
+
+    L->>RPC: getEvents(cursor: E1)
+    L->>RPC: getTransactions(cursor: F1)
+    RPC-->>L: committed page (cursor: E2)
+    RPC-->>L: failed-tx page (cursor: F2)
+    L->>ECS: save(E2)
+    L->>FCS: save(F2)
+
+    Note over L,RPC: After restart
+
+    L->>ECS: load() → E2
+    L->>FCS: load() → F2
+    L->>RPC: getEvents(cursor: E2)
+    L->>RPC: getTransactions(cursor: F2)
+```
+
+Each store is scoped by `{ network, guard, stream }` (issue #282), so a single
+backing store (a file, a database, or an `InMemoryCursorStore`) can safely serve
+multiple listeners without cursor cross-talk.
+
+For a durable `CursorStore` backed by the filesystem, wire an adapter that
+reads and writes a local file — the `save()` / `load()` interface accepts any
+backing store that persists the cursor string across process restarts.
