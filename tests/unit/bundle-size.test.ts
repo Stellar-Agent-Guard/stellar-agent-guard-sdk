@@ -134,4 +134,52 @@ describe("bundle-size canary (issue #145)", () => {
     assert.match(yaml, /bundle-size canary/);
     assert.match(yaml, /check:bundle-size/);
   });
+
+  it("each import shape has an independent budget and recorded rationale (#494)", async () => {
+    const budget = JSON.parse(await readFile(BUDGET_PATH, "utf8")) as {
+      shapes: Record<
+        string,
+        {
+          name: string;
+          platform: string;
+          rationale: string;
+          baseline: { rawBytes: number; gzipBytes: number };
+          budget: { rawBytes: number; gzipBytes: number };
+        }
+      >;
+    };
+
+    assert.ok(budget.shapes, "shapes object must be defined");
+    const requiredShapes = [
+      "dashboard",
+      "root-full",
+      "preflight-interceptor",
+      "cost-pre-checker",
+      "fs-subpath",
+    ];
+
+    for (const shapeId of requiredShapes) {
+      const shape = budget.shapes[shapeId];
+      assert.ok(shape, `shape "${shapeId}" must be defined`);
+      assert.ok(shape.name, `shape "${shapeId}" must have a name`);
+      assert.ok(
+        shape.rationale && shape.rationale.length > 20,
+        `shape "${shapeId}" must have a documented rationale`,
+      );
+      assert.ok(shape.baseline.rawBytes > 0 && shape.baseline.gzipBytes > 0);
+      assert.ok(shape.budget.rawBytes > shape.baseline.rawBytes);
+      assert.ok(shape.budget.gzipBytes > shape.baseline.gzipBytes);
+    }
+
+    // ./fs is node platform and not browser
+    assert.equal(budget.shapes["fs-subpath"]?.platform, "node");
+    assert.equal(budget.shapes["root-full"]?.platform, "browser");
+
+    // Tree-shaking guarantees: CostPreChecker only must be substantially smaller than root full
+    assert.ok(
+      budget.shapes["cost-pre-checker"]!.budget.rawBytes <
+        budget.shapes["root-full"]!.budget.rawBytes * 0.25,
+      "CostPreChecker only budget must be less than 25% of root-full (tree-shaking)",
+    );
+  });
 });

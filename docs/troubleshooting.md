@@ -11,7 +11,7 @@ the action.
 | `kind: "blocked"` with a `reason` such as `paused`, `heartbeat_expired`, `per_tx_cap_exceeded`, or `recipient_not_allowed` | This is a policy/account refusal, not an RPC failure. For example, `paused` is the admin kill switch; `heartbeat_expired` means the dead-man grace elapsed; `per_tx_cap_exceeded` means the transfer exceeded its per-transaction cap; `window_cap_exceeded` means rolling spend is over budget. | Read the exact reason with `explainReason(reason)` or `reasonMessagesEn[reason]`; the latter includes operator remediation. Check the full [SDK reason glossary](api-reference.md#reason-messages-issue-96) and the [contracts-side operator reason glossary](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/docs/reason-glossary.md). |
 | `heartbeat_expired` / `admin_frozen` or `dmsUrgency(...) === "expired"` | The dead-man grace elapsed, or an administrator froze the account. `dmsUrgency()` is display guidance; it does not unfreeze or authorize anything. | Start and monitor `startHeartbeat()` at an interval no greater than one third of the configured grace window. Use `dmsUrgency()` and `DMS_WARN_RATIO_DEFAULT` to surface the countdown. An admin must perform the [contract unfreeze procedure](https://github.com/Stellar-Agent-Guard/stellar-agent-guard-contracts/blob/main/docs/functions/freeze-unfreeze.md); the SDK exposes `submitUnfreeze()`. Resume heartbeats after unfreezing. |
 | `call mapping failed before enforcement` or `the langchain adapter's call mapper threw` | The adapter's `toContractCall` mapper threw (often a typo in the mapped contract/function/arguments) before the guard could check the action. For example: `call mapping failed before enforcement: the langchain adapter's call mapper threw: Cannot read properties of undefined`. | Correct the mapper and its inputs. Adapter mapping failures halt execution as `undetermined`; the wrapped tool does not run. Use the exact `toContractCall` option name (or `toContractCalls` for a batch); see [framework adapter options](api/framework-adapters.md). |
-| `kind: "over_budget"` | The estimated total fee (resource fee plus inclusion fee) exceeds `maxFeeStroops`. | Raise the `CostPreChecker` ceiling only if the operator's budget permits it. `maxFeeStroops` is a non-negative `bigint`; omission means no fee ceiling, while `0n` is a real zero-stroop ceiling. A per-call ceiling overrides the configured one. This is a pre-flight estimate, not a network fee guarantee; see [cost pre-checking](api/cost-checker.md). |
+| `kind: "over_budget"` | The estimated total fee (resource fee plus inclusion fee) exceeds `maxFeeStroops`. | Raise the `CostPreChecker` ceiling only if the operator's budget permits it. `maxFeeStroops` accepts a non-negative `bigint` or base-10 integer string; omission means no fee ceiling, while `0n` / `"0"` is a real zero-stroop ceiling. A per-call ceiling overrides the configured one. This is a pre-flight estimate, not a network fee guarantee; see [cost pre-checking](api/cost-checker.md). |
 | `tx_bad_auth` or an auth-entry signature verification failure after changing networks | The transaction/auth signature was prepared for a different network passphrase than the RPC network. | Set `networkPassphrase` to the passphrase for the same network served by `server` (for example, testnet is `Test SDF Network ; September 2015`). Keep guard address, RPC URL, and passphrase from the same deployment. |
 | `watch()` yields no events, or `onStreamError` receives a terminal RPC error | The listener may be watching the wrong guard/network, starting after the events of interest, or may have exhausted its bounded retries. A process restart without persisted cursor state can also skip events. | Verify the listener's guard and RPC configuration, and subscribe before the actions to observe. Use `startLedger` for a ledger-range start or `cursor` with its `resumeLedger` for resume/gap detection; persist progress with `cursorStore` (and `failedTxCursorStore` separately when failed-transaction scanning is enabled). Handle `onGap` and `onStreamError`; the terminal error is also available from `getLastError()`. There is no `startFrom` option. See [telemetry listener](api/telemetry-listener.md). |
 | `GuardTelemetryListener already has an active watch()/watchAll() stream` | A second stream was started on a listener that already owns an active stream. A listener shares cursor and de-duplication state and supports one active stream. | Finish/abort the existing stream before starting another, or create a separate `GuardTelemetryListener` for the independent stream. |
@@ -21,6 +21,29 @@ the action.
 The current API does not expose `concurrency` or `startFrom`; do not add either
 to an integration config expecting the SDK to act on it. Limit parallel work in
 the caller, and use the supported timeout, cursor, and listener options above.
+## Inspecting an `undetermined` check without a verdict
+
+When `check()` returns `undetermined`, the guard made no ruling — but the raw
+simulation is often what explains why. `simulateForDiagnostics()` runs the same
+probe and enforced simulation under the same transport, signing and
+`signal`/`timeoutMs` bounds, and returns diagnostics instead of a verdict:
+
+```ts
+const diagnostics = await interceptor.simulateForDiagnostics(call, {
+  timeoutMs: 5_000,
+  // includeRaw: true, // opt in to the undecoded event payloads
+});
+
+diagnostics.authoritative; // always false — never a policy verdict
+if (!diagnostics.ok) console.error(diagnostics.error, diagnostics.detail);
+console.log(diagnostics.resourceFeeStroops, diagnostics.resources);
+console.log(diagnostics.guardEvent?.decision);
+```
+
+The result is explicitly non-authoritative (`authoritative: false`), performs no
+broadcast and signs nothing for submission, and `includeRaw` defaults to `false`
+so host payloads are redacted unless you ask for them.
+
 ## Authorization entries not signed
 
 Ensure the invoke pipeline receives a valid agent key and that the custom account `__check_auth` policy admits the call. Blocked calls are rejected client-side before broadcast.
@@ -35,12 +58,14 @@ See the [Agent Key Rotation and Recovery runbook](concepts/custom-account-signin
 
 ## Error classes
 
-Use this section when a log gives you only a class name. There is exactly one
-entry per error class exported from the package root, headed by the class name
-alone — message text can change between releases, so it is listed inside the
-entry, never in the heading. `tests/unit/troubleshooting-errors.test.ts` fails
-when an exported error class has no entry here, or when an entry's **Retry**
-advice disagrees with `isRetryableHeartbeatFailure()`.
+Use this section when a log gives you only a class name. For the compact class →
+stage → meaning → retry → fail-closed → first-fix mapping, see the
+[error catalog](errors.md#error-classes). There is exactly one entry per error
+class exported from the package root, headed by the class name alone — message
+text can change between releases, so it is listed inside the entry, never in
+the heading. `tests/unit/troubleshooting-errors.test.ts` fails when an exported
+error class has no entry here, or when an entry's **Retry** advice disagrees
+with `isRetryableHeartbeatFailure()`.
 
 Branch on the class with `instanceof` (or on a stable field such as `code`,
 `rule`, `kind`, `path`), not on the message. The hierarchy and the 0.1.x
@@ -192,6 +217,18 @@ export RPC_URL=https://soroban-testnet.stellar.org
   console.error(error.address, isValidAgentPublicKey(signer.publicKey), error.cause);
   ```
 
+### `AuthRefreshError`
+
+- **Extends:** `SigningError` (and therefore `GuardError`). It is raised before the enforced simulation, so nothing was broadcast.
+- **Typical messages:** `could not read the current ledger to refresh auth entries: <detail>`, `could not refresh a near-expiry auth entry: <detail>`, `near-expiry auth entry requires authorization from <address>, but no matching key was provided`.
+- **Stage:** signing, in the refresh check `invoke()` runs after signing and before the enforced simulation. `expirationLedger` is the entry's original near-expiry ledger, `currentLedger` the ledger it was compared against (`null` when the read failed) and `marginLedgers` the configured margin that triggered the refresh.
+- **Retry:** No — the entry was rebuilt and re-signed from the discovery probe on the next pipeline pass; a failure here means the signer or ledger read is unavailable, so retrying the same inputs fails the same way. Raise `authRefreshMarginLedgers`, or set it to `0` to disable the check, only after you understand why the pipeline stalled past the entry's validity.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.address, error.expirationLedger, error.currentLedger, error.marginLedgers, error.cause);
+  ```
+
 ### `BroadcastError`
 
 - **Extends:** `GuardError`. `kind` is `"error"`.
@@ -210,7 +247,7 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Extends:** `GuardError`. `code` is `"fee_cap_exceeded"`.
 - **Typical messages:** `fee cap exceeded: total <n> stroops (resource <n> + inclusion <n>) exceeds maxFeeCap <n> stroops; nothing was broadcast`.
 - **Stage:** `invoke()`, before `sendTransaction`. Nothing was broadcast.
-- **Retry:** No — your own spend ceiling stopped it. Raise `maxFeeCap` only if the budget allows, or wait for resource fees to fall.
+- **Retry:** No — your own spend ceiling stopped it. Raise the ceiling (`invoke()`'s `maxFeeStroops`, or `CostPreChecker`'s `maxFeeStroops`) only if the budget allows, or wait for resource fees to fall.
 - **First diagnostic:** see which half grew:
 
   ```ts

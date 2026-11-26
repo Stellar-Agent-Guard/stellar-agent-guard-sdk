@@ -64,7 +64,7 @@ Reading the numbers:
 
 ## Why there is no CI gate
 
-CI runs `npm run bench` informationally and never fails the build on wall-time
+CI runs `npm run bench:compare` informationally and never fails the build on wall-time
 (`.github/workflows/ci.yml`, the `decode-path benchmarks (informational)` step,
 `continue-on-error: true`). Shared GitHub runners have noisy, virtualised CPUs,
 a shared L2 cache, and neighbours running unrelated work; a timing threshold
@@ -72,6 +72,19 @@ derived from any committed baseline would flake on exactly the runner class CI
 uses. The honest use of a benchmark is a before/after comparison recorded in a
 PR's description, on a machine where the only thing that changed is the code.
 
-When a change to the decode path needs a number, run `npm run bench` before and
-after on the same machine and quote both in the PR — do not trust the committed
-baseline across machines.
+## Automated comparison & tolerance model (issue #495)
+
+To catch regressions without manually inspecting raw console outputs:
+
+```bash
+npm run bench:compare
+```
+
+1. **Automated Delta Calculation:** Compares current median times against the committed baseline above and surfaces a table of Current vs Baseline vs Delta % in the CI job summary (`$GITHUB_STEP_SUMMARY`).
+2. **Tolerance Rationale:** A generous tolerance of **50%** is used. Virtualized runner CPUs exhibit standard deviation spikes up to ~30-40% under noisy neighbour conditions. The 50% margin prevents noise from flagging false alarms while immediately highlighting genuine regressions (>50% slowdown).
+3. **Advisory, Never Gating:** The step is strictly informational (`continue-on-error: true`). Timing noise will never redden a PR build or block merges.
+4. **Explicit Re-baselining:** To update the committed baseline numbers when code optimizations land:
+   ```bash
+   npm run bench:rebaseline -- --reason="Optimized ScVal Vec traversal in decodePolicy"
+   ```
+   An explicit `--reason` argument is required, ensuring any baseline change is accompanied by a documented, reviewed justification.

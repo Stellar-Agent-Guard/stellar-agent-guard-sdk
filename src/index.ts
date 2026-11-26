@@ -23,6 +23,7 @@
 export {
   AdapterConfigError,
   AdapterMappingError,
+  AuthRefreshError,
   BroadcastError,
   ContractResponseError,
   FeeCapExceededError,
@@ -97,7 +98,7 @@ export {
 export type { ActiveWindowState, DescribePolicyOptions } from "./policy.ts";
 
 export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
-export { policyDiff } from "./policy-diff.ts";
+export { formatPolicyDiff, policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
 export type { DmsUrgency } from "./dms.ts";
 
@@ -184,6 +185,7 @@ export {
   INVOKE_ERROR_CAUSES,
   InvokeRetryError,
   invoke,
+  invokeQueueStats,
   RpcTimeoutError,
   topicSymbols,
   type EnforcementOutcome,
@@ -200,9 +202,13 @@ export {
   type InvokeParamsInput,
   type InvokePendingOutcome,
   type InvokePipelineStep,
+  type InvokeQueueEvent,
+  type InvokeQueueStats,
   type InvokeRetryAttempt,
+  type InvokeRetryEvent,
   type InvokeRetryMetadata,
   type InvokeStepEvent,
+  type InvokeTiming,
   type RetryableInvokeFailure,
   type SubmissionAcceptedEvent,
 } from "./invoke.ts";
@@ -242,10 +248,15 @@ export type {
   PreFlightDecision,
   PreFlightInterceptorOptions,
   PreFlightUndeterminedCause,
+  SimulationDiagnostics,
+  SimulationDiagnosticsOptions,
+  WarmCacheOptions,
+  WarmCacheSummary,
 } from "./preflight.ts";
 
 export {
   CostPreChecker,
+  FEE_PERCENTILES,
   STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
@@ -258,14 +269,22 @@ export {
 
 export type {
   CostDecision,
+  CostDecisionProvenance,
   CostPreCheckConfig,
   CostPreCheckOptions,
   CostPreCheckResult,
   CostProvenance,
+  CostTransactionCheckOptions,
   CostWithDecision,
   FeeBreakdown,
+  FeePercentile,
+  FeeSource,
+  FeeStatsProvider,
+  FeeStatsResponse,
+  HeadroomWarning,
   PolicyContext,
   ResourceBreakdown,
+  TransactionCostProvenance,
   WindowSpendSnapshot,
 } from "./cost.ts";
 
@@ -325,10 +344,15 @@ export {
 } from "./telemetry.ts";
 
 export {
+  DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
+  DEFAULT_WAIT_POLL_INTERVAL_MS,
+  DEFAULT_WAIT_TIMEOUT_MS,
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
+  authEntryNeedsRefresh,
+  authEntrySignatureExpiration,
   buildGuardAuthEntry,
   buildInitialEnvelope,
   describeSimulationResources,
@@ -339,19 +363,33 @@ export {
   isStaleLedgerResourceFailure,
   isValidAgentPublicKey,
   keypairAgentSigner,
+  refreshNearExpiryAuthEntries,
   toAgentSigner,
   validateAgentPublicKey,
   verifyAgentSignature,
+  waitForTransaction,
 } from "./tx.ts";
 
 export type {
   AdminSigner,
   AgentSigner,
+  AuthRefreshResult,
   ContractCall,
   GuardCredentialType,
   SimulationOutcome,
   SubmissionResult,
+  WaitForTransactionParams,
+  WaitForTransactionResult,
 } from "./tx.ts";
+
+export {
+  buildTransferCall,
+  buildTransferFromCall,
+  checkTransfer,
+  checkTransferFrom,
+} from "./transfer.ts";
+
+export type { TransferFromRequest, TransferRequest } from "./transfer.ts";
 
 export {
   DEFAULT_NETWORK_PASSPHRASE,
@@ -450,24 +488,32 @@ export type {
 // The operator alerting primitive every adapter shares (`onBlocked`).
 // Exported so a consumer can type its sink and build the payload itself.
 export {
+  DEFAULT_ADAPTER_TIMEOUT_MS,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
+  mergeAbortSignals,
   normalizeMappedCall,
   normalizeMappedCalls,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
+  runMappingErrorHook,
 } from "./adapters/shared.ts";
 
 export type {
   BlockedHookLogger,
   GuardAdapterName,
+  GuardBatchDecisionHook,
+  GuardBatchDecisionInfo,
   GuardBlockedHook,
   GuardBlockedInfo,
   GuardCallMapper,
+  GuardMappingErrorHook,
+  GuardMappingErrorInfo,
 } from "./adapters/shared.ts";
 
 // Optional logging. `SILENT_LOGGER` is the default every config resolves to
