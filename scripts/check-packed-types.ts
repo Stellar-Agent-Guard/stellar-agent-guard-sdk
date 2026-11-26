@@ -76,15 +76,24 @@ import {
   type ContractCall,
   type ElizaGuardOptions,
   type GuardBlockedInfo,
+  type GuardPolicy,
   type LangChainGuardOptions,
   type McpGuardOptions,
   type PreFlightBatchDecision,
   type PreFlightDecision,
   type VercelAIGuardOptions,
 } from "stellar-agent-guard-sdk";
+import {
+  loadPolicyFromFile,
+  type LoadPolicyFromFileOptions,
+} from "stellar-agent-guard-sdk/fs";
 
 declare const interceptor: PreFlightInterceptor;
 declare const call: ContractCall;
+declare const fsOpts: LoadPolicyFromFileOptions;
+
+const fsLoaded: Promise<GuardPolicy> = loadPolicyFromFile("fixture.json", fsOpts);
+void fsLoaded;
 
 const decision: PreFlightDecision = {
   allowed: false,
@@ -164,10 +173,12 @@ function run(): void {
     mkdirSync(packDir);
     const tarball = pack(packDir);
 
-    const declaredTypes = "dist/index.d.ts";
+    const declaredTypes = ["dist/index.d.ts", "dist/fs.d.ts"];
     const packedPaths = new Set((tarball.files ?? []).map((file) => file.path));
-    if (!packedPaths.has(declaredTypes)) {
-      fail(`the packed tarball does not contain ${declaredTypes}`);
+    for (const dt of declaredTypes) {
+      if (!packedPaths.has(dt)) {
+        fail(`the packed tarball does not contain ${dt}`);
+      }
     }
 
     const consumerDir = join(workDir, "consumer");
