@@ -271,7 +271,10 @@ export class JsonFileCursorStore implements CursorStore {
   /** Run one operation after every previously queued operation. */
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task);
-    this.queue = run.then(() => undefined, () => undefined);
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
     return run;
   }
 
@@ -435,7 +438,12 @@ class JsonLinesFileWriter implements JsonLinesWriter {
           await handle.truncate(start);
           this.size = start;
         } catch {
-          // The handle is unusable; leave the original failure as the cause.
+          // The handle is unusable (on Windows, opening a directory succeeds and
+          // the failure surfaces at write time, where truncate then fails too).
+          // Drop it so the next write reopens the path instead of reusing a
+          // stale handle; the on-disk size is re-read on reopen.
+          this.handle = null;
+          await handle.close().catch(() => undefined);
         }
         throw error;
       }
@@ -457,7 +465,10 @@ class JsonLinesFileWriter implements JsonLinesWriter {
 
   private enqueue<T>(task: () => Promise<T>): Promise<T> {
     const run = this.queue.then(task, task);
-    this.queue = run.then(() => undefined, () => undefined);
+    this.queue = run.then(
+      () => undefined,
+      () => undefined,
+    );
     return run;
   }
 
