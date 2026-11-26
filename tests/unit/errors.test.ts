@@ -11,6 +11,7 @@ import { xdr } from "@stellar/stellar-sdk";
 import {
   AdapterConfigError,
   AdapterMappingError,
+  AuthRefreshError,
   BroadcastError,
   ConcurrentTelemetryStreamError,
   ContractResponseError,
@@ -161,6 +162,16 @@ const ERROR_CASES: Array<[string, () => Error]> = [
   [
     "SigningError",
     () => new SigningError("sign failed", { address: "GABC", cause: new Error("root") }),
+  ],
+  [
+    "AuthRefreshError",
+    () =>
+      new AuthRefreshError("auth entry expired before the enforced simulation", {
+        address: "GABC",
+        expirationLedger: 1003,
+        currentLedger: 1000,
+        marginLedgers: 5,
+      }),
   ],
   [
     "BroadcastError",

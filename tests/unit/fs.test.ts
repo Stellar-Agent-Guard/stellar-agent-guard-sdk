@@ -6,7 +6,15 @@
  * expected to branch on the class.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { after, describe, it } from "node:test";
@@ -14,12 +22,22 @@ import {
   PolicyDecodeError,
   PolicyFileReadError,
   PolicyValidationError,
+  parseEventRecord,
   policyToJson,
+  serializeEventRecord,
   unsafeAccountAddress,
   unsafeContractAddress,
+  type CursorStoreScope,
+  type GuardEvent,
   type PolicyConfig,
 } from "../../src/index.ts";
-import { diffPolicyFiles, formatPolicyDiff, loadPolicyFromFile } from "../../src/fs.ts";
+import {
+  JsonFileCursorStore,
+  createJsonLinesWriter,
+  diffPolicyFiles,
+  formatPolicyDiff,
+  loadPolicyFromFile,
+} from "../../src/fs.ts";
 
 const TOKEN = unsafeContractAddress("CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB");
 const RECIPIENT = unsafeAccountAddress("GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH");
@@ -295,5 +313,249 @@ describe("diffPolicyFiles (issue #499)", () => {
       "~ per_tx_cap: 100 -> 200\n+ recipients[0]: GAOBC\n- recipients[1]: GBRPY",
     );
     assert.equal(formatPolicyDiff([]), "");
+  });
+});
+
+const GUARD = "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44";
+
+/** One complete committed guard event, enough for a parseable record. */
+function guardEvent(id: string): GuardEvent {
+  return {
+    id,
+    kind: "auth_checked",
+    topic: "event_auth_checked",
+    source: "ledger",
+    stream: "committed",
+    contractId: GUARD,
+    ledger: 42,
+    ledgerClosedAt: "2026-11-25T00:00:00Z",
+    observedAt: null,
+    transactionHash: "ab".repeat(32),
+    decision: { result: "allowed", reason: null, source: "ledger" },
+    data: {},
+  };
+}
+
+describe("JsonFileCursorStore (issue #426)", () => {
+  const scope = (
+    stream: CursorStoreScope["stream"],
+    network = "rpc.testnet",
+  ): CursorStoreScope => ({
+    network,
+    guard: GUARD,
+    stream,
+  });
+
+  it("keeps scoped committed and failed-tx cursors across a simulated restart", async () => {
+    const file = join(scratch, "cursor-store.json");
+    const first = new JsonFileCursorStore({ path: file });
+    await first.save("committed-1", scope("events"));
+    await first.save("failed-tx-1", scope("failed_tx"));
+
+    // A new instance is a new process: it must read the file, not shared state.
+    const restarted = new JsonFileCursorStore({ path: file });
+    assert.equal(await restarted.load(scope("events")), "committed-1");
+    assert.equal(await restarted.load(scope("failed_tx")), "failed-tx-1");
+  });
+
+  it("scopes cursors by network and guard, and keeps unscoped use separate", async () => {
+    const file = join(scratch, "cursor-scopes.json");
+    const store = new JsonFileCursorStore({ path: file });
+    await store.save("mainnet", scope("events", "rpc.mainnet"));
+    await store.save("testnet", scope("events"));
+    await store.save("unscoped");
+
+    const restarted = new JsonFileCursorStore({ path: file });
+    assert.equal(await restarted.load(scope("events", "rpc.mainnet")), "mainnet");
+    assert.equal(await restarted.load(scope("events")), "testnet");
+    assert.equal(await restarted.load(), "unscoped");
+    assert.equal(await restarted.load({ ...scope("events"), guard: "COTHER" }), null);
+  });
+
+  it("treats a missing file as an empty store and touches no file until a save", async () => {
+    const file = join(scratch, "cursor-missing.json");
+    const store = new JsonFileCursorStore({ path: file });
+
+    assert.equal(await store.load(scope("events")), null);
+    assert.equal(existsSync(file), false, "loading must not create the store file");
+  });
+
+  it("does not rewrite the file when the cursor is unchanged", async () => {
+    const file = join(scratch, "cursor-unchanged.json");
+    const store = new JsonFileCursorStore({ path: file });
+    await store.save("cursor-1", scope("events"));
+
+    rmSync(file);
+    await store.save("cursor-1", scope("events"));
+
+    assert.equal(existsSync(file), false, "an unchanged cursor must not be written again");
+    assert.equal(await store.load(scope("events")), "cursor-1");
+  });
+
+  it("rejects corrupt JSON with PolicyFileReadError naming the path", async () => {
+    const file = writeTemp("cursor-corrupt.json", "{ not json");
+
+    await assert.rejects(
+      new JsonFileCursorStore({ path: file }).load(scope("events")),
+      (error: unknown) => {
+        assert(error instanceof PolicyFileReadError);
+        assert.equal(error.path, file);
+        assert.equal(error.code, "EJSONPARSE");
+        assert.match(error.message, /recoverCorrupt/);
+        return true;
+      },
+    );
+  });
+
+  it("recovers from a corrupt file only when recoverCorrupt is explicit", async () => {
+    const file = writeTemp("cursor-recover.json", "[]");
+    const store = new JsonFileCursorStore({ path: file, recoverCorrupt: true });
+
+    assert.equal(await store.load(scope("events")), null);
+    await store.save("cursor-2", scope("events"));
+
+    const restarted = new JsonFileCursorStore({ path: file });
+    assert.equal(await restarted.load(scope("events")), "cursor-2");
+  });
+
+  it("rejects a JSON value that is not a cursor string", async () => {
+    const file = writeTemp("cursor-bad-value.json", JSON.stringify({ key: 42 }));
+
+    await assert.rejects(
+      new JsonFileCursorStore({ path: file }).load(),
+      (error: unknown) => error instanceof PolicyFileReadError,
+    );
+  });
+
+  it("serializes concurrent saves and leaves no temporary files behind", async () => {
+    const file = join(scratch, "cursor-concurrent.json");
+    const store = new JsonFileCursorStore({ path: file });
+
+    await Promise.all([
+      store.save("a", scope("events", "net-a")),
+      store.save("b", scope("events", "net-b")),
+      store.save("c", scope("failed_tx", "net-a")),
+    ]);
+
+    const restarted = new JsonFileCursorStore({ path: file });
+    assert.equal(await restarted.load(scope("events", "net-a")), "a");
+    assert.equal(await restarted.load(scope("events", "net-b")), "b");
+    assert.equal(await restarted.load(scope("failed_tx", "net-a")), "c");
+
+    const leftovers = readdirSync(scratch).filter((name) => name.endsWith(".tmp"));
+    assert.deepEqual(leftovers, [], "atomic writes must not leave temp files");
+  });
+});
+
+describe("createJsonLinesWriter (issue #427)", () => {
+  it("writes one parseable serializeEventRecord() line per event", async () => {
+    const file = join(scratch, "events.jsonl");
+    const writer = createJsonLinesWriter({ path: file });
+
+    await writer.write(guardEvent("ledger:1:event_auth_checked"));
+    await writer.write(guardEvent("ledger:2:event_auth_checked"));
+    await writer.close();
+
+    assert.equal(writer.count, 2);
+    const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+    assert.equal(lines.length, 2);
+    assert.equal(
+      lines[0],
+      serializeEventRecord(guardEvent("ledger:1:event_auth_checked")),
+      "the file must contain the same record format as recentJsonLines()",
+    );
+    for (const line of lines) {
+      const parsed = parseEventRecord(line);
+      assert.equal(parsed.version, 1);
+      assert.equal(parsed.event.kind, "auth_checked");
+    }
+  });
+
+  it("rotates by size and retains at most maxFiles rotated files", async () => {
+    const file = join(scratch, "events-rotated.jsonl");
+    const sample = guardEvent("ledger:0:event_auth_checked");
+    const lineBytes = Buffer.byteLength(`${serializeEventRecord(sample)}\n`);
+    const writer = createJsonLinesWriter({ path: file, maxBytes: lineBytes * 2, maxFiles: 2 });
+
+    for (let index = 1; index <= 5; index += 1) {
+      await writer.write(guardEvent(`ledger:${index}:event_auth_checked`));
+    }
+    await writer.close();
+
+    assert.ok(existsSync(file));
+    assert.ok(existsSync(`${file}.1`));
+    assert.ok(existsSync(`${file}.2`));
+    assert.equal(existsSync(`${file}.3`), false, "maxFiles bounds the retained history");
+
+    const files = [file, `${file}.1`, `${file}.2`];
+    const ids = files.flatMap((path) =>
+      readFileSync(path, "utf8")
+        .trimEnd()
+        .split("\n")
+        .filter((line) => line.length > 0)
+        .map((line) => parseEventRecord(line).event.id),
+    );
+    assert.deepEqual(ids.sort(), [
+      "ledger:1:event_auth_checked",
+      "ledger:2:event_auth_checked",
+      "ledger:3:event_auth_checked",
+      "ledger:4:event_auth_checked",
+      "ledger:5:event_auth_checked",
+    ]);
+  });
+
+  it("does not interleave lines when writes run concurrently", async () => {
+    const file = join(scratch, "events-concurrent.jsonl");
+    const writer = createJsonLinesWriter({ path: file });
+
+    await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        writer.write(guardEvent(`ledger:${index}:event_auth_checked`)),
+      ),
+    );
+    await writer.flush();
+    await writer.close();
+
+    const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+    assert.equal(lines.length, 20);
+    const ids = lines.map((line) => parseEventRecord(line).event.id);
+    assert.equal(new Set(ids).size, 20, "every record must be complete and distinct");
+    assert.equal(writer.count, 20);
+  });
+
+  it("surfaces a write failure once and keeps later lines parseable", async () => {
+    const file = join(scratch, "events-failure.jsonl");
+    // A directory at the target path makes the first open fail (EISDIR on POSIX,
+    // EPERM/EISDIR on Windows); removing it lets the same writer recover.
+    mkdirSync(file);
+    const writer = createJsonLinesWriter({ path: file });
+
+    await assert.rejects(writer.write(guardEvent("ledger:1:event_auth_checked")));
+    assert.equal(writer.count, 0);
+
+    rmSync(file, { recursive: true, force: true });
+    await writer.write(guardEvent("ledger:2:event_auth_checked"));
+    await writer.close();
+
+    const lines = readFileSync(file, "utf8").trimEnd().split("\n");
+    assert.equal(lines.length, 1);
+    assert.equal(parseEventRecord(lines[0]!).event.id, "ledger:2:event_auth_checked");
+    assert.equal(writer.count, 1);
+  });
+
+  it("rejects a write after close and validates rotation options", async () => {
+    const file = join(scratch, "events-closed.jsonl");
+    const writer = createJsonLinesWriter({ path: file });
+    await writer.close();
+
+    await assert.rejects(writer.write(guardEvent("ledger:1:event_auth_checked")), /closed/);
+    assert.throws(
+      () => createJsonLinesWriter({ path: file, maxBytes: 0 }),
+      (error: unknown) => error instanceof RangeError,
+    );
+    assert.throws(
+      () => createJsonLinesWriter({ path: file, maxFiles: -1 }),
+      (error: unknown) => error instanceof RangeError,
+    );
   });
 });

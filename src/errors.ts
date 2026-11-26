@@ -307,6 +307,45 @@ export class SigningError extends GuardError {
   }
 }
 
+/**
+ * A guard auth entry was close to its signature expiration and could not be
+ * rebuilt and re-signed (issue #422).
+ *
+ * Distinct from a generic `SigningError` because the failure is specifically
+ * about *extending* an entry that the pipeline had already accepted: the
+ * caller's remedy is signer/network health, not the authorization contents,
+ * and nothing was broadcast. `expirationLedger` is the entry's original
+ * (near-expiry) ledger, `currentLedger` the ledger it was compared against and
+ * `marginLedgers` the configured margin that triggered the refresh.
+ */
+export class AuthRefreshError extends SigningError {
+  /** The signature expiration ledger carried by the entry that needed refreshing. */
+  readonly expirationLedger: number | null;
+  /** The ledger sequence the refresh check used as "now"; `null` when it could not be read. */
+  readonly currentLedger: number | null;
+  /** The configured margin, in ledgers, below which an entry is refreshed. */
+  readonly marginLedgers: number;
+
+  constructor(
+    message: string,
+    options: {
+      address?: string | null;
+      expirationLedger?: number | null;
+      currentLedger: number | null;
+      marginLedgers: number;
+      cause?: unknown;
+    },
+  ) {
+    super(message, {
+      ...(options.address !== undefined ? { address: options.address } : {}),
+      ...(options.cause !== undefined ? { cause: options.cause } : {}),
+    });
+    this.expirationLedger = options.expirationLedger ?? null;
+    this.currentLedger = options.currentLedger;
+    this.marginLedgers = options.marginLedgers;
+  }
+}
+
 export interface BroadcastFailurePayload {
   resultXdr: string | null;
   resultCode: string | null;
