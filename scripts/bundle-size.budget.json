@@ -60,28 +60,30 @@
       "name": "CostPreChecker only",
       "entryCode": "export { CostPreChecker } from '../src/index.ts';",
       "platform": "browser",
-      "rationale": "Consumers performing only simulation cost pre-checks should pay only for BigNumber and minimal cost helpers. Verifies tree-shaking prevents leaking policy engine or telemetry into lightweight cost checkers.",
+      "rationale": "Consumers performing simulation cost pre-checks receive exact-envelope transaction quotes, string fee normalization, and transaction provenance without pulling in the policy engine or telemetry. Budget was remeasured after those additive APIs increased the cost-checker-only import by 24,979 raw bytes and 5,207 gzip bytes.",
       "baseline": {
-        "rawBytes": 90121,
-        "gzipBytes": 24008
+        "sourceCommit": "0566ba35e920844b97823c4ad022387d84edd35f",
+        "measuredAt": "2026-11-24T11:38:05.000Z",
+        "rawBytes": 115100,
+        "gzipBytes": 29215
       },
       "budget": {
-        "rawBytes": 99133,
-        "gzipBytes": 27609
+        "rawBytes": 126610,
+        "gzipBytes": 33598
       }
     },
     "fs-subpath": {
       "name": "./fs subpath (Node-only)",
       "entryCode": "export * from '../src/fs.ts';",
       "platform": "node",
-      "rationale": "Node-only filesystem adapter and policy storage subpath. Bundled with platform=node so node:* imports remain external and are not compared against browser budgets.",
+      "rationale": "Node-only filesystem adapter and policy storage subpath. Bundled with platform=node so node:* imports remain external and are not compared against browser budgets. Re-baselined after the durable JSON cursor store and JSONL event writer added 10,802 raw bytes and 3,547 gzip bytes to this subpath (measured 2026-11-26: 105,832 raw / 28,027 gzip).",
       "baseline": {
-        "rawBytes": 95030,
-        "gzipBytes": 24480
+        "rawBytes": 105832,
+        "gzipBytes": 28027
       },
       "budget": {
-        "rawBytes": 104533,
-        "gzipBytes": 28152
+        "rawBytes": 116415,
+        "gzipBytes": 32231
       }
     }
   }

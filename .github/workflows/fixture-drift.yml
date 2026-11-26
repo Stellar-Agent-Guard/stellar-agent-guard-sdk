@@ -1,0 +1,92 @@
+# Contract-fixture drift detection (issue #490) — scheduled, never on PRs.
+#
+# `tests/fixtures/vendor/*.json` are hash-pinned to a contracts commit. This job
+# compares every registered feed (reasons, policy schema, policy vectors, auth
+# vocabulary — `VENDORED_ARTIFACTS` in scripts/vendor-fixtures.ts) against the
+# contracts repo's default-branch HEAD and keeps ONE tracking issue in step:
+#
+#   - drift, no open issue labeled `fixture-drift`  -> create it;
+#   - drift, issue already open                      -> edit its body to the
+#                                                      latest report + comment;
+#   - no drift, issue open                           -> close it with the run link;
+#   - no drift, no issue                             -> no-op.
+#
+# Deliberately NOT part of `ci`: pull requests must never depend on the network
+# or on upstream's current state, and drift is not a defect of the PR under
+# review. A network failure fails this job (visible on the Actions page) without
+# touching the tracking issue.
+#
+# No secret: upstream is public. The automatic GITHUB_TOKEN is used only for the
+# issue calls (and to lift the anonymous API rate limit on one HEAD lookup).
+name: fixture-drift
+
+concurrency: fixture-drift
+
+on:
+  schedule:
+    # Weekly, Monday 07:43 UTC — after the live suite, off the hour.
+    - cron: "43 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  drift:
+    name: fixture drift (contracts HEAD)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: install
+        run: npm ci --ignore-scripts
+
+      - name: compare vendored digests with upstream HEAD
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: node --import tsx scripts/check-fixture-drift.ts --report "$RUNNER_TEMP/drift.md"
+
+      - name: open or update the tracking issue
+        if: steps.check.outputs.drift == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          UPSTREAM: ${{ steps.check.outputs.upstream }}
+        run: |
+          set -euo pipefail
+          LABEL="fixture-drift"
+          gh label create "$LABEL" --color FBCA04 \
+            --description "Vendored contract fixtures differ from upstream" 2>/dev/null || true
+          existing="$(gh issue list --state open --label "$LABEL" --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file "$RUNNER_TEMP/drift.md"
+            gh issue comment "$existing" --body "Still drifting against upstream \`${UPSTREAM:0:7}\`: ${RUN_URL}"
+            echo "fixture-drift: updated #$existing"
+          else
+            gh issue create --title "Vendored contract fixtures drifted from upstream" \
+              --label "$LABEL" --body-file "$RUNNER_TEMP/drift.md"
+            echo "fixture-drift: opened a tracking issue"
+          fi
+
+      - name: close the tracking issue once back in sync
+        if: steps.check.outputs.drift == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          existing="$(gh issue list --state open --label fixture-drift --json number --jq '.[0].number')"
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "Vendored fixtures match upstream again: ${RUN_URL}"
+          fi

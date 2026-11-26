@@ -26,12 +26,31 @@
  * the handler never runs, and the failure is reported through `onBlocked` with
  * `reason: null` and no `call` (there is no mapped call to name). A mapper
  * returning `null` is still "not fund-moving" and passes through untouched.
+ *
+ * Mapping failures also have their own hook (issue #453). `onBlocked` still
+ * fires for compatibility — the halt is real — but `onMappingError` fires
+ * first, so an operator can tell an integration bug apart from a policy
+ * refusal instead of reading both as `kind: "undetermined"`. Its payload names
+ * the adapter, the tool and the error class, and deliberately omits the raw
+ * request (and therefore the tool arguments) unless the host opts in.
  */
 import { AdapterMappingError, GuardError, GuardUndeterminedError } from "../errors.ts";
 import { GuardBlockedError } from "../reasons.ts";
-import type { InvokeStepEvent } from "../invoke.ts";
+import { DEFAULT_RPC_TIMEOUT_MS, type InvokeStepEvent } from "../invoke.ts";
 import type { PreFlightCheckOptions, PreFlightDecision } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
+
+/**
+ * The default bound, in milliseconds, every framework adapter applies to each
+ * RPC call its pre-flight check makes (issue #455).
+ *
+ * It aliases the pre-flight pipeline's own `DEFAULT_RPC_TIMEOUT_MS` rather than
+ * restating `30_000`, so the two can never drift; it is exported so a wrapper
+ * or documentation can reference the same number instead of hard-coding it.
+ * `timeoutMs: 0` opts out of the timeout entirely and leaves cancellation to
+ * `signal`.
+ */
+export const DEFAULT_ADAPTER_TIMEOUT_MS = DEFAULT_RPC_TIMEOUT_MS;
 
 /**
  * Which adapter observed the halt. This is the payload's `adapter` field, so an
@@ -85,6 +104,60 @@ export interface GuardBlockedInfo {
  * integrator; see `runBlockedHook` for the isolation guarantee.
  */
 export type GuardBlockedHook = (info: GuardBlockedInfo) => void;
+
+/**
+ * Summary of a batch pre-flight check handed to `onBatchDecision` (issue #498).
+ */
+export interface GuardBatchDecisionInfo {
+  /** The adapter that executed the batch check. */
+  adapter: GuardAdapterName;
+  /** Overall batch outcome: "admissible" if all calls passed, otherwise the first refusal kind. */
+  kind: "admissible" | "blocked" | "undetermined";
+  /** Per-call verdicts in the order the adapter checked them. */
+  verdicts: readonly PreFlightDecision[];
+  /** Every contract call in the checked batch, in order. */
+  calls: readonly ContractCall[];
+  /** Optional correlation identifier (e.g. toolCall id). */
+  correlationId?: string | undefined;
+}
+
+/**
+ * Action-level batch decision hook. Called once after checking an entire batch of calls.
+ */
+export type GuardBatchDecisionHook = (info: GuardBatchDecisionInfo) => void;
+
+/**
+ * The structured payload handed to `onMappingError` (issue #453).
+ *
+ * A mapping failure means the integration's own `toContractCall`/
+ * `toContractCalls` threw or returned a malformed value — never that the guard
+ * refused anything. `tool` and `errorClass` are always present and safe to
+ * alert on; the raw `request` (and therefore the tool arguments, which may
+ * carry secrets) is included only when the adapter was constructed with
+ * `includeMappingErrorRequest: true`.
+ */
+export interface GuardMappingErrorInfo {
+  /** The adapter whose mapper failed. */
+  adapter: GuardAdapterName;
+  /** The tool/action name whose mapping failed; never its arguments. */
+  tool: string;
+  /** The error's class name (`AdapterMappingError`), so a sink can group failures. */
+  errorClass: string;
+  /** The typed mapping error; its message names the mapper and the failure. */
+  error: AdapterMappingError;
+  /**
+   * The request the mapper failed on, present only when the host opted in via
+   * `includeMappingErrorRequest`. Absent by default: tool arguments can contain
+   * secrets and a mapping-error sink is often a remote webhook.
+   */
+  request?: unknown;
+}
+
+/**
+ * Integration-bug hook: fired once, immediately before a mapping failure's
+ * fail-closed halt, and isolated exactly like `onBlocked`.
+ */
+export type GuardMappingErrorHook = (info: GuardMappingErrorInfo) => void;
 
 /**
  * Where a swallowed hook failure is reported, when the host opts in.
@@ -195,13 +268,20 @@ export function mapContractCalls<T>(request: T, mapper: GuardCallMapper<T>): Con
  * run — and the payload omits `call` because the mapping failed before any
  * call existed. A mapper's own error is wrapped in `AdapterMappingError` so the
  * cause stays machine-readable (`instanceof`) without echoing arbitrary values.
+ *
+ * The returned `mapping` payload feeds `onMappingError` (issue #453). `request`
+ * is attached only when the caller supplies it, which the adapters do only for
+ * hosts that opted into `includeMappingErrorRequest`.
  */
 export function mappingFailureFor(
   adapter: GuardAdapterName,
   error: unknown,
+  tool = "unknown",
+  request?: unknown,
 ): {
   decision: Extract<PreFlightDecision, { kind: "undetermined" }>;
   info: GuardBlockedInfo;
+  mapping: GuardMappingErrorInfo;
 } {
   const mappingError =
     error instanceof AdapterMappingError
@@ -216,6 +296,13 @@ export function mappingFailureFor(
   return {
     decision: { allowed: false, kind: "undetermined", detail, error: mappingError },
     info: { adapter, kind: "undetermined", reason: null, explanation: detail },
+    mapping: {
+      adapter,
+      tool,
+      errorClass: mappingError.name,
+      error: mappingError,
+      ...(request !== undefined ? { request } : {}),
+    },
   };
 }
 
@@ -307,6 +394,11 @@ export function blockedInfoForBatch(
  * it describes the request currently being guarded. An aborted signal and a
  * fired `timeoutMs` both surface as the interceptor's `undetermined` verdict,
  * which the adapters already fail closed on.
+ *
+ * `timeoutMs` always resolves to the shared `DEFAULT_ADAPTER_TIMEOUT_MS` when
+ * the host did not supply one (issue #455), so every adapter applies the same
+ * bound and a test can assert it. `timeoutMs: 0` is forwarded unchanged: it is
+ * a real opt-out, not an omission.
  */
 export function checkOptionsFor(
   control: {
@@ -320,8 +412,52 @@ export function checkOptionsFor(
   return {
     ...(control.onStep ? { onStep: control.onStep } : {}),
     ...(signal ? { signal } : {}),
-    ...(control.timeoutMs !== undefined ? { timeoutMs: control.timeoutMs } : {}),
+    timeoutMs: control.timeoutMs ?? DEFAULT_ADAPTER_TIMEOUT_MS,
   };
+}
+
+/**
+ * Combine two cancellation signals into one that aborts when either does
+ * (issue #454).
+ *
+ * `AbortSignal.any()` is the exact primitive for this and is used when the
+ * runtime provides it (Node 20+/modern browsers). The fallback links a small
+ * controller from the same `abort` events, so an older polyfilled environment
+ * still honours both signals. An already-aborted input yields an immediately
+ * aborted result, whether through `any()` or the fallback, so a cancelled
+ * framework signal can never let an RPC start.
+ */
+export function mergeAbortSignals(
+  first?: AbortSignal | undefined,
+  second?: AbortSignal | undefined,
+): AbortSignal | undefined {
+  if (!first) return second;
+  if (!second || first === second) return first;
+
+  const anySignal = (AbortSignal as unknown as { any?: (signals: AbortSignal[]) => AbortSignal })
+    .any;
+  if (typeof anySignal === "function") {
+    try {
+      return anySignal.call(AbortSignal, [first, second]);
+    } catch {
+      // A host polyfill may expose `any` with different semantics; fall through
+      // to the explicit link rather than risking a silently unsound signal.
+    }
+  }
+
+  const controller = new AbortController();
+  const abortFrom = (signal: AbortSignal) => () => {
+    controller.abort((signal as { reason?: unknown }).reason);
+  };
+  if (first.aborted) {
+    controller.abort((first as { reason?: unknown }).reason);
+  } else if (second.aborted) {
+    controller.abort((second as { reason?: unknown }).reason);
+  } else {
+    first.addEventListener("abort", abortFrom(first), { once: true });
+    second.addEventListener("abort", abortFrom(second), { once: true });
+  }
+  return controller.signal;
 }
 
 /**
@@ -364,6 +500,35 @@ function isolateHookRun(run: () => unknown, describe: string, logger?: BlockedHo
 }
 
 /**
+ * Determine the overall outcome kind for a batch of decisions.
+ */
+export function batchDecisionKindFor(
+  verdicts: readonly PreFlightDecision[],
+): "admissible" | "blocked" | "undetermined" {
+  const refusal = verdicts.find((v) => !v.allowed);
+  if (!refusal) return "admissible";
+  return refusal.kind;
+}
+
+/**
+ * Fire an action-level batch decision hook (`onBatchDecision`) without letting it affect the verdict.
+ *
+ * Isolated and never awaited, mirroring `runDecisionHook` and `runBlockedHook`.
+ */
+export function runBatchDecisionHook(
+  hook: GuardBatchDecisionHook | undefined,
+  info: GuardBatchDecisionInfo,
+  logger?: BlockedHookLogger,
+): void {
+  if (!hook) return;
+  isolateHookRun(
+    () => hook(info),
+    `stellar-agent-guard: the ${info.adapter} adapter's onBatchDecision callback threw (or rejected); the guard's verdict stands.`,
+    logger,
+  );
+}
+
+/**
  * Fire an observer hook (`onDecision`) without letting it affect the verdict.
  *
  * A throwing or rejecting observer must not change what the agent is allowed to
@@ -379,6 +544,27 @@ export function runDecisionHook<TArgs extends readonly unknown[]>(
   isolateHookRun(
     () => hook(...args),
     `stellar-agent-guard: the ${adapter} adapter's onDecision callback threw (or rejected); the guard's verdict stands.`,
+    logger,
+  );
+}
+
+/**
+ * Fire the mapping-error hook exactly once, isolating it from the halt path.
+ *
+ * Called immediately before the fail-closed halt, so a host sees the integration
+ * bug before `onBlocked` reports the same halt for compatibility. Isolation is
+ * identical to `runBlockedHook`: a throwing or rejecting sink is swallowed (and
+ * logged when a sink is configured) and can never resume the action.
+ */
+export function runMappingErrorHook(
+  hook: GuardMappingErrorHook | undefined,
+  info: GuardMappingErrorInfo,
+  logger?: BlockedHookLogger,
+): void {
+  if (!hook) return;
+  isolateHookRun(
+    () => hook(info),
+    `stellar-agent-guard: the ${info.adapter} adapter's onMappingError callback threw (or rejected); the halt stands and the action was not executed.`,
     logger,
   );
 }

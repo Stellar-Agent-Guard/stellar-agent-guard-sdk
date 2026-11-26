@@ -55,6 +55,7 @@ import {
 } from "./validate.ts";
 import { GuardError } from "../errors.ts";
 import {
+  batchDecisionKindFor,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
@@ -62,10 +63,15 @@ import {
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
+  mergeAbortSignals,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
+  runMappingErrorHook,
   type BlockedHookLogger,
+  type GuardBatchDecisionHook,
   type GuardBlockedHook,
+  type GuardMappingErrorHook,
 } from "./shared.ts";
 
 /** The subset of LangChain's `ToolCallRequest` this adapter reads. */
@@ -105,6 +111,13 @@ export interface LangChainGuardOptions {
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (request: LangChainToolCallRequest, decision: PreFlightDecision) => void;
   /**
+   * Action-level batch decision summary hook (issue #498).
+   *
+   * Called once per batch check with `{ adapter: "langchain", kind, verdicts, calls, correlationId? }`
+   * after all calls have been checked, before the handler runs or the refusal is returned.
+   */
+  onBatchDecision?: GuardBatchDecisionHook | undefined;
+  /**
    * Operator alerting: called once per halt with a structured payload
    * (`{ adapter, kind, reason, call, explanation }`), so a refusal reaches a
    * webhook/log/dashboard rather than only the agent's transcript. Fires for a
@@ -114,6 +127,22 @@ export interface LangChainGuardOptions {
    * behavior. See `src/adapters/shared.ts`.
    */
   onBlocked?: GuardBlockedHook;
+  /**
+   * Integration-bug alerting (issue #453): called once when
+   * `toContractCall`/`toContractCalls` throws or returns a malformed call,
+   * immediately before the fail-closed halt. Unlike `onBlocked` this can never
+   * fire for a guard refusal, so an operator can tell a broken mapper from a
+   * policy event. The payload names the tool and error class and omits raw tool
+   * arguments unless `includeMappingErrorRequest` is set. Isolated like
+   * `onBlocked`: a throwing hook cannot resume the tool.
+   */
+  onMappingError?: GuardMappingErrorHook;
+  /**
+   * Include the raw tool-call request on `onMappingError` payloads. Off by
+   * default because tool arguments can contain secrets; opt in only when the
+   * sink is trusted local diagnostics.
+   */
+  includeMappingErrorRequest?: boolean;
   /**
    * Explicit sink for a swallowed `onBlocked` failure. Omitted (the default),
    * a throwing hook is silent — the SDK never writes to `console` on its own
@@ -185,6 +214,10 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
   if (nameIssue) issues.push(nameIssue);
   const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
   if (onDecisionIssue) issues.push(onDecisionIssue);
+  const onBatchDecisionIssue = validateOptionalFunction("onBatchDecision", options.onBatchDecision);
+  if (onBatchDecisionIssue) issues.push(onBatchDecisionIssue);
+  const onMappingErrorIssue = validateOptionalFunction("onMappingError", options.onMappingError);
+  if (onMappingErrorIssue) issues.push(onMappingErrorIssue);
   const onStepIssue = validateOptionalFunction("onStep", options.onStep);
   if (onStepIssue) issues.push(onStepIssue);
   const signalIssue = validateOptionalSignal(options.signal);
@@ -200,6 +233,7 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
     async wrapToolCall<T>(
       request: LangChainToolCallRequest,
       handler: (request: LangChainToolCallRequest) => Promise<T>,
+      config?: { signal?: unknown },
     ): Promise<T | LangChainToolMessage> {
       // A mapper that throws or returns a malformed call fails closed (issue
       // #316): the tool body is never entered and the failure is reported as an
@@ -208,7 +242,13 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       try {
         calls = mapContractCalls(request, options);
       } catch (error) {
-        const failure = mappingFailureFor("langchain", error);
+        const failure = mappingFailureFor(
+          "langchain",
+          error,
+          request.toolCall.name,
+          options.includeMappingErrorRequest ? request : undefined,
+        );
+        runMappingErrorHook(options.onMappingError, failure.mapping, options.blockedHookLogger);
         runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
         return mapDecisionToLangChainResult(
           failure.decision,
@@ -224,12 +264,18 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       }
 
       // A host may expose its invocation signal on the request itself (and some
-      // LangChain runtimes nest it under `runtime`); either is forwarded.
-      const checkOptions = checkOptionsFor(
-        options,
+      // LangChain runtimes nest it under `runtime`); either is forwarded. A
+      // `RunnableConfig.signal` passed to the middleware is merged with any
+      // request signal, and the merged pair with the adapter-level `signal`, so
+      // cancelling the chain or this adapter aborts the pre-flight check
+      // (issue #454). Either signal alone is enough; an already-aborted one is
+      // already aborted in the merge and no RPC is issued.
+      const requestSignal =
         hostAbortSignal((request as { signal?: unknown }).signal) ??
-          hostAbortSignal((request as { runtime?: { signal?: unknown } }).runtime?.signal),
-      );
+        hostAbortSignal((request as { runtime?: { signal?: unknown } }).runtime?.signal);
+      const configSignal = hostAbortSignal(config?.signal);
+      const hostSignal = mergeAbortSignals(requestSignal, configSignal);
+      const checkOptions = checkOptionsFor(options, mergeAbortSignals(options.signal, hostSignal));
 
       if (calls.length === 1) {
         let decision: PreFlightDecision;
@@ -298,6 +344,17 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
           options.blockedHookLogger,
         );
       }
+      runBatchDecisionHook(
+        options.onBatchDecision,
+        {
+          adapter: "langchain",
+          kind: batchDecisionKindFor(batch.verdicts),
+          verdicts: batch.verdicts,
+          calls,
+          correlationId: request.toolCall.id,
+        },
+        options.blockedHookLogger,
+      );
       if (batch.admissible) return handler(request);
 
       runBlockedHook(
