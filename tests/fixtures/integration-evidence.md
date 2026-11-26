@@ -436,3 +436,47 @@ node scripts/check-enforcement-evidence.ts --check-structure
 
 The offline checks above passed; they do not substitute for the live-testnet
 scenarios.
+
+## Addendum — 2026-11-26 (PR: admin previews and heartbeat checkpointing; issues #462, #465)
+
+This PR touches `src/policy.ts`: `fetchGuardPolicyAndWindow()` now selects the
+`Policy` and `Window` ledger entries by their contract-data key names instead of
+RPC response position when the server returns named entries. A guard with no
+installed `Policy` entry is therefore reported as having no policy instead of
+having its `Window` entry misread as one. The change is confined to decoding the
+existing RPC response; it does not encode a policy, build or sign an
+authorization entry, change the enforced simulation, or alter the guard's
+block/admit decision. The positional fallback and the single-entry mock path are
+preserved, and a unit test covers the missing-policy case.
+
+**The live suite was not run for this change.** No funded `.env.phase2`
+credentials were available, so `npm run test:integration` was not executed and
+no fresh live enforcement result is claimed. The recorded Phase-2 scenarios
+remain the contract-side proof for the block/admit decision; a maintainer with
+`.env.phase2` should run the live suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm ci
+npm run typecheck
+npm run check:strict-ratchet
+npm run test:types
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+npm run test:browser
+npm run test:types:packed
+npm run test:exports
+npm run test:packed-install
+npm run test:pack
+npm run check:attw
+npm run check:bundle-size
+npm run check:doc-links
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.
