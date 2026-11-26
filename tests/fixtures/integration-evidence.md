@@ -38,6 +38,8 @@ attempt does not replace the recorded successful scenario evidence below.
 
 l**Note** (feat/fs-durability-auth-refresh-and-readme-sweep, PR #539): Adds the durable JSON cursor store and JSONL event writer in `src/fs.ts` (not on the enforcement path), and an auth-entry refresh in `src/invoke.ts`/`src/tx.ts` that rebuilds and re-signs an entry only when its signature expiration is within `authRefreshMarginLedgers` of the ledger read after signing. A comfortable entry keeps its original signature, an entry the contract already refused is never extended, and the refresh runs before the enforced simulation. The contract-side block/admit decision, the enforced simulation and the signed authorization construction are unchanged, so the five live scenarios recorded below remain valid. No fresh live run was performed for this change.
 
+**Note** (feat(invoke)/add-invokemany-for-sequential-multi-call-actions, PR #540 for #425): `src/invoke.ts` adds `invokeMany()` as a sequential orchestration wrapper over `invoke()` (preserving input order, sharing a single `deadlineMs` budget, forwarding `signal` and fee ceilings, and stopping on the first `blocked` outcome by default). Each call still runs through the unchanged `invoke()` pipeline, so the contract-side block/admit decision and the five live scenarios recorded below remain valid. A live `npm run test:integration` run was attempted on 2026-11-26: it matched the Phase 1 artifact identity (`f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63`), deployed the SAC token and guard instance (`CBKSIBZTO6XM7Q7YNDUK3AIWBJAPJJWOCUMAWXCOD4VROTZ3HSMPQQQ2`), and stopped at `initialize` with `txBadAuthExtra` (the pre-existing `main` issue noted above).
+
 ## Instance under test
 
 | | |
