@@ -76,14 +76,14 @@
       "name": "./fs subpath (Node-only)",
       "entryCode": "export * from '../src/fs.ts';",
       "platform": "node",
-      "rationale": "Node-only filesystem adapter and policy storage subpath. Bundled with platform=node so node:* imports remain external and are not compared against browser budgets.",
+      "rationale": "Node-only filesystem adapter and policy storage subpath. Bundled with platform=node so node:* imports remain external and are not compared against browser budgets. Re-baselined after the durable JSON cursor store and JSONL event writer added 10,802 raw bytes and 3,547 gzip bytes to this subpath (measured 2026-11-26: 105,832 raw / 28,027 gzip).",
       "baseline": {
-        "rawBytes": 95030,
-        "gzipBytes": 24480
+        "rawBytes": 105832,
+        "gzipBytes": 28027
       },
       "budget": {
-        "rawBytes": 104533,
-        "gzipBytes": 28152
+        "rawBytes": 116415,
+        "gzipBytes": 32231
       }
     }
   }

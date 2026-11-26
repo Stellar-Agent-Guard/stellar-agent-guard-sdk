@@ -217,6 +217,18 @@ export RPC_URL=https://soroban-testnet.stellar.org
   console.error(error.address, isValidAgentPublicKey(signer.publicKey), error.cause);
   ```
 
+### `AuthRefreshError`
+
+- **Extends:** `SigningError` (and therefore `GuardError`). It is raised before the enforced simulation, so nothing was broadcast.
+- **Typical messages:** `could not read the current ledger to refresh auth entries: <detail>`, `could not refresh a near-expiry auth entry: <detail>`, `near-expiry auth entry requires authorization from <address>, but no matching key was provided`.
+- **Stage:** signing, in the refresh check `invoke()` runs after signing and before the enforced simulation. `expirationLedger` is the entry's original near-expiry ledger, `currentLedger` the ledger it was compared against (`null` when the read failed) and `marginLedgers` the configured margin that triggered the refresh.
+- **Retry:** No — the entry was rebuilt and re-signed from the discovery probe on the next pipeline pass; a failure here means the signer or ledger read is unavailable, so retrying the same inputs fails the same way. Raise `authRefreshMarginLedgers`, or set it to `0` to disable the check, only after you understand why the pipeline stalled past the entry's validity.
+- **First diagnostic:**
+
+  ```ts
+  console.error(error.address, error.expirationLedger, error.currentLedger, error.marginLedgers, error.cause);
+  ```
+
 ### `BroadcastError`
 
 - **Extends:** `GuardError`. `kind` is `"error"`.

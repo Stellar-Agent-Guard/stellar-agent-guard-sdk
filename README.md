@@ -23,7 +23,7 @@
 
 **Non-custodial TypeScript SDK and pre-flight policy interception firewall for AI agents on Stellar.**
 
-An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's  and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
+An autonomous agent holding a wallet has a single point of failure: one prompt-injection or one buggy loop can drain it. Stellar Agent Guard makes that impossible on-chain — the agent's funds stay in its own smart account, and *every* transaction the account must authorize is intercepted by the contract's `__check_auth` and rejected pre-broadcast unless it satisfies the operator's installed policy: per-transaction spend caps, a rolling-window spend limit, recipient/asset allowlists, protocol allowlists, a pause switch, and a dead-man switch. This SDK provides the integration layer: pre-flight simulation interception, zero-broadcast fee estimation, agent-auth transaction signing, and dual-stream event telemetry for AI agent frameworks (LangChain, ElizaOS).
 
 **Status: Phase 2 complete — and the package is published.** [`stellar-agent-guard-sdk@0.1.1`](https://www.npmjs.com/package/stellar-agent-guard-sdk) is live on the npm registry (`npm install stellar-agent-guard-sdk`). All five enforcement scenarios were proven against live Stellar testnet (protocol 28) with real contract IDs, transaction hashes, and diagnostic events — evidence is recorded in [`tests/fixtures/integration-evidence.md`](tests/fixtures/integration-evidence.md). Phase 2 code is merged into `main` with green CI (`ci` status check). For historical release notes and publish pipeline reconciliation, see [`docs/publishing-history.md`](docs/publishing-history.md).
 
@@ -722,7 +722,7 @@ two optional caller-owned bounds on the RPC calls they make:
 - `deadlineMs?: number` — **`invoke()`**: one overall budget for the whole
   action. Expiry is fail-closed and reported as an `RpcTimeoutError` with
   `deadline: true`; it can never become an `allowed` outcome. Pass `clock` to
-  make the accounting deterministic in tests. See `docs/api/invoke-pipeline.md`.
+  make the accounting deterministic in tests. See [`docs/api/invoke-pipeline.md`](docs/api/invoke-pipeline.md) and its [Pipeline State Machine](docs/api/invoke-pipeline.md#pipeline-state-machine).
   `checkBatch()` enforces it as one absolute budget for the whole batch: once it
   is spent, no further call starts and every unfinished call is a fail-closed
   `undetermined` verdict carrying an `RpcTimeoutError` with `deadline: true`.
@@ -904,6 +904,34 @@ try {
   }
 }
 ```
+
+#### Durable telemetry cursors and event logs (Node only)
+
+The same `stellar-agent-guard-sdk/fs` subpath ships two durable sinks for the telemetry listener, so a restart does not re-read from the caller's start ledger and an audit trail does not need custom file plumbing:
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+import { JsonFileCursorStore, createJsonLinesWriter } from "stellar-agent-guard-sdk/fs";
+
+const cursorStore = new JsonFileCursorStore({ path: "guard-cursors.json" });
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD_ID,
+  cursorStore,
+  // One instance serves both streams: entries are scoped by stream.
+  failedTxCursorStore: cursorStore,
+  buffer: { max: 200 }, // opt in to recent()/recentJsonLines()
+});
+
+const writer = createJsonLinesWriter({ path: "guard-events.jsonl", maxBytes: 5_000_000 });
+for (const event of listener.recent()) await writer.write(event);
+await writer.close();
+```
+
+- `JsonFileCursorStore` is a `CursorStore` backed by one JSON object keyed by cursor scope (`network` + `guard` + `stream`). It loads lazily, treats a missing file as empty, writes atomically via temp file + rename, and never rewrites an unchanged cursor. Corrupt JSON throws `PolicyFileReadError` naming the path unless `recoverCorrupt: true` opts into starting over.
+- `createJsonLinesWriter({ path, maxBytes?, maxFiles?, fsync? })` appends one `serializeEventRecord()` line per event, rotates by size with a bounded retained history (`maxFiles`, default 3), serializes concurrent writes so lines never interleave, and exposes `write(event)`, `flush()`, `close()` and `count`. The file contains decoded event data — never secrets or the opt-in `raw` payload.
+
+Both are Node-only: import them from the subpath, never from the browser-safe root entry.
 
 ### Policy encode/decode round trip
 
@@ -1304,6 +1332,7 @@ Every caller-controlled option is validated before any signing or RPC; a bad val
 | `fee` | `bigint \| string` | `100` stroops (`INCLUSION_FEE`) | Inclusion fee for the envelope; set internally on fee-bump retries. |
 | `signal` | `AbortSignal` | none | ⚠️ An aborted run stops at the next RPC boundary and returns the `error` outcome carrying `RpcTimeoutError`; an already-aborted signal issues no RPC. The in-flight HTTP request itself is not cancelled. |
 | `timeoutMs` | `number` (≥ 0) | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is the same fail-closed `error` outcome as an abort. `0` disables the per-call timeout (a `deadlineMs` still applies). |
+| `authRefreshMarginLedgers` | `number` (integer ≥ 0) | `DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS` (5) | Ledger margin below which a signed auth entry is rebuilt and re-signed before the enforced simulation. The check reads the current ledger once after signing; a comfortable entry is not re-signed, and `0` disables the check. A failed refresh is a fail-closed `error` outcome carrying `AuthRefreshError`. |
 | `deadlineMs` | `number` (> 0) | none — only the per-call `timeoutMs` applies | ⚠️ One budget for discovery, signing, simulation, retry backoff, broadcast and polling. Expiry is fail-closed (`RpcTimeoutError` with `deadline: true`), even after the guard approved the call; a dry run reports `undetermined`. |
 | `clock` | `Clock` | `systemClock` | Time source for deadline accounting and poll/backoff delays. Must have `now()` and `sleep()`. |
 | `onStep` | `(step: InvokeStepEvent) => void` | none | One event per stage attempt (probe → sign → simulate → broadcast). Exceptions are isolated. |
