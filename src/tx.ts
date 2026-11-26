@@ -55,6 +55,7 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 import {
+  AuthRefreshError,
   BroadcastError,
   ContractResponseError,
   InvalidInputError,
@@ -67,6 +68,17 @@ import type { ContractAddress } from "./policy.ts";
 
 /** Extra ledger validity granted to a guard auth entry when it is signed. */
 const SIG_EXPIRATION_LEDGERS = 10_000;
+/**
+ * Default margin, in ledgers, below which a signed auth entry is refreshed
+ * (issue #422).
+ *
+ * Five ledgers is roughly 25 seconds on Stellar's five-second ledger close: far
+ * enough ahead that a refresh is not triggered for an entry that will clearly
+ * outlive the next enforced simulation, and early enough that a stalled
+ * pipeline does not hand the host an entry that expires between simulation and
+ * broadcast.
+ */
+export const DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS = 5;
 /** Inclusion fee floor, in stroops, for a single-operation transaction. */
 const INCLUSION_FEE = "100";
 export const MAX_FEE_STROOPS = 2n ** 64n - 1n;
@@ -545,6 +557,129 @@ export async function signAccountAuthEntry(params: {
   // For classic transaction signers (e.g. Freighter) without a separate auth-entry signer,
   // return entry to be authorized via the envelope signature.
   return entry;
+}
+
+/**
+ * The signature expiration ledger carried by an authorization entry.
+ *
+ * Returns `null` for credentials with no signature payload — notably
+ * `sorobanCredentialsSourceAccount`, whose authorization comes from the
+ * transaction envelope rather than from a signed entry.
+ */
+export function authEntrySignatureExpiration(
+  entry: xdr.SorobanAuthorizationEntry,
+): number | null {
+  const credentials = entry.credentials;
+  if (credentials.type === "sorobanCredentialsAddress") {
+    return credentials.address.signatureExpirationLedger;
+  }
+  if (credentials.type === "sorobanCredentialsAddressV2") {
+    return credentials.addressV2.signatureExpirationLedger;
+  }
+  return null;
+}
+
+/**
+ * True when an entry expiring at `signatureExpirationLedger` is within
+ * `marginLedgers` of `currentLedger` and should be rebuilt and re-signed
+ * (issue #422).
+ *
+ * The comparison is against the *current* ledger, not the ledger the entry was
+ * built on: an entry is at risk precisely when the chain has advanced close to
+ * its expiration, which is what a long planning loop or a stalled queue causes.
+ */
+export function authEntryNeedsRefresh(
+  signatureExpirationLedger: number,
+  currentLedger: number,
+  marginLedgers: number = DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
+): boolean {
+  return signatureExpirationLedger - currentLedger < marginLedgers;
+}
+
+/** Result of {@link refreshNearExpiryAuthEntries}. */
+export interface AuthRefreshResult<T extends xdr.SorobanAuthorizationEntry> {
+  /** Entries in their original order; refreshed entries replace their originals. */
+  entries: T[];
+  /** How many entries were rebuilt and re-signed. */
+  refreshed: number;
+}
+
+/**
+ * Rebuild and re-sign every auth entry that is at or near its signature
+ * expiration (issue #422).
+ *
+ * Each entry is inspected once and refreshed at most once, using a fresh
+ * expiration derived from `currentLedger`. An entry with no signature payload
+ * (source-account credentials) and an entry that is comfortably valid are
+ * returned unchanged, so their signatures are never recomputed. The callback
+ * owns *how* an entry is rebuilt (guard preimage versus classic account
+ * authorization); this helper owns the margin decision and the typed failure.
+ *
+ * A failure from `refresh` is reported as {@link AuthRefreshError}, naming the
+ * authorizer when the entry's address is decodable, so a caller can tell a
+ * refresh problem apart from an ordinary signing failure.
+ */
+export async function refreshNearExpiryAuthEntries<T extends xdr.SorobanAuthorizationEntry>(params: {
+  entries: readonly T[];
+  currentLedger: number;
+  marginLedgers?: number;
+  refresh: (entry: T, signatureExpirationLedger: number) => Promise<T>;
+}): Promise<AuthRefreshResult<T>> {
+  const marginLedgers = params.marginLedgers ?? DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS;
+  const entries: T[] = [];
+  let refreshed = 0;
+  // A zero (or negative) margin is an explicit opt-out, matching the SDK's
+  // `timeoutMs: 0` convention. It never extends entries that are already past
+  // their expiration either: the caller asked not to refresh.
+  if (marginLedgers <= 0) {
+    return { entries: [...params.entries], refreshed: 0 };
+  }
+
+  const nextExpiration = params.currentLedger + SIG_EXPIRATION_LEDGERS;
+  for (const entry of params.entries) {
+    const expiration = authEntrySignatureExpiration(entry);
+    if (
+      expiration === null ||
+      !authEntryNeedsRefresh(expiration, params.currentLedger, marginLedgers)
+    ) {
+      entries.push(entry);
+      continue;
+    }
+    try {
+      entries.push(await params.refresh(entry, nextExpiration));
+    } catch (cause) {
+      throw new AuthRefreshError(
+        `auth entry expiring at ledger ${expiration} is within the ${marginLedgers}-ledger ` +
+          `refresh margin of ledger ${params.currentLedger} and could not be refreshed`,
+        {
+          address: authEntryAddress(entry),
+          expirationLedger: expiration,
+          currentLedger: params.currentLedger,
+          marginLedgers,
+          cause,
+        },
+      );
+    }
+    refreshed += 1;
+  }
+  return { entries, refreshed };
+}
+
+/** The authorizer address of an entry, or `null` when it has none / is invalid. */
+function authEntryAddress(entry: xdr.SorobanAuthorizationEntry): string | null {
+  const credentials = entry.credentials;
+  const address =
+    credentials.type === "sorobanCredentialsAddress"
+      ? credentials.address.address
+      : credentials.type === "sorobanCredentialsAddressV2"
+        ? credentials.addressV2.address
+        : null;
+  if (address === null) return null;
+  try {
+    return Address.fromScAddress(address).toString();
+  } catch {
+    return null;
+  }
 }
 
 export interface SimulationOutcome {

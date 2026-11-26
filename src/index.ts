@@ -23,6 +23,7 @@
 export {
   AdapterConfigError,
   AdapterMappingError,
+  AuthRefreshError,
   BroadcastError,
   ContractResponseError,
   FeeCapExceededError,
@@ -342,12 +343,15 @@ export {
 } from "./telemetry.ts";
 
 export {
+  DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
   DEFAULT_WAIT_POLL_INTERVAL_MS,
   DEFAULT_WAIT_TIMEOUT_MS,
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
+  authEntryNeedsRefresh,
+  authEntrySignatureExpiration,
   buildGuardAuthEntry,
   buildInitialEnvelope,
   describeSimulationResources,
@@ -358,6 +362,7 @@ export {
   isStaleLedgerResourceFailure,
   isValidAgentPublicKey,
   keypairAgentSigner,
+  refreshNearExpiryAuthEntries,
   toAgentSigner,
   validateAgentPublicKey,
   verifyAgentSignature,
@@ -367,6 +372,7 @@ export {
 export type {
   AdminSigner,
   AgentSigner,
+  AuthRefreshResult,
   ContractCall,
   GuardCredentialType,
   SimulationOutcome,

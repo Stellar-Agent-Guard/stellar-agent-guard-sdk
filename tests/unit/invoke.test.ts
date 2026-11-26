@@ -1533,6 +1533,16 @@ describe("invoke() option validation", () => {
         overrides: { retry: { random: () => 0.5, jitter: () => 0.5 } },
         field: /retry\.jitter/,
       },
+      {
+        label: "authRefreshMarginLedgers negative",
+        overrides: { authRefreshMarginLedgers: -1 },
+        field: /authRefreshMarginLedgers/,
+      },
+      {
+        label: "authRefreshMarginLedgers fractional",
+        overrides: { authRefreshMarginLedgers: 1.5 },
+        field: /authRefreshMarginLedgers/,
+      },
       { label: "maxRetries negative", overrides: { maxRetries: -1 }, field: /maxRetries/ },
       { label: "maxRetries fractional", overrides: { maxRetries: 1.5 }, field: /maxRetries/ },
       {

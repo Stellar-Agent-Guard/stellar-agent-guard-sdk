@@ -193,6 +193,43 @@ event fields under `event`. Readers that only understand bare records can keep
 reading historical data; to read new data they should switch to
 `parseEventRecord()` (or unwrap `event` after checking `v`).
 
+### Append-only JSON Lines writer — `createJsonLinesWriter()` (issue #427)
+
+`recentJsonLines()` serializes the in-memory ring buffer; it never touches the
+filesystem. Operators who need a durable trail use the Node-only writer from
+`stellar-agent-guard-sdk/fs`:
+
+```ts
+import { createJsonLinesWriter } from "stellar-agent-guard-sdk/fs";
+
+const writer = createJsonLinesWriter({
+  path: "guard-events.jsonl",
+  maxBytes: 5_000_000, // omit for one unbounded file
+  maxFiles: 3, // retained rotated files; `path.1` is newest
+  fsync: false,
+});
+
+await writer.write(event);
+await writer.close();
+console.log(writer.count); // records written by this writer
+```
+
+- **One `serializeEventRecord()` line per event**, so every line parses with
+  `parseEventRecord()` and carries the `v: 1` envelope. A reader can stream the
+  file line by line; no SDK is required to decode it.
+- **Rotation is by size**, before a write that would cross `maxBytes`. The
+  current file becomes `path.1`, older files shift up, and at most `maxFiles`
+  rotated files are retained (`0` keeps no history).
+- **Writes are serialized**, so concurrent producers cannot interleave a line;
+  a failed write rejects once and truncates back to the previous length, so the
+  next record never appends to a torn line.
+- **Decoded data, not secrets.** The file holds the event projection — guard,
+  decision, reason, ledger, timestamps, normalized payload. The opt-in `raw`
+  payload is never emitted, and neither are keys or signatures.
+
+The root entry stays browser-safe; the writer is reachable only through the
+`./fs` subpath.
+
 ### Emitting-identity validation before decode (issue #322)
 
 `poll()` filters by contract at the RPC, but does **not** trust that filter. An
