@@ -93,12 +93,19 @@ function run(): void {
   }
 
   const specifiers: string[] = [];
+  const jsonSpecifiers = new Set<string>();
   const targets = new Set<string>();
   for (const subpath of Object.keys(exportsMap)) {
     const entry = exportsMap[subpath];
     if (entry === undefined) continue;
-    for (const target of leafTargets(entry, subpath)) targets.add(target);
-    specifiers.push(specifierFor(manifest.name, subpath));
+    const specifier = specifierFor(manifest.name, subpath);
+    for (const target of leafTargets(entry, subpath)) {
+      targets.add(target);
+      // JSON subpaths (the shipped policy schema) need an explicit import
+      // attribute in Node; the consumer script below opts in per specifier.
+      if (target.endsWith(".json")) jsonSpecifiers.add(specifier);
+    }
+    specifiers.push(specifier);
   }
 
   // 1. Every declared target is a real file produced by the build.
@@ -165,8 +172,11 @@ function run(): void {
     const consumerScript = [
       `const specifiers = ${JSON.stringify(specifiers)};`,
       `const required = ${JSON.stringify([...REQUIRED_ROOT_EXPORTS])};`,
+      `const jsonSpecifiers = new Set(${JSON.stringify([...jsonSpecifiers])});`,
       `for (const specifier of specifiers) {`,
-      `  const mod = await import(specifier);`,
+      `  const mod = jsonSpecifiers.has(specifier)`,
+      `    ? await import(specifier, { with: { type: "json" } })`,
+      `    : await import(specifier);`,
       `  if (!mod || typeof mod !== "object" || Object.keys(mod).length === 0) {`,
       `    console.error("  exported subpath resolved to an empty module: " + specifier);`,
       `    process.exitCode = 1;`,

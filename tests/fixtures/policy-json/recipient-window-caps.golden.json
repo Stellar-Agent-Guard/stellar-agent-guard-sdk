@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "per_tx_cap": "1000",
+  "window_secs": "3600",
+  "window_cap": "5000",
+  "assets": [
+    "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB"
+  ],
+  "protocols": [
+    {
+      "contract": "CAJJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4LNU",
+      "fns": [
+        "swap"
+      ]
+    }
+  ],
+  "recipients": [
+    "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH",
+    "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ"
+  ],
+  "allow_any_recipient": false,
+  "active_from": "0",
+  "active_until": "0",
+  "paused": false,
+  "dms_grace_secs": "0",
+  "recipient_window_caps": [
+    {
+      "recipient": "GAOBCRXTCO4ZCBNHALJUMJJ5JDXNOUZ7U6VZJX4UBTXAHQEO66IPU6PH",
+      "cap": "1000"
+    },
+    {
+      "recipient": "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      "cap": "170141183460469231731687303715884105727"
+    }
+  ],
+  "blocked_recipients": [
+    "GBRPYHIL2CI3FNQ4BXLFMNDLFJUNPU2HY3ZMFSHONUCEOASW7QC7OX2H"
+  ],
+  "protocol_calls_per_window": "12"
+}

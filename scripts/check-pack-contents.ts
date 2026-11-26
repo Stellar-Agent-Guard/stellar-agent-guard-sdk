@@ -24,7 +24,7 @@ import { runNpm } from "./npm-cli.ts";
 const ROOT = process.cwd();
 
 /** Everything the package is allowed to ship: build output plus metadata. */
-const ALLOWED_TOP_LEVEL = new Set(["dist/", "README.md", "LICENSE", "package.json"]);
+const ALLOWED_TOP_LEVEL = new Set(["dist/", "schema/", "README.md", "LICENSE", "package.json"]);
 
 /** Path fragments that must never appear in the tarball, whatever npm's defaults say. */
 const FORBIDDEN_FRAGMENTS = [
@@ -94,11 +94,14 @@ function run() {
   if (!files.some((path) => path === "dist/index.d.ts")) {
     fail("tarball does not contain dist/index.d.ts");
   }
+  if (!files.includes("schema/policy.schema.json")) {
+    fail("tarball does not contain schema/policy.schema.json (the ./schema export target)");
+  }
 
   console.log(
     `pack check OK: ${files.length} files, unpacked size ${Math.round(Number(unpackedSize) / 1024)} kB — dist + metadata only`,
   );
-  console.log("  no .env*, no tests/fixtures, no scripts/ in the tarball");
+  console.log("  no .env*, no tests/fixtures, no scripts/ in the tarball; schema ships");
 }
 
 function main() {

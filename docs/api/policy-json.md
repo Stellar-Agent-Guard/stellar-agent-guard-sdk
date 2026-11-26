@@ -180,6 +180,23 @@ PolicyDecodeError: cannot decode policy JSON field policy.per_tx_cap: expected a
 `policyFromJson()` does not require canonical input: key order and a leading
 `+` or leading zeros in a decimal string are accepted.
 
+### Compatibility promise: byte stability
+
+Canonical output is a **compatibility promise**, not an implementation detail.
+For a given `PolicyConfig`, `encodePolicyJson()` produces the same key order,
+integer formatting and JSON text across 0.x releases, so a diff-based review or
+a revision hash computed over `JSON.stringify(encodePolicyJson(policy))` only
+changes when the policy itself changes. This guarantee is enforced by committed
+golden files and byte-for-byte tests
+(`tests/unit/policy-json.test.ts`, `tests/fixtures/policy-json/*.golden.json`).
+
+A change that alters those bytes — including key order, whitespace, or decimal
+formatting — is a deliberate policy JSON change: it must update the goldens, be
+called out in the release notes, and bump `POLICY_JSON_VERSION` if it changes
+the meaning of an existing document rather than only its rendering. Relative
+array order remains part of the input's meaning (see above); reordering
+`assets`, `recipients` or `protocols` is a policy change, not a formatting one.
+
 ## Error paths
 
 Every decoding failure is a `PolicyDecodeError` (a `GuardError`) whose `path`
