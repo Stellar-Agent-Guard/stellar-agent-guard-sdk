@@ -26,8 +26,27 @@ The constructor's parameter is `GuardTelemetryInputConfig | GuardTelemetryLocalC
 | `clock` | `() => number` | `Date.now` | Clock for `counters.windowMs` eviction. When set, it replaces `counters.clock`. |
 | `buffer` | `GuardEventBufferOptions` (`{ max: number }`) | none — no buffer; `recent()` returns `[]` | Retain the last `max` decoded events in memory for `recent()` / `recentJsonLines()`. `max` must be a positive integer, otherwise `RangeError`. Non-durable: a restart empties it. |
 | `includeRaw` | `boolean` | `false` | Attach the raw `rpc.Api.EventResponse` to every committed event. Memory cost per event; leave off in long-running fleets. |
-| `cursorStore` | `CursorStore` | a process-local `InMemoryCursorStore` | Persists the committed-stream cursor. ⚠️ Without a durable store, a restart resumes from the head and skips events emitted while the process was down (or replays history when `startLedger` is used). |
-| `failedTxCursorStore` | `CursorStore` | a separate process-local `InMemoryCursorStore` | Cursor store for the failed-transaction scan. Never falls back to `cursorStore`; sharing would replay or skip failed transactions. |
+| `cursorStore` | `CursorStore` | a process-local `InMemoryCursorStore` | Persists the committed-stream cursor. ⚠️ Without a durable store, a restart resumes from the head and skips events emitted while the process was down (or replays history when `startLedger` is used). `JsonFileCursorStore` from `stellar-agent-guard-sdk/fs` is the durable file-backed implementation. |
+| `failedTxCursorStore` | `CursorStore` | a separate process-local `InMemoryCursorStore` | Cursor store for the failed-transaction scan. Never falls back to `cursorStore`; sharing would replay or skip failed transactions. One `JsonFileCursorStore` instance may be passed for both: its records are keyed by stream (`events` / `failed_tx`), so they cannot collide. |
+
+### Durable cursors with `JsonFileCursorStore` (issue #426)
+
+```ts
+import { GuardTelemetryListener } from "stellar-agent-guard-sdk";
+import { JsonFileCursorStore } from "stellar-agent-guard-sdk/fs";
+
+const cursorStore = new JsonFileCursorStore({ path: "guard-cursors.json" });
+const listener = new GuardTelemetryListener({
+  server,
+  guard: GUARD_ID,
+  cursorStore,
+  // One instance serves both streams; the scope (network + guard + stream)
+  // keeps their slots separate.
+  failedTxCursorStore: cursorStore,
+});
+```
+
+The store loads the file on first use, treats a missing file as empty, writes atomically (temp file + rename), and skips a write when the cursor did not change. Corrupt JSON raises `PolicyFileReadError` naming the path; `recoverCorrupt: true` opts into an explicit reset instead.
 
 #### `GuardTelemetryLocalConfig` (local-only listener, no RPC)
 

@@ -108,6 +108,12 @@ for policy field paths, see [policy JSON error paths](api/policy-json.md#error-p
 | --- | --- | --- | --- | --- | --- |
 | `SigningError` | Signing | An authorization signature could not be produced. Fields: `address`, `cause`. | No | Yes — no authorized transaction is submitted | Check signer identity, registered agent key, network passphrase and `address`. |
 
+### `AuthRefreshError`
+
+| Class | Typical stage | Meaning | Retryable | Fail-closed | First fix |
+| --- | --- | --- | --- | --- | --- |
+| `AuthRefreshError` | Signing (auth refresh) | A signed auth entry was within `authRefreshMarginLedgers` of its signature expiration and could not be rebuilt/re-signed, or the current ledger could not be read. Fields: `address`, `expirationLedger`, `currentLedger` (`null` when unreadable), `marginLedgers`, `cause`; extends `SigningError`. | No | Yes — nothing is broadcast | Check signer availability and RPC health; raise `authRefreshMarginLedgers` only if the ledger cadence requires it. |
+
 ### `BroadcastError`
 
 | Class | Typical stage | Meaning | Retryable | Fail-closed | First fix |

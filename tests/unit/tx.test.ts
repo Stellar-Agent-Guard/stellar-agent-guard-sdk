@@ -24,10 +24,13 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { ContractResponseError, SigningError } from "../../src/errors.ts";
+import { AuthRefreshError, ContractResponseError, SigningError } from "../../src/errors.ts";
 import {
   BroadcastError,
+  DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
   assembleFromSimulation,
+  authEntryNeedsRefresh,
+  authEntrySignatureExpiration,
   buildGuardAuthEntry,
   describeSimulationResources,
   isMinimumFeeBroadcastFailure,
@@ -36,6 +39,7 @@ import {
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   parseSimulationResourceFee,
+  refreshNearExpiryAuthEntries,
   submitAndPoll,
   toAgentSigner,
   validateAgentPublicKey,
@@ -809,5 +813,127 @@ describe("BroadcastError", () => {
     assert.match(error.message, /3 attempt\(s\)/);
     assert.match(error.message, /400 stroops/);
     assert.ok(error instanceof Error);
+  });
+});
+
+/**
+ * Near-expiry auth refresh (issue #422).
+ *
+ * A signed auth entry carries the ledger at which its signature stops being
+ * accepted. If the chain advances close to that ledger between signing and the
+ * enforced simulation, the pipeline must rebuild and re-sign the entry with a
+ * fresh expiration instead of broadcasting a doomed authorization.
+ */
+describe("auth entry refresh (issue #422)", () => {
+  const build = (signatureExpirationLedger: number) =>
+    buildGuardAuthEntry({
+      guard: GUARD,
+      call: CALL,
+      signer: Keypair.random(),
+      nonce: 1n,
+      signatureExpirationLedger,
+      networkPassphrase: PASSPHRASE,
+    });
+
+  it("detects an entry within the default margin and keeps a comfortable one", async () => {
+    assert.equal(DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS, 5);
+    assert.equal(authEntryNeedsRefresh(1003, 1000), true);
+    assert.equal(authEntryNeedsRefresh(1005, 1000), false, "exactly at the margin is comfortable");
+    assert.equal(authEntryNeedsRefresh(5000, 1000), false);
+    assert.equal(authEntryNeedsRefresh(1003, 1000, 1), false);
+
+    const entry = await build(1003);
+    assert.equal(authEntrySignatureExpiration(entry), 1003);
+  });
+
+  it("refreshes a near-expiry entry exactly once and uses the new expiration", async () => {
+    const entry = await build(1003);
+    let calls = 0;
+
+    const result = await refreshNearExpiryAuthEntries({
+      entries: [entry],
+      currentLedger: 1000,
+      refresh: async (_entry, signatureExpirationLedger) => {
+        calls += 1;
+        return await build(signatureExpirationLedger);
+      },
+    });
+
+    assert.equal(calls, 1, "a single entry is rebuilt once, never twice");
+    assert.equal(result.refreshed, 1);
+    assert.equal(authEntrySignatureExpiration(result.entries[0]!), 11_000);
+  });
+
+  it("does not re-sign an entry that comfortably outlives the margin", async () => {
+    const entry = await build(5000);
+    let calls = 0;
+
+    const result = await refreshNearExpiryAuthEntries({
+      entries: [entry],
+      currentLedger: 1000,
+      refresh: async () => {
+        calls += 1;
+        return entry;
+      },
+    });
+
+    assert.equal(calls, 0, "a comfortable entry must keep its original signature");
+    assert.equal(result.refreshed, 0);
+    assert.equal(result.entries[0], entry);
+  });
+
+  it("leaves source-account credentials untouched and honors a zero margin opt-out", async () => {
+    const signed = await build(1003);
+    const sourceAccountEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+      rootInvocation: signed.rootInvocation,
+    });
+
+    let calls = 0;
+    const refresh = async () => {
+      calls += 1;
+      return sourceAccountEntry;
+    };
+
+    assert.equal(authEntrySignatureExpiration(sourceAccountEntry), null);
+    const untouched = await refreshNearExpiryAuthEntries({
+      entries: [sourceAccountEntry],
+      currentLedger: 1000,
+      refresh,
+    });
+    assert.equal(calls, 0);
+    assert.equal(untouched.entries[0], sourceAccountEntry);
+
+    const disabled = await refreshNearExpiryAuthEntries({
+      entries: [signed],
+      currentLedger: 1003,
+      marginLedgers: 0,
+      refresh,
+    });
+    assert.equal(calls, 0, "margin 0 disables refreshing entirely");
+    assert.equal(disabled.entries[0], signed);
+  });
+
+  it("reports a failed refresh as a typed AuthRefreshError", async () => {
+    const entry = await build(1003);
+
+    await assert.rejects(
+      refreshNearExpiryAuthEntries({
+        entries: [entry],
+        currentLedger: 1000,
+        refresh: async () => {
+          throw new Error("signer unavailable");
+        },
+      }),
+      (error: unknown) => {
+        assert(error instanceof AuthRefreshError);
+        assert(error instanceof SigningError);
+        assert.equal(error.expirationLedger, 1003);
+        assert.equal(error.currentLedger, 1000);
+        assert.equal(error.marginLedgers, DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS);
+        assert.equal(error.address, GUARD);
+        return true;
+      },
+    );
   });
 });
