@@ -2574,7 +2574,9 @@ export async function enforceCall(
     // extended would be the one the contract already refused.
     const marginLedgers =
       params.authRefreshMarginLedgers ?? DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS;
-    if (marginLedgers > 0) {
+    // Nothing signed means nothing can be near expiry: skip the extra ledger
+    // read entirely so callers without auth entries pay no RPC for the check.
+    if (marginLedgers > 0 && signedAuth.length > 0) {
       assertWithinDeadline(deadline, "sign");
       let currentLedger: number;
       try {
