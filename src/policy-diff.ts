@@ -96,6 +96,34 @@ export function policyDiff(a: ReadonlyPolicyConfig, b: ReadonlyPolicyConfig): Po
   return changes;
 }
 
+/**
+ * Render a human-readable summary of structured policy changes.
+ *
+ * Returns an empty string when there are no differences.
+ */
+export function formatPolicyDiff(changes: readonly PolicyChange[]): string {
+  if (changes.length === 0) return "";
+  return changes
+    .map((change) => {
+      switch (change.kind) {
+        case "added":
+          return `+ ${change.path}: ${formatPolicyValue(change.after)}`;
+        case "removed":
+          return `- ${change.path}: ${formatPolicyValue(change.before)}`;
+        case "changed":
+          return `~ ${change.path}: ${formatPolicyValue(change.before)} -> ${formatPolicyValue(change.after)}`;
+      }
+    })
+    .join("\n");
+}
+
+function formatPolicyValue(value: PolicyValue | undefined): string {
+  if (value === undefined) return "undefined";
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `[${value.join(", ")}]`;
+  return String(value);
+}
+
 function scalar(
   changes: PolicyChange[],
   field: ScalarField,

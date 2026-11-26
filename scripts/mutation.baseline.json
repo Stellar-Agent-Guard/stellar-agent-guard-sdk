@@ -1,0 +1,11 @@
+{
+  "_note": "Informational sampled-mutation baseline for src/preflight.ts, src/policy.ts and src/invoke.ts. Not a merge gate. Re-measure when the targets, mutators, sample seed/size, selected tests or Node major version changes.",
+  "scoreKind": "deterministic sample",
+  "seed": 489,
+  "limit": 60,
+  "targets": ["src/preflight.ts", "src/policy.ts", "src/invoke.ts"],
+  "families": ["conditional-boundary", "boolean-literal", "negation"],
+  "score": 0.6333,
+  "measuredAt": "2026-11-20",
+  "break": null
+}
