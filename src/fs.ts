@@ -12,7 +12,8 @@
  * filesystem I/O. This is the exception path in `docs/design-principles.md`
  * §5, not a pattern for core modules.
  */
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, watch } from "node:fs/promises";
 import { PolicyDecodeError, PolicyFileReadError, PolicyValidationError } from "./errors.ts";
 import { formatPolicyDiff, policyDiff, type PolicyChange } from "./policy-diff.ts";
 import { policyFromJson } from "./policy-json.ts";
@@ -147,6 +148,175 @@ export async function loadPolicyFromFile(
   }
 
   return policy;
+}
+
+/**
+ * Options for {@link watchPolicyFile}.
+ */
+export interface WatchPolicyFileOptions {
+  /**
+   * Milliseconds to wait after a change event before reloading the policy
+   * file (default: 200). Merges rapid successive write events — such as an
+   * editor's atomic save — into one reload.
+   */
+  debounceMs?: number;
+  /**
+   * Called with the loaded, validated policy on each write that changes the
+   * file's content. Not called for writes that leave the content unchanged
+   * (detected via SHA-256 hash).
+   *
+   * A throwing callback is swallowed: the watcher cannot stop because an
+   * observer failed.
+   */
+  onPolicy: (policy: GuardPolicy) => void;
+  /**
+   * Called when a reload attempt fails with a {@link PolicyFileReadError},
+   * {@link PolicyDecodeError} or {@link PolicyValidationError}. Omitting it
+   * silently swallows load errors.
+   *
+   * A throwing callback is swallowed.
+   */
+  onError?: (error: unknown) => void;
+  /**
+   * Abort to stop watching and resolve the returned promise. If already
+   * aborted when `watchPolicyFile` is called, the initial load is still
+   * attempted and the returned promise resolves immediately after.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * Watch a policy JSON file for changes and reload it on each write (issue #428).
+ *
+ * Performs an initial load before entering the watch loop, so the caller
+ * always receives the current policy even when the file has not changed since
+ * the last time the process ran.
+ *
+ * Uses SHA-256 content hashing to skip redundant reloads when the file is
+ * written without its content changing. The debounce window (default 200 ms)
+ * merges rapid successive change events — such as an editor's atomic save —
+ * into one reload, so the policy is never reloaded more often than once per
+ * window.
+ *
+ * The returned promise resolves when the signal aborts or when the underlying
+ * watcher ends naturally (e.g. the watched file is removed on some platforms).
+ * It **never rejects**: watch errors, read errors and validation failures are
+ * all routed to `onError` (when supplied) and swallowed otherwise.
+ *
+ * ```ts
+ * const ac = new AbortController();
+ * watchPolicyFile("/etc/agent/policy.json", {
+ *   onPolicy: (policy) => agent.setPolicy(policy),
+ *   onError: (err) => logger.warn("policy reload failed", err),
+ *   signal: ac.signal,
+ * });
+ * ```
+ */
+export async function watchPolicyFile(
+  filePath: string,
+  options: WatchPolicyFileOptions,
+): Promise<void> {
+  const { debounceMs = 200, onPolicy, onError, signal } = options;
+
+  let lastHash: string | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Call a callback, swallowing any throw so the watcher is not interrupted. */
+  const invoke = (cb: () => void): void => {
+    try {
+      cb();
+    } catch {
+      // observer isolation
+    }
+  };
+
+  /**
+   * Read the file, check the content hash to skip unchanged writes, then
+   * parse and validate the policy in-memory from the already-read bytes.
+   */
+  const tryLoad = async (): Promise<void> => {
+    let text: string;
+    try {
+      text = await readFile(filePath, "utf8");
+    } catch (error) {
+      const code = errnoCode(error);
+      if (onError) {
+        invoke(() =>
+          onError!(
+            new PolicyFileReadError(
+              `cannot read policy file '${filePath}'${code === null ? "" : ` (${code})`}`,
+              { path: filePath, code, cause: error },
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    const hash = createHash("sha256").update(text).digest("hex");
+    if (hash === lastHash) return; // content unchanged — skip
+    lastHash = hash;
+
+    let policy: GuardPolicy;
+    try {
+      policy = policyFromJson(text);
+    } catch (error) {
+      if (onError) invoke(() => onError!(error));
+      return;
+    }
+
+    const failures = validateGuardPolicy(policy, {});
+    if (failures.length > 0) {
+      if (onError) {
+        invoke(() =>
+          onError!(
+            new PolicyValidationError(
+              `policy file '${filePath}' failed validation with ${failures.length} failure(s): ${failures.map((f) => `${f.rule} at ${f.path}`).join("; ")}`,
+              { path: filePath, failures },
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    invoke(() => onPolicy(policy));
+  };
+
+  const scheduleLoad = (): void => {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      void tryLoad();
+    }, debounceMs);
+  };
+
+  // Initial load: always attempt before entering the watch loop so the caller
+  // receives the current policy even when the file has not changed.
+  await tryLoad();
+
+  if (signal?.aborted) {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+    return;
+  }
+
+  try {
+    for await (const _event of watch(filePath, { signal })) {
+      scheduleLoad();
+    }
+  } catch (error) {
+    // AbortError thrown when the signal fires inside the watch loop — normal.
+    if (signal?.aborted) return;
+    if (onError) invoke(() => onError!(error));
+  } finally {
+    if (debounceTimer !== null) {
+      clearTimeout(debounceTimer);
+      debounceTimer = null;
+    }
+  }
 }
 
 /** The errno code Node attached to a filesystem error, or `null`. */
