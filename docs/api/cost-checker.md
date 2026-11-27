@@ -10,6 +10,14 @@ constructor(options: CostPreCheckConfig)
 
 ### Options
 
+- `interceptor: Pick<PreFlightInterceptor, "check">` — Configured interceptor instance whose simulation prices execution
+- `maxFeeStroops?: bigint` — Maximum allowable total fee in stroops (omitted means price it, never object). Must be a non-negative `bigint`; a negative value or any non-`bigint` throws `InvalidFeeCeilingError` at construction. `0n` is a real ceiling, not the same as omission.
+- `policySource?: string | PolicyConfig | null` — Opt-in policy source (contract address or `GuardPolicy`/`PolicyConfig`) enabling additive `policyContext`
+- `policy?: string | PolicyConfig | null` — Alias for `policySource`
+- `windowSnapshot?: WindowSpendSnapshot | null` — Opt-in ledger-tied window-spend snapshot used to compute `policyContext.windowRemainingEstimate` (issue #311). Purely informational: it never changes the cost decision. Invalid snapshots (fractional/negative ledger, or a cap/spent that is not a non-negative `bigint`) throw `TypeError` at construction.
+- `windowSnapshotMaxAgeLedgers?: number` — How many ledgers a snapshot may predate the priced check's own ledger and still be used. Default `0`: only a snapshot observed at the same ledger is trusted. Must be a non-negative safe integer.
+- `inclusionFeeStroops?: bigint | string | number | null` — Custom inclusion fee floor in stroops (defaults to `100n` / `DEFAULT_INCLUSION_FEE_STROOPS`).
+- `inclusionFee?: bigint | string | number | null` — Alias for `inclusionFeeStroops`.
 #### `CostPreCheckConfig` (`new CostPreChecker(config)`)
 
 The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `CostPreCheckConfig`. Every value is validated at construction.

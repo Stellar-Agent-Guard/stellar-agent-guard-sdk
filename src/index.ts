@@ -266,6 +266,7 @@ export {
   FEE_PERCENTILES,
   STROOPS_PER_XLM,
   describeCostDecision,
+  evaluateFeeCeiling,
   exceedsCeiling,
   feeBreakdown,
   formatFee,

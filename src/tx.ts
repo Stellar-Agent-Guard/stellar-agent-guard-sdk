@@ -817,9 +817,10 @@ export function assembleFromSimulation(params: {
   networkPassphrase: string;
   guard: string | null;
   extraResourceFee?: bigint | undefined;
-  inclusionFee?: bigint | string | undefined;
+  inclusionFee?: bigint | string | number | null | undefined;
 }): AssembleResult {
   const { simulation, source, operation, networkPassphrase, guard } = params;
+  const parsedInclusionFee = parseInclusionFee(params.inclusionFee);
   // v17 hands back a builder already; older shapes hand back the data itself.
   const data =
     simulation.transactionData instanceof SorobanDataBuilder
@@ -861,12 +862,12 @@ export function assembleFromSimulation(params: {
   const extra = params.extraResourceFee ?? 0n;
   data.setResourceFee(minResourceFee + extra);
 
-  const inclusionFee = (params.inclusionFee ?? INCLUSION_FEE).toString();
+  const inclusionFeeStr = parsedInclusionFee.toString();
 
   // `TransactionBuilder` folds the resource fee declared in `sorobanData` into
   // the transaction fee on build(), so `fee` here is the inclusion fee only.
   const transaction = new TransactionBuilder(source, {
-    fee: inclusionFee,
+    fee: inclusionFeeStr,
     networkPassphrase,
     sorobanData: data.build(),
   })
@@ -874,7 +875,7 @@ export function assembleFromSimulation(params: {
     .setTimeout(0)
     .build();
 
-  return { transaction, resourceFee: minResourceFee + extra, footprintKeys, inclusionFee: BigInt(inclusionFee) };
+  return { transaction, resourceFee: minResourceFee + extra, footprintKeys, inclusionFee: parsedInclusionFee };
 }
 
 /**
@@ -1617,10 +1618,12 @@ export function buildInitialEnvelope(params: {
   operation: xdr.Operation;
   networkPassphrase: string;
   guard: string | null;
-  fee?: bigint | string | undefined;
+  fee?: bigint | string | number | null | undefined;
+  inclusionFee?: bigint | string | number | null | undefined;
 }): Transaction {
+  const inclusionFee = parseInclusionFee(params.inclusionFee ?? params.fee);
   const builder = new TransactionBuilder(params.source, {
-    fee: (params.fee ?? INCLUSION_FEE).toString(),
+    fee: inclusionFee.toString(),
     networkPassphrase: params.networkPassphrase,
     ...(params.guard
       ? {
