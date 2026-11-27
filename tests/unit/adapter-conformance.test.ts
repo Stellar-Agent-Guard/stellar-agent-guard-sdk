@@ -22,7 +22,10 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
+import {
+  createLangChainGuardMiddleware,
+  type LangChainToolCallRequest,
+} from "../../src/adapters/langchain.ts";
 import { DEFAULT_ADAPTER_TIMEOUT_MS, mapContractCalls } from "../../src/adapters/shared.ts";
 import { DEFAULT_RPC_TIMEOUT_MS } from "../../src/invoke.ts";
 import { createGuardValidator } from "../../src/adapters/elizaos.ts";
@@ -43,6 +46,7 @@ import type {
   GuardAdapterName,
   GuardBatchDecisionInfo,
   GuardBlockedInfo,
+  GuardHookContext,
   GuardMappingErrorInfo,
 } from "../../src/adapters/shared.ts";
 
@@ -219,6 +223,8 @@ interface Controls {
   hostSignal?: AbortSignal | undefined;
   /** A `RunnableConfig.signal` the LangChain middleware is invoked with. */
   configSignal?: AbortSignal | undefined;
+  /** Static or request-mapped correlation id (issue #459). */
+  correlationId?: string | ((...args: unknown[]) => string | undefined) | undefined;
 }
 
 interface Outcome {
@@ -253,6 +259,7 @@ function baseOptions(scenario: Scenario, observer: Observer, controls: Controls)
       : {}),
     ...(controls.signal ? { signal: controls.signal } : {}),
     ...(controls.timeoutMs !== undefined ? { timeoutMs: controls.timeoutMs } : {}),
+    ...(controls.correlationId !== undefined ? { correlationId: controls.correlationId } : {}),
   };
 }
 
@@ -917,6 +924,138 @@ describe("cancellation and timeout forwarding (issue #315)", () => {
         }),
       /timeoutMs/,
     );
+  });
+});
+
+/**
+ * Correlation ids (issue #459).
+ *
+ * One caller-supplied id must reach every hook for one action on every adapter,
+ * stay absent when none was supplied, and never be invented from request
+ * content.
+ */
+describe("adapter correlation ids (issue #459)", () => {
+  const CORRELATION_ID = "run-42";
+
+  function capture(): {
+    observer: Observer;
+    blocked: GuardBlockedInfo[];
+    mappingErrors: GuardMappingErrorInfo[];
+    contexts: GuardHookContext[];
+  } {
+    const blocked: GuardBlockedInfo[] = [];
+    const mappingErrors: GuardMappingErrorInfo[] = [];
+    const contexts: GuardHookContext[] = [];
+    return {
+      observer: {
+        onBlocked: (info) => {
+          blocked.push(info);
+        },
+        onMappingError: (info) => {
+          mappingErrors.push(info);
+        },
+        onDecision: (...args) => {
+          contexts.push(args.at(-1) as GuardHookContext);
+        },
+      },
+      blocked,
+      mappingErrors,
+      contexts,
+    };
+  }
+
+  for (const adapter of HARNESSES) {
+    it(`${adapter.name}: carries the same id to every hook for one action`, async () => {
+      const { observer, blocked, contexts } = capture();
+      const outcome = await adapter.run(SCENARIOS[1]!, observer, {
+        correlationId: CORRELATION_ID,
+      });
+
+      assert.equal(outcome.entered, 0);
+      assert.equal(contexts.length, 1);
+      assert.equal(contexts[0]!.correlationId, CORRELATION_ID);
+      if (adapter.hasBlockedHook) {
+        assert.equal(blocked.length, 1);
+        assert.equal(blocked[0]!.correlationId, CORRELATION_ID);
+      }
+    });
+
+    it(`${adapter.name}: leaves the id absent when none is supplied`, async () => {
+      const { observer, blocked, contexts } = capture();
+      await adapter.run(SCENARIOS[1]!, observer);
+
+      assert.equal(contexts.length, 1);
+      assert.equal(contexts[0]!.correlationId, undefined);
+      assert.equal("correlationId" in contexts[0]!, false, "an absent id must be omitted");
+      if (adapter.hasBlockedHook) {
+        assert.equal(blocked[0]!.correlationId, undefined);
+        assert.equal("correlationId" in blocked[0]!, false, "an absent id must be omitted");
+      }
+    });
+
+    it(`${adapter.name}: treats a blank id as absent`, async () => {
+      const { observer, contexts } = capture();
+      await adapter.run(SCENARIOS[1]!, observer, { correlationId: "   " });
+
+      assert.equal(contexts[0]!.correlationId, undefined);
+      assert.equal("correlationId" in contexts[0]!, false);
+    });
+
+    if (adapter.hasBlockedHook) {
+      it(`${adapter.name}: a mapping failure carries the same id`, async () => {
+        const { observer, blocked, mappingErrors } = capture();
+        await adapter.run(
+          SCENARIOS.find((scenario) => scenario.name === "mapping throws")!,
+          observer,
+          { correlationId: CORRELATION_ID },
+        );
+
+        assert.equal(mappingErrors.length, 1);
+        assert.equal(mappingErrors[0]!.correlationId, CORRELATION_ID);
+        assert.equal(blocked.length, 1);
+        assert.equal(blocked[0]!.kind, "undetermined");
+        assert.equal(blocked[0]!.correlationId, CORRELATION_ID);
+      });
+    }
+  }
+
+  it("maps the id from the request only when the host asks", async () => {
+    const blocked: GuardBlockedInfo[] = [];
+    const middleware = createLangChainGuardMiddleware({
+      interceptor: stub(BLOCKED),
+      toContractCall: () => CALL,
+      correlationId: (request: LangChainToolCallRequest) => request.toolCall.id,
+      onBlocked: (info) => blocked.push(info),
+    });
+
+    await middleware.wrapToolCall(
+      { toolCall: { name: "send_payment", id: "call-9", args: {} } },
+      async () => ({ content: "sent" }),
+    );
+
+    assert.equal(blocked[0]!.correlationId, "call-9");
+  });
+
+  it("never invents an id from request ids, addresses or tool arguments", async () => {
+    const blocked: GuardBlockedInfo[] = [];
+    const middleware = createLangChainGuardMiddleware({
+      interceptor: stub(BLOCKED),
+      toContractCall: () => CALL,
+      onBlocked: (info) => blocked.push(info),
+    });
+
+    await middleware.wrapToolCall(
+      {
+        toolCall: {
+          name: "send_payment",
+          id: "call-9",
+          args: { to: GUARD, amount: 5 },
+        },
+      },
+      async () => ({ content: "sent" }),
+    );
+
+    assert.equal("correlationId" in blocked[0]!, false);
   });
 });
 

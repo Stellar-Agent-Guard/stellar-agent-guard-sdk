@@ -93,6 +93,25 @@ export function validateContractMapping(options: {
   return issues;
 }
 
+/**
+ * An optional correlation id (issue #459): a fixed string or a request mapper.
+ *
+ * A blank string is accepted as "no id" rather than rejected — the runtime
+ * normalization keeps it absent — but any other non-string, non-function value
+ * is a configuration mistake and fails at construction, naming the field.
+ */
+export function validateOptionalCorrelationId(value: unknown): AdapterConfigIssue | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === "string" || typeof value === "function") return undefined;
+  return {
+    field: "correlationId",
+    expected: "a string, or a function returning a string, when provided",
+    message:
+      "`correlationId` must be a string or a function returning a string " +
+      `when provided (got ${describeValue(value)}).`,
+  };
+}
+
 /** An optional explicit sink for a swallowed `onBlocked` failure. */
 export function validateBlockedHookLogger(value: unknown): AdapterConfigIssue | undefined {
   if (value === undefined) return undefined;

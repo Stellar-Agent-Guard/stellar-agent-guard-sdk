@@ -31,6 +31,7 @@ import {
 import { invoke, RpcTimeoutError, type InvokeDryRunVerdict, type InvokeOutcome } from "./invoke.ts";
 import { unsafeContractAddress, type GuardStatus, type PolicyConfig } from "./policy.ts";
 import { explainReason, GuardBlockedError } from "./reasons.ts";
+import { computePollDelay, DEFAULT_JITTER_FRACTION } from "./telemetry.ts";
 import type { AgentSigner, AdminSigner } from "./tx.ts";
 
 /** What one heartbeat submission reports back to the scheduler. */
@@ -383,6 +384,27 @@ export interface SubmitHeartbeatParams {
   signerTimeoutMs?: number;
 }
 
+/**
+ * Cadence jitter mode for `startHeartbeat()` (issue #460).
+ *
+ * - `"none"` (default): the exact fixed cadence the scheduler has always used.
+ * - `"full"`: schedule each beat uniformly in `[deadline - j*intervalMs,
+ *   deadline]`, where `j` is `jitterFraction` (0.2 by default). Beats are never
+ *   later than the fixed deadline, the deadline itself never drifts, and the
+ *   early window is what breaks fleet lockstep.
+ */
+export type HeartbeatJitter = "none" | "full";
+
+/**
+ * Default cadence jitter mode.
+ *
+ * `"none"` keeps the pre-existing fixed-cadence behaviour exactly, which is the
+ * backward-compatible default: jitter is opt-in because it changes when a
+ * safety-critical beat fires. Pass `jitter: "full"` to spread a fleet of agents
+ * that would otherwise beat in lockstep.
+ */
+export const DEFAULT_HEARTBEAT_JITTER: HeartbeatJitter = "none";
+
 export interface HeartbeatOptions {
   /** The guard smart account to keep alive. */
   guard: string;
@@ -393,6 +415,27 @@ export interface HeartbeatOptions {
    * every `intervalMs`. Must be positive.
    */
   intervalMs: number;
+  /**
+   * Cadence jitter (issue #460). Default `"none"`: the fixed cadence this
+   * scheduler has always used. `"full"` schedules each beat up to
+   * `jitterFraction * intervalMs` early, uniformly, so agents started from one
+   * template do not beat in lockstep. Jitter never makes a beat late and never
+   * changes `missedBeats`; `lateMs` is still measured against the fixed
+   * deadline.
+   */
+  jitter?: HeartbeatJitter;
+  /**
+   * Width of the full-jitter window as a fraction of `intervalMs`, in `[0, 1]`.
+   * Default `DEFAULT_JITTER_FRACTION` (0.2), the same helper and default the
+   * telemetry poll loop uses. Only consulted when `jitter: "full"`.
+   */
+  jitterFraction?: number;
+  /**
+   * RNG seam for the jitter sample; it must return a value in `[0, 1)`. Default
+   * `Math.random`. Inject a seeded generator to make cadence deterministic in
+   * tests.
+   */
+  random?: () => number;
   /**
    * Lateness tolerated before a beat counts as missed. Defaults to `0`
    * (strict): set it to your scheduler's tolerable drift (e.g. `2_000` for a
@@ -751,6 +794,19 @@ function assertHeartbeatOptions(options: HeartbeatOptions): void {
       );
     }
   }
+  if (options.jitter !== undefined && options.jitter !== "none" && options.jitter !== "full") {
+    throw new TypeError(
+      `heartbeat jitter must be "none" or "full", received ${String(options.jitter)}`,
+    );
+  }
+  if (options.jitterFraction !== undefined) {
+    const jitterFraction = options.jitterFraction;
+    if (!Number.isFinite(jitterFraction) || jitterFraction < 0 || jitterFraction > 1) {
+      throw new RangeError(
+        `heartbeat jitterFraction must be a finite number in [0, 1], received ${jitterFraction}`,
+      );
+    }
+  }
   if (options.stopTimeoutMs !== undefined) {
     const stopTimeoutMs = options.stopTimeoutMs;
     if (!Number.isFinite(stopTimeoutMs) || stopTimeoutMs < 0) {
@@ -807,6 +863,7 @@ function assertHeartbeatOptions(options: HeartbeatOptions): void {
   assertFunctionOption("submit", options.submit);
   assertFunctionOption("now", options.now);
   assertFunctionOption("wait", options.wait);
+  assertFunctionOption("random", options.random);
   if (options.retry !== undefined) {
     if (typeof options.retry !== "object" || options.retry === null) {
       throw new TypeError(`heartbeat retry must be an object, received ${typeof options.retry}`);
@@ -1075,6 +1132,10 @@ async function attemptSubmission(
  * beat waits for the next future deadline. The first beat fires immediately, so
  * a freshly started agent registers without waiting a full interval.
  *
+ * With `jitter: "full"` each beat is woken up to `jitterFraction * intervalMs`
+ * early, uniformly, while the fixed deadline itself is unchanged. That breaks
+ * fleet lockstep without making a beat late or inflating `missedBeats`.
+ *
  * ## Lateness and failures
  *
  * A beat that fires more than `maxSkewMs` past its deadline increments
@@ -1117,6 +1178,22 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
   const maxSkewMs = options.maxSkewMs ?? 0;
   const now = options.now ?? (() => Date.now());
   const wait = options.wait ?? defaultWait;
+  const jitter = options.jitter ?? DEFAULT_HEARTBEAT_JITTER;
+  const jitterFraction = options.jitterFraction ?? DEFAULT_JITTER_FRACTION;
+  const random = options.random ?? Math.random;
+
+  /**
+   * How far before the fixed deadline this beat is scheduled (issue #460).
+   *
+   * Computed with the telemetry poll loop's own `computePollDelay` helper, so
+   * there is one jitter implementation and one default fraction in the SDK.
+   * The sample is resampled every slot against the same fixed deadline, which
+   * is what keeps the early window from accumulating into a permanent drift.
+   */
+  const jitterOffset = (): number => {
+    if (jitter === "none") return 0;
+    return intervalMs - computePollDelay(intervalMs, "full", random, jitterFraction);
+  };
 
   const { grace, readable } = await resolveGrace(options);
   if (grace !== null && grace > 0n) {
@@ -1324,7 +1401,10 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
     };
 
     while (!stopped) {
-      await wait(Math.max(0, deadline - now()), controller.signal);
+      // The fixed deadline is still the reference for lateness and missed-beat
+      // accounting; only the moment we wake for the beat is jittered earlier.
+      const target = deadline - jitterOffset();
+      await wait(Math.max(0, target - now()), controller.signal);
       if (stopped) break;
 
       const at = now();

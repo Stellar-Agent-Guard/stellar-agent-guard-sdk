@@ -135,6 +135,128 @@ describe("startHeartbeat", () => {
     await handle.stop();
   });
 
+  it("defaults to no cadence jitter, preserving the existing fixed cadence", async () => {
+    const clock = fakeClock();
+    const beats: HeartbeatBeat[] = [];
+    const handle = await startHeartbeat(
+      baseOptions({
+        intervalMs: 1_000,
+        now: clock.now,
+        wait: clock.wait,
+        onBeat: (beat) => beats.push(beat),
+      }),
+    );
+
+    await clock.tick();
+    await clock.tick();
+    await clock.tick();
+
+    assert.deepEqual(
+      beats.map((beat) => beat.at),
+      [0, 1_000, 2_000],
+      "the default must be jitter: 'none'",
+    );
+    assert.equal(handle.missedBeats, 0);
+    await handle.stop();
+  });
+
+  it("explicit jitter 'none' reproduces the fixed cadence exactly", async () => {
+    const clock = fakeClock();
+    const beats: HeartbeatBeat[] = [];
+    const handle = await startHeartbeat(
+      baseOptions({
+        intervalMs: 1_000,
+        jitter: "none",
+        now: clock.now,
+        wait: clock.wait,
+        onBeat: (beat) => beats.push(beat),
+      }),
+    );
+
+    await clock.tick();
+    await clock.tick();
+    await clock.tick();
+
+    assert.deepEqual(
+      beats.map((beat) => beat.at),
+      [0, 1_000, 2_000],
+    );
+    await handle.stop();
+  });
+
+  it("full jitter stays inside the documented early window and never counts as missed", async () => {
+    const intervalMs = 5_000;
+    const fraction = 0.2;
+    const clock = fakeClock();
+    const beats: HeartbeatBeat[] = [];
+    const samples = [0, 0.5, 0.999];
+    let index = 0;
+
+    const handle = await startHeartbeat(
+      baseOptions({
+        intervalMs,
+        jitter: "full",
+        jitterFraction: fraction,
+        maxSkewMs: 0,
+        random: () => samples[index++] ?? 0.5,
+        now: clock.now,
+        wait: clock.wait,
+        onBeat: (beat) => beats.push(beat),
+      }),
+    );
+
+    await clock.tick();
+    await clock.tick();
+    await clock.tick();
+
+    assert.deepEqual(
+      beats.map((beat) => beat.at),
+      [0, 4_500, 9_999],
+    );
+    for (const [beatIndex, beat] of beats.entries()) {
+      const deadline = beatIndex * intervalMs;
+      assert.ok(
+        beat.at >= deadline - fraction * intervalMs && beat.at <= deadline,
+        `beat ${beatIndex} at ${beat.at} fell outside [${deadline - fraction * intervalMs}, ${deadline}]`,
+      );
+      assert.equal(beat.lateMs, 0, `jitter was reported as lateness on beat ${beatIndex}`);
+    }
+    assert.equal(handle.missedBeats, 0, "jitter must not count as a missed beat");
+    await handle.stop();
+  });
+
+  it("produces a reproducible cadence from the same seeded RNG", async () => {
+    const seededRandom = (seed: number): (() => number) => {
+      let state = seed >>> 0;
+      return () => {
+        state = (state * 1_664_525 + 1_013_904_223) >>> 0;
+        return state / 2 ** 32;
+      };
+    };
+
+    const cadence = async (): Promise<number[]> => {
+      const clock = fakeClock();
+      const beats: HeartbeatBeat[] = [];
+      const handle = await startHeartbeat(
+        baseOptions({
+          intervalMs: 5_000,
+          jitter: "full",
+          random: seededRandom(42),
+          now: clock.now,
+          wait: clock.wait,
+          onBeat: (beat) => beats.push(beat),
+        }),
+      );
+      await clock.tick();
+      await clock.tick();
+      await clock.tick();
+      await handle.stop();
+      return beats.map((beat) => beat.at);
+    };
+
+    assert.deepEqual(await cadence(), await cadence());
+  });
+
   it("stops cleanly and never submits after stop(), even mid-flight", async () => {
     const clock = fakeClock();
     let submissions = 0;
@@ -733,6 +855,24 @@ describe("startHeartbeat input validation (issue #341)", () => {
     );
     assert.equal(submissions, 0, "no beat may be submitted");
     assert.equal(policyReads, 0, "and the grace window must not even be read");
+  });
+
+  it("rejects an unusable cadence jitter configuration", async () => {
+    await assert.rejects(
+      startHeartbeat(baseOptions({ jitter: "sometimes" as never })),
+      (error: unknown) => error instanceof TypeError && /jitter/.test((error as Error).message),
+    );
+    for (const jitterFraction of [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.1]) {
+      await assert.rejects(
+        startHeartbeat(baseOptions({ jitterFraction })),
+        (error: unknown) =>
+          error instanceof RangeError && /jitterFraction/.test((error as Error).message),
+      );
+    }
+    await assert.rejects(
+      startHeartbeat(baseOptions({ random: 42 as never })),
+      (error: unknown) => error instanceof TypeError && /random/.test((error as Error).message),
+    );
   });
 
   it("rejects an unusable stopTimeoutMs", async () => {

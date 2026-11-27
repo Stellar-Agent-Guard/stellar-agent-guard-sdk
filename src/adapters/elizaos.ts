@@ -41,6 +41,7 @@ import {
   validateBlockedHookLogger,
   validateContractMapping,
   validateInterceptor,
+  validateOptionalCorrelationId,
   validateOptionalFunction,
   validateOptionalSignal,
   validateOptionalTimeout,
@@ -52,9 +53,11 @@ import {
   blockedInfoForBatch,
   checkOptionsFor,
   decisionFromGuardError,
+  hookContextFor,
   mappingFailureFor,
   normalizeMappedCall,
   normalizeMappedCalls,
+  resolveCorrelationId,
   runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
@@ -62,7 +65,9 @@ import {
   type BlockedHookLogger,
   type GuardBatchDecisionHook,
   type GuardBlockedHook,
+  type GuardHookContext,
   type GuardMappingErrorHook,
+  type CorrelationIdOption,
 } from "./shared.ts";
 
 /** The subset of ElizaOS's `Validator` signature this adapter implements. */
@@ -102,7 +107,15 @@ export interface ElizaGuardOptions {
    */
   name?: string;
   /** Observe every decision — the place to wire telemetry. */
-  onDecision?: (decision: PreFlightDecision) => void;
+  onDecision?: (decision: PreFlightDecision, context: GuardHookContext) => void;
+  /**
+   * Caller correlation id for this action (issue #459), either fixed or mapped
+   * from the message/state. It is added to every hook payload for the action.
+   * Omitted — or blank — stays absent; the SDK never derives one from
+   * addresses, action arguments or timestamps. Treat it as operator metadata:
+   * it may identify a user or run, so do not log it with secrets.
+   */
+  correlationId?: CorrelationIdOption<[message: unknown, state: unknown]>;
   /**
    * Action-level batch decision summary hook (issue #498).
    *
@@ -173,6 +186,8 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
   }
   const blockedLoggerIssue = validateBlockedHookLogger(options.blockedHookLogger);
   if (blockedLoggerIssue) issues.push(blockedLoggerIssue);
+  const correlationIdIssue = validateOptionalCorrelationId(options.correlationId);
+  if (correlationIdIssue) issues.push(correlationIdIssue);
   const baseValidateIssue = validateOptionalFunction("baseValidate", options.baseValidate);
   if (baseValidateIssue) issues.push(baseValidateIssue);
   const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
@@ -190,6 +205,9 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
   throwAdapterConfigError("elizaos", issues);
 
   return async (runtime, message, state, handlerOptions) => {
+    // Resolve the id once, before the mapper, so every hook for this action —
+    // including a mapping failure — carries the same value.
+    const correlationId = resolveCorrelationId(options.correlationId, message, state);
     if (options.baseValidate) {
       const baseOk = await options.baseValidate(runtime, message, state, handlerOptions);
       if (!baseOk) return false; // the action was not applicable in the first place
@@ -208,6 +226,7 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
         error,
         options.name ?? "unknown",
         options.includeMappingErrorRequest ? { message, state } : undefined,
+        correlationId,
       );
       runMappingErrorHook(options.onMappingError, failure.mapping, options.blockedHookLogger);
       runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
@@ -228,12 +247,17 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
           throw error;
         }
       }
-      runDecisionHook(options.onDecision, [decision], "elizaos", options.blockedHookLogger);
+      runDecisionHook(
+        options.onDecision,
+        [decision, hookContextFor(correlationId)],
+        "elizaos",
+        options.blockedHookLogger,
+      );
       if (decision.allowed) return true;
 
       runBlockedHook(
         options.onBlocked,
-        blockedInfoFor("elizaos", calls[0]!, decision),
+        blockedInfoFor("elizaos", calls[0]!, decision, correlationId),
         options.blockedHookLogger,
       );
       return false;
@@ -261,7 +285,12 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
       }
     }
     for (const verdict of batch.verdicts) {
-      runDecisionHook(options.onDecision, [verdict], "elizaos", options.blockedHookLogger);
+      runDecisionHook(
+        options.onDecision,
+        [verdict, hookContextFor(correlationId)],
+        "elizaos",
+        options.blockedHookLogger,
+      );
     }
     runBatchDecisionHook(
       options.onBatchDecision,
@@ -277,7 +306,7 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
 
     runBlockedHook(
       options.onBlocked,
-      blockedInfoForBatch("elizaos", calls, batch.verdicts),
+      blockedInfoForBatch("elizaos", calls, batch.verdicts, correlationId),
       options.blockedHookLogger,
     );
     return false;

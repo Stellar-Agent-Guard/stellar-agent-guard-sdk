@@ -48,6 +48,7 @@ import {
   validateBlockedHookLogger,
   validateContractMapping,
   validateInterceptor,
+  validateOptionalCorrelationId,
   validateOptionalFunction,
   validateOptionalSignal,
   validateOptionalTimeout,
@@ -60,10 +61,12 @@ import {
   blockedInfoForBatch,
   checkOptionsFor,
   decisionFromGuardError,
+  hookContextFor,
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
   mergeAbortSignals,
+  resolveCorrelationId,
   runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
@@ -71,7 +74,9 @@ import {
   type BlockedHookLogger,
   type GuardBatchDecisionHook,
   type GuardBlockedHook,
+  type GuardHookContext,
   type GuardMappingErrorHook,
+  type CorrelationIdOption,
 } from "./shared.ts";
 
 /** The subset of LangChain's `ToolCallRequest` this adapter reads. */
@@ -109,7 +114,19 @@ export interface LangChainGuardOptions {
   /** Middleware name; also the returned message's `name`. */
   name?: string;
   /** Observe every decision — the place to wire telemetry. */
-  onDecision?: (request: LangChainToolCallRequest, decision: PreFlightDecision) => void;
+  onDecision?: (
+    request: LangChainToolCallRequest,
+    decision: PreFlightDecision,
+    context: GuardHookContext,
+  ) => void;
+  /**
+   * Caller correlation id for this tool call (issue #459), either fixed or
+   * mapped from the framework request. It is added to every hook payload for
+   * the action. Omitted — or blank — stays absent; the SDK never derives one
+   * from addresses, tool arguments or timestamps. Treat it as operator
+   * metadata: it may identify a user or run, so do not log it with secrets.
+   */
+  correlationId?: CorrelationIdOption<[request: LangChainToolCallRequest]>;
   /**
    * Action-level batch decision summary hook (issue #498).
    *
@@ -210,6 +227,8 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
   }
   const blockedLoggerIssue = validateBlockedHookLogger(options.blockedHookLogger);
   if (blockedLoggerIssue) issues.push(blockedLoggerIssue);
+  const correlationIdIssue = validateOptionalCorrelationId(options.correlationId);
+  if (correlationIdIssue) issues.push(correlationIdIssue);
   const nameIssue = validateOptionalFunction("name", options.name);
   if (nameIssue) issues.push(nameIssue);
   const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
@@ -235,6 +254,9 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       handler: (request: LangChainToolCallRequest) => Promise<T>,
       config?: { signal?: unknown },
     ): Promise<T | LangChainToolMessage> {
+      // Resolve the correlation id once, before mapping, so a mapping failure
+      // still carries the same id as every other hook for this action.
+      const correlationId = resolveCorrelationId(options.correlationId, request);
       // A mapper that throws or returns a malformed call fails closed (issue
       // #316): the tool body is never entered and the failure is reported as an
       // `undetermined` halt. A `null` return still means "not fund-moving".
@@ -247,6 +269,7 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
           error,
           request.toolCall.name,
           options.includeMappingErrorRequest ? request : undefined,
+          correlationId,
         );
         runMappingErrorHook(options.onMappingError, failure.mapping, options.blockedHookLogger);
         runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
@@ -290,7 +313,7 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
         }
         runDecisionHook(
           options.onDecision,
-          [request, decision],
+          [request, decision, hookContextFor(correlationId)],
           "langchain",
           options.blockedHookLogger,
         );
@@ -300,7 +323,7 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
         // so this adapter and ElizaOS cannot drift on the payload shape.
         runBlockedHook(
           options.onBlocked,
-          blockedInfoFor("langchain", calls[0]!, decision),
+          blockedInfoFor("langchain", calls[0]!, decision, correlationId),
           options.blockedHookLogger,
         );
 
@@ -339,7 +362,7 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
       for (const verdict of batch.verdicts) {
         runDecisionHook(
           options.onDecision,
-          [request, verdict],
+          [request, verdict, hookContextFor(correlationId)],
           "langchain",
           options.blockedHookLogger,
         );
@@ -359,7 +382,7 @@ export function createLangChainGuardMiddleware(options: LangChainGuardOptions) {
 
       runBlockedHook(
         options.onBlocked,
-        blockedInfoForBatch("langchain", calls, batch.verdicts),
+        blockedInfoForBatch("langchain", calls, batch.verdicts, correlationId),
         options.blockedHookLogger,
       );
       const refusal = batch.verdicts.find((verdict) => !verdict.allowed)!;

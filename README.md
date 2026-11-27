@@ -1155,6 +1155,7 @@ if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 ```
 
 - The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule. A submission that outlives several slots skips the stale ones instead of firing a catch-up burst.
+- A fleet started from one template beats in lockstep, so cadence jitter is available as an opt-in: `jitter: "full"` schedules each beat uniformly in `[deadline - 0.2·intervalMs, deadline]`, using the same helper and default fraction as telemetry polling. It never makes a beat late, never affects `missedBeats`, and the deadline does not drift. The default is `jitter: "none"` (today's exact cadence); pass `jitterFraction` (0–1) to widen or narrow the window, and `random` to inject a seeded RNG.
 - A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; each cadence slot skipped while a submission was in flight is counted too. Alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
 - Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
 - `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and by default it resolves once an in-flight beat has settled. `stop()` first aborts the submission context's `signal`; pass `stop({ timeoutMs })` or set `stopTimeoutMs` when a custom transport might not settle, and inspect `{ reason, settled }` on the result.
@@ -1390,6 +1391,7 @@ if (!stop.settled) logger.warn(`heartbeat stop ${stop.reason}`);
 ```
 
 - The first beat fires immediately, then every `intervalMs` on a fixed cadence — a slow beat surfaces as lateness on the next one instead of pushing the whole schedule. A submission that outlives several slots skips the stale ones instead of firing a catch-up burst.
+- A fleet started from one template beats in lockstep, so cadence jitter is available as an opt-in: `jitter: "full"` schedules each beat uniformly in `[deadline - 0.2·intervalMs, deadline]`, using the same helper and default fraction as telemetry polling. It never makes a beat late, never affects `missedBeats`, and the deadline does not drift. The default is `jitter: "none"` (today's exact cadence); pass `jitterFraction` (0–1) to widen or narrow the window, and `random` to inject a seeded RNG.
 - A beat later than `maxSkewMs` increments `hb.missedBeats` and is reported as `lateMs` in `onBeat`; each cadence slot skipped while a submission was in flight is counted too. Alert on lateness, not only on failure. `hb.lastBeatAt` is the epoch ms of the last successful beat.
 - Every submission rejection goes to `onError`; nothing escapes as an unhandled rejection.
 - `stop()` (or the `signal`) tears down cleanly: no beat is sent after it, and by default it resolves once an in-flight beat has settled. `stop()` first aborts the submission context's `signal`; pass `stop({ timeoutMs })` or set `stopTimeoutMs` when a custom transport might not settle, and inspect `{ reason, settled }` on the result.

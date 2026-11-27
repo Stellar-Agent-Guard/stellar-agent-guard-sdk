@@ -60,6 +60,69 @@ export const DEFAULT_ADAPTER_TIMEOUT_MS = DEFAULT_RPC_TIMEOUT_MS;
 export type GuardAdapterName = "langchain" | "elizaos" | "mcp" | "vercelai";
 
 /**
+ * Optional caller correlation id for one action (issue #459).
+ *
+ * Either a fixed string or a callback that reads the id out of the framework's
+ * own request. The callback is the only way the adapters map a request id: the
+ * SDK never guesses one from addresses, tool arguments or timestamps, because a
+ * wrong correlation id is worse than no id at all.
+ */
+export type CorrelationIdOption<TArgs extends readonly unknown[] = readonly unknown[]> =
+  | string
+  | ((...args: TArgs) => string | undefined);
+
+/**
+ * Extra context handed to `onDecision` alongside the verdict (issue #459).
+ *
+ * `correlationId` is present only when the host supplied one; an absent id is
+ * omitted rather than sent as an empty string.
+ */
+export interface GuardHookContext {
+  /** Caller-supplied id tying every hook for one action together. */
+  correlationId?: string;
+}
+
+/**
+ * Normalize a host-supplied correlation id.
+ *
+ * A non-string, an empty string and a whitespace-only string all mean "no id"
+ * and stay `undefined`, so a consumer never has to treat a blank value as an
+ * identifier. The original string is returned unchanged when it is non-blank.
+ */
+export function normalizeCorrelationId(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  return value.trim().length > 0 ? value : undefined;
+}
+
+/**
+ * Resolve the correlation id for one action exactly once.
+ *
+ * Resolution is deliberately total: an option that is not a string or function,
+ * or a callback that throws, yields `undefined`. A correlation id is
+ * observability metadata, not enforcement input — a broken id source must never
+ * change a verdict, halt an action, or become an unhandled rejection.
+ */
+export function resolveCorrelationId<TArgs extends readonly unknown[]>(
+  option: CorrelationIdOption<TArgs> | undefined,
+  ...args: TArgs
+): string | undefined {
+  if (option === undefined) return undefined;
+  if (typeof option === "function") {
+    try {
+      return normalizeCorrelationId(option(...args));
+    } catch {
+      return undefined;
+    }
+  }
+  return normalizeCorrelationId(option);
+}
+
+/** Build the `onDecision` context, omitting an absent id entirely. */
+export function hookContextFor(correlationId: string | undefined): GuardHookContext {
+  return correlationId === undefined ? {} : { correlationId };
+}
+
+/**
  * The structured payload handed to `onBlocked`.
  *
  * `reason` and `explanation` mirror the guard's own `blocked` verdict. Failing
@@ -85,6 +148,12 @@ export interface GuardBlockedInfo {
   call?: ContractCall;
   /** Human-readable one-line meaning; the failure detail when undetermined. */
   explanation: string;
+  /**
+   * Caller-supplied id tying this halt to the agent run/request that produced
+   * it (issue #459). Absent — never an empty string — when the host supplied
+   * none. It is never derived from addresses, tool arguments or timestamps.
+   */
+  correlationId?: string;
   /**
    * Every call in the mapped batch, in the order the adapter checked them.
    * Present only when the halt came from a batch mapping (`toContractCalls`),
@@ -141,6 +210,13 @@ export interface GuardMappingErrorInfo {
   adapter: GuardAdapterName;
   /** The tool/action name whose mapping failed; never its arguments. */
   tool: string;
+  /**
+   * Caller-supplied id tying this integration failure to the agent run/request
+   * that produced it (issue #459). Absent — never an empty string — when the
+   * host supplied none. It is never derived from addresses, tool arguments or
+   * timestamps.
+   */
+  correlationId?: string;
   /** The error's class name (`AdapterMappingError`), so a sink can group failures. */
   errorClass: string;
   /** The typed mapping error; its message names the mapper and the failure. */
@@ -278,6 +354,7 @@ export function mappingFailureFor(
   error: unknown,
   tool = "unknown",
   request?: unknown,
+  correlationId?: string | undefined,
 ): {
   decision: Extract<PreFlightDecision, { kind: "undetermined" }>;
   info: GuardBlockedInfo;
@@ -295,13 +372,20 @@ export function mappingFailureFor(
   const detail = `call mapping failed before enforcement: ${mappingError.message}`;
   return {
     decision: { allowed: false, kind: "undetermined", detail, error: mappingError },
-    info: { adapter, kind: "undetermined", reason: null, explanation: detail },
+    info: {
+      adapter,
+      kind: "undetermined",
+      reason: null,
+      explanation: detail,
+      ...(correlationId !== undefined ? { correlationId } : {}),
+    },
     mapping: {
       adapter,
       tool,
       errorClass: mappingError.name,
       error: mappingError,
       ...(request !== undefined ? { request } : {}),
+      ...(correlationId !== undefined ? { correlationId } : {}),
     },
   };
 }
@@ -341,7 +425,9 @@ export function blockedInfoFor(
   adapter: GuardAdapterName,
   call: ContractCall,
   decision: PreFlightDecision & { allowed: false },
+  correlationId?: string | undefined,
 ): GuardBlockedInfo {
+  const correlation = correlationId !== undefined ? { correlationId } : {};
   if (decision.kind === "blocked") {
     return {
       adapter,
@@ -349,6 +435,7 @@ export function blockedInfoFor(
       reason: decision.reason,
       call,
       explanation: decision.explanation,
+      ...correlation,
     };
   }
   return {
@@ -357,6 +444,7 @@ export function blockedInfoFor(
     reason: null,
     call,
     explanation: decision.detail,
+    ...correlation,
   };
 }
 
@@ -372,6 +460,7 @@ export function blockedInfoForBatch(
   adapter: GuardAdapterName,
   calls: readonly ContractCall[],
   verdicts: readonly PreFlightDecision[],
+  correlationId?: string | undefined,
 ): GuardBlockedInfo {
   const index = verdicts.findIndex((verdict) => !verdict.allowed);
   const decision = verdicts[index] ?? verdicts[0];
@@ -380,7 +469,7 @@ export function blockedInfoForBatch(
     throw new Error("blockedInfoForBatch requires an ordered batch with a refusal");
   }
   return {
-    ...blockedInfoFor(adapter, call, decision),
+    ...blockedInfoFor(adapter, call, decision, correlationId),
     calls: [...calls],
     verdicts: [...verdicts],
   };

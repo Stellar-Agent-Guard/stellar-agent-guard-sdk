@@ -41,14 +41,18 @@ import {
   batchDecisionKindFor,
   checkOptionsFor,
   decisionFromGuardError,
+  hookContextFor,
   mapContractCalls,
   mappingFailureFor,
+  resolveCorrelationId,
   runBatchDecisionHook,
   runDecisionHook,
   runMappingErrorHook,
   type BlockedHookLogger,
   type GuardBatchDecisionHook,
+  type GuardHookContext,
   type GuardMappingErrorHook,
+  type CorrelationIdOption,
 } from "./shared.ts";
 
 /**
@@ -92,7 +96,19 @@ export interface VercelAIGuardOptions {
    * matches the SDK's other failure-isolated callbacks (`onGap`,
    * `onStep`/`onUnknownTopics`).
    */
-  onDecision?: (call: VercelAIToolCallInput, decision: PreFlightDecision) => void;
+  onDecision?: (
+    call: VercelAIToolCallInput,
+    decision: PreFlightDecision,
+    context: GuardHookContext,
+  ) => void;
+  /**
+   * Caller correlation id for this tool call (issue #459), either fixed or
+   * mapped from the tool-call input. It is added to every hook payload for the
+   * action. Omitted — or blank — stays absent; the SDK never derives one from
+   * addresses, tool arguments or timestamps. Treat it as operator metadata: it
+   * may identify a user or run, so do not log it with secrets.
+   */
+  correlationId?: CorrelationIdOption<[call: VercelAIToolCallInput]>;
   /**
    * Action-level batch decision summary hook (issue #498).
    *
@@ -151,6 +167,9 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
     ...tool,
     async execute(input: never, toolOptions: unknown): Promise<unknown> {
       const request = { toolName: call.toolName, input };
+      // Resolve the id once, before mapping, so a mapping failure and every
+      // decision observer see the same value for this action.
+      const correlationId = resolveCorrelationId(options.correlationId, request);
       let contractCalls: ContractCall[];
       try {
         contractCalls = mapContractCalls(request, options);
@@ -186,7 +205,7 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
         }
         runDecisionHook(
           options.onDecision,
-          [request, decision],
+          [request, decision, hookContextFor(correlationId)],
           "vercelai",
           options.blockedHookLogger,
         );
@@ -217,7 +236,7 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
       for (const verdict of batch.verdicts) {
         runDecisionHook(
           options.onDecision,
-          [request, verdict],
+          [request, verdict, hookContextFor(correlationId)],
           "vercelai",
           options.blockedHookLogger,
         );

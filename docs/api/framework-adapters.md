@@ -75,8 +75,8 @@ halt, on every adapter; `onBlocked` still fires afterwards for compatibility.
 
 | Hook | Fires for | Payload | Use it for |
 | --- | --- | --- | --- |
-| `onMappingError` | Only a mapper that threw or returned a malformed call. Never for a guard verdict. | `{ adapter, tool, errorClass, error }`; `request` only when opted in. | Paging the team that owns the integration, grouping mapper bugs. |
-| `onBlocked` | Every halt: a `blocked` refusal, an `undetermined` enforcement run, and (for compatibility) a mapping failure. | `{ adapter, kind, reason, call?, explanation }`. | Policy/operator alerting and audit trails. |
+| `onMappingError` | Only a mapper that threw or returned a malformed call. Never for a guard verdict. | `{ adapter, tool, errorClass, error, correlationId? }`; `request` only when opted in. | Paging the team that owns the integration, grouping mapper bugs. |
+| `onBlocked` | Every halt: a `blocked` refusal, an `undetermined` enforcement run, and (for compatibility) a mapping failure. | `{ adapter, kind, reason, call?, explanation, correlationId? }`. | Policy/operator alerting and audit trails. |
 
 ```ts
 createLangChainGuardMiddleware({
@@ -109,6 +109,55 @@ createLangChainGuardMiddleware({
   },
 });
 ```
+
+## Correlation ids (issue #459)
+
+Every adapter accepts an optional `correlationId`: either a fixed string or a
+callback that reads an id out of the framework request. It is added to every
+hook for one action — `onBlocked`, the `onDecision` context, and both payloads
+that report a mapping failure (`onMappingError` and the compatibility
+`onBlocked` halt) — so an operator alert can be joined to the agent run or user
+request that produced it.
+
+```ts
+createLangChainGuardMiddleware({
+  interceptor,
+  toContractCall,
+  // A fixed id, or map one from the framework request:
+  correlationId: (request) => request.toolCall.id,
+  onDecision: (_request, decision, context) => {
+    telemetry.record({ decision, correlationId: context.correlationId });
+  },
+  onMappingError: (info) => {
+    reportIntegrationBug({ correlationId: info.correlationId, tool: info.tool });
+  },
+  onBlocked: (info) => {
+    alert(`${info.correlationId ?? "no-id"}: ${info.kind}`);
+  },
+});
+```
+
+- **One id per action.** It is resolved once, before call mapping, and reused
+  for every hook the action produces.
+- **Absent stays absent.** With no option, a blank string, or a callback that
+  returns `undefined`, the field is omitted rather than sent as `""`.
+- **Never invented.** The SDK does not derive an id from addresses, tool
+  arguments, timestamps or any other request content. Only the host's explicit
+  option or callback supplies one.
+- **Never enforcement input.** A callback that throws or returns a non-string
+  yields no id; it cannot change a verdict, resume a halted action, or fail the
+  run.
+
+Privacy: a correlation id often names a user, session, or agent run. Treat it as
+operator metadata — ship it only to sinks you already trust with operational
+data, and keep it out of logs that are shared more widely than the request it
+identifies. The SDK stores it only for the duration of the action.
+
+The callback receives the same request shape as the adapter's mapper: the
+tool-call request (LangChain), the tool call (Vercel AI), the MCP request, or
+`(message, state)` (ElizaOS). The Vercel AI adapter has no `onBlocked` hook, so
+there it appears on `onDecision` and `onMappingError`; LangChain, ElizaOS and MCP
+also expose it on `onBlocked`, including mapping-failure halts.
 
 ## Observer hooks: never awaited, never unhandled
 
