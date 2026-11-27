@@ -6,8 +6,11 @@
  * not part of the SDK's usable API.
  */
 import assert from "node:assert/strict";
+import { rmSync, writeFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { xdr } from "@stellar/stellar-sdk";
+import { Account, Keypair, rpc, Transaction, xdr } from "@stellar/stellar-sdk";
+import * as sdk from "../../src/index.ts";
+import * as fsModule from "../../src/fs.ts";
 import {
   AdapterConfigError,
   AdapterMappingError,
@@ -15,9 +18,12 @@ import {
   BroadcastError,
   ConcurrentTelemetryStreamError,
   ContractResponseError,
+  CostPreChecker,
+  DEFAULT_GUARD_POLICY,
   FeeCapExceededError,
   GuardBlockedError,
   GuardError,
+  GuardTelemetryListener,
   GuardUndeterminedError,
   HeartbeatBlockedError,
   HeartbeatDryRunError,
@@ -29,16 +35,33 @@ import {
   PolicyEncodeError,
   PolicyFileReadError,
   PolicyValidationError,
+  PreFlightInterceptor,
   PreFlightUndeterminedError,
   RateLimitedError,
   RpcTimeoutError,
   SignerTimeoutError,
   SigningError,
   SimulationError,
+  createLangChainGuardMiddleware,
   decodeCheckResult,
   decodePolicy,
+  heartbeat,
+  normalizeMappedCall,
+  policyToJson,
+  policyToScVal,
+  readGuardStatus,
+  startHeartbeat,
+  validateAgentPublicKey,
+  validateContractCall,
 } from "../../src/index.ts";
-import * as sdk from "../../src/index.ts";
+import { loadPolicyFromFile } from "../../src/fs.ts";
+import { withRpcAbort } from "../../src/invoke.ts";
+import {
+  buildGuardAuthEntry,
+  parseSimulationResourceFee,
+  refreshNearExpiryAuthEntries,
+  submitAndPoll,
+} from "../../src/tx.ts";
 
 describe("typed guard errors", () => {
   it("puts every public SDK error under one GuardError base", () => {
@@ -137,6 +160,851 @@ describe("typed guard errors", () => {
         return true;
       },
     );
+  });
+});
+
+/**
+ * Snapshot tests for public error messages and codes (issue #491).
+ *
+ * Error messages are part of the developer experience and documented troubleshooting.
+ * Snapshots ensure every change to default message shapes or structured attributes
+ * (`code`, `rule`, `path`, `stage`) is deliberate and reviewed.
+ */
+interface ErrorSnapshot {
+  name: string;
+  message: string;
+  code?: string | number | null;
+  rule?: string;
+  path?: string;
+  stage?: string;
+}
+
+function snapshotOf(error: unknown): ErrorSnapshot {
+  assert.ok(error instanceof Error, "expected instance of Error");
+  const err = error as Error & {
+    code?: string | number | null;
+    rule?: string;
+    path?: string;
+    stage?: string;
+  };
+  const snapshot: ErrorSnapshot = {
+    name: err.name,
+    message: err.message,
+  };
+  if ("code" in err && err.code !== undefined) snapshot.code = err.code;
+  if ("rule" in err && err.rule !== undefined) snapshot.rule = err.rule;
+  if ("path" in err && err.path !== undefined) snapshot.path = err.path;
+  if ("stage" in err && err.stage !== undefined) snapshot.stage = err.stage;
+  return snapshot;
+}
+
+const CONSTRUCTOR_SNAPSHOTS: Record<string, ErrorSnapshot> = {
+  AdapterConfigError: {
+    name: "AdapterConfigError",
+    message: "adapter config is missing required option",
+  },
+  AdapterMappingError: {
+    name: "AdapterMappingError",
+    message: "call mapping failed for action",
+  },
+  AuthRefreshError: {
+    name: "AuthRefreshError",
+    message: "auth entry expired before the enforced simulation",
+  },
+  BroadcastError: {
+    name: "BroadcastError",
+    message: "transaction submission rejected by network",
+  },
+  ConcurrentTelemetryStreamError: {
+    name: "ConcurrentTelemetryStreamError",
+    message:
+      "GuardTelemetryListener already has an active watch()/watchAll() stream; watch() cannot start concurrently. Use one listener per stream.",
+    code: "telemetry.concurrent_stream",
+  },
+  ContractResponseError: {
+    name: "ContractResponseError",
+    message: "simulation response missing expected field",
+    stage: "assemble",
+  },
+  FeeCapExceededError: {
+    name: "FeeCapExceededError",
+    message:
+      "fee cap exceeded: total 1100 stroops (resource 800 + inclusion 300) exceeds maxFeeCap 1000 stroops; nothing was broadcast",
+    code: "fee_cap_exceeded",
+  },
+  GuardBlockedError: {
+    name: "GuardBlockedError",
+    message:
+      "stellar-agent-guard blocked this action (paused): The policy's admin kill switch is engaged.",
+    code: 13,
+    stage: "preflight",
+  },
+  GuardError: {
+    name: "GuardError",
+    message: "guard operational failure",
+  },
+  GuardUndeterminedError: {
+    name: "GuardUndeterminedError",
+    message:
+      "stellar-agent-guard could not determine this action's status\nsimulation could not reach a decision",
+    stage: "preflight",
+  },
+  HeartbeatBlockedError: {
+    name: "HeartbeatBlockedError",
+    message:
+      "stellar-agent-guard blocked the heartbeat (paused): The policy's admin kill switch is engaged.\nkill switch is active",
+  },
+  HeartbeatDryRunError: {
+    name: "HeartbeatDryRunError",
+    message:
+      "stellar-agent-guard heartbeat ran as a dry run and never reached the guard (verdict: blocked, reason: paused): The policy's admin kill switch is engaged.\ndry run refusal",
+  },
+  HeartbeatIntervalError: {
+    name: "HeartbeatIntervalError",
+    message:
+      "heartbeat interval 60000ms exceeds one third of the dead-man grace window (60s → at most 20000ms); a single missed beat could freeze the account",
+  },
+  InvalidFeeCeilingError: {
+    name: "InvalidFeeCeilingError",
+    message:
+      "Invalid input for 'maxFeeStroops': violates rule 'non_negative_bigint' (expected a non-negative bigint, got -1n)",
+    rule: "non_negative_bigint",
+  },
+  InvalidInputError: {
+    name: "InvalidInputError",
+    message: "Invalid input for 'call': violates rule 'required' (call must be an object)",
+    rule: "required",
+  },
+  InvokeRetryError: {
+    name: "InvokeRetryError",
+    message:
+      "stellar-agent-guard invoke retry budget exhausted after 3 attempt(s) (last cause: stale_ledger_sequence)\nsequence number expired",
+  },
+  PolicyDecodeError: {
+    name: "PolicyDecodeError",
+    message: "validate_policy returned an undecodable ScVal",
+    path: "policy",
+  },
+  PolicyEncodeError: {
+    name: "PolicyEncodeError",
+    message:
+      "Invalid input for 'assets[0]': violates rule 'missing_field' (asset address is required)",
+    rule: "missing_field",
+    path: "assets[0]",
+  },
+  PolicyFileReadError: {
+    name: "PolicyFileReadError",
+    message: "cannot read policy file 'policy.json' (ENOENT)",
+    code: "ENOENT",
+    path: "policy.json",
+  },
+  PolicyValidationError: {
+    name: "PolicyValidationError",
+    message:
+      "policy file 'policy.json' failed validation with 1 failure(s): empty_vector_noop at assets",
+    path: "policy.json",
+  },
+  PreFlightUndeterminedError: {
+    name: "GuardUndeterminedError",
+    message:
+      "stellar-agent-guard could not determine this action's status\npreflight interceptor could not determine status",
+    stage: "preflight",
+  },
+  RateLimitedError: {
+    name: "RateLimitedError",
+    message: "the RPC rate-limited the simulation (HTTP 429) on 2 attempt(s); Retry-After 1000ms",
+    stage: "simulate",
+  },
+  RpcTimeoutError: {
+    name: "RpcTimeoutError",
+    message: "RPC call during 'simulate' exceeded timeout of 5000ms",
+    stage: "simulate",
+  },
+  SigningError: {
+    name: "SigningError",
+    message: "agent key signature failed",
+  },
+  SimulationError: {
+    name: "SimulationError",
+    message: "simulation request failed",
+    stage: "simulate",
+  },
+};
+
+const CONSTRUCTORS: Record<string, () => Error> = {
+  AdapterConfigError: () =>
+    new AdapterConfigError("adapter config is missing required option", {
+      field: "interceptor",
+      expected: "an object exposing a check(...) method",
+      adapter: "langchain",
+    }),
+  AdapterMappingError: () =>
+    new AdapterMappingError("call mapping failed for action", {
+      field: "toContractCall",
+    }),
+  AuthRefreshError: () =>
+    new AuthRefreshError("auth entry expired before the enforced simulation", {
+      address: "GABC",
+      expirationLedger: 1003,
+      currentLedger: 1000,
+      marginLedgers: 5,
+    }),
+  BroadcastError: () =>
+    new BroadcastError("transaction submission rejected by network", {
+      transactionHash: null,
+    }),
+  ConcurrentTelemetryStreamError: () => new ConcurrentTelemetryStreamError("watch"),
+  ContractResponseError: () =>
+    new ContractResponseError("simulation response missing expected field", {
+      field: "minResourceFee",
+      stage: "assemble",
+    }),
+  FeeCapExceededError: () =>
+    new FeeCapExceededError({
+      maxFeeCap: 1000n,
+      resourceFeeStroops: 800n,
+      inclusionFeeStroops: 300n,
+      attempt: 0,
+    }),
+  GuardBlockedError: () =>
+    new GuardBlockedError({
+      reason: "paused",
+      stage: "preflight",
+    }),
+  GuardError: () => new GuardError("guard operational failure"),
+  GuardUndeterminedError: () =>
+    new GuardUndeterminedError("simulation could not reach a decision", {
+      stage: "preflight",
+    }),
+  HeartbeatBlockedError: () =>
+    new HeartbeatBlockedError({
+      reason: "paused",
+      detail: "kill switch is active",
+    }),
+  HeartbeatDryRunError: () =>
+    new HeartbeatDryRunError({
+      verdict: "blocked",
+      reason: "paused",
+      detail: "dry run refusal",
+    }),
+  HeartbeatIntervalError: () => new HeartbeatIntervalError(60000, 60n, 20000),
+  InvalidFeeCeilingError: () => new InvalidFeeCeilingError("maxFeeStroops", -1n),
+  InvalidInputError: () => new InvalidInputError("call", "required", "call must be an object"),
+  InvokeRetryError: () =>
+    new InvokeRetryError({
+      attempts: 3,
+      lastOutcome: {
+        kind: "error",
+        stage: "submit",
+        cause: "stale_ledger_sequence",
+        detail: "sequence number expired",
+        error: new GuardError("sequence collision"),
+      } as unknown as sdk.InvokeErrorOutcome,
+    }),
+  PolicyDecodeError: () =>
+    new PolicyDecodeError("validate_policy returned an undecodable ScVal", {
+      path: "policy",
+    }),
+  PolicyEncodeError: () =>
+    new PolicyEncodeError([
+      { path: "assets[0]", rule: "missing_field", message: "asset address is required" },
+    ]),
+  PolicyFileReadError: () =>
+    new PolicyFileReadError("cannot read policy file 'policy.json' (ENOENT)", {
+      path: "policy.json",
+      code: "ENOENT",
+    }),
+  PolicyValidationError: () =>
+    new PolicyValidationError(
+      "policy file 'policy.json' failed validation with 1 failure(s): empty_vector_noop at assets",
+      {
+        path: "policy.json",
+        failures: [
+          {
+            path: "assets",
+            rule: "empty_vector_noop",
+            message: "empty vector has no effect",
+          },
+        ],
+      },
+    ),
+  PreFlightUndeterminedError: () =>
+    new PreFlightUndeterminedError("preflight interceptor could not determine status", {
+      stage: "preflight",
+    }),
+  RateLimitedError: () =>
+    new RateLimitedError({
+      stage: "simulate",
+      retryAfterMs: 1000,
+      attempts: 2,
+    }),
+  RpcTimeoutError: () =>
+    new RpcTimeoutError({
+      stage: "simulate",
+      aborted: false,
+      timeoutMs: 5000,
+    }),
+  SigningError: () => new SigningError("agent key signature failed"),
+  SimulationError: () =>
+    new SimulationError("simulation request failed", {
+      stage: "simulate",
+    }),
+};
+
+const RUNTIME_SNAPSHOTS: Record<string, ErrorSnapshot> = {
+  AdapterConfigError: {
+    name: "AdapterConfigError",
+    message:
+      "langchain adapter options are invalid: 2 problem(s) found (`interceptor`, `toContractCall`).\n  - `interceptor` is required and must be a PreFlightInterceptor (an object exposing a `check(...)` method).\n  - `toContractCall` or `toContractCalls` is required; supply one to map the action to the guarded contract call(s).",
+  },
+  AdapterMappingError: {
+    name: "AdapterMappingError",
+    message:
+      "`toContractCall` returned a malformed contract call: expected { contract, fn, args } with a non-empty contract and fn and an args array.",
+  },
+  AuthRefreshError: {
+    name: "AuthRefreshError",
+    message:
+      "auth entry expiring at ledger 1003 is within the 5-ledger refresh margin of ledger 1000 and could not be refreshed",
+  },
+  BroadcastError: {
+    name: "BroadcastError",
+    message: "transaction submission request failed",
+  },
+  ConcurrentTelemetryStreamError: {
+    name: "ConcurrentTelemetryStreamError",
+    message:
+      "GuardTelemetryListener already has an active watch()/watchAll() stream; watch() cannot start concurrently. Use one listener per stream.",
+    code: "telemetry.concurrent_stream",
+  },
+  ContractResponseError: {
+    name: "ContractResponseError",
+    message: 'simulation returned an invalid resource fee: "invalid-fee"',
+    stage: "assemble",
+  },
+  FeeCapExceededError: {
+    name: "FeeCapExceededError",
+    message:
+      "fee cap exceeded: total 1100 stroops (resource 800 + inclusion 300) exceeds maxFeeCap 1000 stroops; nothing was broadcast",
+    code: "fee_cap_exceeded",
+  },
+  GuardBlockedError: {
+    name: "GuardBlockedError",
+    message:
+      "stellar-agent-guard blocked this action (paused): The policy's admin kill switch is engaged. [call: guard_account.transfer(0 args)]\nThe policy's admin kill switch is engaged.",
+    code: 13,
+    stage: "preflight",
+  },
+  GuardError: {
+    name: "GuardError",
+    message: "heartbeat produced no outcome",
+  },
+  GuardUndeterminedError: {
+    name: "GuardUndeterminedError",
+    message:
+      "stellar-agent-guard could not determine this action's status\nsimulation could not reach a decision",
+    stage: "preflight",
+  },
+  HeartbeatBlockedError: {
+    name: "HeartbeatBlockedError",
+    message:
+      "stellar-agent-guard blocked the heartbeat (paused): The policy's admin kill switch is engaged.\nguard kill switch active",
+  },
+  HeartbeatDryRunError: {
+    name: "HeartbeatDryRunError",
+    message:
+      "stellar-agent-guard heartbeat ran as a dry run and never reached the guard (verdict: blocked, reason: paused): The policy's admin kill switch is engaged.\ndry run refusal",
+  },
+  HeartbeatIntervalError: {
+    name: "HeartbeatIntervalError",
+    message:
+      "heartbeat interval 30000ms exceeds one third of the dead-man grace window (60s → at most 20000ms); a single missed beat could freeze the account",
+  },
+  InvalidFeeCeilingError: {
+    name: "InvalidFeeCeilingError",
+    message:
+      "Invalid input for 'maxFeeStroops': violates rule 'non_negative_bigint' (expected a non-negative bigint, got -1n)",
+    rule: "non_negative_bigint",
+  },
+  InvalidInputError: {
+    name: "InvalidInputError",
+    message: "Invalid input for 'call': violates rule 'required' (call must be an object)",
+    rule: "required",
+  },
+  InvokeRetryError: {
+    name: "InvokeRetryError",
+    message:
+      "stellar-agent-guard invoke retry budget exhausted after 3 attempt(s) (last cause: stale_ledger_sequence)\nsequence number expired",
+  },
+  PolicyDecodeError: {
+    name: "PolicyDecodeError",
+    message:
+      "cannot decode policy field policy: no policy is installed (Void is None, not a config)",
+    path: "policy",
+  },
+  PolicyEncodeError: {
+    name: "PolicyEncodeError",
+    message:
+      "Invalid input for 'assets[0]': violates rule 'invalid_address' (\"not-an-address\" is not a valid Stellar address)",
+    rule: "invalid_address",
+    path: "assets[0]",
+  },
+  PolicyFileReadError: {
+    name: "PolicyFileReadError",
+    message: "cannot read policy file 'missing-policy.json' (ENOENT)",
+    code: "ENOENT",
+    path: "missing-policy.json",
+  },
+  PolicyValidationError: {
+    name: "PolicyValidationError",
+    message:
+      "policy file 'invalid-policy.json' failed validation with 2 failure(s): empty_vector_noop at assets; empty_vector_noop at recipients",
+    path: "invalid-policy.json",
+  },
+  PreFlightUndeterminedError: {
+    name: "GuardUndeterminedError",
+    message:
+      "stellar-agent-guard could not determine this action's status\nsimulation could not reach a decision",
+    stage: "preflight",
+  },
+  RateLimitedError: {
+    name: "RateLimitedError",
+    message: "the RPC rate-limited the simulation (HTTP 429) on 2 attempt(s); Retry-After 1000ms",
+    stage: "simulate",
+  },
+  RpcTimeoutError: {
+    name: "RpcTimeoutError",
+    message: "RPC call during 'simulate' aborted by caller signal",
+    stage: "simulate",
+  },
+  SigningError: {
+    name: "SigningError",
+    message:
+      "signer.publicKey must be a checksum-valid G... Ed25519 StrKey or a 64-character hex-encoded 32-byte public key",
+  },
+  SimulationError: {
+    name: "SimulationError",
+    message: "reading guard status returned no value",
+    stage: "simulate",
+  },
+};
+
+const RUNTIME_THROWS: Record<string, () => Promise<void> | void> = {
+  AdapterConfigError: () => {
+    createLangChainGuardMiddleware({} as unknown as sdk.LangChainGuardOptions);
+  },
+  AdapterMappingError: () => {
+    normalizeMappedCall({} as unknown as sdk.ContractCall, "toContractCall");
+  },
+  AuthRefreshError: async () => {
+    const entry = await buildGuardAuthEntry({
+      guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      call: {
+        contract:
+          "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+        fn: "transfer",
+        args: [],
+      },
+      signer: Keypair.random(),
+      nonce: 1n,
+      signatureExpirationLedger: 1003,
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
+    await refreshNearExpiryAuthEntries({
+      entries: [entry],
+      currentLedger: 1000,
+      refresh: async () => {
+        throw new Error("signer unavailable");
+      },
+    });
+  },
+  BroadcastError: async () => {
+    await submitAndPoll(
+      {
+        sendTransaction: async () => {
+          throw new Error("network rejected");
+        },
+      } as unknown as rpc.Server,
+      { networkPassphrase: "test" } as unknown as Transaction,
+      [],
+    );
+  },
+  ConcurrentTelemetryStreamError: async () => {
+    const rawEvent = {
+      contractId: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      type: "contract" as const,
+      topic: [xdr.ScVal.scvSymbol("event_heartbeat")],
+      value: xdr.ScVal.scvMap([
+        new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("at"), val: xdr.ScVal.scvU64(100n) }),
+      ]),
+      ledger: 100,
+      ledgerClosedAt: null,
+      txHash: "tx-1",
+    };
+    const listener = new GuardTelemetryListener({
+      server: {
+        getLatestLedger: async () => ({ sequence: 500 }),
+        getEvents: async () => ({ events: [rawEvent], cursor: "c1", latestLedger: 500 }),
+      } as unknown as rpc.Server,
+      guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+    });
+    const first = listener.watch({ pollIntervalMs: 1 });
+    await first.next();
+    const second = listener.watch({ pollIntervalMs: 1 });
+    try {
+      await second.next();
+    } finally {
+      await first.return?.();
+      await second.return?.();
+    }
+  },
+  ContractResponseError: () => {
+    parseSimulationResourceFee("invalid-fee", { stage: "assemble" });
+  },
+  FeeCapExceededError: () => {
+    throw CONSTRUCTORS["FeeCapExceededError"]!();
+  },
+  GuardBlockedError: async () => {
+    const interceptor = new PreFlightInterceptor({
+      server: {} as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
+    interceptor.check = async () =>
+      ({
+        kind: "blocked",
+        allowed: false,
+        reason: "paused",
+        stage: "preflight",
+        detail: "The policy's admin kill switch is engaged.",
+        charged: false,
+      }) as unknown as sdk.PreFlightDecision;
+    await interceptor.assertAllowed({
+      contract: "guard_account" as unknown as sdk.ContractAddress,
+      fn: "transfer",
+      args: [],
+    });
+  },
+  GuardError: async () => {
+    await heartbeat({
+      server: {} as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      signer: {} as unknown as sdk.AgentSigner,
+      submit: async () => ({ outcome: undefined as unknown as sdk.InvokeOutcome }),
+    });
+  },
+  GuardUndeterminedError: async () => {
+    const interceptor = new PreFlightInterceptor({
+      server: {} as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
+    interceptor.check = async () =>
+      ({
+        kind: "undetermined",
+        allowed: false,
+        stage: "preflight",
+        detail: "simulation could not reach a decision",
+        cause: "simulation_failed",
+        latencyMs: 10,
+      }) as unknown as sdk.PreFlightDecision;
+    await interceptor.assertAllowed({
+      contract: "guard_account" as unknown as sdk.ContractAddress,
+      fn: "transfer",
+      args: [],
+    });
+  },
+  HeartbeatBlockedError: async () => {
+    await heartbeat({
+      server: {} as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      signer: {} as unknown as sdk.AgentSigner,
+      submit: async () => ({
+        outcome: {
+          kind: "blocked",
+          reason: "paused",
+          stage: "submission",
+          detail: "guard kill switch active",
+        } as unknown as sdk.InvokeOutcome,
+      }),
+    });
+  },
+  HeartbeatDryRunError: async () => {
+    await heartbeat({
+      server: {} as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      signer: {} as unknown as sdk.AgentSigner,
+      submit: async () => ({
+        outcome: {
+          kind: "dry_run",
+          verdict: "blocked",
+          reason: "paused",
+          stage: "simulate",
+          detail: "dry run refusal",
+        } as unknown as sdk.InvokeOutcome,
+      }),
+    });
+  },
+  HeartbeatIntervalError: async () => {
+    await startHeartbeat({
+      server: {} as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      signer: {} as unknown as sdk.AgentSigner,
+      intervalMs: 30000,
+      graceSecs: 60n,
+    });
+  },
+  InvalidFeeCeilingError: () => {
+    new CostPreChecker({
+      interceptor: { check: async () => ({}) as unknown as sdk.PreFlightDecision },
+      maxFeeStroops: -1n,
+    });
+  },
+  InvalidInputError: () => {
+    validateContractCall(null as unknown as sdk.ContractCall);
+  },
+  InvokeRetryError: () => {
+    throw CONSTRUCTORS["InvokeRetryError"]!();
+  },
+  PolicyDecodeError: () => {
+    decodePolicy(xdr.ScVal.scvVoid());
+  },
+  PolicyEncodeError: () => {
+    policyToScVal({
+      ...DEFAULT_GUARD_POLICY,
+      assets: ["not-an-address" as unknown as sdk.ContractAddress],
+    });
+  },
+  PolicyFileReadError: async () => {
+    await loadPolicyFromFile("missing-policy.json");
+  },
+  PolicyValidationError: async () => {
+    const filename = "invalid-policy.json";
+    writeFileSync(
+      filename,
+      JSON.stringify(
+        policyToJson({
+          ...DEFAULT_GUARD_POLICY,
+          per_tx_cap: 2000n,
+          window_cap: 1000n,
+        }),
+      ),
+    );
+    try {
+      await loadPolicyFromFile(filename);
+    } finally {
+      rmSync(filename, { force: true });
+    }
+  },
+  PreFlightUndeterminedError: async () => {
+    const interceptor = new PreFlightInterceptor({
+      server: {} as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      networkPassphrase: "Test SDF Network ; September 2015",
+    });
+    interceptor.check = async () =>
+      ({
+        kind: "undetermined",
+        allowed: false,
+        stage: "preflight",
+        detail: "simulation could not reach a decision",
+        cause: "simulation_failed",
+        latencyMs: 10,
+      }) as unknown as sdk.PreFlightDecision;
+    await interceptor.assertAllowed({
+      contract: "guard_account" as unknown as sdk.ContractAddress,
+      fn: "transfer",
+      args: [],
+    });
+  },
+  RateLimitedError: async () => {
+    const server = {
+      async getAccount() {
+        return new Account("GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5", "100");
+      },
+      async getLatestLedger() {
+        return { sequence: 1000 };
+      },
+      async simulateTransaction() {
+        const error = new Error("rate limited") as Error & {
+          response?: { status: number; headers?: Record<string, string> };
+        };
+        error.response = { status: 429, headers: { "retry-after": "1" } };
+        throw error;
+      },
+    };
+    const interceptor = new PreFlightInterceptor({
+      server: server as unknown as rpc.Server,
+      guard:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      agent: Keypair.random(),
+      source: Keypair.random(),
+      networkPassphrase: "Test SDF Network ; September 2015",
+      clock: { now: () => 0, sleep: async () => {} },
+    });
+    const decision = await interceptor.check({
+      contract:
+        "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44" as unknown as sdk.ContractAddress,
+      fn: "test",
+      args: [],
+    });
+    if (decision.kind === "undetermined" && decision.error) {
+      throw decision.error;
+    }
+  },
+  RpcTimeoutError: async () => {
+    await withRpcAbort({ stage: "simulate", signal: AbortSignal.abort() }, async () => {});
+  },
+  SigningError: () => {
+    validateAgentPublicKey("");
+  },
+  SimulationError: async () => {
+    const server = {
+      getAccount: async () =>
+        new Account("GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5", "1"),
+      simulateTransaction: async () => ({ result: {} }),
+    };
+    await readGuardStatus({
+      server: server as unknown as rpc.Server,
+      guard: "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+      source: "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5",
+    });
+  },
+};
+
+describe("public error snapshots (issue #491)", () => {
+  it("registers a snapshot for every exported error class", () => {
+    const allExports = { ...sdk, ...fsModule };
+    const exportedErrorClasses = Object.entries(allExports)
+      .filter(
+        ([_, val]) => typeof val === "function" && val.prototype && val.prototype instanceof Error,
+      )
+      .map(([name]) => name)
+      .sort();
+
+    assert.deepEqual(Object.keys(CONSTRUCTOR_SNAPSHOTS).sort(), exportedErrorClasses);
+    assert.deepEqual(Object.keys(RUNTIME_SNAPSHOTS).sort(), exportedErrorClasses);
+  });
+
+  it("ensures snapshots contain no sensitive values (addresses, hashes, XDR)", () => {
+    const stellarAddressPattern = /\b[GA][A-Z2-7]{55}\b/;
+    const contractAddressPattern = /\bC[A-Z2-7]{55}\b/;
+    const hexHashPattern = /\b[0-9a-fA-F]{64}\b/;
+    const xdrPattern = /\bAAAA[A-Za-z0-9+/=]{10,}\b/;
+
+    for (const [name, snapshot] of Object.entries(CONSTRUCTOR_SNAPSHOTS)) {
+      for (const field of [
+        snapshot.message,
+        snapshot.path ?? "",
+        String(snapshot.code ?? ""),
+        snapshot.rule ?? "",
+        snapshot.stage ?? "",
+      ]) {
+        assert.doesNotMatch(
+          field,
+          stellarAddressPattern,
+          `${name} constructor snapshot leaked account address`,
+        );
+        assert.doesNotMatch(
+          field,
+          contractAddressPattern,
+          `${name} constructor snapshot leaked contract address`,
+        );
+        assert.doesNotMatch(field, hexHashPattern, `${name} constructor snapshot leaked hex hash`);
+        assert.doesNotMatch(field, xdrPattern, `${name} constructor snapshot leaked XDR payload`);
+      }
+    }
+
+    for (const [name, snapshot] of Object.entries(RUNTIME_SNAPSHOTS)) {
+      for (const field of [
+        snapshot.message,
+        snapshot.path ?? "",
+        String(snapshot.code ?? ""),
+        snapshot.rule ?? "",
+        snapshot.stage ?? "",
+      ]) {
+        assert.doesNotMatch(
+          field,
+          stellarAddressPattern,
+          `${name} runtime snapshot leaked account address`,
+        );
+        assert.doesNotMatch(
+          field,
+          contractAddressPattern,
+          `${name} runtime snapshot leaked contract address`,
+        );
+        assert.doesNotMatch(field, hexHashPattern, `${name} runtime snapshot leaked hex hash`);
+        assert.doesNotMatch(field, xdrPattern, `${name} runtime snapshot leaked XDR payload`);
+      }
+    }
+  });
+
+  it("ensures snapshots are stable across platforms", () => {
+    for (const [name, snapshot] of Object.entries(CONSTRUCTOR_SNAPSHOTS)) {
+      assert.doesNotMatch(
+        snapshot.message,
+        /\r/,
+        `${name} constructor snapshot contains CR line ending`,
+      );
+      if (snapshot.path) {
+        assert.doesNotMatch(
+          snapshot.path,
+          /\\/,
+          `${name} constructor path contains Windows backslash`,
+        );
+      }
+    }
+
+    for (const [name, snapshot] of Object.entries(RUNTIME_SNAPSHOTS)) {
+      assert.doesNotMatch(
+        snapshot.message,
+        /\r/,
+        `${name} runtime snapshot contains CR line ending`,
+      );
+      if (snapshot.path) {
+        assert.doesNotMatch(snapshot.path, /\\/, `${name} runtime path contains Windows backslash`);
+      }
+    }
+  });
+
+  describe("constructor message shapes", () => {
+    for (const [name, expected] of Object.entries(CONSTRUCTOR_SNAPSHOTS)) {
+      it(`matches snapshot for ${name}`, () => {
+        const create = CONSTRUCTORS[name];
+        assert.ok(create, `missing constructor factory for ${name}`);
+        const err = create();
+        assert.deepEqual(snapshotOf(err), expected);
+      });
+    }
+  });
+
+  describe("representative runtime throws", () => {
+    for (const [name, expected] of Object.entries(RUNTIME_SNAPSHOTS)) {
+      it(`matches runtime throw snapshot for ${name}`, async () => {
+        const trigger = RUNTIME_THROWS[name];
+        assert.ok(trigger, `missing runtime throw factory for ${name}`);
+        try {
+          await trigger();
+          assert.fail(`expected runtime throw for ${name}`);
+        } catch (error) {
+          if (error instanceof assert.AssertionError) throw error;
+          assert.deepEqual(snapshotOf(error), expected);
+        }
+      });
+    }
   });
 });
 
