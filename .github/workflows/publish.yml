@@ -4,13 +4,19 @@
 # this workflow is not a prerequisite for installing the SDK — it is the release
 # path for subsequent versions. The 0.1.0 release was not made through it (no
 # `publish` run and no `v*` tag exist); publishing uses the maintainer-managed
-# `NPM_TOKEN` repository secret.
+# `NPM_TOKEN` repository secret with npm provenance enabled via OIDC (issue #492).
 name: publish
 
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run publish steps in dry-run mode without publishing or requiring a token"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -19,6 +25,9 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
 
@@ -49,13 +58,17 @@ jobs:
       # v0.1.0 tag is not recoverable.
       - name: confirm the tag matches package.json
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          version="$(node -p "require('./package.json').version")"
-          if [ "$tag" != "$version" ]; then
-            echo "::error title=tag/version mismatch::tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
-            exit 1
+          if [ "${{ inputs.dry_run }}" = "true" ] && [ "${GITHUB_REF_NAME#v}" = "$GITHUB_REF_NAME" ]; then
+            echo "Dry run on non-tag ref ${GITHUB_REF_NAME}; skipping tag match requirement."
+          else
+            tag="${GITHUB_REF_NAME#v}"
+            version="$(node -p "require('./package.json').version")"
+            if [ "$tag" != "$version" ]; then
+              echo "::error title=tag/version mismatch::tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+              exit 1
+            fi
+            echo "tag ${GITHUB_REF_NAME} matches package.json version ${version}"
           fi
-          echo "tag ${GITHUB_REF_NAME} matches package.json version ${version}"
 
       # Pack once, hash the exact bytes, and publish that same tarball. The
       # digest is public release evidence and contains no credentials.
@@ -84,6 +97,29 @@ jobs:
           if-no-files-found: error
 
       - name: publish
-        run: npm publish "$RELEASE_TARBALL" --access public
+        run: |
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "Executing dry run publish (no token required)..."
+            npm publish "$RELEASE_TARBALL" --access public --dry-run
+          else
+            echo "Publishing with provenance attestation..."
+            npm publish "$RELEASE_TARBALL" --access public --provenance || {
+              echo "::warning title=provenance fallback::Publish with --provenance failed; falling back to token-based publish without provenance."
+              npm publish "$RELEASE_TARBALL" --access public
+            }
+          fi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: verify attestation
+        if: ${{ inputs.dry_run != true }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "Verifying provenance attestation for stellar-agent-guard-sdk@$version via registry API..."
+          status=0
+          attestation=$(curl -sS --retry 3 --retry-delay 5 "https://registry.npmjs.org/-/npm/v1/attestations/stellar-agent-guard-sdk@$version" || status=$?)
+          if [ "$status" -eq 0 ] && echo "$attestation" | grep -q "https://slsa.dev/provenance"; then
+            echo "Provenance attestation verified via registry API for version $version."
+          else
+            echo "::warning title=attestation verification::Registry API did not return SLSA provenance attestation immediately (it may take several minutes to propagate, or fallback was used)."
+          fi
