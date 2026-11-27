@@ -50,9 +50,9 @@ updates:
     labels:
       - "dependencies"
     groups:
-      # Workflows pin by tag today (e.g. actions/checkout@v7). If #106 /
-      # SHA-pinning moves them to `uses: owner/action@<sha> # vX.Y.Z`,
-      # Dependabot updates the SHA and the trailing version comment together.
+      # Workflows pin every action by full commit SHA with a trailing
+      # `# vX.Y.Z` comment (#106). Dependabot updates the SHA and the version
+      # comment together, so pins stay current and human-readable.
       actions-minor-patch:
         patterns:
           - "*"

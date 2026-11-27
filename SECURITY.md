@@ -119,6 +119,33 @@ Tooling and examples in this repository (`examples/`, test scripts, bench harnes
 
 ---
 
+## CI workflow permissions
+
+Every workflow declares an explicit least-privilege `GITHUB_TOKEN` scope (#106). Write scopes are granted only at job level, to the one job that needs them. All actions are pinned to full commit SHAs with a `# vX.Y.Z` comment; Dependabot (`.github/dependabot.yml`) keeps the pins and the version comments current.
+
+| Workflow | Job | Permissions | Why |
+|---|---|---|---|
+| `ci.yml` | (workflow default) | `contents: read` | Checks out code and runs typecheck/lint/tests/build; never writes to the repo |
+| `ci.yml` | `ci` | `contents: read` | Required merge gate; read-only checkout + evidence-gate diff |
+| `ci.yml` | `bench` | `contents: read` | Informational benchmarks; read-only |
+| `links.yml` | (workflow default) | `contents: read` | Doc link checks only |
+| `links.yml` | `relative` | `contents: read` | Reads docs to check relative links/anchors |
+| `links.yml` | `external` | `contents: read` | Report-only external link check; no writes |
+| `live-suite.yml` | (workflow default) | `contents: read` | Weekly testnet suite |
+| `live-suite.yml` | `live` | `contents: read`, `issues: write` | Opens/comments/closes the single tracked drift issue on failure/recovery (#143); write scoped to this job only |
+| `publish.yml` | (workflow default) | `contents: read` | Tag-triggered npm release |
+| `publish.yml` | `publish` | `contents: read` | Publishes with `NPM_TOKEN`, not `GITHUB_TOKEN`; creates no GitHub release, tag or commit, so no `contents: write` is needed |
+
+### Action SHA pins
+
+| Action | Pinned to |
+|---|---|
+| `actions/checkout` (6 uses) | `@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` |
+| `actions/setup-node` (6 uses) | `@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0` |
+| `actions/upload-artifact` (1 use) | `@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2` |
+
+---
+
 ## Policy Source
 
 This policy aligns with the authoritative security policies of the Stellar Agent Guard project. For on-chain contract security rules, refer to the [contracts SECURITY.md](https://github.com/stellar-agent-guard/stellar-agent-guard-contracts/blob/main/SECURITY.md).
