@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Unit tests for the telemetry decoder's pure parts.
  *
  * The payloads here are not invented: they are verbatim diagnostic event shapes
@@ -14,6 +14,7 @@ import {
   GuardEventRingBuffer,
   GuardTelemetryListener,
   computePollDelay,
+  describeGap,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
@@ -241,7 +242,7 @@ describe("describeGuardEvent", () => {
  * Stable-id coverage (issue #33).
  *
  * A blocked decision is rolled back before broadcast, so it has no transaction
- * to anchor on — the only way a telemetry consumer can tell two refusals apart,
+ * to anchor on â€” the only way a telemetry consumer can tell two refusals apart,
  * or recognise a re-parse as the same refusal, is the `id` the SDK derives.
  * Both properties are pinned here: determinism across re-parses, and
  * distinctness between two different blocks inside one simulation.
@@ -477,7 +478,7 @@ describe("telemetry polling jitter", () => {
  *
  * The RPC reports its retention window (`oldestLedger` / `latestLedger`) on
  * every `getEvents` response, so a pruned range is a fact the listener can
- * prove — not a guess inferred from how sparse the events look. These tests pin
+ * prove â€” not a guess inferred from how sparse the events look. These tests pin
  * both halves of that: a gap is reported once with the correct bounds, and a
  * simply-quiet range is not reported at all.
  */
@@ -540,7 +541,7 @@ describe("GuardTelemetryListener coverage-gap detection", () => {
 
   it("reports the pruned range exactly once when retention moved past a fresh startLedger", async () => {
     // Three polls, all with the retention edge at 500. The gap must be announced
-    // on the first and then stay quiet — an alert per poll would be noise, and
+    // on the first and then stay quiet â€” an alert per poll would be noise, and
     // coverage cannot un-break itself. Only the real ledger-500 event streams:
     // the missing range is reported, never filled with fabricated events.
     const server = pagedServer([
@@ -567,7 +568,7 @@ describe("GuardTelemetryListener coverage-gap detection", () => {
     assert.deepEqual(
       batches.flat().map((event) => event.ledger),
       [500, 500, 500],
-      "only real events stream — no dummies for the pruned range",
+      "only real events stream â€” no dummies for the pruned range",
     );
   });
 
@@ -683,9 +684,9 @@ describe("GuardTelemetryListener coverage-gap detection", () => {
  * its caller wait out the poll interval first, and must not leave the process
  * holding an unhandled rejection or an open timer.
  *
- * One limit is honest rather than papered over — `@stellar/stellar-sdk`'s
+ * One limit is honest rather than papered over â€” `@stellar/stellar-sdk`'s
  * `getEvents` takes no `AbortSignal`, so a request already in flight cannot be
- * cancelled — and the mid-flight case below is written the way a real
+ * cancelled â€” and the mid-flight case below is written the way a real
  * fetch-level abort would look: the mock rejects the in-flight request when the
  * caller aborts, and the loop is asserted to end quietly rather than surfacing
  * that rejection or firing another poll.
@@ -695,7 +696,7 @@ describe("GuardTelemetryListener abort cancellation (issue #95)", () => {
    * The outcome of `wait` if it settles within `ms`, or `"hung"` if it does not.
    *
    * The timer is cleared the moment the race settles, so the guard against a
-   * hang is not itself an open handle — the failure mode this suite is about.
+   * hang is not itself an open handle â€” the failure mode this suite is about.
    */
   async function settledWithin<T>(wait: Promise<T>, ms = 1_000): Promise<T | "hung"> {
     let timer: NodeJS.Timeout | undefined;
@@ -753,7 +754,7 @@ describe("GuardTelemetryListener abort cancellation (issue #95)", () => {
         getLatestLedger: async () => ({ sequence: 500 }),
         getEvents: () => {
           getEventsCalls += 1;
-          // Settles only when the caller aborts — the shape a fetch-level
+          // Settles only when the caller aborts â€” the shape a fetch-level
           // cancellation rejection has.
           return new Promise((_resolve, reject) => {
             controller.signal.addEventListener(
@@ -846,7 +847,7 @@ describe("GuardTelemetryListener abort cancellation (issue #95)", () => {
  *
  * `watch()` alone is the motivating trap: a blocked decision is rolled back
  * before broadcast, so a consumer tailing the ledger sees a guard that never
- * blocks. These tests pin the merged stream both ways — that it really carries
+ * blocks. These tests pin the merged stream both ways â€” that it really carries
  * both sources, ordered and de-duplicated, and that the default `watch()` path
  * is untouched.
  */
@@ -1169,7 +1170,7 @@ describe("GuardEventRingBuffer (issue #68)", () => {
  * `recent()` used to hand out the buffer's own event objects: a consumer that
  * edited one changed what the buffer still retained, and the next `recent()`
  * reported the edit instead of the event. The contract is now a *detached
- * snapshot* — the array, the events in it, and everything nested inside them
+ * snapshot* â€” the array, the events in it, and everything nested inside them
  * (decoded data, the decoded decision, the opt-in raw payload) are copies.
  */
 describe("GuardEventRingBuffer detached snapshots (issue #344)", () => {
@@ -1335,7 +1336,7 @@ describe("GuardTelemetryListener opt-in buffer (issue #68)", () => {
 
     await listener.poll({ startLedger: 500 });
 
-    assert.deepEqual(listener.recent(), [], "no buffer requested → recent() is always empty");
+    assert.deepEqual(listener.recent(), [], "no buffer requested â†’ recent() is always empty");
   });
 
   it("retains diagnostic events merged by watchAll()", async () => {
@@ -1421,7 +1422,7 @@ describe("GuardTelemetryListener opt-in buffer (issue #68)", () => {
  * bug report needs. It is off by default because the payload (XDR `ScVal`s,
  * host-shaped objects) is large enough that retaining it for every event is a
  * memory decision, not a convenience. These tests pin both halves: the source
- * object is attached when asked for, and *absent* — not merely empty —
+ * object is attached when asked for, and *absent* â€” not merely empty â€”
  * otherwise, so the default path keeps discarding it.
  */
 describe("opt-in raw event retention (issue #94)", () => {
@@ -1683,7 +1684,7 @@ describe("GuardDecisionCounters wall-clock resilience (issue #320)", () => {
  *
  * A zero `blocked` count is only evidence that nothing was refused when both
  * decision-bearing streams have fed the counters. These tests pin the three
- * cases the issue calls out — committed-only, unified, and no observation — and
+ * cases the issue calls out â€” committed-only, unified, and no observation â€” and
  * prove that reset clears coverage instead of leaving a stale `complete`.
  */
 describe("GuardTelemetryListener counter coverage (issue #321)", () => {
@@ -1941,5 +1942,127 @@ describe("injectable transport config (shared { server? | url? })", () => {
         return true;
       },
     );
+  });
+});
+
+// ── describeGap tests (#432) ─────────────────────────────────────────────────
+
+describe("describeGap (#432)", () => {
+  const historyPrunedGap: GuardTelemetryGap = {
+    fromLedger: 1000,
+    toLedger: 1099,
+    reason: "history_pruned",
+    retainedFromLedger: 1100,
+    retainedToLedger: 2000,
+  };
+
+  it("includes the ledger range in the message", () => {
+    const msg = describeGap(historyPrunedGap);
+    assert.ok(msg.includes("1000"), "must include fromLedger");
+    assert.ok(msg.includes("1099"), "must include toLedger");
+  });
+
+  it("includes the retained boundary for history_pruned", () => {
+    const msg = describeGap(historyPrunedGap);
+    assert.ok(msg.includes("1100"), "must include retainedFromLedger");
+  });
+
+  it("includes a remediation hint for history_pruned", () => {
+    const msg = describeGap(historyPrunedGap);
+    assert.ok(
+      msg.toLowerCase().includes("backfill") || msg.toLowerCase().includes("suggested"),
+      "must include a remediation hint",
+    );
+  });
+
+  it("produces a stable string across multiple calls (deterministic)", () => {
+    assert.equal(describeGap(historyPrunedGap), describeGap(historyPrunedGap));
+  });
+
+  it("contains the word 'gap' (case insensitive) for discoverability in log search", () => {
+    assert.ok(describeGap(historyPrunedGap).toLowerCase().includes("gap"));
+  });
+});
+
+// ── byReason unknown bucket tests (#433) ─────────────────────────────────────
+
+describe("stats() byReason unknown bucket (#433)", () => {
+  function decisionEvent(
+    result: "allowed" | "blocked",
+    reason: string | null,
+    ledger = 1,
+    stream: "committed" | "diagnostic" | "failed_tx" = "committed",
+  ): GuardEvent {
+    return {
+      id: `ledger:hash:event_auth_checked_${ledger}`,
+      kind: "auth_checked",
+      topic: "event_auth_checked",
+      source: stream === "committed" ? "ledger" : "diagnostic",
+      stream,
+      contractId: null,
+      ledger,
+      ledgerClosedAt: null,
+      observedAt: null,
+      transactionHash: null,
+      decision: {
+        result,
+        reason: reason as never,
+        source: stream === "committed" ? "ledger" : "diagnostic",
+      },
+      data: null,
+    };
+  }
+
+  it("unknown reason symbols are bucketed under 'unknown', not their raw string", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("blocked", "some_future_reason_xyz"));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.blocked, 1);
+    // Must NOT appear under its raw key
+    assert.equal(stats!.byReason["some_future_reason_xyz"], undefined);
+    // Must appear under the 'unknown' bucket
+    assert.equal(stats!.byReason["unknown"], 1);
+  });
+
+  it("known reason symbols are NOT moved to 'unknown' bucket", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded"));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.byReason["per_tx_cap_exceeded"], 1);
+    assert.equal(stats!.byReason["unknown"], undefined);
+  });
+
+  it("multiple unknown reasons all fold into one 'unknown' key", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 20 } });
+    listener.observe(decisionEvent("blocked", "future_reason_a"));
+    listener.observe(decisionEvent("blocked", "future_reason_b", 2));
+    listener.observe(decisionEvent("blocked", "future_reason_c", 3));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.equal(stats!.byReason["unknown"], 3);
+    assert.equal(Object.keys(stats!.byReason).length, 1, "only 'unknown' key");
+  });
+
+  it("unknown bucket decrements correctly when evicted from window", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 2 } });
+    listener.observe(decisionEvent("blocked", "future_reason_a", 1));
+    listener.observe(decisionEvent("blocked", "future_reason_b", 2));
+    // This evicts the first entry from the window
+    listener.observe(decisionEvent("blocked", "per_tx_cap_exceeded", 3));
+    const stats = listener.stats();
+    assert.ok(stats);
+    // "future_reason_a" was evicted, "future_reason_b" remains
+    assert.equal(stats!.byReason["unknown"], 1);
+    assert.equal(stats!.byReason["per_tx_cap_exceeded"], 1);
+  });
+
+  it("null reason (allowed decisions) does not appear in byReason", () => {
+    const listener = new GuardTelemetryListener({ counters: { windowEvents: 10 } });
+    listener.observe(decisionEvent("allowed", null));
+    const stats = listener.stats();
+    assert.ok(stats);
+    assert.deepEqual(stats!.byReason, {});
   });
 });

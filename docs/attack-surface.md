@@ -126,6 +126,15 @@ is re-checked before decoding, and unknown topics are dropped.
 | Secret rule | `Uint8Array`/`Buffer` values become `[redacted: binary payload]`; functions are dropped; depth and circular references are bounded, so an error object cannot leak a key or a whole envelope |
 | Tests | `tests/unit/logger.test.ts` |
 
+`createRedactingLogger()` exports that same wrapper so a host's own log calls
+get the SDK's redaction, level filtering, receiver preservation and sink
+isolation. The boundary is deliberately shallow and must be stated honestly:
+only calls made through the returned wrapper are protected, and only their
+structured `meta` argument is redacted. Message strings pass verbatim, and the
+original logger remains unprotected if a caller keeps using it directly. Call
+the wrapper with any secret-shaped values placed in `meta`, never interpolated
+into the message.
+
 ## Framework adapters
 
 Adapters sit between an agent framework and the interceptor: LangChain

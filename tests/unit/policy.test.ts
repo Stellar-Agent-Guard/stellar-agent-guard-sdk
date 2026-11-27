@@ -2311,6 +2311,34 @@ describe("ledger reads (policy and window from storage)", () => {
     assert.equal(windowSpent, 5n);
   });
 
+  it("does not mistake a lone Window entry for an installed policy", async () => {
+    const windowValue = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("total"),
+        val: nativeToScVal(5, { type: "u64" }),
+      }),
+    ]);
+    const server = {
+      getLedgerEntries: () =>
+        Promise.resolve({
+          entries: [
+            {
+              key: {
+                contractData: {
+                  key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Window")]),
+                },
+              },
+              val: { contractData: { val: windowValue } },
+            },
+          ],
+        }),
+    } as unknown as LedgerServer;
+
+    const { policy, windowSpent } = await fetchGuardPolicyAndWindow(server, GUARD);
+    assert.equal(policy, null);
+    assert.equal(windowSpent, 5n);
+  });
+
   it("reports no policy and a zero spend when neither entry is present", async () => {
     const server = ledgerServer([undefined, undefined]);
     const { policy, windowSpent } = await fetchGuardPolicyAndWindow(server, GUARD);
