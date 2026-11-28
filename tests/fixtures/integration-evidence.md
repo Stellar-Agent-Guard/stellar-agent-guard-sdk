@@ -405,6 +405,39 @@ node scripts/check-doc-links.ts
 The offline checks above passed; they do not substitute for the live-testnet
 scenarios.
 
+## Addendum — 2026-11-23 (PR #522: issues #474, #475, #476, #478)
+
+This PR touches `src/policy.ts` (adds a client-side `remediation` string to each
+`PolicyFailure`; `rule`, `path`, `message`, encoding and decision logic are
+unchanged), so the enforcement-path evidence file is included as required. It
+also adds advisory error predicates, streaming WASM verification and offline
+decode-policy fuzz coverage; none of those change the guard's block/admit
+decision or the signed authorization path.
+
+**The live suite was attempted in default ephemeral mode on 2026-11-23.** It
+verified the pinned WASM identity, deployed an isolated SAC
+(`CDD4WSJ2W3PAFDDPXIQFJZ3Y7ZIKEQODYXZQD3HWVFX6WXCFQEO2FDUE`) and guard
+(`CBS7Z4BHVZ3F3UDO4MCPJOVZUBG4WOYYXCPYEDJRAIOQJR5N7DJMNBV7`), then failed at
+`initialize(admin, agent_pubkey)` with `result=txBadAuthExtra` (transaction
+`a3f1eafad91048993c5835f3c68a7c4838c46d070fa88cd32e0895c50b419248`). This is
+the known pre-existing deployment issue recorded above — the same key is both
+the source and an `accountSigners` entry, reproduced on `main`. **No fresh live
+enforcement transcript is claimed.** A maintainer with a working deployment
+should rerun `npm run test:integration` before merge if desired.
+
+### What did run locally
+
+```text
+npm run format:check
+npm run typecheck
+npm run lint
+npm test
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+The offline gates passed. They are useful regression coverage but are not a
+substitute for the Phase-2 live scenarios above.
+
 ## Addendum — 2026-11-25 (PR: invoke queue observability, fee ceiling, preflight warmCache and typed failures; issues #423, #418, #413, #412)
 
 This PR touches `src/invoke.ts` and `src/preflight.ts`:

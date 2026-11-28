@@ -155,6 +155,7 @@ interface SchemaPolicyFailure {
   path: string;       // dotted path, e.g. "recipients[1]"; the root is "policy"
   rule: PolicyRuleId; // shared vocabulary
   message: string;    // human-readable; may change — do not branch on it
+  remediation: string; // one actionable sentence naming the field and expected shape
   keyword: string;    // schema keyword that fired, or "code" / "invalid_address"
   schemaPath: string; // JSON-pointer-style locator, e.g. "/allOf/0/then/properties/window_secs"
 }
