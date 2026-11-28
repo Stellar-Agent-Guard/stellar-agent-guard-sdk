@@ -158,7 +158,7 @@ pages.
       *Verify:* the configured values and the computed worst case are in the
       evidence record. Docs: [fee-bump configuration](api/invoke-pipeline.md#fee-bump-configuration-feebump).
 - [ ] **Pre-flight cost checks use a ceiling.** `CostPreChecker` is
-      constructed with `maxFeeStroops` (a non-negative `bigint`), and
+      constructed with `maxFeeStroops` (a non-negative `bigint` or base-10 integer string), and
       `over_budget` is treated as a refusal.
       *Verify:* a check with `maxFeeStroops: 0n` returns `kind: "over_budget"`.
       Docs: [cost pre-checking](api/cost-checker.md).

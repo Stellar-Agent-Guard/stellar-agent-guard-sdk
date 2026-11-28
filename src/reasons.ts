@@ -23,7 +23,7 @@
  * parity test is bidirectional: a glossary reason without SDK guidance fails,
  * and an SDK reason the glossary does not list fails too.
  */
-import { GuardError } from "./errors.ts";
+import { GuardError, type GuardErrorJSON } from "./errors.ts";
 import type { PolicyRuleId } from "./policy.ts";
 
 export const GUARD_REASON_CODES = {
@@ -473,7 +473,7 @@ export class GuardBlockedError extends GuardError {
    * Omits huge XDR blobs while carrying essential decision context, reason,
    * explanation, and call summary.
    */
-  toJSON(): Record<string, unknown> {
+  override toJSON(): GuardErrorJSON {
     return {
       name: this.name,
       message: this.message,

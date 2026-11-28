@@ -20,7 +20,14 @@
  */
 import { Keypair, Operation, rpc, scValToNative, TransactionBuilder } from "@stellar/stellar-sdk";
 import { DEFAULT_NETWORK_PASSPHRASE } from "./admin.ts";
-import { BroadcastError, GuardError, SimulationError } from "./errors.ts";
+import {
+  BroadcastError,
+  GuardError,
+  SigningError,
+  SimulationError,
+  guardErrorToJSON,
+  type GuardErrorJSON,
+} from "./errors.ts";
 import { invoke, RpcTimeoutError, type InvokeDryRunVerdict, type InvokeOutcome } from "./invoke.ts";
 import { unsafeContractAddress, type GuardStatus, type PolicyConfig } from "./policy.ts";
 import { explainReason, GuardBlockedError } from "./reasons.ts";
@@ -47,6 +54,61 @@ export interface HeartbeatSubmission {
 export interface HeartbeatSubmitContext {
   /** Aborted when `stop()` begins. */
   signal: AbortSignal;
+}
+
+/**
+ * Durable checkpoint for the last accepted beat (issue #462).
+ *
+ * `at` is epoch milliseconds, matching {@link HeartbeatBeat.at}. `ledger` is
+ * the ledger the accepted submission committed to, when one is known.
+ */
+export interface HeartbeatState {
+  at: number;
+  ledger?: number;
+}
+
+/**
+ * Optional persistence seam for heartbeat restart awareness.
+ *
+ * Both methods may be synchronous or asynchronous. Any load/save failure is
+ * reported through `onWarning` and ignored: a checkpoint is an aid to honest
+ * restarts, never a prerequisite for sending the next beat.
+ */
+export interface HeartbeatStateStore {
+  load(): HeartbeatState | null | undefined | Promise<HeartbeatState | null | undefined>;
+  save(state: HeartbeatState): void | Promise<void>;
+}
+
+/** In-memory {@link HeartbeatStateStore}; useful for tests and single-process agents. */
+export class InMemoryHeartbeatStateStore implements HeartbeatStateStore {
+  private state: HeartbeatState | null = null;
+
+  load(): HeartbeatState | null {
+    return this.state === null ? null : { ...this.state };
+  }
+
+  save(state: HeartbeatState): void {
+    this.state = { at: state.at, ...(state.ledger === undefined ? {} : { ledger: state.ledger }) };
+  }
+
+  /** Drop the checkpoint (e.g. after an admin unfreeze resets the guard). */
+  clear(): void {
+    this.state = null;
+  }
+}
+
+/**
+ * A late beat's skew details, reported after its submission result is known.
+ *
+ * `deadline` is the cadence slot the beat belonged to (not a re-anchored future
+ * deadline). `missedBeats` is the live handle counter at callback time, so it
+ * includes the skipped slots and the late increment for this beat.
+ */
+export interface HeartbeatLateBeat {
+  at: number;
+  lateMs: number;
+  deadline: number;
+  missedBeats: number;
 }
 
 /** One fired beat, as handed to `onBeat`. */
@@ -164,6 +226,10 @@ export function isRetryableHeartbeatFailure(error: unknown): boolean {
   if (error instanceof GuardBlockedError) return false;
   if (error instanceof HeartbeatBlockedError) return false;
   if (error instanceof HeartbeatDryRunError) return false;
+  // A signer timeout is a local configuration/callback failure: replaying the
+  // same heartbeat cannot make a stalled signer answer, and a timeout is never
+  // automatically retried (issue #472).
+  if (error instanceof SigningError) return false;
   if (error instanceof BroadcastError) return true;
   if (error instanceof RpcTimeoutError) return true;
   if (error instanceof SimulationError) return true;
@@ -285,6 +351,11 @@ export class HeartbeatIntervalError extends Error {
     this.graceSecs = graceSecs;
     this.maxIntervalMs = maxIntervalMs;
   }
+
+  /** JSON-safe representation for structured loggers. */
+  toJSON(): GuardErrorJSON {
+    return guardErrorToJSON(this);
+  }
 }
 
 /** Parameters to the default submission, `submitHeartbeat()`. */
@@ -305,6 +376,11 @@ export interface SubmitHeartbeatParams {
   pollIntervalMs?: number;
   /** Cancellation forwarded to the underlying `invoke()` pipeline. */
   signal?: AbortSignal;
+  /**
+   * Bound on the agent's `signDigest()` call, in milliseconds; `0` disables it.
+   * A fired bound is a `SignerTimeoutError` and is never retried.
+   */
+  signerTimeoutMs?: number;
 }
 
 export interface HeartbeatOptions {
@@ -324,12 +400,27 @@ export interface HeartbeatOptions {
    *
    * Must be a finite, non-negative number: a negative threshold would make
    * every beat look late, and a non-finite one would make the lateness report
-   * meaningless. Both are rejected before the first beat (issue #341).
+   * meaningless. Both are rejected before the first beat (issue #341). A beat
+   * is late for `onLateBeat` only when `lateMs > maxSkewMs`; equality is
+   * tolerated jitter, not lateness.
    */
   maxSkewMs?: number;
   onBeat?: (beat: HeartbeatBeat) => void;
+  /**
+   * Fires after a beat whose `lateMs` exceeded `maxSkewMs`, once its submission
+   * result is known whether it succeeded or failed. Callback errors are
+   * isolated. Jitter within `maxSkewMs` and on-time beats never fire it.
+   */
+  onLateBeat?: (beat: HeartbeatLateBeat) => void;
   onError?: (error: unknown) => void;
   signal?: AbortSignal;
+
+  /**
+   * Optional durable checkpoint of the last accepted beat. Loaded before the
+   * loop starts (to report restart lateness honestly) and saved only after an
+   * accepted beat. Load/save failures go to `onWarning` and never stop the loop.
+   */
+  stateStore?: HeartbeatStateStore;
 
   /** Required for the default submission (unless `submit` is supplied). */
   server?: rpc.Server;
@@ -338,6 +429,12 @@ export interface HeartbeatOptions {
   networkPassphrase?: string;
   pollAttempts?: number;
   pollIntervalMs?: number;
+  /**
+   * Bound on each `AgentSigner.signDigest()` call in the default submission, in
+   * milliseconds. `0` keeps the signer unbounded. It is independent of the
+   * `invoke()` deadline: whichever bound fires first decides the error class.
+   */
+  signerTimeoutMs?: number;
 
   /**
    * Optional read of the live policy, used to validate the interval against
@@ -436,6 +533,7 @@ export async function submitHeartbeat(params: SubmitHeartbeatParams): Promise<He
     ...(params.pollAttempts !== undefined ? { pollAttempts: params.pollAttempts } : {}),
     ...(params.pollIntervalMs !== undefined ? { pollIntervalMs: params.pollIntervalMs } : {}),
     ...(params.signal !== undefined ? { signal: params.signal } : {}),
+    ...(params.signerTimeoutMs !== undefined ? { signerTimeoutMs: params.signerTimeoutMs } : {}),
   });
   const ledger = outcome.kind === "allowed" ? outcome.submission.ledger : null;
   return {
@@ -607,6 +705,9 @@ function defaultSubmit(
         : {}),
       ...(options.pollAttempts !== undefined ? { pollAttempts: options.pollAttempts } : {}),
       ...(options.pollIntervalMs !== undefined ? { pollIntervalMs: options.pollIntervalMs } : {}),
+      ...(options.signerTimeoutMs !== undefined
+        ? { signerTimeoutMs: options.signerTimeoutMs }
+        : {}),
       signal: context.signal,
     });
   };
@@ -658,6 +759,14 @@ function assertHeartbeatOptions(options: HeartbeatOptions): void {
       );
     }
   }
+  if (options.signerTimeoutMs !== undefined) {
+    const signerTimeoutMs = options.signerTimeoutMs;
+    if (!Number.isFinite(signerTimeoutMs) || signerTimeoutMs < 0) {
+      throw new RangeError(
+        `heartbeat signerTimeoutMs must be a finite, non-negative number, received ${signerTimeoutMs}`,
+      );
+    }
+  }
   if (options.graceSecs !== undefined) {
     const graceSecs = options.graceSecs;
     if (typeof graceSecs === "bigint") {
@@ -682,8 +791,18 @@ function assertHeartbeatOptions(options: HeartbeatOptions): void {
     }
   }
   assertFunctionOption("onBeat", options.onBeat);
+  assertFunctionOption("onLateBeat", options.onLateBeat);
   assertFunctionOption("onError", options.onError);
   assertFunctionOption("onWarning", options.onWarning);
+  if (options.stateStore !== undefined) {
+    if (typeof options.stateStore !== "object" || options.stateStore === null) {
+      throw new TypeError(
+        `heartbeat stateStore must be an object, received ${typeof options.stateStore}`,
+      );
+    }
+    assertFunctionOption("stateStore.load", options.stateStore.load);
+    assertFunctionOption("stateStore.save", options.stateStore.save);
+  }
   assertFunctionOption("readPolicy", options.readPolicy);
   assertFunctionOption("submit", options.submit);
   assertFunctionOption("now", options.now);
@@ -753,6 +872,63 @@ function fullJitterDelay(attempt: number, options: ResolvedHeartbeatRetry): numb
 /** A one-line rendering of a failure, for the retry warning. */
 function describeFailure(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** Warning callbacks are diagnostics only; a broken one must not stop the loop. */
+function warnSafely(options: HeartbeatOptions, message: string): void {
+  try {
+    options.onWarning?.(message);
+  } catch {
+    /* ignored by design: observability must never gate the dead-man switch */
+  }
+}
+
+/** Load a checkpoint, treating a malformed or failing store as no checkpoint. */
+async function loadHeartbeatState(options: HeartbeatOptions): Promise<HeartbeatState | null> {
+  if (!options.stateStore) return null;
+  try {
+    const state = await options.stateStore.load();
+    if (state === null || state === undefined) return null;
+    if (typeof state.at !== "number" || !Number.isFinite(state.at)) {
+      warnSafely(options, "heartbeat stateStore returned an invalid checkpoint; ignoring it");
+      return null;
+    }
+    return {
+      at: state.at,
+      ...(typeof state.ledger === "number" && Number.isFinite(state.ledger)
+        ? { ledger: state.ledger }
+        : {}),
+    };
+  } catch (error) {
+    warnSafely(
+      options,
+      `heartbeat stateStore load failed; continuing without a checkpoint: ${describeFailure(error)}`,
+    );
+    return null;
+  }
+}
+
+/**
+ * Chain checkpoint writes so an older save cannot overwrite a newer one.
+ *
+ * The loop never awaits this chain: a slow or stuck store cannot delay a beat.
+ */
+function persistHeartbeatState(
+  options: HeartbeatOptions,
+  chain: { current: Promise<void> },
+  state: HeartbeatState,
+): void {
+  if (!options.stateStore) return;
+  chain.current = chain.current.then(async () => {
+    try {
+      await options.stateStore?.save(state);
+    } catch (error) {
+      warnSafely(
+        options,
+        `heartbeat stateStore save failed; the checkpoint is stale: ${describeFailure(error)}`,
+      );
+    }
+  });
 }
 
 /** The result of one heartbeat submission attempt. */
@@ -955,10 +1131,39 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
     );
   }
 
+  const stored = await loadHeartbeatState(options);
+  const startedAt = now();
+
   let stopped = false;
-  let lastBeatAt: number | null = null;
+  let lastBeatAt: number | null = stored?.at ?? null;
   let missedBeats = 0;
-  let lastBeatSecond: number | null = null;
+  let lastBeatSecond: number | null = stored ? Math.floor(stored.at / 1000) : null;
+  // A restored checkpoint anchors the cadence to the previous accepted beat.
+  // A future-skewed checkpoint is clamped to "now" so it can never stall the
+  // dead-man switch.
+  const restoredDue = stored === null ? null : stored.at + intervalMs;
+  let deadline = restoredDue === null ? startedAt : Math.min(restoredDue, startedAt + intervalMs);
+  let initialLate: HeartbeatLateBeat | null = null;
+  if (restoredDue !== null && deadline < startedAt) {
+    const skipped = Math.floor((startedAt - deadline) / intervalMs) + 1;
+    initialLate = {
+      at: startedAt,
+      lateMs: startedAt - restoredDue,
+      deadline: restoredDue,
+      missedBeats: skipped,
+    };
+    missedBeats = skipped;
+    deadline += skipped * intervalMs;
+  }
+  const storeWrites: { current: Promise<void> } = { current: Promise.resolve() };
+  const reportInitialLate = (): void => {
+    if (initialLate === null) return;
+    try {
+      options.onLateBeat?.(initialLate);
+    } catch {
+      /* a broken observer must not stop the scheduler on restart */
+    }
+  };
   const controller = new AbortController();
   // Submission cancellation is separate from the scheduler's wait controller:
   // stopping always requests it, while the loop preserves graceful teardown.
@@ -1103,7 +1308,7 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
   }
 
   async function run(): Promise<void> {
-    let deadline = now();
+    reportInitialLate();
 
     // A submission can outlive several cadence slots. Advance over every slot
     // that is already stale instead of firing the backlog back-to-back; each
@@ -1123,7 +1328,8 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
       if (stopped) break;
 
       const at = now();
-      const lateMs = Math.max(0, at - deadline);
+      const due = deadline;
+      const lateMs = Math.max(0, at - due);
       deadline += intervalMs;
       skipExpiredSlots();
 
@@ -1144,6 +1350,14 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
 
       if (stopped) break;
 
+      if (lateMs > maxSkewMs) {
+        try {
+          options.onLateBeat?.({ at, lateMs, deadline: due, missedBeats });
+        } catch {
+          /* as with onBeat/onError, observer bugs cannot kill the loop */
+        }
+      }
+
       if (!result.ok) {
         try {
           options.onError?.(result.error);
@@ -1155,6 +1369,10 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
 
       lastBeatAt = at;
       lastBeatSecond = second;
+      persistHeartbeatState(options, storeWrites, {
+        at,
+        ...(result.ledger !== undefined ? { ledger: result.ledger } : {}),
+      });
       try {
         options.onBeat?.({
           at,
@@ -1172,13 +1390,14 @@ export async function startHeartbeat(options: HeartbeatOptions): Promise<Heartbe
   if (external?.aborted) {
     stopped = true;
     submissionController.abort();
+    reportInitialLate();
     return {
       stop: async () => ({ reason: "completed", settled: true }),
       get lastBeatAt() {
-        return null;
+        return lastBeatAt;
       },
       get missedBeats() {
-        return 0;
+        return missedBeats;
       },
       get stopped() {
         return true;

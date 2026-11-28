@@ -24,10 +24,18 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { ContractResponseError, SigningError } from "../../src/errors.ts";
+import {
+  AuthRefreshError,
+  ContractResponseError,
+  SignerTimeoutError,
+  SigningError,
+} from "../../src/errors.ts";
 import {
   BroadcastError,
+  DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
   assembleFromSimulation,
+  authEntryNeedsRefresh,
+  authEntrySignatureExpiration,
   buildGuardAuthEntry,
   describeSimulationResources,
   isMinimumFeeBroadcastFailure,
@@ -36,6 +44,7 @@ import {
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
   parseSimulationResourceFee,
+  refreshNearExpiryAuthEntries,
   submitAndPoll,
   toAgentSigner,
   validateAgentPublicKey,
@@ -718,6 +727,91 @@ describe("AgentSigner", () => {
   });
 });
 
+describe("signerTimeoutMs bounds remote signer callbacks (issue #472)", () => {
+  const networkPassphrase = "Test SDF Network ; September 2015";
+  const base = {
+    guard: GUARD,
+    call: CALL,
+    nonce: 1n,
+    signatureExpirationLedger: 100,
+    networkPassphrase,
+  };
+
+  function remoteSigner(signDigest: AgentSigner["signDigest"]): AgentSigner {
+    return { publicKey: Keypair.random().publicKey(), signDigest };
+  }
+
+  it("leaves a fast signer untouched and calls it exactly once", async () => {
+    const keypair = Keypair.random();
+    let calls = 0;
+    const signer = remoteSigner((digest) => {
+      calls += 1;
+      return keypair.sign(Buffer.from(digest));
+    });
+
+    const entry = await buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 1_000 });
+    const credentials = (entry.credentials as unknown as { address: xdr.SorobanAddressCredentials })
+      .address;
+    assert.equal(calls, 1);
+    assert.equal((scValToNative(credentials.signature) as Uint8Array).length, 64);
+  });
+
+  it("fails a hanging signer with a typed SigningError, not an RpcTimeoutError", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let calls = 0;
+    const signer = remoteSigner(() => {
+      calls += 1;
+      return new Promise<Uint8Array>(() => {});
+    });
+
+    const pending = buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 25 });
+    t.mock.timers.tick(25);
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof SignerTimeoutError);
+      assert.ok(error instanceof SigningError);
+      assert.equal(error.timeoutMs, 25);
+      assert.equal(error.address, GUARD);
+      assert.match(error.name, /SignerTimeoutError/);
+      return true;
+    });
+    assert.equal(calls, 1, "the bound stops waiting without re-invoking the signer");
+  });
+
+  it("preserves a signer rejection as the typed error's cause", async () => {
+    const cause = new Error("remote HSM refused");
+    const signer = remoteSigner(() => Promise.reject(cause));
+
+    await assert.rejects(
+      buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 1_000 }),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.ok(!(error instanceof SignerTimeoutError));
+        assert.equal(error.cause, cause);
+        return true;
+      },
+    );
+  });
+
+  it("rejects an invalid bound before calling the signer", async () => {
+    let calls = 0;
+    const signer = remoteSigner(() => {
+      calls += 1;
+      return new Uint8Array(64);
+    });
+    for (const signerTimeoutMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assert.rejects(
+        buildGuardAuthEntry({ ...base, signer, signerTimeoutMs }),
+        (error: unknown) => {
+          assert.ok(error instanceof RangeError);
+          assert.match(error.message, /signerTimeoutMs/);
+          return true;
+        },
+      );
+    }
+    assert.equal(calls, 0);
+  });
+});
+
 describe("isMinimumFeeBroadcastFailure", () => {
   it("recognises structured result=txInsufficientFee", () => {
     assert.equal(
@@ -809,5 +903,127 @@ describe("BroadcastError", () => {
     assert.match(error.message, /3 attempt\(s\)/);
     assert.match(error.message, /400 stroops/);
     assert.ok(error instanceof Error);
+  });
+});
+
+/**
+ * Near-expiry auth refresh (issue #422).
+ *
+ * A signed auth entry carries the ledger at which its signature stops being
+ * accepted. If the chain advances close to that ledger between signing and the
+ * enforced simulation, the pipeline must rebuild and re-sign the entry with a
+ * fresh expiration instead of broadcasting a doomed authorization.
+ */
+describe("auth entry refresh (issue #422)", () => {
+  const build = (signatureExpirationLedger: number) =>
+    buildGuardAuthEntry({
+      guard: GUARD,
+      call: CALL,
+      signer: Keypair.random(),
+      nonce: 1n,
+      signatureExpirationLedger,
+      networkPassphrase: PASSPHRASE,
+    });
+
+  it("detects an entry within the default margin and keeps a comfortable one", async () => {
+    assert.equal(DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS, 5);
+    assert.equal(authEntryNeedsRefresh(1003, 1000), true);
+    assert.equal(authEntryNeedsRefresh(1005, 1000), false, "exactly at the margin is comfortable");
+    assert.equal(authEntryNeedsRefresh(5000, 1000), false);
+    assert.equal(authEntryNeedsRefresh(1003, 1000, 1), false);
+
+    const entry = await build(1003);
+    assert.equal(authEntrySignatureExpiration(entry), 1003);
+  });
+
+  it("refreshes a near-expiry entry exactly once and uses the new expiration", async () => {
+    const entry = await build(1003);
+    let calls = 0;
+
+    const result = await refreshNearExpiryAuthEntries({
+      entries: [entry],
+      currentLedger: 1000,
+      refresh: async (_entry, signatureExpirationLedger) => {
+        calls += 1;
+        return await build(signatureExpirationLedger);
+      },
+    });
+
+    assert.equal(calls, 1, "a single entry is rebuilt once, never twice");
+    assert.equal(result.refreshed, 1);
+    assert.equal(authEntrySignatureExpiration(result.entries[0]!), 11_000);
+  });
+
+  it("does not re-sign an entry that comfortably outlives the margin", async () => {
+    const entry = await build(5000);
+    let calls = 0;
+
+    const result = await refreshNearExpiryAuthEntries({
+      entries: [entry],
+      currentLedger: 1000,
+      refresh: async () => {
+        calls += 1;
+        return entry;
+      },
+    });
+
+    assert.equal(calls, 0, "a comfortable entry must keep its original signature");
+    assert.equal(result.refreshed, 0);
+    assert.equal(result.entries[0], entry);
+  });
+
+  it("leaves source-account credentials untouched and honors a zero margin opt-out", async () => {
+    const signed = await build(1003);
+    const sourceAccountEntry = new xdr.SorobanAuthorizationEntry({
+      credentials: xdr.SorobanCredentials.sorobanCredentialsSourceAccount(),
+      rootInvocation: signed.rootInvocation,
+    });
+
+    let calls = 0;
+    const refresh = async () => {
+      calls += 1;
+      return sourceAccountEntry;
+    };
+
+    assert.equal(authEntrySignatureExpiration(sourceAccountEntry), null);
+    const untouched = await refreshNearExpiryAuthEntries({
+      entries: [sourceAccountEntry],
+      currentLedger: 1000,
+      refresh,
+    });
+    assert.equal(calls, 0);
+    assert.equal(untouched.entries[0], sourceAccountEntry);
+
+    const disabled = await refreshNearExpiryAuthEntries({
+      entries: [signed],
+      currentLedger: 1003,
+      marginLedgers: 0,
+      refresh,
+    });
+    assert.equal(calls, 0, "margin 0 disables refreshing entirely");
+    assert.equal(disabled.entries[0], signed);
+  });
+
+  it("reports a failed refresh as a typed AuthRefreshError", async () => {
+    const entry = await build(1003);
+
+    await assert.rejects(
+      refreshNearExpiryAuthEntries({
+        entries: [entry],
+        currentLedger: 1000,
+        refresh: async () => {
+          throw new Error("signer unavailable");
+        },
+      }),
+      (error: unknown) => {
+        assert(error instanceof AuthRefreshError);
+        assert(error instanceof SigningError);
+        assert.equal(error.expirationLedger, 1003);
+        assert.equal(error.currentLedger, 1000);
+        assert.equal(error.marginLedgers, DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS);
+        assert.equal(error.address, GUARD);
+        return true;
+      },
+    );
   });
 });

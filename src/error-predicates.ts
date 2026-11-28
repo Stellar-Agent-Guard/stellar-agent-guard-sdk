@@ -1,6 +1,7 @@
 import {
   AdapterConfigError,
   AdapterMappingError,
+  AuthRefreshError,
   BroadcastError,
   ContractResponseError,
   FeeCapExceededError,
@@ -13,6 +14,7 @@ import {
   PolicyFileReadError,
   PolicyValidationError,
   RateLimitedError,
+  SignerTimeoutError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -29,6 +31,7 @@ import { ConcurrentTelemetryStreamError } from "./telemetry.ts";
 export const ERROR_CLASSIFIERS = {
   AdapterConfigError: (error: unknown): boolean => error instanceof AdapterConfigError,
   AdapterMappingError: (error: unknown): boolean => error instanceof AdapterMappingError,
+  AuthRefreshError: (error: unknown): boolean => error instanceof AuthRefreshError,
   BroadcastError: (error: unknown): boolean => error instanceof BroadcastError,
   ConcurrentTelemetryStreamError: (error: unknown): boolean =>
     error instanceof ConcurrentTelemetryStreamError,
@@ -49,6 +52,7 @@ export const ERROR_CLASSIFIERS = {
   PolicyValidationError: (error: unknown): boolean => error instanceof PolicyValidationError,
   RateLimitedError: (error: unknown): boolean => error instanceof RateLimitedError,
   RpcTimeoutError: (error: unknown): boolean => error instanceof RpcTimeoutError,
+  SignerTimeoutError: (error: unknown): boolean => error instanceof SignerTimeoutError,
   SigningError: (error: unknown): boolean => error instanceof SigningError,
   SimulationError: (error: unknown): boolean => error instanceof SimulationError,
 } as const;
@@ -65,6 +69,8 @@ export type ErrorDisposition =
 
 export function classifyKnownError(error: unknown): KnownErrorClass | undefined {
   if (error instanceof RateLimitedError) return "RateLimitedError";
+  if (error instanceof AuthRefreshError) return "AuthRefreshError";
+  if (error instanceof SignerTimeoutError) return "SignerTimeoutError";
   if (error instanceof InvalidFeeCeilingError) return "InvalidFeeCeilingError";
   if (error instanceof PolicyEncodeError) return "PolicyEncodeError";
   if (error instanceof GuardUndeterminedError) return "GuardUndeterminedError";
@@ -94,6 +100,7 @@ export function errorDisposition(name: KnownErrorClass): ErrorDisposition {
   switch (name) {
     case "AdapterConfigError":
     case "AdapterMappingError":
+    case "AuthRefreshError":
     case "ConcurrentTelemetryStreamError":
     case "ContractResponseError":
     case "FeeCapExceededError":
@@ -106,6 +113,7 @@ export function errorDisposition(name: KnownErrorClass): ErrorDisposition {
     case "PolicyEncodeError":
     case "PolicyFileReadError":
     case "PolicyValidationError":
+    case "SignerTimeoutError":
     case "SigningError":
       return "other";
     case "GuardBlockedError":

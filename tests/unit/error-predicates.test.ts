@@ -28,6 +28,7 @@ type ErrorCtor = { prototype: object };
 const ERROR_CONSTRUCTORS: Record<KnownErrorClass, ErrorCtor> = {
   AdapterConfigError: sdk.AdapterConfigError,
   AdapterMappingError: sdk.AdapterMappingError,
+  AuthRefreshError: sdk.AuthRefreshError,
   BroadcastError: sdk.BroadcastError,
   ConcurrentTelemetryStreamError,
   ContractResponseError: sdk.ContractResponseError,
@@ -47,6 +48,7 @@ const ERROR_CONSTRUCTORS: Record<KnownErrorClass, ErrorCtor> = {
   PolicyValidationError: sdk.PolicyValidationError,
   RateLimitedError: sdk.RateLimitedError,
   RpcTimeoutError: sdk.RpcTimeoutError,
+  SignerTimeoutError: sdk.SignerTimeoutError,
   SigningError: sdk.SigningError,
   SimulationError: sdk.SimulationError,
 };
@@ -54,6 +56,7 @@ const ERROR_CONSTRUCTORS: Record<KnownErrorClass, ErrorCtor> = {
 const EXPECTED: Record<KnownErrorClass, { failClosed: boolean; retryable: boolean }> = {
   AdapterConfigError: { failClosed: false, retryable: false },
   AdapterMappingError: { failClosed: false, retryable: false },
+  AuthRefreshError: { failClosed: false, retryable: false },
   BroadcastError: { failClosed: false, retryable: false },
   ConcurrentTelemetryStreamError: { failClosed: false, retryable: false },
   ContractResponseError: { failClosed: false, retryable: false },
@@ -73,6 +76,7 @@ const EXPECTED: Record<KnownErrorClass, { failClosed: boolean; retryable: boolea
   PolicyValidationError: { failClosed: false, retryable: false },
   RateLimitedError: { failClosed: false, retryable: true },
   RpcTimeoutError: { failClosed: false, retryable: false },
+  SignerTimeoutError: { failClosed: false, retryable: false },
   SigningError: { failClosed: false, retryable: false },
   SimulationError: { failClosed: false, retryable: false },
 };
@@ -142,6 +146,14 @@ describe("error classification registry", () => {
     assert.equal(
       classifyKnownError(Object.create(sdk.GuardUndeterminedError.prototype)),
       "GuardUndeterminedError",
+    );
+    assert.equal(
+      classifyKnownError(Object.create(sdk.AuthRefreshError.prototype)),
+      "AuthRefreshError",
+    );
+    assert.equal(
+      classifyKnownError(Object.create(sdk.SignerTimeoutError.prototype)),
+      "SignerTimeoutError",
     );
   });
 });

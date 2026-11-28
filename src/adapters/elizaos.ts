@@ -47,6 +47,7 @@ import {
   type AdapterConfigIssue,
 } from "./validate.ts";
 import {
+  batchDecisionKindFor,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
@@ -54,10 +55,14 @@ import {
   mappingFailureFor,
   normalizeMappedCall,
   normalizeMappedCalls,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
+  runMappingErrorHook,
   type BlockedHookLogger,
+  type GuardBatchDecisionHook,
   type GuardBlockedHook,
+  type GuardMappingErrorHook,
 } from "./shared.ts";
 
 /** The subset of ElizaOS's `Validator` signature this adapter implements. */
@@ -90,8 +95,21 @@ export interface ElizaGuardOptions {
   toContractCalls?: (message: unknown, state: unknown) => readonly ContractCall[] | null;
   /** The action's own validation, composed in front of the guard's. */
   baseValidate?: ElizaValidator;
+  /**
+   * The action name reported by `onMappingError` (issue #453); `guardAction`
+   * fills it from the wrapped action automatically. Defaults to `"unknown"`
+   * when `createGuardValidator` is used directly without a name.
+   */
+  name?: string;
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (decision: PreFlightDecision) => void;
+  /**
+   * Action-level batch decision summary hook (issue #498).
+   *
+   * Called once per batch check with `{ adapter: "elizaos", kind, verdicts, calls }`
+   * after all calls have been checked, before returning the boolean validation outcome.
+   */
+  onBatchDecision?: GuardBatchDecisionHook | undefined;
   /**
    * Operator alerting: called once per halt with the same structured payload
    * every adapter uses (`{ adapter, kind, reason, call, explanation }`). A
@@ -102,6 +120,21 @@ export interface ElizaGuardOptions {
    * `src/adapters/shared.ts`.
    */
   onBlocked?: GuardBlockedHook;
+  /**
+   * Integration-bug alerting (issue #453): called once when
+   * `toContractCall`/`toContractCalls` throws or returns a malformed call,
+   * immediately before the fail-closed `false` return. Never fires for a guard
+   * refusal or an undetermined enforcement run, so a broken mapper no longer
+   * looks like a policy event. Isolated like `onBlocked`: a throwing hook cannot
+   * resume the action.
+   */
+  onMappingError?: GuardMappingErrorHook;
+  /**
+   * Include the raw `(message, state)` mapping inputs on `onMappingError`
+   * payloads as `{ message, state }`. Off by default because they can contain
+   * agent/PII data.
+   */
+  includeMappingErrorRequest?: boolean;
   /**
    * Explicit sink for a swallowed `onBlocked` failure. Omitted (the default),
    * a throwing hook is silent (issue #314).
@@ -144,8 +177,12 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
   if (baseValidateIssue) issues.push(baseValidateIssue);
   const onDecisionIssue = validateOptionalFunction("onDecision", options.onDecision);
   if (onDecisionIssue) issues.push(onDecisionIssue);
+  const onBatchDecisionIssue = validateOptionalFunction("onBatchDecision", options.onBatchDecision);
+  if (onBatchDecisionIssue) issues.push(onBatchDecisionIssue);
   const onBlockedIssue = validateOptionalFunction("onBlocked", options.onBlocked);
   if (onBlockedIssue) issues.push(onBlockedIssue);
+  const onMappingErrorIssue = validateOptionalFunction("onMappingError", options.onMappingError);
+  if (onMappingErrorIssue) issues.push(onMappingErrorIssue);
   const signalIssue = validateOptionalSignal(options.signal);
   if (signalIssue) issues.push(signalIssue);
   const timeoutIssue = validateOptionalTimeout(options.timeoutMs);
@@ -166,7 +203,13 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
     } catch (error) {
       // A mapper failure is a fail-closed halt, not an "applicable" action
       // (issue #316): the runtime drops the action before its handler runs.
-      const failure = mappingFailureFor("elizaos", error);
+      const failure = mappingFailureFor(
+        "elizaos",
+        error,
+        options.name ?? "unknown",
+        options.includeMappingErrorRequest ? { message, state } : undefined,
+      );
+      runMappingErrorHook(options.onMappingError, failure.mapping, options.blockedHookLogger);
       runBlockedHook(options.onBlocked, failure.info, options.blockedHookLogger);
       return false;
     }
@@ -220,6 +263,16 @@ export function createGuardValidator(options: ElizaGuardOptions): ElizaValidator
     for (const verdict of batch.verdicts) {
       runDecisionHook(options.onDecision, [verdict], "elizaos", options.blockedHookLogger);
     }
+    runBatchDecisionHook(
+      options.onBatchDecision,
+      {
+        adapter: "elizaos",
+        kind: batchDecisionKindFor(batch.verdicts),
+        verdicts: batch.verdicts,
+        calls,
+      },
+      options.blockedHookLogger,
+    );
     if (batch.admissible) return true;
 
     runBlockedHook(
@@ -247,6 +300,10 @@ export function guardAction<T extends ElizaActionLike>(
 ): Omit<T, "validate"> & { validate: ElizaValidator } {
   return {
     ...action,
-    validate: createGuardValidator({ ...options, baseValidate: action.validate }),
+    validate: createGuardValidator({
+      ...options,
+      baseValidate: action.validate,
+      name: options.name ?? action.name,
+    }),
   };
 }

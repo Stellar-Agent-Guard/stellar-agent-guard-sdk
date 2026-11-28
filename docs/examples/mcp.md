@@ -93,6 +93,25 @@ const callTool = guardMcpCallTool(myClient.callTool.bind(myClient), {
 });
 ```
 
+## A Complete Server
+
+The snippet above shows the wrappers. For a whole server — tool registration,
+a JSON-RPC transport carrying `tools/list` and `tools/call`, and the
+admissible and blocked results as a client receives them — see
+[`examples/mcp-server.ts`](../../examples/mcp-server.ts). It runs with no
+network and no credentials:
+
+```sh
+node --import tsx examples/mcp-server.ts
+```
+
+It uses a minimal in-memory server with the same `registerTool(name, config,
+handler)` shape as `@modelcontextprotocol/server`. To serve over stdio, replace
+it with the SDK's `McpServer` and `StdioServerTransport`; the guarded handler is
+passed to `registerTool` unchanged. The MCP SDK remains your server's optional
+dependency, never this package's. `tests/unit/mcp-server-example.test.ts`
+exercises the server with a fake interceptor, so the example cannot drift.
+
 ## Blocked Result
 
 A refusal is returned in MCP's own error-result form, so the model sees it as a

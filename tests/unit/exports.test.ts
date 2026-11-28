@@ -70,6 +70,7 @@ describe("package module format and export-map", () => {
       "GuardUndeterminedError",
       "SimulationError",
       "SigningError",
+      "SignerTimeoutError",
       "BroadcastError",
       "ContractResponseError",
       "PolicyDecodeError",
@@ -80,6 +81,11 @@ describe("package module format and export-map", () => {
       "InvokeRetryError",
       "verifyAgentSignature",
       "TRACE_STEP_NAMES",
+      "createRedactingLogger",
+      "formatDmsCountdown",
+      "DEFAULT_ADMIN_OP_WAIT_TIMEOUT_MS",
+      "isAdminOpOutcome",
+      "waitForAdminOp",
     ];
 
     for (const exp of requiredExports) {

@@ -9,7 +9,7 @@ The Stellar Agent Guard SDK exposes the following public surface. For the narrat
 - `policyToJson(policy)` / `policyFromJson(input)` (aliases `encodePolicyJson` / `decodePolicyJson`) and `POLICY_JSON_VERSION` — lossless JSON representation of a `PolicyConfig` with decimal-string integers, fixed key order and `PolicyDecodeError` paths. See [Policy JSON](api/policy-json.md).
 - `validateGuardPolicyAgainstSchema(policy, schema, options?)`, `POLICY_SCHEMA_PATH`, `SCHEMA_DIALECT`, `SCHEMA_RULE_ID_ANNOTATION`, `SCHEMA_VS_CODE_RULES`, `ruleForKeyword()`, `ruleFromAnnotation()` — schema-driven SPEC §8 validation with the shared rule vocabulary. See [Policy Schema Validation](api/policy-schema.md).
 
-Errors: every exported error class has an entry in [troubleshooting: error classes](troubleshooting.md#error-classes). Before going live, work through the [production readiness checklist](production-readiness.md).
+Errors: use the [error catalog](errors.md#error-classes) for the class → cause → fix mapping, and [troubleshooting: error classes](troubleshooting.md#error-classes) for symptom-first guidance. Before going live, work through the [production readiness checklist](production-readiness.md).
 
 ### Constructor options
 
@@ -31,8 +31,24 @@ Every constructor options object has a table (Option | Type | Default | Meaning)
 - `invoke(options: InvokeOptions): Promise<InvokeResult>` — [Options table](api/invoke-pipeline.md#options). End-to-end pipeline: probe, sign auth, simulate, and broadcast. Accepts an optional `onStep(step: InvokeStepEvent)` hook reporting per-stage `start`/`ok`/`fail` timing events with a 0-based retry `attempt` index; callback exceptions are isolated and omitting the hook changes nothing.
 - `invoke(options)` / `invoke({ ...options, dryRun: true })` — Broadcasts an admissible result, or returns the full pre-broadcast dry-run trace.
 - `invoke({ ...options, onSubmitted })` — An optional `onSubmitted(event: SubmissionAcceptedEvent)` hook, called once as soon as the network accepts the broadcast and **before** any confirmation polling, carrying the transaction hash (`hash: null` when the broadcast response named no transaction — that submission fails closed). Every outcome that happened after a broadcast carries the same hash as `transactionHash`, so a failed poll or a spent deadline never costs the caller its recovery handle. See [the invoke pipeline](api/invoke-pipeline.md#the-transaction-hash-as-soon-as-the-server-accepts-the-submission).
-- `submitSetPolicy(params)` / `submitFreeze(params)` / `submitUnfreeze(params)` / `submitRotateAgentKey(params)` — The administrative submissions (`set_policy`, `freeze`, `unfreeze`, `rotate_agent_key`), each running the full `invoke()` pipeline with the admin signer as the authorizer. Besides `server`, `guard`, `admin` and `source`, they accept `dryRun`, `pollAttempts`, `pollIntervalMs`, and — like a normal invocation — `signal` and `timeoutMs`. An already-aborted signal short-circuits before any RPC and returns the documented typed outcome (the `error` arm carrying an `RpcTimeoutError` with `aborted: true`); a fired per-call timeout is reported the same way. Neither option relaxes the administrative authorization behaviour.
-- `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). `stop()` requests cancellation through the submission context and waits for the in-flight beat; `stop({ timeoutMs })` / `stopTimeoutMs` bound that wait and return `{ reason, settled, submission?, error? }`. A submission that outlives several cadence slots skips the stale slots instead of firing a catch-up burst. See “Keep the dead-man switch alive”.
+- `submitSetPolicy(params)` / `submitFreeze(params)` / `submitUnfreeze(params)` / `submitRotateAgentKey(params)` — The administrative submissions (`set_policy`, `freeze`, `unfreeze`, `rotate_agent_key`), each running the full `invoke()` pipeline with the admin signer as the authorizer and returning a branded `AdminOpOutcome` (also an `InvokeOutcome` with `outcome.admin = { op, guard, policyHash?, newAgent? }`). Besides `server`, `guard`, `admin` and `source`, they accept `dryRun`, `pollAttempts`, `pollIntervalMs`, and — like a normal invocation — `signal`, `timeoutMs`, and `signerTimeoutMs`. An already-aborted signal short-circuits before any RPC and returns the documented typed outcome (the `error` arm carrying an `RpcTimeoutError` with `aborted: true`); a fired per-call timeout is reported the same way. Neither option relaxes the administrative authorization behaviour. No secret, signature or fee payer is included in `admin` metadata.
+- `previewSetPolicy({ server, guard, policy, admin? }): Promise<PolicyPreview>` — The required first step before `submitSetPolicy()`. Reads the installed policy (`current: null` when none exists), validates the candidate with the SDK rules (and the contract's read-only `validate_policy` when `admin` is supplied), hashes it, and returns `{ valid, failures, diff, policyHash, current }`. Invalid policies produce `failures` instead of throws; a policy with no changes produces an empty `diff`. Preview never assembles a submission transaction, signs, or broadcasts. An unavailable on-chain validator is best-effort and does not by itself invalidate the preview.
+- `waitForAdminOp(outcome, options): Promise<AdminOpWaitResult>` — The read-only second half of an admin operation. Pass the full submit outcome; it carries the operation name, guard and transaction hash. The waiter polls **only** `server.getTransaction(hash)` (never `sendTransaction`) and returns `confirmed`, `failed`, `pending`, or `undetermined`. `pending` means the budget or `signal` expired without a verdict — not that the operation failed; `undetermined` means an RPC error or an unrecognized status requires out-of-band reconciliation. A non-admin outcome, a dry run, or a submission with no hash fails fast with `InvalidInputError`. `isAdminOpOutcome()` is the public type guard; `DEFAULT_ADMIN_OP_WAIT_TIMEOUT_MS` is 30 000 ms.
+
+  ```ts
+  const submitted = await submitFreeze({ server, guard, admin });
+  if (submitted.kind !== "allowed") throw submitted.error;
+
+  const inclusion = await waitForAdminOp(submitted, {
+    server,
+    timeoutMs: 30_000,
+    pollIntervalMs: 1_000,
+  });
+  // "confirmed" | "failed" | "pending" | "undetermined"
+  ```
+
+  Never broadcast again to resolve a `pending` result: look up `inclusion.transactionHash` instead.
+- `startHeartbeat(options): Promise<HeartbeatHandle>` — Drift-aware dead-man keep-alive. Fires `heartbeat()` on an interval, reports lateness (`handle.missedBeats`, `onBeat`'s `lateMs`, and `onLateBeat` for skew beyond `maxSkewMs`), routes every failure to `onError`, validates `interval <= grace/3` before the first beat when the grace window is readable, and stops cleanly (`await handle.stop()`). `stop()` requests cancellation through the submission context and waits for the in-flight beat; `stop({ timeoutMs })` / `stopTimeoutMs` bound that wait and return `{ reason, settled, submission?, error? }`. A submission that outlives several cadence slots skips the stale slots instead of firing a catch-up burst. An optional `stateStore` checkpoints the last accepted beat for restart awareness. See “Keep the dead-man switch alive”.
 - `submitHeartbeat(params): Promise<HeartbeatSubmission>` — Signs and submits a single `heartbeat()` with the agent's guard authorization; the default submission `startHeartbeat` uses. Accepts an optional `signal` forwarded to the underlying `invoke()` pipeline.
 - `HeartbeatIntervalError` — Thrown before the first beat when the requested interval exceeds `grace / 3`.
 - `HeartbeatBlockedError` — The guard refused the heartbeat. A refusal is a decision, not a transport failure, so it is never retried (issue #340).
@@ -52,8 +68,10 @@ See the [Agent Key Rotation and Recovery runbook](concepts/custom-account-signin
 | `intervalMs` | a positive, finite number | `0`, negatives, `NaN`, `Infinity` (`RangeError`) |
 | `maxSkewMs` | a finite, non-negative number | negatives, `NaN`, `±Infinity` (`RangeError`) |
 | `stopTimeoutMs` | a finite, non-negative number | negatives, `NaN`, `±Infinity` (`RangeError`) |
+| `signerTimeoutMs` | a finite, non-negative number (also forwarded through `submitHeartbeat` to `invoke()`); `0` leaves the signer unbounded | negatives, `NaN`, `±Infinity` (`RangeError`) |
 | `graceSecs` | a non-negative `bigint`, or a non-negative **safe integer** | negatives, fractions, `NaN`, `±Infinity`, values beyond `Number.MAX_SAFE_INTEGER` (`RangeError`); a non-number, non-bigint (`TypeError`) |
-| `onBeat`, `onError`, `onWarning`, `readPolicy`, `submit`, `now`, `wait` | a function | anything else (`TypeError`) |
+| `onBeat`, `onLateBeat`, `onError`, `onWarning`, `readPolicy`, `submit`, `now`, `wait` | a function | anything else (`TypeError`) |
+| `stateStore` | an object with callable `load()` and `save()` | anything else (`TypeError`) |
 | `retry.maxAttempts` | an integer `>= 1` | `0`, negatives, fractions (`RangeError`) |
 | `retry.baseDelayMs`, `retry.maxDelayMs` | a finite number `>= 0` | negatives, `NaN`, `±Infinity` (`RangeError`) |
 
@@ -75,7 +93,7 @@ const hb = await startHeartbeat({
 });
 ```
 
-- **Only transport failures are retried**: a `BroadcastError`, an `RpcTimeoutError` or a `SimulationError`. A **policy block is never retried** — the guard made a decision, and hammering a call it has already refused only adds load. An error the SDK cannot classify is reported, not retried.
+- **Only transport failures are retried**: a `BroadcastError`, an `RpcTimeoutError` or a `SimulationError`. A **policy block is never retried** — the guard made a decision, and hammering a call it has already refused only adds load. A `SignerTimeoutError` is also never retried: the signer did not answer within its own bound, so another attempt would sign nothing new. An error the SDK cannot classify is reported, not retried.
 - The delay before attempt *n* is a full-jitter sample of `[0, min(maxDelayMs, baseDelayMs · 2ⁿ⁻¹))`, so agents that hit the same outage do not retry in a synchronized herd. `retry.random` makes it deterministic.
 - The attempt that failed and the delay before the next one are announced through `onWarning`; the failure that ends the beat is reported **once** through `onError`, with the original error. Nothing escapes as an unhandled rejection.
 - A successful beat reports how many attempts it took in `onBeat`'s `attempt`.
@@ -96,6 +114,14 @@ const result = await hb.stop({ timeoutMs: 5_000 });
 #### Skipping stale cadence slots (issue #339)
 
 The heartbeat loop keeps a fixed cadence. When a submission outlives one or more intervals, the stale slots are skipped instead of being fired back-to-back: each is counted once in `handle.missedBeats`, and the next beat waits for the next future deadline. A late wake still reports `lateMs` relative to the slot the beat represents. The same-second duplicate courtesy and the contract's own authority are unchanged.
+
+#### Reporting material lateness (issue #463)
+
+`maxSkewMs` is the jitter tolerance: a beat is materially late only when `lateMs > maxSkewMs` (equality is tolerated). `onLateBeat({ at, lateMs, deadline, missedBeats })` fires after that beat's submission result is known — whether the beat succeeded or failed — with `deadline` set to the cadence slot the beat belonged to and `missedBeats` equal to the live handle counter. On-time beats and jitter within `maxSkewMs` never fire it, and a throwing callback is isolated like `onBeat`/`onError`.
+
+#### Restart awareness (issue #462)
+
+`startHeartbeat({ stateStore })` loads a checkpoint before the first beat. A restored beat sets `handle.lastBeatAt` and anchors the next deadline to `lastAcceptedAt + intervalMs`, so a restart cannot submit a same-second duplicate or pretend an old, healthy cadence is still current. If the checkpoint is already past due, one initial `onLateBeat` reports the gap and the skipped slots are counted in `missedBeats`. Only accepted beats call `stateStore.save({ at, ledger })` — refusals, dry runs and transport failures never persist. Load/save failures are reported through `onWarning` and never stop the loop. `InMemoryHeartbeatStateStore` is provided for tests and single-process agents; durable file storage lives in the Node-only `FileHeartbeatStateStore` under `stellar-agent-guard-sdk/fs`.
 
 #### Fee units: stroops and XLM
 
@@ -140,7 +166,9 @@ if (decision.kind === "within_budget" && decision.breakdown) {
 
 #### Ledger provenance
 
-Priced decisions carry `provenance: { ledger: number } | null`, read from the **same** simulation response that produced the quote. It identifies the ledger snapshot the quote describes; it is informational and is not a promise about where a transaction will land. When the simulation does not establish a usable ledger, provenance is `null` rather than a fabricated number. `blocked` and `undetermined` decisions always have `provenance: null`.
+Priced decisions carry `provenance: { ledger: number | null } | null`, read from the **same** simulation response that produced the quote (or, in `feeSource: "rpc"` mode, from the fee-stats response, marked `ledgerSource: "fee_stats"`). It identifies the ledger snapshot the quote describes; it is informational and is not a promise about where a transaction will land. When no source establishes a usable ledger, provenance is `null` rather than a fabricated number. `blocked` and `undetermined` decisions always have `provenance: null`.
+
+Every cost decision also reports `surplusStroops` (`ceiling - total`, clamped at zero, `null` without a ceiling; #446) and priced `within_budget` decisions may carry an opt-in structured `headroomWarning` from `warnAtRatio` (#447). `feeSource: "rpc"` with `percentile` quotes the inclusion fee from `getFeeStats`, with a visible `provenance.fallbackReason` when it falls back to the fixed fee (#445).
 
 #### One simulation per check: prefer `checkWithCost`
 
@@ -189,6 +217,7 @@ one-shot form.
 - `policyToScVal(policy: PolicyConfig): xdr.ScVal` — Encodes a policy as the contract's canonical sorted ScVal struct. Emits the contract `PolicyConfig` struct's full field set, including `recipient_window_caps`, `blocked_recipients`, the `u32` `protocol_calls_per_window` and the empty `asset_caps` vector, byte-aligned with the contracts repo's shared encode-parity vectors (issue #260); `ProtocolRule` maps carry the per-rule `paused` flag.
 - `decodePolicy(scVal: xdr.ScVal): PolicyConfig` — Strictly decodes `policy()`/set-policy ScVal data, including Option/Vec and numeric normalization.
 - `policyFromScVal(scVal)` — Alias for callers using the issue's original function name.
+- `policyHash(policy)` — Lower-case SHA-256 of the exact `JSON.stringify(policyToJson(policy))` bytes. Use it as a stable content fingerprint for audit metadata and before/after diffs; it is not a signature and does not replace validation.
 - `policyToJson(policy)` / `policyFromJson(value)` — Versioned, lossless JSON shape for persistence and transport, not ScVal encoding. All integer fields are decimal strings; parsing rejects numbers, unknown fields, invalid addresses, and values outside their `u64`/`i128` ranges with a `PolicyDecodeError` field path. The top-level `version` is currently `1`, and the parser accepts only versions supported by this SDK; unknown versions fail closed at `policy.version`. Incompatible format changes will increment the version, so consumers should explicitly migrate stored payloads before parsing them with a version that does not support their existing format. `encodePolicyJson` / `decodePolicyJson` are equivalent aliases.
 - `describePolicy(policy: PolicyConfig | null, options?: DescribePolicyOptions): string` — A compact, log-friendly rendering of the policy in force. See [Describing a policy](#describing-a-policy-issue-343).
 - `verifyAgentSignature(publicKey, payload, signature): boolean` — Verify-only Ed25519 check against a strkey or raw 32-byte key.
@@ -200,12 +229,13 @@ one-shot form.
 - `decodeAuthDecision(event: SorobanRpc.Api.GetEventsResponse.Event): AuthDecisionEvent | null`
 - `decodeGuardEventXdr(xdrBase64: string, source?: 'ledger' | 'diagnostic'): GuardAuthDecision | null` — Offline decode of a raw base64 event XDR. Accepts either a `DiagnosticEvent` (what `getEvents()` and a simulation error carry) or a `ContractEvent` (what a block explorer exposes) and returns the same decision the object-path decode produces. Malformed base64, an XDR that is not a contract event, and an event that is not an `event_auth_checked` decision all return `null` — it never throws, so fixture checks and operator copy-paste cannot crash a long-running process.
 - `guardEventsFromDiagnostics(events: xdr.DiagnosticEvent[]): GuardEvent[]` — Each decoded `GuardEvent` carries a stable `id`: `ledger:<txHash>:<topic>` for committed events, `diag:<sha256>` for blocked ones (which are rolled back and have no hash to anchor on). Same event re-parsed → same id; two different blocks in one simulation → different ids. Format and collision notes: [`event-schema.md`](event-schema.md).
-- `GuardLogger`, `GuardLoggerInput`, `GuardLogMeta`, `GUARD_LOG_LEVELS` — the optional, structurally-typed log sink shared by every config above; `SILENT_LOGGER` is what a config resolves to when none is supplied. See [Optional logging](../README.md#optional-logging-the-sdk-is-silent-unless-you-ask).
+- `GuardLogger`, `GuardLoggerInput`, `GuardLogMeta`, `GUARD_LOG_LEVELS` — the optional, structurally-typed log sink shared by every config above; `SILENT_LOGGER` is what a config resolves to when none is supplied. `createRedactingLogger(logger)` wraps any host logger with the SDK's own metadata redaction, level filtering, receiver preservation and throwing-sink isolation. See [Optional logging](../README.md#optional-logging-the-sdk-is-silent-unless-you-ask) and [the attack-surface boundary](attack-surface.md#logs).
 - `explainReason(reason: string | number, locale?, overrides?): string` — Human-readable explanation of contract reason codes. The default call is unchanged; the optional `locale` catalog and per-reason `overrides` localise or reword a refusal without an i18n dependency. Reason keys, titles and remediation text: [`reasonMessages` / `reasonMessagesEn`](#reason-messages-issue-96).
 - `isDeadManFrozen(status: GuardStatus): boolean`
 - `deadManRemaining(status: GuardStatus, policy: PolicyConfig | null): bigint | null`
 - `dmsUrgency(status: GuardStatus, policy: PolicyConfig | null, nowSecs?: bigint, warnRatio = DMS_WARN_RATIO_DEFAULT): 'ok' | 'warn' | 'expired' | 'unknown'` — Dead-man countdown urgency for dashboards: `warn` from `warnRatio` (default `DMS_WARN_RATIO_DEFAULT` = 0.8) of the grace period, `expired` once the grace has elapsed. `unknown` exactly where `deadManRemaining` is `null` (no policy, switch disabled, never heartbeated — never ≠ expired).
-- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; valid addresses compare through `policyAddressComparisonKey`, and protocols match by contract. Duplicate members in malformed drafts collapse by set membership; the first duplicate protocol or recipient cap wins. The helper is deterministic but does not replace validation before encoding or submission.
+- `formatDmsCountdown(status, policy, options?)` — Locale-independent, renderer-ready text derived from `dmsUrgency()` and `deadManRemaining()`. Returns `{ urgency, state, remainingSecs, short, long }`; `state` splits `unknown` into `no_policy`, `disabled` and `never` so each gets its own wording. A never-heartbeated account is never rendered as `0 seconds` or expired.
+- `policyDiff(a: PolicyConfig, b: PolicyConfig): PolicyChange[]` — Structured change list between two policies for operator display (e.g. when the policy revision bumps; dashboard change-history feed: stellar-agent-guard-dashboard#17). Lists compare as sets, so a pure reorder is no change; valid addresses compare through `policyAddressComparisonKey`, protocols match by contract, and an absent `protocol_calls_per_window` compares as `0`. Duplicate members in malformed drafts collapse by set membership; the first duplicate protocol or recipient cap wins. The helper is deterministic but does not replace validation before encoding or submission.
 
 #### Dashboard-style snapshot (issue #68)
 
@@ -304,6 +334,10 @@ import { parseEventRecord, serializeEventRecord } from "stellar-agent-guard-sdk"
 logger.info(serializeEventRecord(event)); // {"v":1,"event":{…}}
 const { version, event: decoded } = parseEventRecord(storedLine); // version 0 = legacy
 ```
+
+#### Policy cookbook (issue #444)
+
+[`policy-cookbook.md`](policy-cookbook.md) has five complete, reviewed `ReadonlyPolicyConfig` recipes — single-recipient payer, hourly-capped trading agent, staged rollout, treasury with pause, and deny-all observer — each with its `describePolicy()` output, its deliberate limitations, and an example pinned to [`examples/policy-cookbook.ts`](../examples/policy-cookbook.ts) by a unit test.
 
 #### Describing a policy (issue #343)
 

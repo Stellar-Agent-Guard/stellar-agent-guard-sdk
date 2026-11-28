@@ -8,6 +8,8 @@ import { describe, it } from "node:test";
 import { runLangChainExample } from "../../examples/langchain.ts";
 import { runElizaOSExample } from "../../examples/elizaos.ts";
 import { runMcpExample } from "../../examples/mcp.ts";
+import { runVercelAiExample } from "../../examples/vercelai.ts";
+import { GuardBlockedError } from "../../src/reasons.ts";
 
 describe("runnable framework adapter examples", () => {
   it("executes LangChain middleware example with allowed and blocked runs", async () => {
@@ -87,5 +89,32 @@ describe("runnable framework adapter examples", () => {
     // Client boundary: refused before the request was sent.
     assert.equal(res.requestSent, false);
     assert.ok("isError" in res.clientResult && res.clientResult.isError === true);
+  });
+
+  it("executes Vercel AI SDK adapter example with allowed and blocked runs", async () => {
+    const res = await runVercelAiExample();
+
+    // Run 1: Allowed — wrapped tool execute runs.
+    assert.equal(res.allowedToolRan, true, "allowed tool body should execute");
+    assert.deepEqual(res.allowedResult, {
+      success: true,
+      recipient: "GA7QYNF7SOWQ3GLR2BGMZEHXAVIRZA4KVWLTJJFC7MGXUA74P7UJVSGZ",
+      amount: "50",
+    });
+
+    // Run 2: Blocked — tool execute must never run; throws GuardBlockedError.
+    assert.equal(res.blockedToolRan, false, "blocked tool body must never execute");
+    assert.ok(
+      res.blockedError instanceof GuardBlockedError,
+      "must throw GuardBlockedError on refusal",
+    );
+    assert.equal(res.blockedError.reason, "recipient_not_allowed");
+    assert.equal(res.blockedError.stage, "preflight");
+    assert.match(res.blockedError.message, /recipient_not_allowed/);
+
+    // Decisions observed through onDecision hook.
+    assert.equal(res.decisionsObserved.length, 2);
+    assert.equal(res.decisionsObserved[0]!.kind, "admissible");
+    assert.equal(res.decisionsObserved[1]!.kind, "blocked");
   });
 });
