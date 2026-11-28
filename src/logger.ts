@@ -170,3 +170,22 @@ export function resolveLogger(input?: GuardLoggerInput | null): GuardLogger {
     error: bindLevel(input, "error"),
   };
 }
+
+/**
+ * Wrap a host logger so *its* metadata gets the SDK's redaction too.
+ *
+ * The SDK already redacts metadata it emits; this is the same policy for a host
+ * that wants to log its own structured details through pino/winston or a
+ * class-based child logger. It reuses `resolveLogger`, so it preserves the
+ * sink's `this`, drops missing levels, isolates throws, and applies the same
+ * bounded copy rather than deep-cloning unbounded payloads.
+ *
+ * Shallow boundary: only calls made through the returned wrapper are redacted,
+ * and only their `meta` argument — message strings are delivered verbatim. A
+ * caller that keeps the original logger and calls it directly, or logs an
+ * object through the message, bypasses this boundary. This is a safe-by-default
+ * convenience, not a sanitizer for arbitrary host log calls.
+ */
+export function createRedactingLogger(logger: GuardLoggerInput): GuardLogger {
+  return resolveLogger(logger);
+}

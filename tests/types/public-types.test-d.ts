@@ -31,6 +31,7 @@ import {
   PolicyValidationError,
   PreFlightUndeterminedError,
   RpcTimeoutError,
+  SignerTimeoutError,
   SigningError,
   SimulationError,
   type AccountAddress,
@@ -39,12 +40,16 @@ import {
   type Clock,
   type ContractAddress,
   type ContractCall,
+  type CostPreCheckConfig,
+  type CostPreCheckOptions,
+  type CostTransactionCheckOptions,
   type DeepReadonly,
   type DescribePolicyOptions,
   type ElizaGuardOptions,
   type InvokeDryRunVerdict,
   type InvokeOptions,
   type InvokeOutcome,
+  type FeeBumpConfig,
   type LangChainGuardOptions,
   type McpGuardOptions,
   type PolicyConfig,
@@ -150,6 +155,8 @@ expectTypeOf<SimulationError>().toExtend<GuardError>();
 
 // Transport, protocol, and policy errors extend GuardError
 expectTypeOf<SigningError>().toExtend<GuardError>();
+expectTypeOf<SignerTimeoutError>().toExtend<SigningError>();
+expectTypeOf<SignerTimeoutError>().toExtend<GuardError>();
 expectTypeOf<BroadcastError>().toExtend<GuardError>();
 expectTypeOf<ContractResponseError>().toExtend<GuardError>();
 expectTypeOf<PolicyValidationError>().toExtend<GuardError>();
@@ -225,6 +232,19 @@ const _validInvokeOpts: InvokeOptions = {
   maxRetries: 3,
 };
 expectTypeOf(_validInvokeOpts).toMatchTypeOf<InvokeOptions>();
+const _validStringFeeBump: FeeBumpConfig = { initialInclusionFee: "500" };
+const _validStringCostConfig: CostPreCheckConfig = {
+  interceptor,
+  maxFeeStroops: "50000",
+};
+const _validStringCostOptions: CostPreCheckOptions = { maxFeeStroops: "50000" };
+const _validTransactionCostOptions: CostTransactionCheckOptions = {
+  maxFeeStroops: "50000",
+};
+expectTypeOf(_validStringFeeBump).toMatchTypeOf<FeeBumpConfig>();
+expectTypeOf(_validStringCostConfig).toMatchTypeOf<CostPreCheckConfig>();
+expectTypeOf(_validStringCostOptions).toMatchTypeOf<CostPreCheckOptions>();
+expectTypeOf(_validTransactionCostOptions).toMatchTypeOf<CostTransactionCheckOptions>();
 
 // Adapter options: LangChainGuardOptions
 const _validLangChainOpts: LangChainGuardOptions = {

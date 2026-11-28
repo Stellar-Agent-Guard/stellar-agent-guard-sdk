@@ -11,6 +11,8 @@
  * See the README's "Verified against live testnet" section and
  * `docs/verification.md`.
  */
+import { createSha256Hasher } from "./hash.ts";
+
 export const GUARD_WASM_HASH = "f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63";
 
 /** The outcome of verifying WASM bytes against a pinned hash. */
@@ -21,6 +23,15 @@ export interface GuardWasmVerification {
   expected: string;
   /** The SHA-256 of the supplied bytes, lower-case hex. */
   actual: string;
+}
+
+export interface VerifyGuardWasmStreamOptions {
+  expected?: string;
+  chunkSize?: number;
+}
+
+function normalizeExpected(expected: string): string {
+  return expected.trim().toLowerCase();
 }
 
 /** Lower-case hex rendering of a byte array. */
@@ -53,6 +64,25 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return toHex(new Uint8Array(digest));
 }
 
+export async function verifyGuardWasmStream(
+  stream: AsyncIterable<Uint8Array>,
+  options?: VerifyGuardWasmStreamOptions,
+): Promise<GuardWasmVerification> {
+  const expected = normalizeExpected(options?.expected ?? GUARD_WASM_HASH);
+  const chunkSize = options?.chunkSize ?? 64 * 1024;
+  if (!Number.isSafeInteger(chunkSize) || chunkSize <= 0) {
+    throw new RangeError("chunkSize must be a positive safe integer");
+  }
+  const hasher = createSha256Hasher();
+  for await (const chunk of stream) {
+    for (let offset = 0; offset < chunk.length; offset += chunkSize) {
+      hasher.update(chunk.subarray(offset, Math.min(offset + chunkSize, chunk.length)));
+    }
+  }
+  const actual = toHex(hasher.digest());
+  return { ok: actual === expected, expected, actual };
+}
+
 /**
  * Verify downloaded guard-contract WASM against the pinned hash.
  *
@@ -73,7 +103,10 @@ export async function verifyGuardWasm(
   bytes: Uint8Array,
   expected: string = GUARD_WASM_HASH,
 ): Promise<GuardWasmVerification> {
-  const normalized = expected.trim().toLowerCase();
-  const actual = await sha256Hex(bytes);
-  return { ok: actual === normalized, expected: normalized, actual };
+  return verifyGuardWasmStream(
+    (async function* () {
+      yield bytes;
+    })(),
+    { expected },
+  );
 }

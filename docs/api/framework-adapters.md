@@ -112,7 +112,7 @@ createLangChainGuardMiddleware({
 
 ## Observer hooks: never awaited, never unhandled
 
-`onDecision` and `onBlocked` are advisory. The adapters call them with a
+`onDecision`, `onBatchDecision`, and `onBlocked` are advisory. The adapters call them with a
 try/catch **and** attach a rejection handler when the callback returns a
 thenable, so an `async` sink is safe:
 
@@ -134,6 +134,23 @@ createLangChainGuardMiddleware({
 ```
 
 Without `blockedHookLogger` the SDK stays silent, exactly as before issue #314.
+
+### Batch decisions: onBatchDecision summary hook
+
+When using `toContractCalls` to check an ordered batch, `onDecision` fires once per call. For operators or telemetry pipelines requiring one single summary per action, supply optional `onBatchDecision`:
+
+```ts
+createLangChainGuardMiddleware({
+  interceptor,
+  toContractCalls: (request) => mapBatch(request),
+  onBatchDecision: ({ adapter, kind, verdicts, calls, correlationId }) => {
+    // kind is "admissible" | "blocked" | "undetermined"
+    console.log(`Action on ${adapter} overall outcome: ${kind} (${calls.length} call(s))`);
+  },
+});
+```
+
+`onBatchDecision` fires once after the entire batch is checked, before the handler runs or the refusal is returned. A single-call mapping (`toContractCall` or a 1-element array) does not fire it. Callback errors are isolated and never awaited.
 
 ## Cancellation and timeouts
 
@@ -207,5 +224,10 @@ Verdict → halt semantics, shared across all three adapters:
 
 Throwing on refusal is deliberate here: the AI SDK renders a thrown tool error
 into its error stream, and a blocked call must not produce a tool *result* the
-model could read as success. `ai` is an optional peer capability — the adapter
-is written structurally, so the SDK takes no dependency on the `ai` package.
+model could read as success. Because the refusal error is thrown before entering
+the wrapped function body, `execute` never runs on a refusal — preventing unauthorized
+operations, unexpected side-effects, or un-policy-checked spend. `ai` is an optional peer
+capability — the adapter is written structurally, so the SDK takes no dependency on
+the `ai` package.
+
+See the [full runnable Vercel AI SDK example](../../examples/vercelai.ts) ([`examples/vercelai.ts`](../../examples/vercelai.ts)) for an end-to-end demonstration with both allowed and blocked tool invocations.

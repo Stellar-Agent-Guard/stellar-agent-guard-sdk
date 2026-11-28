@@ -38,13 +38,16 @@ import type {
 } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
 import {
+  batchDecisionKindFor,
   checkOptionsFor,
   decisionFromGuardError,
   mapContractCalls,
   mappingFailureFor,
+  runBatchDecisionHook,
   runDecisionHook,
   runMappingErrorHook,
   type BlockedHookLogger,
+  type GuardBatchDecisionHook,
   type GuardMappingErrorHook,
 } from "./shared.ts";
 
@@ -90,6 +93,13 @@ export interface VercelAIGuardOptions {
    * `onStep`/`onUnknownTopics`).
    */
   onDecision?: (call: VercelAIToolCallInput, decision: PreFlightDecision) => void;
+  /**
+   * Action-level batch decision summary hook (issue #498).
+   *
+   * Called once per batch check with `{ adapter: "vercelai", kind, verdicts, calls, correlationId? }`
+   * after all calls have been checked, before `execute` runs or the error is thrown.
+   */
+  onBatchDecision?: GuardBatchDecisionHook | undefined;
   /**
    * Integration-bug alerting (issue #453): called once when
    * `toContractCall`/`toContractCalls` throws or returns a malformed call,
@@ -212,6 +222,17 @@ export function wrapToolWithGuard<T extends VercelAIToolLike>(
           options.blockedHookLogger,
         );
       }
+      runBatchDecisionHook(
+        options.onBatchDecision,
+        {
+          adapter: "vercelai",
+          kind: batchDecisionKindFor(batch.verdicts),
+          verdicts: batch.verdicts,
+          calls: contractCalls,
+          correlationId: (call as { id?: string }).id,
+        },
+        options.blockedHookLogger,
+      );
       if (batch.admissible) return execute(input, toolOptions);
 
       const index = batch.verdicts.findIndex((verdict) => !verdict.allowed);

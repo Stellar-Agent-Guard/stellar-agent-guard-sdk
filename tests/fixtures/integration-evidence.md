@@ -4,6 +4,10 @@ Record of the enforcement suite running against the real Phase 2 testnet
 instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 
 **Last verified**: September 2026 (feat/integration-harness-and-guardpolicy-types)
+**Attempted** (feat/cost-issues-448-451, 2026-11-24): `npm run test:integration`
+matched the Phase 1 artifact identity, then stopped while funding the ephemeral
+test fixture because Friendbot returned HTTP 400. No live scenarios ran, so this
+attempt does not replace the recorded successful scenario evidence below.
 **Note**: Type guard validation refactoring in `src/policy.ts` does not change enforcement behavior; evidence remains valid.
 **Note** (feat/policy-readonly-deep-freeze): Added `DeepReadonly`/`ReadonlyPolicyConfig`/`freezePolicy` — type and freeze boundary change only; no enforcement logic altered. Evidence remains valid.
 **Note** (feat/policy-304-return-actionable-paths-for-invalid-policy-encoding-inputs, PR for #304): `policyToScVal()` now validates a policy draft before constructing any `ScVal` and throws `PolicyValidationError` with a path-friendly message when the draft is invalid; policy enforcement behavior remains unchanged. Evidence remains valid.
@@ -27,6 +31,12 @@ instance. Reproduce with `npm run test:integration` (requires `.env.phase2`).
 **Note** (feat(preflight)/preflight-verify-assertallowed-throws-guardblockederror-only-never-transport-errors, PR for #90): Formalizes and pins the `assertAllowed` and `assertBatchAllowed` throw-on-refusal contract, ensuring policy blocks throw `GuardBlockedError` and undetermined / transport errors throw `GuardUndeterminedError` with root cause preserved. The underlying on-chain simulation and policy enforcement evaluation remain unchanged; live Phase 2 integration evidence remains valid.
 
 **Note** (security/issue-117-feat-telemetry-injectable-transport-custom-rpc, PR #373 for #117): `src/preflight.ts` and `src/invoke.ts` now take the shared `{ server? | url? }` transport config (`src/transport.ts`). The only new code on the enforcement path runs at the public boundary: it resolves the `rpc.Server` (an injected instance verbatim, or `new rpc.Server(url, rpcOptions)`) and throws `InvalidInputError` when both or neither are supplied, before any RPC. Simulation, signing, broadcast and the guard's block/admit decision are unchanged, so the scenario evidence below remains valid. A live re-run was attempted on 2026-10-24 against a freshly deployed instance (`npm run deploy:phase2`). It stopped at `set_policy` with `HostError: Error(Object, UnexpectedSize)`: the Phase-1 WASM does not decode the current `policyToScVal` ABI, which is the redeploy prerequisite recorded above. That deploy also showed `initialize` failing with `txBadAuthExtra` when the same key is both `source` and an `accountSigners` entry, reproduced on `main`; that is out of scope for this PR and is not fixed here. No scenario output from that attempt is recorded here.
+
+**Note** (feat/invoke-fee-cap-batch-deadline-diagnostics-reason-table, PR for #419/#411/#407/#406): `src/invoke.ts` adds an optional `maxFeeStroops` ceiling checked after the enforced simulation and before broadcast (over-budget calls stay local and unbroadcast), and `src/preflight.ts` now enforces `checkBatch()`'s `deadlineMs` as one fail-closed budget and exposes `simulateForDiagnostics()` without producing a verdict. These are local safety and observability bounds around the existing pipeline: the contract-side block/admit decision, the enforced simulation and the signed authorization entry are unchanged, so the five live scenarios recorded below remain valid. No fresh live run was performed for this change.
+
+**Note** (feat/onverdict-cache-provenance-error-tojson, PR for #408/#409/#477): `src/preflight.ts` now reports cache provenance on a pre-flight verdict (`cached`, `observedLedger`, `ageMs`), accepts `forceFresh` to bypass the opt-in cache for one call, and emits each final verdict once to an observability-only `onVerdict` hook (cached, coalesced and fail-closed paths included). The hook is invoked after the verdict is fixed and cannot change it, and caching/`forceFresh` only select whether the existing simulation runs — the contract-side block/admit decision is unchanged. In `src/invoke.ts` the only change is a JSON-safe `toJSON()` on `InvokeRetryError` for structured logging. The five live scenarios recorded below remain the correct proof; no fresh live run was performed for this change.
+
+l**Note** (feat/fs-durability-auth-refresh-and-readme-sweep, PR #539): Adds the durable JSON cursor store and JSONL event writer in `src/fs.ts` (not on the enforcement path), and an auth-entry refresh in `src/invoke.ts`/`src/tx.ts` that rebuilds and re-signs an entry only when its signature expiration is within `authRefreshMarginLedgers` of the ledger read after signing. A comfortable entry keeps its original signature, an entry the contract already refused is never extended, and the refresh runs before the enforced simulation. The contract-side block/admit decision, the enforced simulation and the signed authorization construction are unchanged, so the five live scenarios recorded below remain valid. No fresh live run was performed for this change.
 
 ## Instance under test
 
@@ -344,6 +354,172 @@ npm test
 npm run test:types
 npm run build && npm run test:exports && npm run test:pack
 node scripts/check-doc-links.ts
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.
+
+## Addendum — 2026-11-23 (PR #520: admin outcomes, DMS copy, redacting logger, signer timeouts; issues #466, #467, #471, #472)
+
+This PR touches `src/tx.ts` and `src/invoke.ts`, so the enforcement-path evidence
+file is included as required.
+
+**The live suite did not reach its enforcement scenarios.**
+`GUARD_KEEP_EPHEMERAL=1 npm run test:integration` used the documented default
+ephemeral deployment. It verified the Phase-1 artifact identity, generated keys,
+funded and deployed a SAC (`CAOFKFGHBSVHJERW2DV7LJW3AIKCSIY3AGXWTBJTLIWEBMGN66DFEXJ2`,
+tx `0c8096089aba10db33dbc69ebfa0f0f9f068b495c61f43731022e01d041cc298`) and a guard
+(`CAFDHYFPNTGVOHRBR4RCZOLPJ6UL4XKXVPSROY3XIZFBE52VMFMUX6YW`,
+tx `6169569e0b43b5d110c61505c3a9d5a6448e42067ccb386fe141094adeb44f09`) from WASM
+`f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63`, then failed
+during `initialize` with `txBadAuthExtra`
+(tx `801b8e7f0231e08e79f01ec10d1f315041d4c9a8389b1c6abb911787210cfa4f`). This is
+the known initialize/key-role failure recorded above; it reproduces independently
+of this change. No fresh live enforcement result is claimed. The generated
+ephemeral environment file was removed after the public identifiers were captured.
+
+### What the PR changes on the enforcement path
+
+- `src/tx.ts`: adds `signDigestWithBound()` and extends `buildGuardAuthEntry()`
+  with `signerTimeoutMs`, so a hanging remote signer fails as a typed
+  `SignerTimeoutError` instead of stalling the pipeline.
+- `src/invoke.ts`: validates and forwards `signerTimeoutMs` to the signing
+  boundary and reports that timeout as a typed signer error.
+- The enforced simulation, policy encoding/decoding, and `blocked`/`admissible`
+  decision rules are unchanged. The admin-outcome, DMS-copy and logger work is
+  additive around the pipeline and cannot turn a refusal into a pass.
+
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+npm run check:bundle-size
+node scripts/check-doc-links.ts
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.
+
+## Addendum — 2026-11-23 (PR #522: issues #474, #475, #476, #478)
+
+This PR touches `src/policy.ts` (adds a client-side `remediation` string to each
+`PolicyFailure`; `rule`, `path`, `message`, encoding and decision logic are
+unchanged), so the enforcement-path evidence file is included as required. It
+also adds advisory error predicates, streaming WASM verification and offline
+decode-policy fuzz coverage; none of those change the guard's block/admit
+decision or the signed authorization path.
+
+**The live suite was attempted in default ephemeral mode on 2026-11-23.** It
+verified the pinned WASM identity, deployed an isolated SAC
+(`CDD4WSJ2W3PAFDDPXIQFJZ3Y7ZIKEQODYXZQD3HWVFX6WXCFQEO2FDUE`) and guard
+(`CBS7Z4BHVZ3F3UDO4MCPJOVZUBG4WOYYXCPYEDJRAIOQJR5N7DJMNBV7`), then failed at
+`initialize(admin, agent_pubkey)` with `result=txBadAuthExtra` (transaction
+`a3f1eafad91048993c5835f3c68a7c4838c46d070fa88cd32e0895c50b419248`). This is
+the known pre-existing deployment issue recorded above — the same key is both
+the source and an `accountSigners` entry, reproduced on `main`. **No fresh live
+enforcement transcript is claimed.** A maintainer with a working deployment
+should rerun `npm run test:integration` before merge if desired.
+
+### What did run locally
+
+```text
+npm run format:check
+npm run typecheck
+npm run lint
+npm test
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+The offline gates passed. They are useful regression coverage but are not a
+substitute for the Phase-2 live scenarios above.
+
+## Addendum — 2026-11-25 (PR: invoke queue observability, fee ceiling, preflight warmCache and typed failures; issues #423, #418, #413, #412)
+
+This PR touches `src/invoke.ts` and `src/preflight.ts`:
+
+- `onQueue` / `invokeQueueStats()` observe the existing per-source-account
+  queue. They add no new ordering, signing or RPC work: the queue semantics are
+  unchanged, and a throwing hook is swallowed.
+- `feeBump.maxInclusionFee` compares a fee-bump retry's already-computed
+  inclusion fee with a caller ceiling. A breach returns an `error` outcome
+  carrying `FeeCapExceededError` and never broadcasts the over-cap transaction;
+  it cannot turn a guard refusal into an approval.
+- `warmCache()` runs calls through the same `check()` path to populate the
+  opt-in cache. It stores only `admissible`/`blocked` verdicts, exactly as a
+  normal check does.
+- `check()` now converts an unexpected non-`GuardError` throw into the
+  fail-closed `undetermined` verdict with the original value on `cause`.
+  `InvalidInputError` stays unwrapped, and the verdict is never `admissible`.
+
+**The live suite was not run for this change.** No `.env.phase2` credentials
+were available, so `npm run test:integration` was not executed and no fresh live
+enforcement result is claimed. None of the changes alter the guard's
+block/admit decision; the recorded Phase-2 scenarios remain the contract-side
+proof for that decision. A maintainer with `.env.phase2` should run the live
+suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm run typecheck
+npm run lint
+npm run format:check
+npm run check:strict-ratchet
+npm run test:types
+npm test
+npm run test:coverage:floor
+npm run build
+npm run test:exports
+node scripts/check-doc-links.ts
+node scripts/check-enforcement-evidence.ts --check-structure
+```
+
+The offline checks above passed; they do not substitute for the live-testnet
+scenarios.
+
+## Addendum — 2026-11-26 (PR: admin previews and heartbeat checkpointing; issues #462, #465)
+
+This PR touches `src/policy.ts`: `fetchGuardPolicyAndWindow()` now selects the
+`Policy` and `Window` ledger entries by their contract-data key names instead of
+RPC response position when the server returns named entries. A guard with no
+installed `Policy` entry is therefore reported as having no policy instead of
+having its `Window` entry misread as one. The change is confined to decoding the
+existing RPC response; it does not encode a policy, build or sign an
+authorization entry, change the enforced simulation, or alter the guard's
+block/admit decision. The positional fallback and the single-entry mock path are
+preserved, and a unit test covers the missing-policy case.
+
+**The live suite was not run for this change.** No funded `.env.phase2`
+credentials were available, so `npm run test:integration` was not executed and
+no fresh live enforcement result is claimed. The recorded Phase-2 scenarios
+remain the contract-side proof for the block/admit decision; a maintainer with
+`.env.phase2` should run the live suite against this branch before merge.
+
+### What did run locally
+
+```text
+npm ci
+npm run typecheck
+npm run check:strict-ratchet
+npm run test:types
+npm run lint
+npm run format:check
+npm test
+npm run test:coverage:floor
+npm run build
+npm run test:browser
+npm run test:types:packed
+npm run test:smoke
+npm run test:exports
+npm run test:packed-install
+npm run test:pack
+npm run check:attw
+npm run check:bundle-size
+npm run check:doc-links
+node scripts/check-enforcement-evidence.ts --check-structure
 ```
 
 The offline checks above passed; they do not substitute for the live-testnet

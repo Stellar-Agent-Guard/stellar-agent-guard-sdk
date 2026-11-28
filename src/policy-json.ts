@@ -6,6 +6,7 @@
  * It performs no filesystem I/O.
  */
 import { PolicyDecodeError } from "./errors.ts";
+import { sha256Hex } from "./hash.ts";
 import {
   isAccountAddress,
   isContractAddress,
@@ -109,6 +110,18 @@ export function policyToJson(policy: ReadonlyPolicyConfig): PolicyJson {
       ? {}
       : { protocol_calls_per_window: policy.protocol_calls_per_window.toString() }),
   };
+}
+
+/**
+ * Stable SHA-256 hash of a policy's canonical JSON representation.
+ *
+ * The hash is over exactly the bytes `policyToJson()` produces, so two policies
+ * that are equal under the lossless JSON encoding always share a hash. It is a
+ * content fingerprint for operators and diffs — not a signature, and not a
+ * substitute for `validateGuardPolicy()` before encoding or submission.
+ */
+export function policyHash(policy: ReadonlyPolicyConfig): string {
+  return sha256Hex(JSON.stringify(policyToJson(policy)));
 }
 
 /** Parse and validate a JSON object or JSON string without floating-point conversion. */

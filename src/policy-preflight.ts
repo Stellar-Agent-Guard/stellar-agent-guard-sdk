@@ -134,14 +134,16 @@ function validResult(): PolicyValidationResult {
 }
 
 /** Build the invalid arm, translating a documented rule when possible. */
-function invalidResult(rule: string): PolicyValidationResult {
+function invalidResult(rule: string, detail?: string): PolicyValidationResult {
   const known = (CONTRACT_POLICY_RULE_IDS as readonly string[]).includes(rule);
   return {
     valid: false,
     rule,
-    message: known
-      ? POLICY_RULE_MESSAGES[rule as ContractPolicyRuleId]
-      : `the contract rejected the policy with rule "${rule}"; this SDK does not have a description for it yet`,
+    message:
+      detail ??
+      (known
+        ? POLICY_RULE_MESSAGES[rule as ContractPolicyRuleId]
+        : `the contract rejected the policy with rule "${rule}"; this SDK does not have a description for it yet`),
     knownRule: known,
   };
 }
@@ -183,25 +185,35 @@ export function decodeValidationOutcome(raw: unknown): PolicyValidationResult {
     });
   }
 
-  // Note: describeRaw is a utility for error messages; kept for external consumers
   if (native === "Valid") {
     return validResult();
   }
 
-  if (native === "Invalid" && typeof native === "object" && native !== null && "reason" in native) {
-    return invalidResult((native as { reason: string }).reason);
-  }
-
-  // `["Invalid", "AmountSign"]` form
   if (Array.isArray(native)) {
-    const [tag, reason] = native;
-    if (tag === "Invalid" && typeof reason === "string") {
-      return invalidResult(reason);
+    const [first, second, third] = native;
+
+    // ["Valid"] or [true]
+    if ((first === "Valid" || first === true) && second === undefined) {
+      return validResult();
+    }
+
+    // ["Invalid", "AmountSign"] / ["Invalid", "AmountSign", "message"]
+    if (first === "Invalid" && typeof second === "string") {
+      return typeof third === "string" ? invalidResult(second, third) : invalidResult(second);
+    }
+
+    // [false, "AmountSign", "message"] / [false, "AmountSign"]
+    if (first === false && typeof second === "string") {
+      return typeof third === "string" ? invalidResult(second, third) : invalidResult(second);
     }
   }
 
-  // Fallback: try to extract a rule name from any other shape
-  throw new PolicyDecodeError(`validate_policy returned an unrecognised Invalid form`, {
+  if (typeof native === "object" && native !== null && "Invalid" in native) {
+    const reason = (native as { Invalid: unknown }).Invalid;
+    if (typeof reason === "string") return invalidResult(reason);
+  }
+
+  throw new PolicyDecodeError("validate_policy returned an unrecognised ValidationOutcome form", {
     path: "ValidationOutcome",
   });
 }

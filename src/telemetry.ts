@@ -33,6 +33,7 @@
  */
 import { rpc, scValToNative, StrKey, xdr } from "@stellar/stellar-sdk";
 import { GuardError } from "./errors.ts";
+import { isGuardReason } from "./reasons.ts";
 import {
   GUARD_AUTH_RESULTS,
   GUARD_EVENT_TOPICS,
@@ -1749,7 +1750,11 @@ export class GuardDecisionCounters {
     if (verdict === "allowed") this.allowed += 1;
     else {
       this.blocked += 1;
-      if (reason !== null) this.byReason.set(reason, (this.byReason.get(reason) ?? 0) + 1);
+      // Unknown reason symbols (outside the contract's vocabulary) are bucketed
+      // into "unknown" so cardinality is bounded: only the known set plus one
+      // extra key can appear, regardless of what an adversarial RPC sends.
+      const reasonKey = reason !== null ? (isGuardReason(reason) ? reason : "unknown") : null;
+      if (reasonKey !== null) this.byReason.set(reasonKey, (this.byReason.get(reasonKey) ?? 0) + 1);
     }
     this.evict();
   }
@@ -1791,9 +1796,10 @@ export class GuardDecisionCounters {
     }
     this.blocked -= 1;
     if (entry.reason !== null) {
-      const next = (this.byReason.get(entry.reason) ?? 0) - 1;
-      if (next <= 0) this.byReason.delete(entry.reason);
-      else this.byReason.set(entry.reason, next);
+      const reasonKey = isGuardReason(entry.reason) ? entry.reason : "unknown";
+      const next = (this.byReason.get(reasonKey) ?? 0) - 1;
+      if (next <= 0) this.byReason.delete(reasonKey);
+      else this.byReason.set(reasonKey, next);
     }
   }
 
@@ -3095,10 +3101,7 @@ export class GuardTelemetryListener {
         // Also reported through the logger, because `onGap` is only wired when a
         // caller supplies it and a pruned range is worth seeing in a log even
         // for a listener that did not ask for a callback.
-        this.logger.warn(
-          `telemetry coverage gap: ledgers ${gap.fromLedger}-${gap.toLedger} are no longer retained by the RPC`,
-          { ...gap, guard: this.config.guard },
-        );
+        this.logger.warn(describeGap(gap), { ...gap, guard: this.config.guard });
         this.recordedGaps.push({ ...gap });
         if (this.recordedGaps.length > MAX_RECORDED_GAPS) this.recordedGaps.shift();
         try {
@@ -3492,6 +3495,35 @@ export interface GuardEventFilter {
   reasons?: readonly string[] | undefined;
   /** Keep events observed on any of these streams. */
   streams?: readonly GuardEventStream[] | undefined;
+}
+
+/**
+ * A human-readable description of a coverage gap, with a suggested remediation.
+ *
+ * Covers every `GuardTelemetryGapReason` value with a distinct message so a log
+ * line answers both "what happened?" and "what can I do about it?".
+ *
+ * Used by the listener's default logger warning (issue #432); consumers may also
+ * call it to format gap notifications in their own sinks.
+ */
+export function describeGap(gap: GuardTelemetryGap): string {
+  const range = `ledgers ${gap.fromLedger}–${gap.toLedger}`;
+  switch (gap.reason) {
+    case "history_pruned":
+      return (
+        `telemetry coverage gap: ${range} are no longer retained by the RPC ` +
+        `(oldest retained: ledger ${gap.retainedFromLedger}). ` +
+        `Suggested action: restart the listener with a backfill source, widen the ` +
+        `RPC retention window, or resume from ledger ${gap.retainedFromLedger} and ` +
+        `accept the gap.`
+      );
+    default: {
+      // Exhaustiveness check: a new reason added to GuardTelemetryGapReason
+      // without updating this switch will be a TypeScript compile error.
+      const _exhaustive: never = gap.reason;
+      return `telemetry coverage gap: ${range} (reason: ${String(_exhaustive)}).`;
+    }
+  }
 }
 
 /** A compact one-line rendering of a guard event, for logs. */

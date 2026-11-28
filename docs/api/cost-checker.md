@@ -18,6 +18,11 @@ The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `Cos
 | --- | --- | --- | --- |
 | `interceptor` | `Pick<PreFlightInterceptor, "check">` | required | Its `check()` supplies both the verdict and the price, from one enforced simulation. ⚠️ If that interceptor has `cache` enabled, the price can come from a cached verdict (up to one ledger / 5 s old). |
 | `maxFeeStroops` | `bigint` | none — no ceiling; the price is reported, never objected to | Ceiling on the estimated **total** fee (resource + inclusion). Must be a non-negative `bigint`, otherwise `InvalidFeeCeilingError` at construction. `0n` is a real ceiling (every quote is then `over_budget`). ⚠️ Omitting it disables the fee check entirely. |
+| `feeSource` | `"fixed" \| "rpc"` | `"fixed"` | Where the inclusion fee comes from. `"fixed"` is the SDK's declared one-operation fee, offline and deterministic. `"rpc"` reads `getFeeStats` once per priced check and quotes `percentile`. ⚠️ Fee stats are a prediction of the next ledger's fee market, not a guarantee; a failed read falls back to the fixed fee with a visible `provenance.fallbackReason`. Invalid values throw `InvalidInputError` at construction. |
+| `percentile` | `"p50" \| "p90" \| "p99"` | `"p50"` | Soroban inclusion-fee percentile used in `"rpc"` mode. Validated at construction even in `"fixed"` mode. Invalid values throw `InvalidInputError`. |
+| `server` | `rpc.Server` | none | RPC server used to read fee stats in `"rpc"` mode. Required in that mode unless `feeStats` is supplied. |
+| `feeStats` | `() => Promise<FeeStatsResponse>` | none | Injectable fee-stats provider, winning over `server`. This is the offline test seam for fake stats; it never changes the fixed-fee default. |
+| `warnAtRatio` | `number` in `(0, 1]` | off — no warning | Opt-in headroom warning: when `total / ceiling >= warnAtRatio`, a priced decision carries a structured `headroomWarning`. The boundary is inclusive. ⚠️ A warning never changes `kind` and never turns `within_budget` into `over_budget`. Invalid ratios throw `InvalidInputError` at construction. |
 | `policySource` | `string \| PolicyConfig \| null` | none — `policyContext` is `null` | Contract address or policy enabling the additive `policyContext`. Informational only: it never changes the cost decision. |
 | `policy` | `string \| PolicyConfig \| null` | none | Alias for `policySource`. Per-call values win over constructor values; `policySource` wins over `policy` at each level. |
 | `logger` | `GuardLoggerInput` | none — silent | Log sink for the priced verdict and ceiling breaches. Never changes the decision. |
@@ -30,33 +35,120 @@ The SDK has no separate `CostPreCheckerOptions` type: the constructor takes `Cos
 | --- | --- | --- | --- |
 | `policySource` | `string \| PolicyConfig \| null` | the constructor's `policySource` / `policy` | Per-call policy source for `policyContext`. |
 | `policy` | `string \| PolicyConfig \| null` | as above | Alias for `policySource`. |
-| `maxFeeStroops` | `bigint` | the constructor's `maxFeeStroops` | Per-call ceiling, validated before the interceptor runs (`InvalidFeeCeilingError`). `0n` is kept, not treated as omission. |
+| `maxFeeStroops` | `bigint \| string` | the constructor's `maxFeeStroops` | Per-call ceiling, validated before simulation. `0n` / `"0"` is kept, not treated as omission. |
 | `windowSnapshot` | `WindowSpendSnapshot \| null` | the constructor's `windowSnapshot` | Per-call snapshot; an explicit `null` clears the configured one for this check. |
 | `signal` | `AbortSignal` | none | ⚠️ Forwarded to the interceptor: a fired signal yields an `undetermined` verdict and therefore an `undetermined` cost decision carrying `RpcTimeoutError`. |
 | `timeoutMs` | `number` | `DEFAULT_RPC_TIMEOUT_MS` (30 000 ms) per RPC call | ⚠️ A fired timeout is reported exactly like an abort, never as `within_budget`. `0` disables it. |
 
-Malformed ceilings are rejected before the interceptor runs, so a bad budget policy cannot spend an RPC call or be hidden behind a guard verdict. `InvalidFeeCeilingError` extends `InvalidInputError` (itself a `TypeError`) and exposes `field`, `rule: "non_negative_bigint"` and the rejected `value`.
+Malformed ceilings are rejected before the interceptor runs, so a bad budget policy cannot spend an RPC call or be hidden behind a guard verdict. `InvalidFeeCeilingError` remains the error for legacy wrong-type and negative-bigint inputs. Malformed strings and values above u64 throw `InvalidInputError`; both expose the offending field and an actionable validation detail.
 
 ## Methods
 
-### `check(call: ContractCall, options?: { policySource?: string | PolicyConfig | null; maxFeeStroops?: bigint; windowSnapshot?: WindowSpendSnapshot | null }): Promise<CostPreCheckResult>`
+### `check(call: ContractCall, options?: { policySource?: string | PolicyConfig | null; maxFeeStroops?: bigint | string; windowSnapshot?: WindowSpendSnapshot | null }): Promise<CostPreCheckResult>`
 
 Returns `CostPreCheckResult` (`CostDecision`), a discriminated union:
-- `{ kind: "within_budget", allowed: true, totalFeeStroops, resourceFeeStroops, inclusionFeeStroops, footprintKeys, feeCeilingStroops, policyContext, provenance }`
-- `{ kind: "over_budget", allowed: false, totalFeeStroops, resourceFeeStroops, inclusionFeeStroops, footprintKeys, feeCeilingStroops, policyContext, provenance }`
-- `{ kind: "blocked", allowed: false, reason, explanation, detail, totalFeeStroops: 0n, resourceFeeStroops: 0n, inclusionFeeStroops: 0n, policyContext, provenance: null }`
-- `{ kind: "undetermined", allowed: false, detail, totalFeeStroops: 0n, resourceFeeStroops: 0n, inclusionFeeStroops: 0n, policyContext, provenance: null }`
+- `{ kind: "within_budget", allowed: true, totalFeeStroops, resourceFeeStroops, inclusionFeeStroops, footprintKeys, feeCeilingStroops, surplusStroops, headroomWarning, policyContext, provenance }`
+- `{ kind: "over_budget", allowed: false, totalFeeStroops, resourceFeeStroops, inclusionFeeStroops, footprintKeys, feeCeilingStroops, surplusStroops: 0n, headroomWarning: null, policyContext, provenance }`
+- `{ kind: "blocked", allowed: false, reason, explanation, detail, totalFeeStroops: 0n, resourceFeeStroops: 0n, inclusionFeeStroops: 0n, surplusStroops: null, headroomWarning: null, policyContext, provenance: null }`
+- `{ kind: "undetermined", allowed: false, detail, totalFeeStroops: 0n, resourceFeeStroops: 0n, inclusionFeeStroops: 0n, surplusStroops: null, headroomWarning: null, policyContext, provenance: null }`
+
+### Surplus (`surplusStroops`, issue #446)
+
+Every cost decision reports how much room is left under the ceiling, in stroops, so a caller deciding whether to retry at a higher fee never has to subtract two bigints itself:
+
+```ts
+surplusStroops: bigint | null
+```
+
+- `ceiling - totalFeeStroops` when a ceiling exists, **clamped at zero**: an `over_budget` decision reports `0n` and its breach through `kind`, never a negative surplus.
+- `null` — not `0n` — when no ceiling was configured. An absent ceiling means "no objection", not "no room left".
+- `null` for `blocked` and `undetermined`: neither is a price judged against a ceiling.
+
+The value is exact integer arithmetic over the same `totalFeeStroops` the decision carries, and `describeCostDecision()` includes it.
+
+### Headroom warning (`headroomWarning`, issue #447)
+
+A binary ceiling only says pass or fail. Set `warnAtRatio` to get an early, structured warning when a quote is close to the ceiling:
+
+```ts
+interface HeadroomWarning {
+  kind: "headroom_warning";
+  threshold: number;          // the configured warnAtRatio, e.g. 0.9
+  usedRatio: number;          // total / ceiling, 4 decimal places (display only)
+  totalFeeStroops: bigint;    // exact quoted total
+  feeCeilingStroops: bigint;  // exact ceiling
+  surplusStroops: bigint;     // exact remaining room
+}
+```
+
+- Reached when `total * scale >= ceiling * numerator` in `bigint`, so the boundary at exactly the ratio is inclusive and floating-point rounding cannot move it.
+- **A warning is not a refusal.** It leaves `kind`, `allowed` and `feeCeilingStroops` unchanged, and only `over_budget` (a real breach) is `allowed: false`.
+- Off by default. `warnAtRatio` must be in `(0, 1]`; `0`, values above `1`, `NaN` and infinities throw `InvalidInputError` at construction.
+- `within_budget` always carries the field (`null` when off or not reached). A breach carries `headroomWarning: null`, because the breach is the decision itself.
+
+### Fee-source provenance and RPC pricing (issue #445)
+
+`feeSource: "rpc"` quotes the **Soroban inclusion fee** from `getFeeStats` at
+`percentile`, once per priced check, while the resource fee still comes from the
+same enforced simulation as the verdict:
+
+```ts
+const checker = new CostPreChecker({
+  interceptor,
+  server,                 // or feeStats: () => myRpc.getFeeStats()
+  feeSource: "rpc",
+  percentile: "p90",
+  maxFeeStroops: 50_000_000n,
+});
+```
+
+- The quote and the verdict stay tied to the **same** simulation; fee stats add
+  the inclusion component only. A refused or unpriced verdict makes no fee-stats
+  RPC, because there is no quote to price.
+- `provenance` records the source and ledger: `feeSource`, `percentile`,
+  `feeStatsLedger`, and `ledgerSource: "fee_stats"` when the simulation exposed
+  no ledger of its own.
+- A failed or malformed response **falls back to the fixed fee** and sets
+  `provenance.fallbackReason`. Fallback is never silent and never throws from the
+  pricing path.
+- Fee stats are a **prediction**, not a guarantee: the next ledger's fee market
+  can move before submission, so a quote can still underpay. The fixed-fee
+  default remains the offline, deterministic choice.
+
+### `checkTransaction(transaction, options?): Promise<CostDecision>`
+
+Prices an already-built Stellar SDK `Transaction` without rebuilding or
+modifying its envelope. Set `networkPassphrase` in `CostPreCheckConfig`; a
+mismatch is rejected with `InvalidInputError` before simulation. Pass
+`options.simulation` when the exact transaction has already been simulated;
+otherwise configure `server` and the checker simulates that envelope directly.
+An unsuccessful or unpriceable simulation returns a fail-closed
+`undetermined` decision. The total is the envelope's actual fee, with the
+simulated resource fee separated from the remainder as inclusion fee.
+Transaction quotes carry
+`provenance: { ledger: number | null, source: "transaction" }` (the ledger is
+null if the RPC response did not establish a usable sequence). Ordinary
+`check()` quotes retain the interceptor's call path and mark known-ledger
+provenance with `source: "call"`.
+
+```ts
+const decision = await checker.checkTransaction(transaction, {
+  simulation: alreadySimulatedResponse,
+  maxFeeStroops: "50000",
+});
+```
 
 ### Ledger Provenance (`provenance`)
 
-Priced decisions carry the ledger marker of the simulation that produced the quote:
+Priced decisions carry the ledger marker and input path of the simulation that
+produced the quote:
 
 ```ts
-provenance: { ledger: number } | null
+provenance: { ledger: number | null } | null
 ```
 
-- `ledger` is `latestLedger` read from the **same** enforced simulation, not from a second `getLatestLedger()` call that could race ahead of the state actually priced.
-- `null` means the simulation did not establish a usable ledger (absent, non-numeric, fractional, negative or unsafe integer). The SDK never fabricates a ledger number.
+- `ledger` is `latestLedger` read from the **same** enforced simulation, not from a second `getLatestLedger()` call that could race ahead of the state actually priced. In `"rpc"` fee mode it may come from the fee-stats response instead (`ledgerSource: "fee_stats"`), and is `null` only when neither source established a usable ledger.
+- `null` means no usable ledger was established (absent, non-numeric, fractional, negative or unsafe integer). The SDK never fabricates a ledger number.
 - This is **informational only**: it identifies the snapshot a quote describes. It is not a promise that a transaction will land in that ledger, and a quote may be stale by submission time.
 - `blocked` and `undetermined` decisions are not simulation-priced, so their `provenance` is always `null`.
 
@@ -190,6 +282,8 @@ Loose ceiling (`maxFeeStroops: 200_000_000n`) — priced and allowed:
   totalFeeStroops: 115_480_521n,
   footprintKeys: 5,
   feeCeilingStroops: 200_000_000n,
+  surplusStroops: 84_519_479n,
+  headroomWarning: null,
   policyContext: null,
   provenance: { ledger: 4899176 },
   breakdown: {
@@ -214,6 +308,8 @@ Tight ceiling (`maxFeeStroops: 5_000_000n`) — same quote, refused on price:
   totalFeeStroops: 115_480_521n,
   footprintKeys: 5,
   feeCeilingStroops: 5_000_000n,
+  surplusStroops: 0n,
+  headroomWarning: null,
   policyContext: null,
   provenance: { ledger: 4899176 },
   breakdown: { /* same breakdown as above */ },

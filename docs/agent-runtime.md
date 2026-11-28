@@ -28,13 +28,22 @@ const hb = await startHeartbeat({
   intervalMs: Number(graceSecs / 6n) * 1000, // must be <= grace/3 (validated before the first beat)
   graceSecs,
   retry: { maxAttempts: 3, baseDelayMs: 1_000, maxDelayMs: 10_000 },
+  maxSkewMs: 2_000,
   onBeat: ({ lateMs }) => { if (lateMs > 2_000) alert(`heartbeat ${lateMs}ms late`); },
+  onLateBeat: ({ at, lateMs, deadline, missedBeats }) =>
+    alert(`heartbeat ${lateMs}ms late (slot ${deadline}, ${missedBeats} missed, at ${at})`),
   onError: (error) => alert(`heartbeat failed: ${String(error)}`),
+  onWarning: (message) => logger.warn(message),
+  // In-memory for a single process; use FileHeartbeatStateStore from
+  // stellar-agent-guard-sdk/fs for a durable checkpoint.
+  stateStore: new InMemoryHeartbeatStateStore(),
 });
 // on shutdown: await hb.stop();
 ```
 
 For a single beat use [`heartbeat()`](../README.md#send-one-heartbeat-heartbeat), which also re-reads `status()`. The contracts repo's `agent-tx` binary remains a CLI alternative. See [Keep the dead-man switch alive](../README.md#keep-the-dead-man-switch-alive-startheartbeat) for lateness, `stop()` and retry semantics.
+
+`maxSkewMs` is the tolerance band: `onLateBeat` fires only when `lateMs > maxSkewMs`, after the submission result is known, and its `missedBeats` is the same live counter the handle reports. A `stateStore` checkpoints only accepted beats. On restart, the loaded timestamp sets `lastBeatAt`, anchors the next deadline to the old cadence, and emits one initial `onLateBeat` if the gap already exceeded an interval; store failures go to `onWarning` and never stop the loop.
 
 ### 2. Pre-flight every transfer
 
@@ -102,7 +111,8 @@ The full, compiled version is [`examples/agent-runtime.ts`](../examples/agent-ru
 | RPC down or stalled during `check()` | `timeoutMs` bounds it; verdict is `undetermined` carrying `RpcTimeoutError`. Refuses. | Yes |
 | RPC rate limiting (HTTP 429) | One bounded backoff and retry inside the interceptor, then `undetermined` with `cause: "rate_limited"`. Refuses. | Yes |
 | RPC down during a heartbeat | Retried with bounded jittered backoff; each failure goes to `onError`. A *blocked* heartbeat is never retried. | The account freezes at grace; it never over-spends |
-| Heartbeat late | `onBeat` reports `lateMs`; `missedBeats` increments. | n/a |
+| Heartbeat late | `onBeat` reports `lateMs`; `missedBeats` increments. Beyond `maxSkewMs`, `onLateBeat` fires after the result (success or failure). | n/a |
+| Heartbeat process restarts | A `stateStore` restores the previous beat, avoids a same-second duplicate, and reports an initial late/missed state from the stored timestamp. Store failures only warn. | n/a |
 | DMS in the warn band | `checkDmsHealth` alerts at 80% of grace. | n/a |
 | DMS expired (`heartbeat_expired`) | Alert; every transfer and heartbeat is blocked until an admin unfreezes. | Yes |
 | Telemetry stream drops | `watchAll` retries within its envelope; the committed stream resumes from its cursor. Alerts may be delayed, enforcement is unaffected. | n/a |

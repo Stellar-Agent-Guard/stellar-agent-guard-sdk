@@ -23,6 +23,7 @@
 export {
   AdapterConfigError,
   AdapterMappingError,
+  AuthRefreshError,
   BroadcastError,
   ContractResponseError,
   FeeCapExceededError,
@@ -34,10 +35,14 @@ export {
   PolicyEncodeError,
   PolicyFileReadError,
   PolicyValidationError,
+  SignerTimeoutError,
   SigningError,
   RateLimitedError,
   SimulationError,
 } from "./errors.ts";
+
+export { isFailClosed, isRetryable } from "./error-predicates.ts";
+export type { ErrorDisposition, KnownErrorClass } from "./error-predicates.ts";
 
 export type { PolicyEncodingFailure, PolicyEncodingRuleId } from "./errors.ts";
 
@@ -50,8 +55,10 @@ export {
   ACCOUNT_STATE_REASONS,
   GUARD_REASON_CODES,
   GUARD_REASONS,
+  POLICY_RULE_REMEDIATIONS,
   explainReason,
   isGuardReason,
+  policyRuleRemediation,
   reasonMessages,
   reasonMessagesEn,
   reasonName,
@@ -96,10 +103,15 @@ export {
 
 export type { ActiveWindowState, DescribePolicyOptions } from "./policy.ts";
 
-export { DMS_WARN_RATIO_DEFAULT, dmsUrgency } from "./dms.ts";
-export { policyDiff } from "./policy-diff.ts";
+export { DMS_WARN_RATIO_DEFAULT, dmsUrgency, formatDmsCountdown } from "./dms.ts";
+export { formatPolicyDiff, policyDiff } from "./policy-diff.ts";
 export type { PolicyChange, PolicyValue } from "./policy-diff.ts";
-export type { DmsUrgency } from "./dms.ts";
+export type {
+  DmsCountdown,
+  DmsCountdownState,
+  DmsUrgency,
+  FormatDmsCountdownOptions,
+} from "./dms.ts";
 
 export type {
   AccountAddress,
@@ -124,6 +136,7 @@ export {
   decodePolicyJson,
   encodePolicyJson,
   policyFromJson,
+  policyHash,
   policyToJson,
 } from "./policy-json.ts";
 
@@ -184,6 +197,7 @@ export {
   INVOKE_ERROR_CAUSES,
   InvokeRetryError,
   invoke,
+  invokeQueueStats,
   RpcTimeoutError,
   topicSymbols,
   type EnforcementOutcome,
@@ -200,9 +214,13 @@ export {
   type InvokeParamsInput,
   type InvokePendingOutcome,
   type InvokePipelineStep,
+  type InvokeQueueEvent,
+  type InvokeQueueStats,
   type InvokeRetryAttempt,
+  type InvokeRetryEvent,
   type InvokeRetryMetadata,
   type InvokeStepEvent,
+  type InvokeTiming,
   type RetryableInvokeFailure,
   type SubmissionAcceptedEvent,
 } from "./invoke.ts";
@@ -242,10 +260,15 @@ export type {
   PreFlightDecision,
   PreFlightInterceptorOptions,
   PreFlightUndeterminedCause,
+  SimulationDiagnostics,
+  SimulationDiagnosticsOptions,
+  WarmCacheOptions,
+  WarmCacheSummary,
 } from "./preflight.ts";
 
 export {
   CostPreChecker,
+  FEE_PERCENTILES,
   STROOPS_PER_XLM,
   describeCostDecision,
   exceedsCeiling,
@@ -258,14 +281,22 @@ export {
 
 export type {
   CostDecision,
+  CostDecisionProvenance,
   CostPreCheckConfig,
   CostPreCheckOptions,
   CostPreCheckResult,
   CostProvenance,
+  CostTransactionCheckOptions,
   CostWithDecision,
   FeeBreakdown,
+  FeePercentile,
+  FeeSource,
+  FeeStatsProvider,
+  FeeStatsResponse,
+  HeadroomWarning,
   PolicyContext,
   ResourceBreakdown,
+  TransactionCostProvenance,
   WindowSpendSnapshot,
 } from "./cost.ts";
 
@@ -279,6 +310,7 @@ export {
   InMemoryCursorStore,
   compareCommittedEvents,
   computePollDelay,
+  describeGap,
   describeGuardEvent,
   diagnosticsToEvents,
   guardEventId,
@@ -325,10 +357,15 @@ export {
 } from "./telemetry.ts";
 
 export {
+  DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
+  DEFAULT_WAIT_POLL_INTERVAL_MS,
+  DEFAULT_WAIT_TIMEOUT_MS,
   GUARD_STORAGE_KEYS,
   INCLUSION_FEE,
   SIG_EXPIRATION_LEDGERS,
   assembleFromSimulation,
+  authEntryNeedsRefresh,
+  authEntrySignatureExpiration,
   buildGuardAuthEntry,
   buildInitialEnvelope,
   describeSimulationResources,
@@ -339,41 +376,78 @@ export {
   isStaleLedgerResourceFailure,
   isValidAgentPublicKey,
   keypairAgentSigner,
+  refreshNearExpiryAuthEntries,
   toAgentSigner,
   validateAgentPublicKey,
   verifyAgentSignature,
+  waitForTransaction,
 } from "./tx.ts";
 
 export type {
   AdminSigner,
   AgentSigner,
+  AuthRefreshResult,
   ContractCall,
   GuardCredentialType,
   SimulationOutcome,
   SubmissionResult,
+  WaitForTransactionParams,
+  WaitForTransactionResult,
 } from "./tx.ts";
 
 export {
+  buildTransferCall,
+  buildTransferFromCall,
+  checkTransfer,
+  checkTransferFrom,
+} from "./transfer.ts";
+
+export type { TransferFromRequest, TransferRequest } from "./transfer.ts";
+
+export {
+  DEFAULT_ADMIN_OP_WAIT_TIMEOUT_MS,
   DEFAULT_NETWORK_PASSPHRASE,
   agentPubkeyToScVal,
   buildFreezeCall,
   buildRotateAgentKeyCall,
   buildSetPolicyCall,
   buildUnfreezeCall,
+  isAdminOpOutcome,
+  previewSetPolicy,
   submitFreeze,
   submitRotateAgentKey,
   submitSetPolicy,
   submitUnfreeze,
+  waitForAdminOp,
 } from "./admin.ts";
 
-export type { AdminOpParams, RotateAgentKeyParams, SetPolicyParams } from "./admin.ts";
+export type {
+  AdminInvokeOutcome,
+  AdminOpMetadata,
+  AdminOpName,
+  AdminOpOutcome,
+  AdminOpParams,
+  AdminOpWaitResult,
+  AdminOpWaitStatus,
+  AdminOperation,
+  AdminOutcomeMetadata,
+  PolicyPreview,
+  PolicyPreviewFailure,
+  PolicyPreviewFailureSource,
+  PreviewSetPolicyParams,
+  RotateAgentKeyParams,
+  SetPolicyParams,
+  WaitForAdminOpOptions,
+} from "./admin.ts";
 
 export {
   GUARD_WASM_HASH,
   sha256Hex,
   toHex,
   verifyGuardWasm,
+  verifyGuardWasmStream,
   type GuardWasmVerification,
+  type VerifyGuardWasmStreamOptions,
 } from "./wasm.ts";
 
 export {
@@ -381,6 +455,7 @@ export {
   HeartbeatBlockedError,
   HeartbeatDryRunError,
   HeartbeatIntervalError,
+  InMemoryHeartbeatStateStore,
   heartbeat,
   isRetryableHeartbeatFailure,
   readGuardStatus,
@@ -388,10 +463,13 @@ export {
   submitHeartbeat,
   type HeartbeatBeat,
   type HeartbeatHandle,
+  type HeartbeatLateBeat,
   type HeartbeatOptions,
   type HeartbeatParams,
   type HeartbeatResult,
   type HeartbeatRetryOptions,
+  type HeartbeatState,
+  type HeartbeatStateStore,
   type HeartbeatStopOptions,
   type HeartbeatStopResult,
   type HeartbeatSubmission,
@@ -460,6 +538,7 @@ export {
   mergeAbortSignals,
   normalizeMappedCall,
   normalizeMappedCalls,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
   runMappingErrorHook,
@@ -468,6 +547,8 @@ export {
 export type {
   BlockedHookLogger,
   GuardAdapterName,
+  GuardBatchDecisionHook,
+  GuardBatchDecisionInfo,
   GuardBlockedHook,
   GuardBlockedInfo,
   GuardCallMapper,
@@ -479,6 +560,7 @@ export type {
 // when no logger is supplied: the SDK writes nothing unless a host asks.
 export {
   GUARD_LOG_LEVELS,
+  createRedactingLogger,
   redactLogMeta,
   SILENT_LOGGER,
   resolveLogger,

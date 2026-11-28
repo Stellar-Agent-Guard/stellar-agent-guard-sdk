@@ -106,6 +106,27 @@ export interface GuardBlockedInfo {
 export type GuardBlockedHook = (info: GuardBlockedInfo) => void;
 
 /**
+ * Summary of a batch pre-flight check handed to `onBatchDecision` (issue #498).
+ */
+export interface GuardBatchDecisionInfo {
+  /** The adapter that executed the batch check. */
+  adapter: GuardAdapterName;
+  /** Overall batch outcome: "admissible" if all calls passed, otherwise the first refusal kind. */
+  kind: "admissible" | "blocked" | "undetermined";
+  /** Per-call verdicts in the order the adapter checked them. */
+  verdicts: readonly PreFlightDecision[];
+  /** Every contract call in the checked batch, in order. */
+  calls: readonly ContractCall[];
+  /** Optional correlation identifier (e.g. toolCall id). */
+  correlationId?: string | undefined;
+}
+
+/**
+ * Action-level batch decision hook. Called once after checking an entire batch of calls.
+ */
+export type GuardBatchDecisionHook = (info: GuardBatchDecisionInfo) => void;
+
+/**
  * The structured payload handed to `onMappingError` (issue #453).
  *
  * A mapping failure means the integration's own `toContractCall`/
@@ -476,6 +497,35 @@ function isolateHookRun(run: () => unknown, describe: string, logger?: BlockedHo
   Promise.resolve(result as PromiseLike<unknown>).catch((error: unknown) => {
     logger?.error(describe, error);
   });
+}
+
+/**
+ * Determine the overall outcome kind for a batch of decisions.
+ */
+export function batchDecisionKindFor(
+  verdicts: readonly PreFlightDecision[],
+): "admissible" | "blocked" | "undetermined" {
+  const refusal = verdicts.find((v) => !v.allowed);
+  if (!refusal) return "admissible";
+  return refusal.kind;
+}
+
+/**
+ * Fire an action-level batch decision hook (`onBatchDecision`) without letting it affect the verdict.
+ *
+ * Isolated and never awaited, mirroring `runDecisionHook` and `runBlockedHook`.
+ */
+export function runBatchDecisionHook(
+  hook: GuardBatchDecisionHook | undefined,
+  info: GuardBatchDecisionInfo,
+  logger?: BlockedHookLogger,
+): void {
+  if (!hook) return;
+  isolateHookRun(
+    () => hook(info),
+    `stellar-agent-guard: the ${info.adapter} adapter's onBatchDecision callback threw (or rejected); the guard's verdict stands.`,
+    logger,
+  );
 }
 
 /**

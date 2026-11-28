@@ -190,15 +190,17 @@ The rule that follows is where the "load `fs` via a subpath" guidance comes from
 filesystem (reading a WASM artifact, say) or a raw socket, it is exposed through an
 explicit `exports` subpath — so `import "stellar-agent-guard-sdk"` stays
 browser-safe and a consumer opts into the Node-only surface by path. Today the only
-`node:fs` usage is in a **caller** example in `verifyGuardWasm`'s documentation,
-not in shipped code, and `verifyGuardWasm` itself hashes through WebCrypto
-(`globalThis.crypto.subtle`) so the same call runs in Node and the browser.
+`node:fs` usage is in **caller** examples for `verifyGuardWasm` and
+`verifyGuardWasmStream`, not in shipped code. Both verification paths hash through
+the dependency-free incremental SHA-256 in `src/hash.ts`, so the same call runs in
+Node and the browser; `sha256Hex` remains the separate WebCrypto one-shot helper.
 
 **Current state, verified rather than claimed.** The root entry carries no
 filesystem, HTTP, or server code and imports no Node built-ins. SHA-256 for
 pre-flight cache fingerprints, auth-entry signing and telemetry ids goes through
-the Stellar SDK's browser-compatible hashing (`src/hash.ts`), so it is synchronous
-and needs no `node:crypto` or async WebCrypto boundary. `npm run test:browser`
+the Stellar SDK's browser-compatible hashing (`src/hash.ts`), and artifact
+verification uses that module's in-repo incremental SHA-256, so neither path needs
+`node:crypto` or an async WebCrypto boundary. `npm run test:browser`
 bundles the built root entry with esbuild for `platform: "browser"` and fails if
 any `node:*` input is reachable; a unit test runs the same check against
 `src/index.ts`. Never add another Node-only import to a core module without the

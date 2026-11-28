@@ -33,6 +33,7 @@ import type {
 } from "../preflight.ts";
 import type { ContractCall } from "../tx.ts";
 import {
+  batchDecisionKindFor,
   blockedInfoFor,
   blockedInfoForBatch,
   checkOptionsFor,
@@ -40,10 +41,12 @@ import {
   hostAbortSignal,
   mapContractCalls,
   mappingFailureFor,
+  runBatchDecisionHook,
   runBlockedHook,
   runDecisionHook,
   runMappingErrorHook,
   type BlockedHookLogger,
+  type GuardBatchDecisionHook,
   type GuardBlockedHook,
   type GuardMappingErrorHook,
 } from "./shared.ts";
@@ -93,6 +96,13 @@ export interface McpGuardOptions {
   toContractCalls?: (request: McpToolCallRequest) => readonly ContractCall[] | null;
   /** Observe every decision — the place to wire telemetry. */
   onDecision?: (request: McpToolCallRequest, decision: PreFlightDecision) => void;
+  /**
+   * Action-level batch decision summary hook (issue #498).
+   *
+   * Called once per batch check with `{ adapter: "mcp", kind, verdicts, calls, correlationId? }`
+   * after all calls have been checked, before the handler runs or the refusal is returned.
+   */
+  onBatchDecision?: GuardBatchDecisionHook | undefined;
   /**
    * Operator alerting on every halt, on the same shared payload as the other
    * adapters (`{ adapter: "mcp", kind, reason, call, explanation }`). A throwing
@@ -223,6 +233,17 @@ async function guardMcpRequest<T extends McpToolResult>(
   for (const verdict of batch.verdicts) {
     runDecisionHook(options.onDecision, [request, verdict], "mcp", options.blockedHookLogger);
   }
+  runBatchDecisionHook(
+    options.onBatchDecision,
+    {
+      adapter: "mcp",
+      kind: batchDecisionKindFor(batch.verdicts),
+      verdicts: batch.verdicts,
+      calls,
+      correlationId: (request as { id?: string }).id,
+    },
+    options.blockedHookLogger,
+  );
   if (batch.admissible) return proceed();
 
   runBlockedHook(
