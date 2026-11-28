@@ -506,3 +506,129 @@ describe("validateGuardEventXdr (strict offline validation)", () => {
     );
   });
 });
+
+// ── Adversarial / fuzz-style tests for decodeGuardEventXdr (#434) ────────────
+//
+// All inputs here are either random bytes, structurally invalid XDR, or valid
+// XDR that is not a guard decision (wrong ScVal types, oversized topic lists,
+// non-decision event topics). Every test asserts that decodeGuardEventXdr:
+//   1. Never throws — a malformed payload must not crash a long-running process.
+//   2. Returns null — not a decision, not a partial decode.
+//
+// A seeded PRNG (mulberry32) makes failures replay identically across machines.
+import { mulberry32, randomUint } from "./seeded-random.ts";
+
+/** Encode `n` random bytes as base64. */
+function randomBase64(rand: () => number, length: number): string {
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < length; i++) bytes[i] = Number(randomUint(rand, 8));
+  return Buffer.from(bytes).toString("base64");
+}
+
+/** Build a ContractEvent XDR where every topic is a random non-symbol ScVal. */
+function contractEventWithScValTopics(topicValues: xdr.ScVal[]): string {
+  return new xdr.ContractEvent({
+    ext: xdr.ExtensionPoint.v0(),
+    contractId: null,
+    type: xdr.ContractEventType.contract,
+    body: xdr.ContractEventBody.v0(
+      new xdr.ContractEventV0({
+        topics: topicValues,
+        data: xdr.ScVal.scvVoid(),
+      }),
+    ),
+  }).toXDR("base64");
+}
+
+describe("decodeGuardEventXdr adversarial inputs (#434)", () => {
+  const SEED = 0xdeadbeef;
+  const rand = mulberry32(SEED);
+
+  it("never throws and returns null for 200 random byte strings", () => {
+    for (let i = 0; i < 200; i++) {
+      const length = 1 + Math.floor(rand() * 256);
+      const payload = randomBase64(rand, length);
+      let result: ReturnType<typeof decodeGuardEventXdr>;
+      assert.doesNotThrow(() => {
+        result = decodeGuardEventXdr(payload);
+      }, `input ${i}: threw on random bytes of length ${length}`);
+      assert.equal(result!, null, `input ${i}: returned non-null for random bytes`);
+    }
+  });
+
+  it("never throws and returns null for 50 truncated valid-prefix XDR strings", () => {
+    const fullXdr = contractEventXdr([
+      GUARD_EVENT_TOPICS.authChecked,
+      GUARD_AUTH_RESULTS.blocked,
+      "per_tx_cap_exceeded",
+    ]);
+    const bytes = Buffer.from(fullXdr, "base64");
+    for (let i = 0; i < 50; i++) {
+      const truncLength = 1 + Math.floor(rand() * (bytes.length - 1));
+      const truncated = bytes.subarray(0, truncLength).toString("base64");
+      let result: ReturnType<typeof decodeGuardEventXdr>;
+      assert.doesNotThrow(() => {
+        result = decodeGuardEventXdr(truncated);
+      }, `truncated to ${truncLength} bytes: threw`);
+      assert.equal(result!, null, `truncated to ${truncLength} bytes: returned non-null`);
+    }
+  });
+
+  it("returns null when topics are non-symbol ScVal types (u32, u64, bytes)", () => {
+    // Note: scvString decodes identically to scvSymbol via scValToNative, so
+    // only ScVal types that decode to non-string values are tested here.
+    const wrongTypeInputs: xdr.ScVal[][] = [
+      [xdr.ScVal.scvU32(1), xdr.ScVal.scvU32(2), xdr.ScVal.scvU32(3)],
+      [xdr.ScVal.scvU64(xdr.Uint64.fromXdr(Buffer.alloc(8)))],
+      [xdr.ScVal.scvBytes(Buffer.from("event_auth_checked"))],
+      [xdr.ScVal.scvBool(true), xdr.ScVal.scvBool(false)],
+      [xdr.ScVal.scvVoid()],
+    ];
+    for (const topics of wrongTypeInputs) {
+      const payload = contractEventWithScValTopics(topics);
+      let result: ReturnType<typeof decodeGuardEventXdr>;
+      assert.doesNotThrow(() => {
+        result = decodeGuardEventXdr(payload);
+      });
+      assert.equal(result!, null, `wrong ScVal types should decode to null`);
+    }
+  });
+
+  it("returns null for oversized topic lists (100 symbol topics)", () => {
+    const manyTopics = Array.from({ length: 100 }, (_, i) => xdr.ScVal.scvSymbol(`topic_${i}`));
+    const payload = contractEventWithScValTopics(manyTopics);
+    let result: ReturnType<typeof decodeGuardEventXdr>;
+    assert.doesNotThrow(() => {
+      result = decodeGuardEventXdr(payload);
+    });
+    assert.equal(result!, null);
+  });
+
+  it("returns null for a valid non-decision topic (kind unknown), not a decision", () => {
+    // These are valid guard events but NOT auth_checked decisions. The decoder
+    // must return null, never a partial result mistaken for a decision.
+    const nonDecisionTopics = [
+      [GUARD_EVENT_TOPICS.heartbeat],
+      [GUARD_EVENT_TOPICS.initialized, "admin_key"],
+      [GUARD_EVENT_TOPICS.frozen, "admin_key"],
+      [GUARD_EVENT_TOPICS.policySet, "account"],
+      ["event_auth_checked"],
+      ["event_auth_checked", "unknown_result", "reason"],
+    ];
+    for (const topics of nonDecisionTopics) {
+      const result = decodeGuardEventXdr(contractEventXdr(topics));
+      assert.equal(result, null, `non-decision topic "${topics[0]}" must return null`);
+    }
+  });
+
+  it("non-string inputs return null without throwing", () => {
+    const nonStrings = [null, undefined, 42, true, {}, [], Symbol("x")];
+    for (const input of nonStrings) {
+      let result: ReturnType<typeof decodeGuardEventXdr>;
+      assert.doesNotThrow(() => {
+        result = decodeGuardEventXdr(input as string);
+      });
+      assert.equal(result!, null, `${String(input)} should return null`);
+    }
+  });
+});

@@ -54,6 +54,7 @@ function canonical(p: PolicyConfig): string {
       active_until: p.active_until,
       paused: p.paused,
       dms_grace_secs: p.dms_grace_secs,
+      protocol_calls_per_window: p.protocol_calls_per_window ?? 0,
       recipient_window_caps: [...(p.recipient_window_caps ?? [])]
         .map((c) => ({ recipient: c.recipient, cap: c.cap }))
         .sort((x, y) => x.recipient.localeCompare(y.recipient)),
@@ -85,6 +86,21 @@ describe("policyDiff", () => {
     assert.deepEqual(policyDiff(policy(), policy({ paused: true })), [
       { field: "paused", path: "paused", kind: "changed", before: false, after: true },
     ]);
+  });
+
+  it("reports protocol_calls_per_window, treating absent as zero", () => {
+    assert.deepEqual(policyDiff(policy(), policy({ protocol_calls_per_window: 3 })), [
+      {
+        field: "protocol_calls_per_window",
+        path: "protocol_calls_per_window",
+        kind: "changed",
+        before: 0,
+        after: 3,
+      },
+    ] satisfies PolicyChange[]);
+    const absent = policy();
+    delete absent.protocol_calls_per_window;
+    assert.deepEqual(policyDiff(policy({ protocol_calls_per_window: 0 }), absent), []);
   });
 
   it("reports list removal (index into a) and addition (index into b)", () => {

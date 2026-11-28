@@ -15,7 +15,8 @@ import { Address, nativeToScVal, scValToNative, StrKey, xdr } from "@stellar/ste
 import { mulberry32, randomUint } from "./seeded-random.ts";
 import { PolicyDecodeError, PolicyEncodeError } from "../../src/errors.ts";
 import { POLICY_JSON_VERSION, policyFromJson, policyToJson } from "../../src/policy-json.ts";
-import type { CheckResult } from "../../src/policy.ts";
+import type { CheckResult, PolicyRuleId } from "../../src/policy.ts";
+import { POLICY_RULE_REMEDIATIONS, policyRuleRemediation } from "../../src/reasons.ts";
 import {
   decodeCheckResult,
   decodePolicy,
@@ -1140,6 +1141,92 @@ describe("address decoding", () => {
   });
 });
 
+describe("policy rule remediations (issue #474)", () => {
+  const exhaustiveRemediations = POLICY_RULE_REMEDIATIONS satisfies Record<PolicyRuleId, string>;
+
+  const REMEDIATION_PATHS: Record<PolicyRuleId, string> = {
+    invalid_type: "per_tx_cap",
+    missing_field: "dms_grace_secs",
+    invalid_address: "protocols[0].contract",
+    negative_amount: "recipient_window_caps[0].cap",
+    integer_out_of_range: "active_from",
+    window_requires_secs: "window_cap",
+    recipient_cap_requires_window: "recipient_window_caps[0].cap",
+    active_window_inverted: "active_until",
+    empty_vector_noop: "assets",
+    duplicate_asset: "assets[2]",
+    duplicate_recipient: "recipients[1]",
+    duplicate_blocked_recipient: "blocked_recipients[2]",
+    duplicate_protocol: "protocols[0].contract",
+    duplicate_protocol_function: "protocols[0].fns[1]",
+    empty_protocol_functions: "protocols[0].fns",
+    duplicate_recipient_window_cap: "recipient_window_caps[1].recipient",
+    max_recipient_entries_exceeded: "recipients",
+    recipient_conflict: "blocked_recipients[2]",
+    self_as_asset: "assets[0]",
+    self_as_protocol: "protocols[0].contract",
+    self_as_recipient: "recipients[0]",
+    self_as_recipient_cap: "recipient_window_caps[0].recipient",
+  };
+
+  function assertRuleCoverage(record: Readonly<Record<string, string>>): void {
+    assert.deepEqual(Object.keys(record).sort(), POLICY_RULE_IDS.slice().sort());
+  }
+
+  it("covers exactly the 22 declared policy rule ids", () => {
+    assertRuleCoverage(exhaustiveRemediations);
+    assert.equal(Object.keys(exhaustiveRemediations).length, 22);
+  });
+
+  it("rejects a synthetic new rule id in the same record check", () => {
+    const synthetic = {
+      ...exhaustiveRemediations,
+      synthetic_future_rule: "Set the field to a future value.",
+    };
+    assert.throws(() => assertRuleCoverage(synthetic));
+  });
+
+  it("gives every rule one actionable sentence naming the path field without key material", () => {
+    for (const rule of POLICY_RULE_IDS) {
+      const template = POLICY_RULE_REMEDIATIONS[rule];
+      assert.equal(template.split("the field").length - 1, 1, `${rule}: missing field token`);
+      const path = REMEDIATION_PATHS[rule];
+      const remediation = policyRuleRemediation(rule, path);
+      const leaf = path.split(".").at(-1) ?? "";
+      const field = leaf.split("[")[0] ?? "";
+      assert.ok(remediation.trim().length > 0, `${rule}: empty remediation`);
+      assert.ok(remediation.endsWith("."), `${rule}: not one sentence`);
+      assert.equal(remediation.split(".").length - 1, 1, `${rule}: not one sentence`);
+      assert.ok(remediation.includes(field), `${rule}: does not name ${field}`);
+      assert.ok(!remediation.includes("the field"), `${rule}: unsubstituted field token`);
+      assert.doesNotMatch(remediation, /\b[SGC][A-Z2-7]{55}\b/, `${rule}: contains key material`);
+    }
+  });
+
+  it("never interpolates a path that looks like a secret key", () => {
+    const secret = `S${"A".repeat(55)}`;
+    const remediation = policyRuleRemediation("invalid_type", secret);
+    assert.ok(!remediation.includes(secret));
+    assert.equal(remediation, "Set policy to the value type the policy expects.");
+  });
+
+  it("attaches each failure's remediation from its rule and path", () => {
+    const failures = validateGuardPolicy({
+      ...samplePolicy(),
+      per_tx_cap: "bad" as unknown as bigint,
+      assets: ["bad"],
+      protocols: [{ contract: TOKEN, fns: [] }],
+      recipients: [RECIPIENT, RECIPIENT],
+      active_from: 2n,
+      active_until: 1n,
+    });
+    assert.ok(failures.length > 0);
+    for (const failure of failures) {
+      assert.equal(failure.remediation, policyRuleRemediation(failure.rule, failure.path));
+    }
+  });
+});
+
 describe("validateGuardPolicy (SPEC §8)", () => {
   it("matches the contract fixture plus the SDK-only wire-range rule", async () => {
     const fixturePath = new URL("../fixtures/policy-rule-ids.json", import.meta.url);
@@ -1165,21 +1252,17 @@ describe("validateGuardPolicy (SPEC §8)", () => {
 
   describe("type integrity & missing fields", () => {
     it("rejects non-object inputs", () => {
-      assert.deepEqual(validateGuardPolicy(null), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
-      ]);
-      assert.deepEqual(validateGuardPolicy(undefined), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
-      ]);
-      assert.deepEqual(validateGuardPolicy("not-a-policy"), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
-      ]);
-      assert.deepEqual(validateGuardPolicy(12345), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
-      ]);
-      assert.deepEqual(validateGuardPolicy([]), [
-        { path: "policy", rule: "invalid_type", message: "policy must be a non-null object" },
-      ]);
+      const expected = {
+        path: "policy",
+        rule: "invalid_type",
+        message: "policy must be a non-null object",
+        remediation: policyRuleRemediation("invalid_type", "policy"),
+      };
+      assert.deepEqual(validateGuardPolicy(null), [expected]);
+      assert.deepEqual(validateGuardPolicy(undefined), [expected]);
+      assert.deepEqual(validateGuardPolicy("not-a-policy"), [expected]);
+      assert.deepEqual(validateGuardPolicy(12345), [expected]);
+      assert.deepEqual(validateGuardPolicy([]), [expected]);
     });
 
     it("rejects missing required fields", () => {
@@ -2308,6 +2391,34 @@ describe("ledger reads (policy and window from storage)", () => {
     const { policy, windowSpent } = await fetchGuardPolicyAndWindow(server, GUARD);
 
     assert.deepEqual(policy as unknown, { label: "live" });
+    assert.equal(windowSpent, 5n);
+  });
+
+  it("does not mistake a lone Window entry for an installed policy", async () => {
+    const windowValue = xdr.ScVal.scvMap([
+      new xdr.ScMapEntry({
+        key: xdr.ScVal.scvSymbol("total"),
+        val: nativeToScVal(5, { type: "u64" }),
+      }),
+    ]);
+    const server = {
+      getLedgerEntries: () =>
+        Promise.resolve({
+          entries: [
+            {
+              key: {
+                contractData: {
+                  key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("Window")]),
+                },
+              },
+              val: { contractData: { val: windowValue } },
+            },
+          ],
+        }),
+    } as unknown as LedgerServer;
+
+    const { policy, windowSpent } = await fetchGuardPolicyAndWindow(server, GUARD);
+    assert.equal(policy, null);
     assert.equal(windowSpent, 5n);
   });
 

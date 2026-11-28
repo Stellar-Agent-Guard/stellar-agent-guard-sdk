@@ -32,6 +32,7 @@ import {
   PolicyValidationError,
   PreFlightUndeterminedError,
   RpcTimeoutError,
+  SignerTimeoutError,
   SigningError,
   SimulationError,
   type AccountAddress,
@@ -159,6 +160,8 @@ expectTypeOf<SimulationError>().toExtend<GuardError>();
 
 // Transport, protocol, and policy errors extend GuardError
 expectTypeOf<SigningError>().toExtend<GuardError>();
+expectTypeOf<SignerTimeoutError>().toExtend<SigningError>();
+expectTypeOf<SignerTimeoutError>().toExtend<GuardError>();
 expectTypeOf<BroadcastError>().toExtend<GuardError>();
 expectTypeOf<ContractResponseError>().toExtend<GuardError>();
 expectTypeOf<PolicyValidationError>().toExtend<GuardError>();

@@ -59,11 +59,52 @@ validateAgentPublicKey(local.publicKey);             // returns the G… form
 validateAgentPublicKey(local.publicKey.slice(0, -1) + "A"); // throws SigningError
 ```
 
+## Known-answer vectors for the authorization digest
+
+The 32 bytes handed to `AgentSigner.signDigest` are a commitment to the exact
+Soroban preimage the host will hash. A change in field order, network
+separation or argument order can still look like a valid signature while the
+contract rejects it — or authorizes a different invocation. The committed
+[`tests/fixtures/auth-digest-vectors.json`](../../tests/fixtures/auth-digest-vectors.json)
+therefore pins the inputs, the expected XDR preimage bytes and the expected
+SHA-256 digest hex for three calls: a SAC `transfer`, a protocol `supply` and a
+guard `rotate_agent_key` operation. Both legacy and CAP-71 address-bound
+(credential V2) preimages are covered.
+
+**Where the vectors come from.** The expected bytes are derived offline from
+the Soroban `HashIdPreimage::SorobanAuthorization` /
+`HashIdPreimage::SorobanAuthorizationWithAddress` XDR structures defined by the
+Stellar protocol and exposed by `@stellar/stellar-sdk` 17.3.0. `network_id` is
+`SHA-256(network_passphrase)` and the signed digest is `SHA-256(preimage XDR)`.
+The generator uses `node:crypto` for both hashes and never calls
+`buildGuardAuthEntry`, so the vectors can catch a change to the SDK's own
+preimage construction. They require no network access.
+
+**How to regenerate them.**
+
+1. Edit only a vector's `input` (addresses, passphrase, nonce, expiration,
+   credential type and `ScVal` argument hex) in the fixture.
+2. Run `npm run vectors:auth-digest` (the implementation is
+   [`scripts/generate-auth-digest-vectors.ts`](../../scripts/generate-auth-digest-vectors.ts)).
+   It rewrites only each vector's `expected` block and preserves provenance.
+3. Review the resulting diff as a security change, then commit the fixture and
+   any deliberate test update together. Never regenerate simply to make a
+   failing test pass: a digest change means the signed wire format changed.
+
+`tests/unit/tx.test.ts` checks that `buildGuardAuthEntry` signs the committed
+digest byte-for-byte and mutation-tests every field in the preimage: network
+passphrase, nonce, expiration, invocation contract/function/arguments and
+credential type, plus the address field on the CAP-71 V2 vector (legacy address
+credentials do not include the address in the signed preimage). Argument order
+is asserted separately.
+
 ## Operator Runbook: Agent Key Rotation and Recovery
 
 This runbook outlines the procedure for rotating the agent key of a custom account
 and recovering from rotation failures. Follow these steps to minimize downtime
-and ensure the guard's policy remains enforceable.
+and ensure the guard's policy remains enforceable. For a compromise incident
+where an admin freeze must precede rotation, use the
+[Admin Incident Runbook](../admin-incident-runbook.md) instead.
 
 ### Pre-Rotation Checks
 

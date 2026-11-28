@@ -11,6 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   Account,
@@ -24,7 +25,12 @@ import {
   scValToNative,
   xdr,
 } from "@stellar/stellar-sdk";
-import { AuthRefreshError, ContractResponseError, SigningError } from "../../src/errors.ts";
+import {
+  AuthRefreshError,
+  ContractResponseError,
+  SignerTimeoutError,
+  SigningError,
+} from "../../src/errors.ts";
 import {
   BroadcastError,
   DEFAULT_AUTH_REFRESH_MARGIN_LEDGERS,
@@ -35,6 +41,7 @@ import {
   describeSimulationResources,
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
+  invocationArgs,
   isValidAgentPublicKey,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
@@ -49,6 +56,11 @@ import {
   type SubmissionAcceptedEvent,
 } from "../../src/tx.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
+import type {
+  AuthCredentialType,
+  AuthVectorFixture,
+  AuthVectorInput,
+} from "../../scripts/generate-auth-digest-vectors.ts";
 
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 const CALL: ContractCall = {
@@ -722,6 +734,91 @@ describe("AgentSigner", () => {
   });
 });
 
+describe("signerTimeoutMs bounds remote signer callbacks (issue #472)", () => {
+  const networkPassphrase = "Test SDF Network ; September 2015";
+  const base = {
+    guard: GUARD,
+    call: CALL,
+    nonce: 1n,
+    signatureExpirationLedger: 100,
+    networkPassphrase,
+  };
+
+  function remoteSigner(signDigest: AgentSigner["signDigest"]): AgentSigner {
+    return { publicKey: Keypair.random().publicKey(), signDigest };
+  }
+
+  it("leaves a fast signer untouched and calls it exactly once", async () => {
+    const keypair = Keypair.random();
+    let calls = 0;
+    const signer = remoteSigner((digest) => {
+      calls += 1;
+      return keypair.sign(Buffer.from(digest));
+    });
+
+    const entry = await buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 1_000 });
+    const credentials = (entry.credentials as unknown as { address: xdr.SorobanAddressCredentials })
+      .address;
+    assert.equal(calls, 1);
+    assert.equal((scValToNative(credentials.signature) as Uint8Array).length, 64);
+  });
+
+  it("fails a hanging signer with a typed SigningError, not an RpcTimeoutError", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    let calls = 0;
+    const signer = remoteSigner(() => {
+      calls += 1;
+      return new Promise<Uint8Array>(() => {});
+    });
+
+    const pending = buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 25 });
+    t.mock.timers.tick(25);
+    await assert.rejects(pending, (error: unknown) => {
+      assert.ok(error instanceof SignerTimeoutError);
+      assert.ok(error instanceof SigningError);
+      assert.equal(error.timeoutMs, 25);
+      assert.equal(error.address, GUARD);
+      assert.match(error.name, /SignerTimeoutError/);
+      return true;
+    });
+    assert.equal(calls, 1, "the bound stops waiting without re-invoking the signer");
+  });
+
+  it("preserves a signer rejection as the typed error's cause", async () => {
+    const cause = new Error("remote HSM refused");
+    const signer = remoteSigner(() => Promise.reject(cause));
+
+    await assert.rejects(
+      buildGuardAuthEntry({ ...base, signer, signerTimeoutMs: 1_000 }),
+      (error: unknown) => {
+        assert.ok(error instanceof SigningError);
+        assert.ok(!(error instanceof SignerTimeoutError));
+        assert.equal(error.cause, cause);
+        return true;
+      },
+    );
+  });
+
+  it("rejects an invalid bound before calling the signer", async () => {
+    let calls = 0;
+    const signer = remoteSigner(() => {
+      calls += 1;
+      return new Uint8Array(64);
+    });
+    for (const signerTimeoutMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      await assert.rejects(
+        buildGuardAuthEntry({ ...base, signer, signerTimeoutMs }),
+        (error: unknown) => {
+          assert.ok(error instanceof RangeError);
+          assert.match(error.message, /signerTimeoutMs/);
+          return true;
+        },
+      );
+    }
+    assert.equal(calls, 0);
+  });
+});
+
 describe("isMinimumFeeBroadcastFailure", () => {
   it("recognises structured result=txInsufficientFee", () => {
     assert.equal(
@@ -813,6 +910,191 @@ describe("BroadcastError", () => {
     assert.match(error.message, /3 attempt\(s\)/);
     assert.match(error.message, /400 stroops/);
     assert.ok(error instanceof Error);
+  });
+});
+
+/**
+ * Known-answer vectors for the auth-entry digest (issue #473).
+ *
+ * The committed fixture is generated offline from the Soroban `HashIdPreimage`
+ * XDR (see `docs/concepts/custom-account-signing.md`). These tests never
+ * recompute the expected digest from the builder under test: they check that
+ * `buildGuardAuthEntry` signs exactly the committed bytes, and then mutate each
+ * signed field to prove it is bound into the digest.
+ */
+describe("auth-entry digest known-answer vectors", () => {
+  const fixture = JSON.parse(
+    readFileSync(new URL("../fixtures/auth-digest-vectors.json", import.meta.url), "utf8"),
+  ) as AuthVectorFixture;
+  const agent = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 7));
+
+  /** Rebuild the preimage from a vector's inputs without using `src/tx.ts`. */
+  function preimageHex(input: AuthVectorInput): string {
+    const invocation = new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+        invocationArgs({
+          contract: unsafeContractAddress(input.call.contract),
+          fn: input.call.fn,
+          args: input.call.args.map((arg) => xdr.ScVal.fromXDR(arg.scValHex, "hex")),
+        }),
+      ),
+      subInvocations: [],
+    });
+    const networkId = createHash("sha256").update(input.networkPassphrase, "utf8").digest();
+    const preimage =
+      input.credentialType === "sorobanCredentialsAddressV2"
+        ? xdr.HashIdPreimage.envelopeTypeSorobanAuthorizationWithAddress(
+            new xdr.HashIdPreimageSorobanAuthorizationWithAddress({
+              networkId,
+              nonce: BigInt(input.nonce),
+              invocation,
+              address: new Address(input.guard).toScAddress(),
+              signatureExpirationLedger: input.signatureExpirationLedger,
+            }),
+          )
+        : xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+            new xdr.HashIdPreimageSorobanAuthorization({
+              networkId,
+              nonce: BigInt(input.nonce),
+              invocation,
+              signatureExpirationLedger: input.signatureExpirationLedger,
+            }),
+          );
+    return Buffer.from(preimage.toXDR()).toString("hex");
+  }
+
+  async function digestFor(
+    input: AuthVectorInput,
+    mutate?: (value: AuthVectorInput) => AuthVectorInput,
+  ): Promise<Uint8Array> {
+    const effective = mutate ? mutate(input) : input;
+    const seen: Uint8Array[] = [];
+    const signer: AgentSigner = {
+      publicKey: agent.publicKey(),
+      signDigest: (digest) => {
+        seen.push(Uint8Array.from(digest));
+        return agent.sign(Buffer.from(digest));
+      },
+    };
+    await buildGuardAuthEntry({
+      guard: effective.guard,
+      call: {
+        contract: unsafeContractAddress(effective.call.contract),
+        fn: effective.call.fn,
+        args: effective.call.args.map((arg) => xdr.ScVal.fromXDR(arg.scValHex, "hex")),
+      },
+      signer,
+      nonce: BigInt(effective.nonce),
+      signatureExpirationLedger: effective.signatureExpirationLedger,
+      networkPassphrase: effective.networkPassphrase,
+      credentialType: effective.credentialType,
+    });
+    assert.equal(seen.length, 1, "the signer sees exactly one digest per entry");
+    return seen[0]!;
+  }
+
+  it("ships reviewed vectors for a SAC transfer, a protocol call and an admin operation", () => {
+    assert.deepEqual(
+      fixture.vectors.map((vector) => vector.name),
+      ["sac-transfer", "protocol-call", "admin-rotation"],
+    );
+    assert.equal(fixture._provenance.regenerate, "npm run vectors:auth-digest");
+    assert.match(fixture._provenance.source, /HashIdPreimage/);
+  });
+
+  for (const vector of fixture.vectors) {
+    it(`${vector.name}: signs the committed preimage and digest`, async () => {
+      const { input, expected } = vector;
+      const digest = await digestFor(input);
+
+      assert.equal(
+        createHash("sha256").update(input.networkPassphrase, "utf8").digest("hex"),
+        expected.networkIdHex,
+        "network_id is SHA-256(network passphrase)",
+      );
+      assert.equal(preimageHex(input), expected.preimageHex, "preimage bytes are pinned");
+      assert.equal(
+        createHash("sha256").update(Buffer.from(expected.preimageHex, "hex")).digest("hex"),
+        expected.digestHex,
+        "digest is SHA-256(preimage bytes)",
+      );
+      assert.equal(
+        Buffer.from(digest).toString("hex"),
+        expected.digestHex,
+        "the SDK signs exactly the committed digest",
+      );
+      assert.ok(
+        verifyAgentSignature(agent.publicKey(), digest, agent.sign(Buffer.from(digest))),
+        "the committed digest is a verifiable Ed25519 payload",
+      );
+    });
+  }
+
+  it("binds every signed field: mutations change the digest", async () => {
+    const vector = fixture.vectors[0]!;
+    const other = fixture.vectors[1]!;
+    const base = Buffer.from(await digestFor(vector.input)).toString("hex");
+    const flippedCredential: AuthCredentialType =
+      vector.input.credentialType === "sorobanCredentialsAddress"
+        ? "sorobanCredentialsAddressV2"
+        : "sorobanCredentialsAddress";
+
+    const mutations: Array<[field: string, mutate: (input: AuthVectorInput) => AuthVectorInput]> = [
+      [
+        "network passphrase",
+        (input) => ({ ...input, networkPassphrase: `${input.networkPassphrase} mutated` }),
+      ],
+      ["nonce", (input) => ({ ...input, nonce: (BigInt(input.nonce) + 1n).toString() })],
+      [
+        "signature expiration ledger",
+        (input) => ({ ...input, signatureExpirationLedger: input.signatureExpirationLedger + 1 }),
+      ],
+      ["function name", (input) => ({ ...input, call: { ...input.call, fn: "mutated_fn" } })],
+      [
+        "target contract",
+        (input) => ({ ...input, call: { ...input.call, contract: other.input.call.contract } }),
+      ],
+      [
+        "argument order",
+        (input) => ({
+          ...input,
+          call: {
+            ...input.call,
+            args: [input.call.args[1]!, input.call.args[0]!, input.call.args[2]!],
+          },
+        }),
+      ],
+      [
+        "argument value",
+        (input) => ({
+          ...input,
+          call: {
+            ...input.call,
+            args: [input.call.args[0]!, input.call.args[1]!, other.input.call.args[2]!],
+          },
+        }),
+      ],
+      ["credential type", (input) => ({ ...input, credentialType: flippedCredential })],
+    ];
+
+    for (const [field, mutate] of mutations) {
+      assert.notEqual(
+        Buffer.from(await digestFor(vector.input, mutate)).toString("hex"),
+        base,
+        `${field} must change the auth digest`,
+      );
+    }
+  });
+
+  it("binds the address field of CAP-71 V2 credentials to the digest", async () => {
+    const vector = fixture.vectors.find(
+      (candidate) => candidate.input.credentialType === "sorobanCredentialsAddressV2",
+    )!;
+    const base = Buffer.from(await digestFor(vector.input)).toString("hex");
+    const mutated = Buffer.from(
+      await digestFor(vector.input, (input) => ({ ...input, guard: CALL.contract })),
+    ).toString("hex");
+    assert.notEqual(mutated, base, "guard address must change a V2 auth digest");
   });
 });
 

@@ -12,7 +12,9 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { PolicyDecodeError } from "../../src/errors.ts";
 import { policyFromJson, policyToJson } from "../../src/policy-json.ts";
+import type { PolicyRuleId } from "../../src/policy.ts";
 import { POLICY_SCHEMA_PATH, validateGuardPolicyAgainstSchema } from "../../src/policy-schema.ts";
+import { policyRuleRemediation } from "../../src/reasons.ts";
 
 function read(path: string): string {
   return readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
@@ -64,7 +66,19 @@ describe("docs/api/policy-schema.md examples", () => {
 
   it("the invalid example produces exactly the documented failures", () => {
     const policy = JSON.parse(example(page, "policy-schema-invalid")) as unknown;
-    const expected = JSON.parse(example(page, "policy-schema-invalid-failures")) as unknown;
-    assert.deepEqual(validateGuardPolicyAgainstSchema(policy, schema), expected);
+    const expected = JSON.parse(example(page, "policy-schema-invalid-failures")) as Array<{
+      path: string;
+      rule: PolicyRuleId;
+      keyword: string;
+      schemaPath: string;
+      message: string;
+    }>;
+    assert.deepEqual(
+      validateGuardPolicyAgainstSchema(policy, schema),
+      expected.map((failure) => ({
+        ...failure,
+        remediation: policyRuleRemediation(failure.rule, failure.path),
+      })),
+    );
   });
 });

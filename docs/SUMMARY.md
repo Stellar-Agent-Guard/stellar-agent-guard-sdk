@@ -2,6 +2,7 @@
 
 * [Introduction](introduction.md)
 * [Glossary](glossary.md)
+* [Reason codes](reason-codes.md)
 * [Installation](installation.md)
 * [Runtime and Bundler Support](runtime-support.md)
 * [Concepts](concepts/)
@@ -20,6 +21,7 @@
   * [Policy Schema Validation](api/policy-schema.md)
 * [Policy Cookbook](policy-cookbook.md)
 * [Running an Agent 24/7](agent-runtime.md)
+* [Admin Incident Runbook](admin-incident-runbook.md)
 * [Production Readiness Checklist](production-readiness.md)
 * [Architecture](architecture.md)
 * [Event Schema](event-schema.md)

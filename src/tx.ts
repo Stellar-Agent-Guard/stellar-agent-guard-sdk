@@ -59,6 +59,7 @@ import {
   BroadcastError,
   ContractResponseError,
   InvalidInputError,
+  SignerTimeoutError,
   SigningError,
   SimulationError,
 } from "./errors.ts";
@@ -440,6 +441,62 @@ export type GuardCredentialType =
   | "sorobanCredentialsAddress"
   | "sorobanCredentialsAddressV2";
 
+function assertSignerTimeoutMs(signerTimeoutMs: number | undefined): void {
+  if (
+    signerTimeoutMs !== undefined &&
+    (!Number.isFinite(signerTimeoutMs) || signerTimeoutMs < 0)
+  ) {
+    throw new RangeError(
+      `signerTimeoutMs must be a finite number >= 0 (received ${String(signerTimeoutMs)})`,
+    );
+  }
+}
+
+/**
+ * Await one signer callback, optionally bounded by a local timer.
+ *
+ * `0`/`undefined` preserves the unbounded path exactly: no timer, no wrapper,
+ * no extra microtask beyond the `await` the caller already performed. A bounded
+ * call races the signer against `setTimeout`; whichever settles first wins, and
+ * the timer is cleared on the signer's resolution/rejection so a fast signer
+ * cannot leave a live handle behind. The underlying callback is not cancelled —
+ * this is the same honest local-only cancellation `RpcTimeoutError` documents.
+ */
+async function signDigestWithBound(
+  signer: AgentSigner,
+  digest: Uint8Array,
+  signerTimeoutMs: number | undefined,
+  address: string,
+): Promise<Uint8Array> {
+  if (signerTimeoutMs === undefined || signerTimeoutMs === 0) {
+    return signer.signDigest(digest);
+  }
+  return new Promise<Uint8Array>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new SignerTimeoutError({ timeoutMs: signerTimeoutMs, address }));
+    }, signerTimeoutMs);
+    Promise.resolve()
+      .then(() => signer.signDigest(digest))
+      .then(
+        (signature) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(signature);
+        },
+        (error: unknown) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+  });
+}
+
 export async function buildGuardAuthEntry(params: {
   guard: string;
   call: ContractCall;
@@ -453,6 +510,14 @@ export async function buildGuardAuthEntry(params: {
   signatureExpirationLedger: number;
   networkPassphrase: string;
   credentialType?: GuardCredentialType;
+  /**
+   * Optional local bound on `signer.signDigest()`, in milliseconds. `0` (or an
+   * omitted value) keeps the historical unbounded behaviour. A fired bound
+   * rejects with `SignerTimeoutError`, a `SigningError` subclass — never an
+   * `RpcTimeoutError`. It is independent of `invoke({ deadlineMs })`: when both
+   * are set, whichever bound fires first decides the error class.
+   */
+  signerTimeoutMs?: number | undefined;
 }): Promise<xdr.SorobanAuthorizationEntry> {
   const {
     guard,
@@ -462,7 +527,9 @@ export async function buildGuardAuthEntry(params: {
     signatureExpirationLedger,
     networkPassphrase,
     credentialType = "sorobanCredentialsAddress",
+    signerTimeoutMs,
   } = params;
+  assertSignerTimeoutMs(signerTimeoutMs);
   const signer = toAgentSigner(rawSigner);
   const rootInvocation = new xdr.SorobanAuthorizedInvocation({
     function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
@@ -496,11 +563,12 @@ export async function buildGuardAuthEntry(params: {
   const digest = sha256(preimage.toXDR());
   let signature: Uint8Array;
   try {
-    signature = await signer.signDigest(digest);
+    signature = await signDigestWithBound(signer, digest, signerTimeoutMs, guard);
   } catch (error) {
-    // A signer that cannot produce a signature is a `SigningError` at the layer
-    // that owns the failure, so a direct caller of this helper gets the same
-    // typed category an `invoke()` caller would have gotten.
+    // A timed-out signer already produced the precise typed failure. Every
+    // other rejection is still wrapped at the layer that owns the failure, so
+    // direct callers get the same typed category an `invoke()` caller gets.
+    if (error instanceof SignerTimeoutError) throw error;
     throw new SigningError("could not sign the guard authorization entry", {
       address: guard,
       cause: error,

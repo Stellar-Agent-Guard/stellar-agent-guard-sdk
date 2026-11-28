@@ -351,7 +351,7 @@ Pre-flight policy interception makes an intentional asymmetric distinction betwe
 | Pre-flight verdict / condition | `check(call)` outcome | `assertAllowed(call)` outcome | Notes |
 | :--- | :--- | :--- | :--- |
 | **Admissible** | Returns `{ allowed: true, kind: "admissible", ... }` | Returns `PreFlightDecision & { allowed: true }` | Green light; tool/call permitted. |
-| **Blocked** (`reason`) | Returns `{ allowed: false, kind: "blocked", reason, ... }` | Throws `GuardBlockedError` | Policy refusal (cap, recipient, pause, etc.); inspect `.reason`, `.code`, `.call`. |
+| **Blocked** (`reason`) | Returns `{ allowed: false, kind: "blocked", reason, ... }` | Throws `GuardBlockedError` | Policy refusal or account-state refusal; inspect `.reason`, `.code`, `.call`. See [Reason codes](docs/reason-codes.md). |
 | **Undetermined** | Returns `{ allowed: false, kind: "undetermined", detail, error? }` | Throws `GuardUndeterminedError` | Fail-closed: guard could not evaluate (e.g. unpriceable fee); underlying `.cause` preserved. |
 | **Transport / Network Error** (generic `Error`) | Returns `{ allowed: false, kind: "undetermined", ... }` | Throws `GuardUndeterminedError` | Raw transport error never escapes; wrapped with original error preserved on `.cause`. |
 | **Invalid Input** (malformed call) | Throws `InvalidInputError` | Throws `InvalidInputError` | Programmer error: synchronous validation failure, zero RPC round-trips. |
@@ -461,6 +461,17 @@ Supplying both, or neither, throws `InvalidInputError` (a `TypeError`, rules
 before any RPC. A telemetry listener used only for local state (counters,
 `recent()`, no `guard`) needs no transport.
 
+**HTTPS is required for `url`.** A URL must be an absolute `http://` or
+`https://` URL (rule `http-or-https-required`). Plain HTTP is allowed only for
+`localhost`, `127.0.0.1` and `[::1]` — the SDK then passes `allowHttp: true` to
+`rpc.Server` so local development works without extra options. Any other HTTP
+host fails at construction with rule `https-required-for-remote-rpc`: credentials
+and signed envelopes must not travel in plaintext. For a trusted non-local host
+(for example a container name on a private network), opt out explicitly with
+`allowInsecureHttp: true`; any other value (including `false` or a truthy string)
+is rejected with rule `exactly-true`. Injected `server` instances are used
+verbatim — configure their transport before passing them in.
+
 ```ts
 import { rpc } from "@stellar/stellar-sdk";
 import { PreFlightInterceptor } from "stellar-agent-guard-sdk";
@@ -473,6 +484,17 @@ const guard = new PreFlightInterceptor({ server, networkPassphrase, guard, agent
 
 // Or let the SDK build it from a URL:
 const guard2 = new PreFlightInterceptor({ url: "https://soroban-testnet.stellar.org", networkPassphrase, guard, agent, source });
+
+// Plain HTTP is local-only unless the operator opts out explicitly:
+const local = new PreFlightInterceptor({ url: "http://localhost:8000", networkPassphrase, guard, agent, source });
+const privateContainer = new PreFlightInterceptor({
+  url: "http://soroban-rpc:8000",
+  allowInsecureHttp: true,
+  networkPassphrase,
+  guard,
+  agent,
+  source,
+});
 ```
 
 What `@stellar/stellar-sdk` 17 supports (from `lib/esm/rpc/server.d.ts`, 17.0.1):
@@ -722,7 +744,7 @@ two optional caller-owned bounds on the RPC calls they make:
 - `deadlineMs?: number` — **`invoke()`**: one overall budget for the whole
   action. Expiry is fail-closed and reported as an `RpcTimeoutError` with
   `deadline: true`; it can never become an `allowed` outcome. Pass `clock` to
-  make the accounting deterministic in tests. See `docs/api/invoke-pipeline.md`.
+  make the accounting deterministic in tests. See [`docs/api/invoke-pipeline.md`](docs/api/invoke-pipeline.md) and its [Pipeline State Machine](docs/api/invoke-pipeline.md#pipeline-state-machine).
   `checkBatch()` enforces it as one absolute budget for the whole batch: once it
   is spent, no further call starts and every unfinished call is a fail-closed
   `undetermined` verdict carrying an `RpcTimeoutError` with `deadline: true`.
@@ -871,13 +893,19 @@ const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
 
 if (failures.length > 0) {
   for (const failure of failures) {
-    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+    console.error(`[${failure.rule}] at ${failure.path}: ${failure.message}`);
+    console.error(`Fix: ${failure.remediation}`);
   }
   // Safe-exit before encode or broadcast
 } else {
   // Proceed with policyToScVal(draftPolicy) and broadcast
 }
 ```
+
+Every failure also carries a one-sentence `remediation` derived from its stable
+`rule` id and field path, so a form can show the fix without a lookup table.
+`rule`, `path` and `message` are unchanged; the map is exported as
+`POLICY_RULE_REMEDIATIONS` with the helper `policyRuleRemediation(rule, path)`.
 
 #### Loading a policy from a JSON file (Node only)
 
@@ -1091,6 +1119,14 @@ if (outcome.kind === "error") {
   }
 }
 ```
+
+For a quick advisory check, `isRetryable(error)` and `isFailClosed(error)` classify
+any value without throwing. They cover the documented stale-ledger,
+sequence-collision, min-fee and rate-limit retryable classes, and treat
+`GuardUndeterminedError` plus wrapped transport failures as fail-closed while
+never classifying a policy block that way. They do **not** replace narrowing
+`outcome.kind` or checking `retry.exhausted`; the full table is in
+[the troubleshooting error-class catalog](docs/troubleshooting.md#advisory-error-predicates).
 
 A pipeline stage that throws — a dropped RPC connection, say — is reported the same way:
 as `kind: "error"` carrying the original error as the typed error's `cause`, never as a
@@ -1596,7 +1632,30 @@ if (!result.ok) {
 }
 ```
 
-`verifyGuardWasm` hashes with WebCrypto (`crypto.subtle`), so the identical call runs in Node and in the browser and needs no extra dependency. It is async, because `crypto.subtle.digest` is. `GUARD_WASM_HASH` is exported if you need the constant on its own.
+`verifyGuardWasm` is the buffered convenience wrapper: it holds the whole artifact
+in memory, feeds it through the dependency-free incremental SHA-256 in `src/hash.ts`
+and returns `{ ok, expected, actual }` with both hashes even on a mismatch. Use
+`verifyGuardWasmStream` for large artifacts; it accepts any async iterable of byte
+chunks and keeps SDK memory bounded to constant hasher state plus the chunk the
+caller yielded (set `chunkSize`, and yield chunks of at most that size, to bound
+end-to-end memory):
+
+```ts
+import { createReadStream } from "node:fs";
+import { verifyGuardWasmStream } from "stellar-agent-guard-sdk";
+
+const result = await verifyGuardWasmStream(createReadStream("guard.wasm"), {
+  chunkSize: 64 * 1024,
+});
+if (!result.ok) {
+  throw new Error(`WASM mismatch: got ${result.actual}, expected ${result.expected}`);
+}
+```
+
+Both forms use the same hasher and produce identical hashes for identical bytes, in
+Node and in the browser, with no extra dependency. `sha256Hex` remains the
+WebCrypto one-shot helper. `GUARD_WASM_HASH` is exported if you need the constant
+on its own.
 
 ### 5/5 Live Enforcement Scenarios
 

@@ -50,6 +50,7 @@ contract still enforces the policy at broadcast.
 The verdict meaning the guard explicitly refused the call, carrying the
 contract's own reason code.
 [Decision outcomes](concepts/pre-flight-interception.md#decision-outcomes)
+[Reason codes](reason-codes.md)
 
 *Why it matters:* this is the guardrail working. Nothing was broadcast, so
 nothing was spent.

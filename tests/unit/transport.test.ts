@@ -62,16 +62,72 @@ describe("resolveRpcServer (shared transport config)", () => {
     assert.throws(() => resolveRpcServer({ url: 42 }), assertTransportError("non-empty-string"));
   });
 
-  it("withResolvedServer strips url/rpcOptions and keeps the rest", () => {
+  it("rejects malformed and non-http URLs before building a server", () => {
+    for (const url of [
+      "not-a-url",
+      "https://",
+      "http:foo",
+      "ftp://rpc.example.com",
+      "file:///etc/passwd",
+    ]) {
+      assert.throws(
+        () => resolveRpcServer({ url }),
+        assertTransportError("http-or-https-required"),
+        url,
+      );
+    }
+  });
+
+  it("rejects plaintext HTTP to a remote host", () => {
+    assert.throws(
+      () => resolveRpcServer({ url: "http://rpc.example.com" }),
+      assertTransportError("https-required-for-remote-rpc"),
+    );
+    assert.throws(
+      () => resolveRpcServer({ url: "http://localhost.example.com:8000" }),
+      assertTransportError("https-required-for-remote-rpc"),
+    );
+  });
+
+  it("allows HTTP for localhost, 127.0.0.1 and [::1] without an opt-out", () => {
+    for (const host of ["localhost:8000", "127.0.0.1:8000", "[::1]:8000"]) {
+      const url = `http://${host}`;
+      const server = resolveRpcServer({ url });
+      assert.ok(server instanceof rpc.Server, url);
+      assert.equal(server.serverURL.toString(), `${url}/`, url);
+    }
+  });
+
+  it("honours an explicit allowInsecureHttp: true for a trusted host", () => {
+    const server = resolveRpcServer({
+      url: "http://rpc.internal:8000",
+      allowInsecureHttp: true,
+    });
+    assert.ok(server instanceof rpc.Server);
+    assert.equal(server.serverURL.toString(), "http://rpc.internal:8000/");
+  });
+
+  it("requires the opt-out to be the literal true", () => {
+    for (const value of [false, "true", 1, {}]) {
+      assert.throws(
+        () => resolveRpcServer({ url: "http://rpc.internal:8000", allowInsecureHttp: value }),
+        assertTransportError("exactly-true"),
+        String(value),
+      );
+    }
+  });
+
+  it("withResolvedServer strips url/rpcOptions/allowInsecureHttp and keeps the rest", () => {
     const resolved = withResolvedServer<{ server: rpc.Server; guard: string }>({
-      url: URL,
-      rpcOptions: { allowHttp: false },
+      url: "http://rpc.internal:8000",
+      allowInsecureHttp: true,
       guard: "g",
     });
     assert.ok(resolved.server instanceof rpc.Server);
     assert.equal(resolved.guard, "g");
     assert.equal("url" in resolved, false);
     assert.equal("rpcOptions" in resolved, false);
+    assert.equal("allowInsecureHttp" in resolved, false);
   });
 });
 
@@ -95,6 +151,22 @@ describe("all three surfaces consume the shared transport config", () => {
       () => new PreFlightInterceptor(base as never),
       assertTransportError("server-or-url-required"),
     );
+  });
+
+  it("surfaces apply the HTTPS rule to URLs at construction", () => {
+    assert.throws(
+      () => new PreFlightInterceptor({ ...base, url: "http://rpc.example.com" }),
+      assertTransportError("https-required-for-remote-rpc"),
+    );
+    assert.doesNotThrow(
+      () =>
+        new PreFlightInterceptor({
+          ...base,
+          url: "http://rpc.internal:8000",
+          allowInsecureHttp: true,
+        }),
+    );
+    assert.doesNotThrow(() => new PreFlightInterceptor({ ...base, url: "http://localhost:8000" }));
   });
 
   it("invoke() and enforceCall() reject both and neither before any RPC", async () => {

@@ -19,7 +19,7 @@ import {
   PolicyEncodeError,
   type PolicyEncodingFailure,
 } from "./errors.ts";
-import { isGuardReason } from "./reasons.ts";
+import { isGuardReason, policyRuleRemediation } from "./reasons.ts";
 import type { ContractCall } from "./tx.ts";
 
 /**
@@ -321,6 +321,7 @@ export interface PolicyFailure {
   path: string;
   rule: PolicyRuleId;
   message: string;
+  remediation: string;
 }
 
 export interface ValidatePolicyOptions {
@@ -1150,6 +1151,27 @@ function extractContractDataScVal(entry: unknown): xdr.ScVal | undefined {
   return undefined;
 }
 
+/** The contract-data key name (`Policy`, `Window`, ...) of one ledger entry. */
+function ledgerEntryKeyName(entry: unknown): string | null {
+  if (entry === null || typeof entry !== "object") return null;
+  const key = (entry as { key?: unknown }).key;
+  if (key === null || typeof key !== "object") return null;
+  const contractData =
+    typeof (key as { contractData?: unknown }).contractData === "function"
+      ? (key as { contractData: () => unknown }).contractData()
+      : (key as { contractData?: unknown }).contractData;
+  if (contractData === null || typeof contractData !== "object") return null;
+  const dataKey =
+    typeof (contractData as { key?: unknown }).key === "function"
+      ? (contractData as { key: () => unknown }).key()
+      : (contractData as { key?: unknown }).key;
+  if (dataKey === null || typeof dataKey !== "object") return null;
+  if ((dataKey as { type?: unknown }).type !== "scvVec") return null;
+  const values = (dataKey as unknown as { vec?: xdr.ScVal[] }).vec ?? [];
+  if (values.length !== 1 || values[0]?.type !== "scvSymbol") return null;
+  return String(scValToNative(values[0]));
+}
+
 /**
  * Read one of a contract's persistent storage entries from ledger state via RPC.
  */
@@ -1251,14 +1273,22 @@ export async function fetchGuardPolicyAndWindow(
   try {
     // Attempt to get both entries in one RPC call for ledger consistency
     const response = await server.getLedgerEntries(policyKey, windowKey);
-    const entries = (response.entries ?? []).filter(Boolean);
+    const entries = response.entries ?? [];
+
+    // Prefer the entry keys: a guard with no Policy entry still returns the
+    // Window entry, and reading it positionally would misreport it as policy.
+    const namedEntries = new Map<string, unknown>();
+    for (const entry of entries) {
+      const name = ledgerEntryKeyName(entry);
+      if (name === "Policy" || name === "Window") namedEntries.set(name, entry);
+    }
+    const keyed = namedEntries.size > 0;
+    const policyRawEntry: unknown = keyed ? namedEntries.get("Policy") : entries[0];
+    let windowRawEntry: unknown = keyed ? namedEntries.get("Window") : entries[1];
 
     // If a single-entry mock server only returned one item for a two-key query,
     // fetch the second entry so both Policy and Window are populated.
-    const policyRawEntry: unknown = entries[0];
-    let windowRawEntry: unknown = entries[1];
-
-    if (entries.length === 1 && (response.entries ?? []).length === 1) {
+    if (!keyed && entries.length === 1) {
       const secondResponse = await server.getLedgerEntries(windowKey);
       windowRawEntry = secondResponse.entries?.[0];
     }
@@ -1322,6 +1352,10 @@ function toBigInt(val: unknown): bigint {
   return 0n;
 }
 
+function policyFailure(path: string, rule: PolicyRuleId, message: string): PolicyFailure {
+  return { path, rule, message, remediation: policyRuleRemediation(rule, path) };
+}
+
 function checkIntegerMaximum(
   value: unknown,
   path: string,
@@ -1330,11 +1364,13 @@ function checkIntegerMaximum(
 ): void {
   const maximum = wireType === "i128" ? I128_MAX : U64_MAX;
   if (toBigInt(value) > maximum) {
-    failures.push({
-      path,
-      rule: "integer_out_of_range",
-      message: `${path} must be within ${wireType} range [0, ${maximum}]`,
-    });
+    failures.push(
+      policyFailure(
+        path,
+        "integer_out_of_range",
+        `${path} must be within ${wireType} range [0, ${maximum}]`,
+      ),
+    );
   }
 }
 
@@ -1669,13 +1705,7 @@ export function validateGuardPolicy(
       : optionsOrGuardAddress ?? {};
 
   if (policy === null || typeof policy !== "object" || Array.isArray(policy)) {
-    return [
-      {
-        path: "policy",
-        rule: "invalid_type",
-        message: "policy must be a non-null object",
-      },
-    ];
+    return [policyFailure("policy", "invalid_type", "policy must be a non-null object")];
   }
 
   const raw = policy as Record<string, unknown>;
@@ -1687,23 +1717,15 @@ export function validateGuardPolicy(
 
   // 1. per_tx_cap (SPEC §8 bullet 1)
   if (raw.per_tx_cap === undefined || raw.per_tx_cap === null) {
-    failures.push({
-      path: "per_tx_cap",
-      rule: "missing_field",
-      message: "per_tx_cap is required",
-    });
+    failures.push(policyFailure("per_tx_cap", "missing_field", "per_tx_cap is required"));
   } else if (!isIntegerLike(raw.per_tx_cap)) {
-    failures.push({
-      path: "per_tx_cap",
-      rule: "invalid_type",
-      message: "per_tx_cap must be an integer or bigint",
-    });
+    failures.push(
+      policyFailure("per_tx_cap", "invalid_type", "per_tx_cap must be an integer or bigint"),
+    );
   } else if (toBigInt(raw.per_tx_cap) < 0n) {
-    failures.push({
-      path: "per_tx_cap",
-      rule: "negative_amount",
-      message: "per_tx_cap must be non-negative (>= 0)",
-    });
+    failures.push(
+      policyFailure("per_tx_cap", "negative_amount", "per_tx_cap must be non-negative (>= 0)"),
+    );
   } else {
     checkIntegerMaximum(raw.per_tx_cap, "per_tx_cap", "i128", failures);
   }
@@ -1711,25 +1733,17 @@ export function validateGuardPolicy(
   // 2. window_secs (SPEC §8 bullet 1)
   let windowSecs: bigint | null = null;
   if (raw.window_secs === undefined || raw.window_secs === null) {
-    failures.push({
-      path: "window_secs",
-      rule: "missing_field",
-      message: "window_secs is required",
-    });
+    failures.push(policyFailure("window_secs", "missing_field", "window_secs is required"));
   } else if (!isIntegerLike(raw.window_secs)) {
-    failures.push({
-      path: "window_secs",
-      rule: "invalid_type",
-      message: "window_secs must be an integer or bigint",
-    });
+    failures.push(
+      policyFailure("window_secs", "invalid_type", "window_secs must be an integer or bigint"),
+    );
   } else {
     windowSecs = toBigInt(raw.window_secs);
     if (windowSecs < 0n) {
-      failures.push({
-        path: "window_secs",
-        rule: "negative_amount",
-        message: "window_secs must be non-negative (>= 0)",
-      });
+      failures.push(
+        policyFailure("window_secs", "negative_amount", "window_secs must be non-negative (>= 0)"),
+      );
     } else {
       checkIntegerMaximum(raw.window_secs, "window_secs", "u64", failures);
     }
@@ -1737,159 +1751,163 @@ export function validateGuardPolicy(
 
   // 3. window_cap (SPEC §8 bullet 1 & 2)
   if (raw.window_cap === undefined || raw.window_cap === null) {
-    failures.push({
-      path: "window_cap",
-      rule: "missing_field",
-      message: "window_cap is required",
-    });
+    failures.push(policyFailure("window_cap", "missing_field", "window_cap is required"));
   } else if (!isIntegerLike(raw.window_cap)) {
-    failures.push({
-      path: "window_cap",
-      rule: "invalid_type",
-      message: "window_cap must be an integer or bigint",
-    });
+    failures.push(
+      policyFailure("window_cap", "invalid_type", "window_cap must be an integer or bigint"),
+    );
   } else {
     const windowCap = toBigInt(raw.window_cap);
     if (windowCap < 0n) {
-      failures.push({
-        path: "window_cap",
-        rule: "negative_amount",
-        message: "window_cap must be non-negative (>= 0)",
-      });
+      failures.push(
+        policyFailure("window_cap", "negative_amount", "window_cap must be non-negative (>= 0)"),
+      );
     } else {
       checkIntegerMaximum(raw.window_cap, "window_cap", "i128", failures);
     }
     // SPEC §8 bullet 2: window_cap != 0 requires window_secs != 0
     if (windowCap > 0n && windowSecs !== null && windowSecs === 0n) {
-      failures.push({
-        path: "window_cap",
-        rule: "window_requires_secs",
-        message: "window_cap > 0 requires window_secs != 0",
-      });
+      failures.push(
+        policyFailure(
+          "window_cap",
+          "window_requires_secs",
+          "window_cap > 0 requires window_secs != 0",
+        ),
+      );
     }
   }
 
   // 4. assets (SPEC §8 bullet 5, 6, 10)
   if (!Array.isArray(raw.assets)) {
-    failures.push({
-      path: "assets",
-      rule: "invalid_type",
-      message: "assets must be an array of Stellar contract addresses",
-    });
+    failures.push(
+      policyFailure(
+        "assets",
+        "invalid_type",
+        "assets must be an array of Stellar contract addresses",
+      ),
+    );
   } else {
     if (raw.assets.length === 0) {
-      failures.push({
-        path: "assets",
-        rule: "empty_vector_noop",
-        message: "assets list is empty; SAC token transfers will never be allowed",
-      });
+      failures.push(
+        policyFailure(
+          "assets",
+          "empty_vector_noop",
+          "assets list is empty; SAC token transfers will never be allowed",
+        ),
+      );
     }
     const seenAssets = new Set<string>();
     for (let i = 0; i < raw.assets.length; i++) {
       const a = raw.assets[i];
       if (!isValidStellarAddress(a)) {
-        failures.push({
-          path: `assets[${i}]`,
-          rule: "invalid_address",
-          message: `"${a}" is not a valid Stellar address`,
-        });
+        failures.push(
+          policyFailure(`assets[${i}]`, "invalid_address", `"${a}" is not a valid Stellar address`),
+        );
         continue;
       }
       const norm = policyAddressComparisonKey(a)!;
       if (seenAssets.has(norm)) {
-        failures.push({
-          path: `assets[${i}]`,
-          rule: "duplicate_asset",
-          message: `duplicate asset address "${a}"`,
-        });
+        failures.push(
+          policyFailure(`assets[${i}]`, "duplicate_asset", `duplicate asset address "${a}"`),
+        );
       }
       seenAssets.add(norm);
       if (guardAddress && norm === guardAddress) {
-        failures.push({
-          path: `assets[${i}]`,
-          rule: "self_as_asset",
-          message: "guard contract address cannot be listed as an asset",
-        });
+        failures.push(
+          policyFailure(
+            `assets[${i}]`,
+            "self_as_asset",
+            "guard contract address cannot be listed as an asset",
+          ),
+        );
       }
     }
   }
 
   // 5. protocols (SPEC §8 bullet 5, 6, 10)
   if (!Array.isArray(raw.protocols)) {
-    failures.push({
-      path: "protocols",
-      rule: "invalid_type",
-      message: "protocols must be an array of ProtocolRule",
-    });
+    failures.push(
+      policyFailure("protocols", "invalid_type", "protocols must be an array of ProtocolRule"),
+    );
   } else {
     const seenProtocols = new Set<string>();
     for (let i = 0; i < raw.protocols.length; i++) {
       const p = raw.protocols[i];
       if (!p || typeof p !== "object" || Array.isArray(p)) {
-        failures.push({
-          path: `protocols[${i}]`,
-          rule: "invalid_type",
-          message: "protocol rule must be an object",
-        });
+        failures.push(policyFailure(`protocols[${i}]`, "invalid_type", "protocol rule must be an object"));
         continue;
       }
       const ruleObj = p as Record<string, unknown>;
       if (!isValidStellarAddress(ruleObj.contract)) {
-        failures.push({
-          path: `protocols[${i}].contract`,
-          rule: "invalid_address",
-          message: `"${ruleObj.contract}" is not a valid Stellar address`,
-        });
+        failures.push(
+          policyFailure(
+            `protocols[${i}].contract`,
+            "invalid_address",
+            `"${ruleObj.contract}" is not a valid Stellar address`,
+          ),
+        );
       } else {
         const norm = policyAddressComparisonKey(ruleObj.contract)!;
         if (seenProtocols.has(norm)) {
-          failures.push({
-            path: `protocols[${i}].contract`,
-            rule: "duplicate_protocol",
-            message: `duplicate protocol contract "${ruleObj.contract}"`,
-          });
+          failures.push(
+            policyFailure(
+              `protocols[${i}].contract`,
+              "duplicate_protocol",
+              `duplicate protocol contract "${ruleObj.contract}"`,
+            ),
+          );
         }
         seenProtocols.add(norm);
         if (guardAddress && norm === guardAddress) {
-          failures.push({
-            path: `protocols[${i}].contract`,
-            rule: "self_as_protocol",
-            message: "guard contract address cannot be listed as a protocol",
-          });
+          failures.push(
+            policyFailure(
+              `protocols[${i}].contract`,
+              "self_as_protocol",
+              "guard contract address cannot be listed as a protocol",
+            ),
+          );
         }
       }
 
       if (ruleObj.fns !== null && ruleObj.fns !== undefined) {
         if (!Array.isArray(ruleObj.fns)) {
-          failures.push({
-            path: `protocols[${i}].fns`,
-            rule: "invalid_type",
-            message: "protocol fns must be null or an array of function name strings",
-          });
+          failures.push(
+            policyFailure(
+              `protocols[${i}].fns`,
+              "invalid_type",
+              "protocol fns must be null or an array of function name strings",
+            ),
+          );
         } else if (ruleObj.fns.length === 0) {
-          failures.push({
-            path: `protocols[${i}].fns`,
-            rule: "empty_protocol_functions",
-            message: "protocol fns list must not be empty (use null to allow any function)",
-          });
+          failures.push(
+            policyFailure(
+              `protocols[${i}].fns`,
+              "empty_protocol_functions",
+              "protocol fns list must not be empty (use null to allow any function)",
+            ),
+          );
         } else {
           const seenFns = new Set<string>();
           for (let j = 0; j < ruleObj.fns.length; j++) {
             const fn = ruleObj.fns[j];
             if (typeof fn !== "string" || fn.length === 0) {
-              failures.push({
-                path: `protocols[${i}].fns[${j}]`,
-                rule: "invalid_type",
-                message: "protocol function name must be a non-empty string",
-              });
+              failures.push(
+                policyFailure(
+                  `protocols[${i}].fns[${j}]`,
+                  "invalid_type",
+                  "protocol function name must be a non-empty string",
+                ),
+              );
               continue;
             }
             if (seenFns.has(fn)) {
-              failures.push({
-                path: `protocols[${i}].fns[${j}]`,
-                rule: "duplicate_protocol_function",
-                message: `duplicate function "${fn}" in protocol rule`,
-              });
+              failures.push(
+                policyFailure(
+                  `protocols[${i}].fns[${j}]`,
+                  "duplicate_protocol_function",
+                  `duplicate function "${fn}" in protocol rule`,
+                ),
+              );
             }
             seenFns.add(fn);
           }
@@ -1900,61 +1918,63 @@ export function validateGuardPolicy(
 
   // 6. allow_any_recipient (type check)
   if (typeof raw.allow_any_recipient !== "boolean") {
-    failures.push({
-      path: "allow_any_recipient",
-      rule: "invalid_type",
-      message: "allow_any_recipient must be a boolean",
-    });
+    failures.push(
+      policyFailure(
+        "allow_any_recipient",
+        "invalid_type",
+        "allow_any_recipient must be a boolean",
+      ),
+    );
   }
 
   // 7. recipients (SPEC §8 bullet 5, 6, 8, 10)
   const seenRecipients = new Set<string>();
   if (!Array.isArray(raw.recipients)) {
-    failures.push({
-      path: "recipients",
-      rule: "invalid_type",
-      message: "recipients must be an array of Stellar addresses",
-    });
+    failures.push(
+      policyFailure("recipients", "invalid_type", "recipients must be an array of Stellar addresses"),
+    );
   } else {
     if (raw.recipients.length === 0 && raw.allow_any_recipient === false) {
-      failures.push({
-        path: "recipients",
-        rule: "empty_vector_noop",
-        message: "recipients list is empty while allow_any_recipient is false; no recipient will be allowed",
-      });
+      failures.push(
+        policyFailure(
+          "recipients",
+          "empty_vector_noop",
+          "recipients list is empty while allow_any_recipient is false; no recipient will be allowed",
+        ),
+      );
     }
     if (raw.recipients.length > maxRecipientEntries) {
-      failures.push({
-        path: "recipients",
-        rule: "max_recipient_entries_exceeded",
-        message: `recipients list exceeds maximum of ${maxRecipientEntries} entries (${raw.recipients.length})`,
-      });
+      failures.push(
+        policyFailure(
+          "recipients",
+          "max_recipient_entries_exceeded",
+          `recipients list exceeds maximum of ${maxRecipientEntries} entries (${raw.recipients.length})`,
+        ),
+      );
     }
     for (let i = 0; i < raw.recipients.length; i++) {
       const r = raw.recipients[i];
       if (!isValidStellarAddress(r)) {
-        failures.push({
-          path: `recipients[${i}]`,
-          rule: "invalid_address",
-          message: `"${r}" is not a valid Stellar address`,
-        });
+        failures.push(
+          policyFailure(`recipients[${i}]`, "invalid_address", `"${r}" is not a valid Stellar address`),
+        );
         continue;
       }
       const norm = policyAddressComparisonKey(r)!;
       if (seenRecipients.has(norm)) {
-        failures.push({
-          path: `recipients[${i}]`,
-          rule: "duplicate_recipient",
-          message: `duplicate recipient address "${r}"`,
-        });
+        failures.push(
+          policyFailure(`recipients[${i}]`, "duplicate_recipient", `duplicate recipient address "${r}"`),
+        );
       }
       seenRecipients.add(norm);
       if (guardAddress && norm === guardAddress) {
-        failures.push({
-          path: `recipients[${i}]`,
-          rule: "self_as_recipient",
-          message: "guard contract address cannot be listed as a recipient",
-        });
+        failures.push(
+          policyFailure(
+            `recipients[${i}]`,
+            "self_as_recipient",
+            "guard contract address cannot be listed as a recipient",
+          ),
+        );
       }
     }
   }
@@ -1962,53 +1982,65 @@ export function validateGuardPolicy(
   // 8. blocked_recipients (SPEC §8 bullet 6, 8, 9, 10)
   if (raw.blocked_recipients !== undefined && raw.blocked_recipients !== null) {
     if (!Array.isArray(raw.blocked_recipients)) {
-      failures.push({
-        path: "blocked_recipients",
-        rule: "invalid_type",
-        message: "blocked_recipients must be an array of Stellar addresses",
-      });
+      failures.push(
+        policyFailure(
+          "blocked_recipients",
+          "invalid_type",
+          "blocked_recipients must be an array of Stellar addresses",
+        ),
+      );
     } else {
       if (raw.blocked_recipients.length > maxRecipientEntries) {
-        failures.push({
-          path: "blocked_recipients",
-          rule: "max_recipient_entries_exceeded",
-          message: `blocked_recipients list exceeds maximum of ${maxRecipientEntries} entries (${raw.blocked_recipients.length})`,
-        });
+        failures.push(
+          policyFailure(
+            "blocked_recipients",
+            "max_recipient_entries_exceeded",
+            `blocked_recipients list exceeds maximum of ${maxRecipientEntries} entries (${raw.blocked_recipients.length})`,
+          ),
+        );
       }
       const seenBlocked = new Set<string>();
       for (let i = 0; i < raw.blocked_recipients.length; i++) {
         const b = raw.blocked_recipients[i];
         if (!isValidStellarAddress(b)) {
-          failures.push({
-            path: `blocked_recipients[${i}]`,
-            rule: "invalid_address",
-            message: `"${b}" is not a valid Stellar address`,
-          });
+          failures.push(
+            policyFailure(
+              `blocked_recipients[${i}]`,
+              "invalid_address",
+              `"${b}" is not a valid Stellar address`,
+            ),
+          );
           continue;
         }
         const norm = policyAddressComparisonKey(b)!;
         if (seenBlocked.has(norm)) {
-          failures.push({
-            path: `blocked_recipients[${i}]`,
-            rule: "duplicate_blocked_recipient",
-            message: `duplicate blocked recipient address "${b}"`,
-          });
+          failures.push(
+            policyFailure(
+              `blocked_recipients[${i}]`,
+              "duplicate_blocked_recipient",
+              `duplicate blocked recipient address "${b}"`,
+            ),
+          );
         }
         seenBlocked.add(norm);
         if (guardAddress && norm === guardAddress) {
-          failures.push({
-            path: `blocked_recipients[${i}]`,
-            rule: "self_as_recipient",
-            message: "guard contract address cannot be listed as a blocked recipient",
-          });
+          failures.push(
+            policyFailure(
+              `blocked_recipients[${i}]`,
+              "self_as_recipient",
+              "guard contract address cannot be listed as a blocked recipient",
+            ),
+          );
         }
         // SPEC §8 bullet 9: recipients and blocked_recipients must not intersect
         if (seenRecipients.has(norm)) {
-          failures.push({
-            path: `blocked_recipients[${i}]`,
-            rule: "recipient_conflict",
-            message: `recipient "${b}" appears in both recipients and blocked_recipients`,
-          });
+          failures.push(
+            policyFailure(
+              `blocked_recipients[${i}]`,
+              "recipient_conflict",
+              `recipient "${b}" appears in both recipients and blocked_recipients`,
+            ),
+          );
         }
       }
     }
@@ -2017,91 +2049,106 @@ export function validateGuardPolicy(
   // 9. recipient_window_caps (SPEC §8 bullet 1, 3, 7, 8, 10)
   if (raw.recipient_window_caps !== undefined && raw.recipient_window_caps !== null) {
     if (!Array.isArray(raw.recipient_window_caps)) {
-      failures.push({
-        path: "recipient_window_caps",
-        rule: "invalid_type",
-        message: "recipient_window_caps must be an array of RecipientWindowCap objects",
-      });
+      failures.push(
+        policyFailure(
+          "recipient_window_caps",
+          "invalid_type",
+          "recipient_window_caps must be an array of RecipientWindowCap objects",
+        ),
+      );
     } else {
       if (raw.recipient_window_caps.length > maxRecipientEntries) {
-        failures.push({
-          path: "recipient_window_caps",
-          rule: "max_recipient_entries_exceeded",
-          message: `recipient_window_caps list exceeds maximum of ${maxRecipientEntries} entries (${raw.recipient_window_caps.length})`,
-        });
+        failures.push(
+          policyFailure(
+            "recipient_window_caps",
+            "max_recipient_entries_exceeded",
+            `recipient_window_caps list exceeds maximum of ${maxRecipientEntries} entries (${raw.recipient_window_caps.length})`,
+          ),
+        );
       }
       const seenCapRecipients = new Set<string>();
       for (let i = 0; i < raw.recipient_window_caps.length; i++) {
         const rc = raw.recipient_window_caps[i];
         if (!rc || typeof rc !== "object" || Array.isArray(rc)) {
-          failures.push({
-            path: `recipient_window_caps[${i}]`,
-            rule: "invalid_type",
-            message: "recipient window cap entry must be an object with recipient and cap fields",
-          });
+          failures.push(
+            policyFailure(
+              `recipient_window_caps[${i}]`,
+              "invalid_type",
+              "recipient window cap entry must be an object with recipient and cap fields",
+            ),
+          );
           continue;
         }
         const rcObj = rc as Record<string, unknown>;
         if (!isValidStellarAddress(rcObj.recipient)) {
-          failures.push({
-            path: `recipient_window_caps[${i}].recipient`,
-            rule: "invalid_address",
-            message: `"${rcObj.recipient}" is not a valid Stellar address`,
-          });
+          failures.push(
+            policyFailure(
+              `recipient_window_caps[${i}].recipient`,
+              "invalid_address",
+              `"${rcObj.recipient}" is not a valid Stellar address`,
+            ),
+          );
         } else {
           const norm = policyAddressComparisonKey(rcObj.recipient)!;
           if (seenCapRecipients.has(norm)) {
-            failures.push({
-              path: `recipient_window_caps[${i}].recipient`,
-              rule: "duplicate_recipient_window_cap",
-              message: `duplicate recipient "${rcObj.recipient}" in recipient_window_caps`,
-            });
+            failures.push(
+              policyFailure(
+                `recipient_window_caps[${i}].recipient`,
+                "duplicate_recipient_window_cap",
+                `duplicate recipient "${rcObj.recipient}" in recipient_window_caps`,
+              ),
+            );
           }
           seenCapRecipients.add(norm);
           if (guardAddress && norm === guardAddress) {
-            failures.push({
-              path: `recipient_window_caps[${i}].recipient`,
-              rule: "self_as_recipient_cap",
-              message: "guard contract address cannot be listed in recipient_window_caps",
-            });
+            failures.push(
+              policyFailure(
+                `recipient_window_caps[${i}].recipient`,
+                "self_as_recipient_cap",
+                "guard contract address cannot be listed in recipient_window_caps",
+              ),
+            );
           }
         }
 
         if (rcObj.cap === undefined || rcObj.cap === null) {
-          failures.push({
-            path: `recipient_window_caps[${i}].cap`,
-            rule: "missing_field",
-            message: "recipient window cap requires a cap amount",
-          });
+          failures.push(
+            policyFailure(
+              `recipient_window_caps[${i}].cap`,
+              "missing_field",
+              "recipient window cap requires a cap amount",
+            ),
+          );
         } else if (!isIntegerLike(rcObj.cap)) {
-          failures.push({
-            path: `recipient_window_caps[${i}].cap`,
-            rule: "invalid_type",
-            message: "recipient window cap must be an integer or bigint",
-          });
+          failures.push(
+            policyFailure(
+              `recipient_window_caps[${i}].cap`,
+              "invalid_type",
+              "recipient window cap must be an integer or bigint",
+            ),
+          );
         } else {
           const capVal = toBigInt(rcObj.cap);
           if (capVal < 0n) {
-            failures.push({
-              path: `recipient_window_caps[${i}].cap`,
-              rule: "negative_amount",
-              message: "recipient window cap must be non-negative (>= 0)",
-            });
-          } else {
-            checkIntegerMaximum(
-              rcObj.cap,
-              `recipient_window_caps[${i}].cap`,
-              "i128",
-              failures,
+            failures.push(
+              policyFailure(
+                `recipient_window_caps[${i}].cap`,
+                "negative_amount",
+                "recipient window cap must be non-negative (>= 0)",
+              ),
             );
+          } else {
+            checkIntegerMaximum(rcObj.cap, `recipient_window_caps[${i}].cap`, "i128", failures);
           }
           // SPEC §8 bullet 3: A per-recipient cap > 0 requires window_secs != 0
           if (capVal > 0n && windowSecs !== null && windowSecs === 0n) {
-            failures.push({
-              path: `recipient_window_caps[${i}].cap`,
-              rule: "recipient_cap_requires_window",
-              message: "per-recipient window cap > 0 requires window_secs != 0",
-            });
+            failures.push(
+              policyFailure(
+                `recipient_window_caps[${i}].cap`,
+                "recipient_cap_requires_window",
+                "per-recipient window cap > 0 requires window_secs != 0",
+              ),
+            );
           }
         }
       }
@@ -2111,25 +2158,17 @@ export function validateGuardPolicy(
   // 10. active_from and active_until (SPEC §8 bullet 1 & 4)
   let activeFrom: bigint | null = null;
   if (raw.active_from === undefined || raw.active_from === null) {
-    failures.push({
-      path: "active_from",
-      rule: "missing_field",
-      message: "active_from is required",
-    });
+    failures.push(policyFailure("active_from", "missing_field", "active_from is required"));
   } else if (!isIntegerLike(raw.active_from)) {
-    failures.push({
-      path: "active_from",
-      rule: "invalid_type",
-      message: "active_from must be an integer or bigint",
-    });
+    failures.push(
+      policyFailure("active_from", "invalid_type", "active_from must be an integer or bigint"),
+    );
   } else {
     activeFrom = toBigInt(raw.active_from);
     if (activeFrom < 0n) {
-      failures.push({
-        path: "active_from",
-        rule: "negative_amount",
-        message: "active_from must be non-negative (>= 0)",
-      });
+      failures.push(
+        policyFailure("active_from", "negative_amount", "active_from must be non-negative (>= 0)"),
+      );
     } else {
       checkIntegerMaximum(raw.active_from, "active_from", "u64", failures);
     }
@@ -2137,25 +2176,17 @@ export function validateGuardPolicy(
 
   let activeUntil: bigint | null = null;
   if (raw.active_until === undefined || raw.active_until === null) {
-    failures.push({
-      path: "active_until",
-      rule: "missing_field",
-      message: "active_until is required",
-    });
+    failures.push(policyFailure("active_until", "missing_field", "active_until is required"));
   } else if (!isIntegerLike(raw.active_until)) {
-    failures.push({
-      path: "active_until",
-      rule: "invalid_type",
-      message: "active_until must be an integer or bigint",
-    });
+    failures.push(
+      policyFailure("active_until", "invalid_type", "active_until must be an integer or bigint"),
+    );
   } else {
     activeUntil = toBigInt(raw.active_until);
     if (activeUntil < 0n) {
-      failures.push({
-        path: "active_until",
-        rule: "negative_amount",
-        message: "active_until must be non-negative (>= 0)",
-      });
+      failures.push(
+        policyFailure("active_until", "negative_amount", "active_until must be non-negative (>= 0)"),
+      );
     } else {
       checkIntegerMaximum(raw.active_until, "active_until", "u64", failures);
     }
@@ -2164,42 +2195,40 @@ export function validateGuardPolicy(
   // SPEC §8 bullet 4: active_until == 0 || active_until > active_from
   if (activeFrom !== null && activeUntil !== null) {
     if (activeUntil !== 0n && activeUntil <= activeFrom) {
-      failures.push({
-        path: "active_until",
-        rule: "active_window_inverted",
-        message: "active_until must be 0 (no expiration) or strictly greater than active_from",
-      });
+      failures.push(
+        policyFailure(
+          "active_until",
+          "active_window_inverted",
+          "active_until must be 0 (no expiration) or strictly greater than active_from",
+        ),
+      );
     }
   }
 
   // 11. paused (type check)
   if (typeof raw.paused !== "boolean") {
-    failures.push({
-      path: "paused",
-      rule: "invalid_type",
-      message: "paused must be a boolean",
-    });
+    failures.push(policyFailure("paused", "invalid_type", "paused must be a boolean"));
   }
 
   // 12. dms_grace_secs (SPEC §8 bullet 1)
   if (raw.dms_grace_secs === undefined || raw.dms_grace_secs === null) {
-    failures.push({
-      path: "dms_grace_secs",
-      rule: "missing_field",
-      message: "dms_grace_secs is required",
-    });
+    failures.push(policyFailure("dms_grace_secs", "missing_field", "dms_grace_secs is required"));
   } else if (!isIntegerLike(raw.dms_grace_secs)) {
-    failures.push({
-      path: "dms_grace_secs",
-      rule: "invalid_type",
-      message: "dms_grace_secs must be an integer or bigint",
-    });
+    failures.push(
+      policyFailure(
+        "dms_grace_secs",
+        "invalid_type",
+        "dms_grace_secs must be an integer or bigint",
+      ),
+    );
   } else if (toBigInt(raw.dms_grace_secs) < 0n) {
-    failures.push({
-      path: "dms_grace_secs",
-      rule: "negative_amount",
-      message: "dms_grace_secs must be non-negative (>= 0)",
-    });
+    failures.push(
+      policyFailure(
+        "dms_grace_secs",
+        "negative_amount",
+        "dms_grace_secs must be non-negative (>= 0)",
+      ),
+    );
   } else {
     checkIntegerMaximum(raw.dms_grace_secs, "dms_grace_secs", "u64", failures);
   }
