@@ -871,13 +871,19 @@ const failures: PolicyFailure[] = validateGuardPolicy(draftPolicy, {
 
 if (failures.length > 0) {
   for (const failure of failures) {
-    console.error(`[${failure.rule}] at ${failure.field}: ${failure.message}`);
+    console.error(`[${failure.rule}] at ${failure.path}: ${failure.message}`);
+    console.error(`Fix: ${failure.remediation}`);
   }
   // Safe-exit before encode or broadcast
 } else {
   // Proceed with policyToScVal(draftPolicy) and broadcast
 }
 ```
+
+Every failure also carries a one-sentence `remediation` derived from its stable
+`rule` id and field path, so a form can show the fix without a lookup table.
+`rule`, `path` and `message` are unchanged; the map is exported as
+`POLICY_RULE_REMEDIATIONS` with the helper `policyRuleRemediation(rule, path)`.
 
 #### Loading a policy from a JSON file (Node only)
 
@@ -1091,6 +1097,14 @@ if (outcome.kind === "error") {
   }
 }
 ```
+
+For a quick advisory check, `isRetryable(error)` and `isFailClosed(error)` classify
+any value without throwing. They cover the documented stale-ledger,
+sequence-collision, min-fee and rate-limit retryable classes, and treat
+`GuardUndeterminedError` plus wrapped transport failures as fail-closed while
+never classifying a policy block that way. They do **not** replace narrowing
+`outcome.kind` or checking `retry.exhausted`; the full table is in
+[the troubleshooting error-class catalog](docs/troubleshooting.md#advisory-error-predicates).
 
 A pipeline stage that throws — a dropped RPC connection, say — is reported the same way:
 as `kind: "error"` carrying the original error as the typed error's `cause`, never as a
@@ -1596,7 +1610,30 @@ if (!result.ok) {
 }
 ```
 
-`verifyGuardWasm` hashes with WebCrypto (`crypto.subtle`), so the identical call runs in Node and in the browser and needs no extra dependency. It is async, because `crypto.subtle.digest` is. `GUARD_WASM_HASH` is exported if you need the constant on its own.
+`verifyGuardWasm` is the buffered convenience wrapper: it holds the whole artifact
+in memory, feeds it through the dependency-free incremental SHA-256 in `src/hash.ts`
+and returns `{ ok, expected, actual }` with both hashes even on a mismatch. Use
+`verifyGuardWasmStream` for large artifacts; it accepts any async iterable of byte
+chunks and keeps SDK memory bounded to constant hasher state plus the chunk the
+caller yielded (set `chunkSize`, and yield chunks of at most that size, to bound
+end-to-end memory):
+
+```ts
+import { createReadStream } from "node:fs";
+import { verifyGuardWasmStream } from "stellar-agent-guard-sdk";
+
+const result = await verifyGuardWasmStream(createReadStream("guard.wasm"), {
+  chunkSize: 64 * 1024,
+});
+if (!result.ok) {
+  throw new Error(`WASM mismatch: got ${result.actual}, expected ${result.expected}`);
+}
+```
+
+Both forms use the same hasher and produce identical hashes for identical bytes, in
+Node and in the browser, with no extra dependency. `sha256Hex` remains the
+WebCrypto one-shot helper. `GUARD_WASM_HASH` is exported if you need the constant
+on its own.
 
 ### 5/5 Live Enforcement Scenarios
 

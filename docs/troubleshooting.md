@@ -92,6 +92,49 @@ The examples use `RPC_URL` for your Soroban RPC endpoint:
 export RPC_URL=https://soroban-testnet.stellar.org
 ```
 
+#### Advisory error predicates
+
+`isRetryable(error)` and `isFailClosed(error)` are exported from the package root
+as fast, never-throwing classifiers. They are **advisory**: they do not replace
+narrowing `InvokeOutcome.kind`, checking a decision's `admissible`/`kind`, or
+inspecting `retry.exhausted`. A retryable class can still be terminal after the
+SDK's bounded budget, and a transport failure can be wrapped in a fail-closed
+`undetermined` verdict. `isRetryable()` is deliberately narrower than
+`isRetryableHeartbeatFailure()`: it reports only the four documented retryable
+classes below, while the heartbeat predicate also retries other transport
+failures. `isFailClosed()` returns `true` for `GuardUndeterminedError` and for
+any error whose `cause`/`error` chain contains a transport failure, except for
+policy blocks, which are always `false`.
+
+| Error class | `isRetryable` | `isFailClosed` | Note |
+| --- | --- | --- | --- |
+| `GuardError` | No | No | Base class alone says nothing. |
+| `GuardBlockedError` | No | No | Policy decision, never wrapped-transport classified. |
+| `GuardUndeterminedError` | No | Yes | Fail-closed by construction. |
+| `PreFlightUndeterminedError` | No | Yes | Alias of `GuardUndeterminedError`. |
+| `InvalidInputError` | No | No | Caller input bug. |
+| `InvalidFeeCeilingError` | No | No | Caller budget bug. |
+| `SimulationError` | No | No | Transport, but not one of the four retryable classes. |
+| `RateLimitedError` | Yes | No | Rate limit after bounded backoff. |
+| `RpcTimeoutError` | No | No | Fail-closed transport failure; inspect any wrapped cause. |
+| `SigningError` | No | No | Wrong or unavailable signer. |
+| `SignerTimeoutError` | No | No | Signer bound fired; a retry would sign nothing new. |
+| `AuthRefreshError` | No | No | Auth entry could not be re-signed before the enforced simulation. |
+| `BroadcastError` | If `retry.terminalFailure === "min_fee"` | No | Minimum-fee retry class; other broadcasts are not classified as retryable. |
+| `FeeCapExceededError` | No | No | Caller spend ceiling. |
+| `InvokeRetryError` | If `retry.terminalFailure` is `stale_ledger_resource_limit`, `sequence_number_collision` or `min_fee` | No | Exhausted budget: advisory only. |
+| `ContractResponseError` | No | No | Malformed RPC response. |
+| `PolicyDecodeError` | No | No | Bad policy bytes. |
+| `PolicyEncodeError` | No | No | Bad policy draft. |
+| `PolicyFileReadError` | No | No | Filesystem path or permissions. |
+| `PolicyValidationError` | No | No | Policy semantics. |
+| `AdapterMappingError` | No | No | Application mapper bug. |
+| `AdapterConfigError` | No | No | Adapter configuration bug. |
+| `HeartbeatBlockedError` | No | No | Policy decision. |
+| `HeartbeatDryRunError` | No | No | Dry run reached no decision. |
+| `HeartbeatIntervalError` | No | No | Unsafe interval configuration. |
+| `ConcurrentTelemetryStreamError` | No | No | Listener state conflict. |
+
 ### `GuardError`
 
 - **Extends:** `Error`. Base class of every operational SDK error, so `instanceof GuardError` catches transport, signing, policy and simulation failures in one check. `InvalidInputError` (a `TypeError`), `InvokeRetryError` and `HeartbeatIntervalError` deliberately do not extend it.
@@ -337,11 +380,11 @@ export RPC_URL=https://soroban-testnet.stellar.org
 - **Extends:** `GuardError`. Raised by `loadPolicyFromFile()` after a successful decode.
 - **Typical messages:** `policy file '<path>' failed validation with <n> failure(s): <rule> at <field>; …`.
 - **Stage:** SPEC §8 validation of a decoded policy file.
-- **Retry:** No — edit the policy; every failure is in `failures`.
+- **Retry:** No — edit the policy; every failure is in `failures`, and each one carries a `remediation` sentence naming the field and the expected shape. `rule`, `path` and `message` are unchanged from earlier releases.
 - **First diagnostic:**
 
   ```ts
-  console.table(error.failures);
+  console.table(error.failures.map(({ path, rule, remediation }) => ({ path, rule, remediation })));
   ```
 
   The rule ids are explained in [policy schema validation](api/policy-schema.md#schema-enforced-vs-code-enforced-rules).

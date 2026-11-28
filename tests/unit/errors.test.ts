@@ -231,7 +231,15 @@ const ERROR_CASES: Array<[string, () => Error]> = [
     () =>
       new PolicyValidationError("invalid policy", {
         path: "p.json",
-        failures: [{ path: "window_cap", rule: "window_requires_secs", message: "needs window" }],
+        failures: [
+          {
+            path: "window_cap",
+            rule: "window_requires_secs",
+            message: "needs window",
+            remediation:
+              "Set window_secs to a positive value while window_cap carries a positive cap.",
+          },
+        ],
       }),
   ],
   [
@@ -392,14 +400,27 @@ describe("guard error JSON serialization (#477)", () => {
       JSON.stringify(
         new PolicyValidationError("invalid policy", {
           path: "p.json",
-          failures: [{ path: "window_cap", rule: "window_requires_secs", message: "needs window" }],
+          failures: [
+            {
+              path: "window_cap",
+              rule: "window_requires_secs",
+              message: "needs window",
+              remediation:
+                "Set window_secs to a positive value while window_cap carries a positive cap.",
+            },
+          ],
         }),
       ),
     ) as Record<string, unknown>;
 
     assert.equal(policy["path"], "p.json");
     assert.deepEqual(policy["failures"], [
-      { path: "window_cap", rule: "window_requires_secs", message: "needs window" },
+      {
+        path: "window_cap",
+        rule: "window_requires_secs",
+        message: "needs window",
+        remediation: "Set window_secs to a positive value while window_cap carries a positive cap.",
+      },
     ]);
 
     const encode = JSON.parse(
