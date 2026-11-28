@@ -1,0 +1,103 @@
+{
+  "_provenance": {
+    "source": "Soroban HashIdPreimage::SorobanAuthorization / HashIdPreimage::SorobanAuthorizationWithAddress XDR defined by the Stellar protocol and exposed by @stellar/stellar-sdk 17.3.0",
+    "regenerate": "npm run vectors:auth-digest",
+    "note": "Expected bytes are derived offline from the inputs with node:crypto SHA-256 and stellar-sdk XDR classes; buildGuardAuthEntry is never used to produce them."
+  },
+  "vectors": [
+    {
+      "name": "sac-transfer",
+      "description": "SAC transfer authorized by the guard, legacy address credentials.",
+      "input": {
+        "guard": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+        "networkPassphrase": "Test SDF Network ; September 2015",
+        "nonce": "7",
+        "signatureExpirationLedger": 4000000,
+        "credentialType": "sorobanCredentialsAddress",
+        "call": {
+          "contract": "CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB",
+          "fn": "transfer",
+          "args": [
+            {
+              "description": "from: guard address",
+              "scValHex": "00000012000000011e01988ae77f13a9bc8e2b460d3329c7237e3d3c4907354bc2bec2a85db148d7"
+            },
+            {
+              "description": "to: recipient G... address",
+              "scValHex": "0000001200000000000000001c1146f313b99105a702d346253d48eed7533fa7ab94df940cee03c08ef790fa"
+            },
+            {
+              "description": "amount: 250 as i128",
+              "scValHex": "0000000a000000000000000000000000000000fa"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "networkIdHex": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472",
+        "preimageHex": "00000009cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd4720000000000000007003d09000000000000000001c581982697419e8732f5f1a92b4f3a4f2710d36edbc4344adf145f1a9a0985fc000000087472616e736665720000000300000012000000011e01988ae77f13a9bc8e2b460d3329c7237e3d3c4907354bc2bec2a85db148d70000001200000000000000001c1146f313b99105a702d346253d48eed7533fa7ab94df940cee03c08ef790fa0000000a000000000000000000000000000000fa00000000",
+        "digestHex": "c235b81a4494394c8190f2398d1e8420c7b3f82bd6cb1e17d1434ae4b6e8abdd"
+      }
+    },
+    {
+      "name": "protocol-call",
+      "description": "Protocol supply call, CAP-71 address-bound (V2) credentials.",
+      "input": {
+        "guard": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+        "networkPassphrase": "Test SDF Network ; September 2015",
+        "nonce": "8",
+        "signatureExpirationLedger": 4000001,
+        "credentialType": "sorobanCredentialsAddressV2",
+        "call": {
+          "contract": "CAJJZT4XH5SWDXNR7MZJCCUBIDAT2KZDDUTZ7OZQEMKCPJGD4P3X4LNU",
+          "fn": "supply",
+          "args": [
+            {
+              "description": "asset: SAC token address",
+              "scValHex": "0000001200000001c581982697419e8732f5f1a92b4f3a4f2710d36edbc4344adf145f1a9a0985fc"
+            },
+            {
+              "description": "supplier: recipient G... address",
+              "scValHex": "0000001200000000000000001c1146f313b99105a702d346253d48eed7533fa7ab94df940cee03c08ef790fa"
+            },
+            {
+              "description": "amount: 1000000 as u64",
+              "scValHex": "0000000500000000000f4240"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "networkIdHex": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472",
+        "preimageHex": "0000000acee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd4720000000000000008003d0901000000011e01988ae77f13a9bc8e2b460d3329c7237e3d3c4907354bc2bec2a85db148d70000000000000001129ccf973f6561ddb1fb32910a8140c13d2b231d279fbb30231427a4c3e3f77e00000006737570706c790000000000030000001200000001c581982697419e8732f5f1a92b4f3a4f2710d36edbc4344adf145f1a9a0985fc0000001200000000000000001c1146f313b99105a702d346253d48eed7533fa7ab94df940cee03c08ef790fa0000000500000000000f424000000000",
+        "digestHex": "3befdf7b7959b2f54050875babf3401f0da2e9d08a8013e850df39b18f37610d"
+      }
+    },
+    {
+      "name": "admin-rotation",
+      "description": "Guard admin operation rotate_agent_key, legacy address credentials.",
+      "input": {
+        "guard": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+        "networkPassphrase": "Test SDF Network ; September 2015",
+        "nonce": "9",
+        "signatureExpirationLedger": 4000002,
+        "credentialType": "sorobanCredentialsAddress",
+        "call": {
+          "contract": "CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44",
+          "fn": "rotate_agent_key",
+          "args": [
+            {
+              "description": "new_agent: fixed 32-byte Ed25519 public key",
+              "scValHex": "0000000d000000200123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+            }
+          ]
+        }
+      },
+      "expected": {
+        "networkIdHex": "cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd472",
+        "preimageHex": "00000009cee0302d59844d32bdca915c8203dd44b33fbb7edc19051ea37abedf28ecd4720000000000000009003d090200000000000000011e01988ae77f13a9bc8e2b460d3329c7237e3d3c4907354bc2bec2a85db148d700000010726f746174655f6167656e745f6b6579000000010000000d000000200123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef00000000",
+        "digestHex": "ce1ae68fd73d215c09f1feaaa24aeb417ba703156304d92a96655a44dfa34cf5"
+      }
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 
 The pieces of this SDK — pre-flight, heartbeat, telemetry, DMS monitoring — are documented one by one. This page shows the **complete loop** a long-running agent needs, and what that loop does when something goes wrong.
 
-Every call below exists in the SDK and is compiled by `npm run typecheck` in [`examples/agent-runtime.ts`](../examples/agent-runtime.ts); the failure-mode table is pinned by `tests/unit/agent-runtime-example.test.ts`.
+Every call below exists in the SDK and is compiled by `npm run typecheck` in [`examples/agent-runtime.ts`](../examples/agent-runtime.ts); the failure-mode table is pinned by `tests/unit/agent-runtime-example.test.ts`. When an incident requires an admin freeze, rotate and unfreeze, follow the [admin incident runbook](admin-incident-runbook.md) with its compiled [`examples/admin-incident-runbook.ts`](../examples/admin-incident-runbook.ts).
 
 > **Fail-closed everywhere.** The only verdict that lets a transfer run is `admissible`. `blocked`, `undetermined`, a timeout, an RPC outage and a rate limit all refuse. There is no "proceed on doubt" branch.
 
@@ -114,7 +114,7 @@ The full, compiled version is [`examples/agent-runtime.ts`](../examples/agent-ru
 | Heartbeat late | `onBeat` reports `lateMs`; `missedBeats` increments. Beyond `maxSkewMs`, `onLateBeat` fires after the result (success or failure). | n/a |
 | Heartbeat process restarts | A `stateStore` restores the previous beat, avoids a same-second duplicate, and reports an initial late/missed state from the stored timestamp. Store failures only warn. | n/a |
 | DMS in the warn band | `checkDmsHealth` alerts at 80% of grace. | n/a |
-| DMS expired (`heartbeat_expired`) | Alert; every transfer and heartbeat is blocked until an admin unfreezes. | Yes |
+| DMS expired (`heartbeat_expired`) | Alert; every transfer and heartbeat is blocked until an admin unfreezes. If the freeze is part of a key incident, use the [admin incident runbook](admin-incident-runbook.md) and resume heartbeats only after verification. | Yes |
 | Telemetry stream drops | `watchAll` retries within its envelope; the committed stream resumes from its cursor. Alerts may be delayed, enforcement is unaffected. | n/a |
 
 Telemetry and DMS monitoring are *observability*: if they fail, nothing is approved that policy would refuse. Pre-flight and the contract's `__check_auth` are the enforcement.

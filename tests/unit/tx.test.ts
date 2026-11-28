@@ -11,6 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import {
   Account,
@@ -40,6 +41,7 @@ import {
   describeSimulationResources,
   isMinimumFeeBroadcastFailure,
   isSequenceNumberFailure,
+  invocationArgs,
   isValidAgentPublicKey,
   isStaleLedgerResourceFailure,
   keypairAgentSigner,
@@ -54,6 +56,11 @@ import {
   type SubmissionAcceptedEvent,
 } from "../../src/tx.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
+import type {
+  AuthCredentialType,
+  AuthVectorFixture,
+  AuthVectorInput,
+} from "../../scripts/generate-auth-digest-vectors.ts";
 
 const GUARD = unsafeContractAddress("CAPADGEK457RHKN4RYVUMDJTFHDSG7R5HREQONKLYK7MFKC5WFENPP44");
 const CALL: ContractCall = {
@@ -903,6 +910,191 @@ describe("BroadcastError", () => {
     assert.match(error.message, /3 attempt\(s\)/);
     assert.match(error.message, /400 stroops/);
     assert.ok(error instanceof Error);
+  });
+});
+
+/**
+ * Known-answer vectors for the auth-entry digest (issue #473).
+ *
+ * The committed fixture is generated offline from the Soroban `HashIdPreimage`
+ * XDR (see `docs/concepts/custom-account-signing.md`). These tests never
+ * recompute the expected digest from the builder under test: they check that
+ * `buildGuardAuthEntry` signs exactly the committed bytes, and then mutate each
+ * signed field to prove it is bound into the digest.
+ */
+describe("auth-entry digest known-answer vectors", () => {
+  const fixture = JSON.parse(
+    readFileSync(new URL("../fixtures/auth-digest-vectors.json", import.meta.url), "utf8"),
+  ) as AuthVectorFixture;
+  const agent = Keypair.fromRawEd25519Seed(Buffer.alloc(32, 7));
+
+  /** Rebuild the preimage from a vector's inputs without using `src/tx.ts`. */
+  function preimageHex(input: AuthVectorInput): string {
+    const invocation = new xdr.SorobanAuthorizedInvocation({
+      function: xdr.SorobanAuthorizedFunction.sorobanAuthorizedFunctionTypeContractFn(
+        invocationArgs({
+          contract: unsafeContractAddress(input.call.contract),
+          fn: input.call.fn,
+          args: input.call.args.map((arg) => xdr.ScVal.fromXDR(arg.scValHex, "hex")),
+        }),
+      ),
+      subInvocations: [],
+    });
+    const networkId = createHash("sha256").update(input.networkPassphrase, "utf8").digest();
+    const preimage =
+      input.credentialType === "sorobanCredentialsAddressV2"
+        ? xdr.HashIdPreimage.envelopeTypeSorobanAuthorizationWithAddress(
+            new xdr.HashIdPreimageSorobanAuthorizationWithAddress({
+              networkId,
+              nonce: BigInt(input.nonce),
+              invocation,
+              address: new Address(input.guard).toScAddress(),
+              signatureExpirationLedger: input.signatureExpirationLedger,
+            }),
+          )
+        : xdr.HashIdPreimage.envelopeTypeSorobanAuthorization(
+            new xdr.HashIdPreimageSorobanAuthorization({
+              networkId,
+              nonce: BigInt(input.nonce),
+              invocation,
+              signatureExpirationLedger: input.signatureExpirationLedger,
+            }),
+          );
+    return Buffer.from(preimage.toXDR()).toString("hex");
+  }
+
+  async function digestFor(
+    input: AuthVectorInput,
+    mutate?: (value: AuthVectorInput) => AuthVectorInput,
+  ): Promise<Uint8Array> {
+    const effective = mutate ? mutate(input) : input;
+    const seen: Uint8Array[] = [];
+    const signer: AgentSigner = {
+      publicKey: agent.publicKey(),
+      signDigest: (digest) => {
+        seen.push(Uint8Array.from(digest));
+        return agent.sign(Buffer.from(digest));
+      },
+    };
+    await buildGuardAuthEntry({
+      guard: effective.guard,
+      call: {
+        contract: unsafeContractAddress(effective.call.contract),
+        fn: effective.call.fn,
+        args: effective.call.args.map((arg) => xdr.ScVal.fromXDR(arg.scValHex, "hex")),
+      },
+      signer,
+      nonce: BigInt(effective.nonce),
+      signatureExpirationLedger: effective.signatureExpirationLedger,
+      networkPassphrase: effective.networkPassphrase,
+      credentialType: effective.credentialType,
+    });
+    assert.equal(seen.length, 1, "the signer sees exactly one digest per entry");
+    return seen[0]!;
+  }
+
+  it("ships reviewed vectors for a SAC transfer, a protocol call and an admin operation", () => {
+    assert.deepEqual(
+      fixture.vectors.map((vector) => vector.name),
+      ["sac-transfer", "protocol-call", "admin-rotation"],
+    );
+    assert.equal(fixture._provenance.regenerate, "npm run vectors:auth-digest");
+    assert.match(fixture._provenance.source, /HashIdPreimage/);
+  });
+
+  for (const vector of fixture.vectors) {
+    it(`${vector.name}: signs the committed preimage and digest`, async () => {
+      const { input, expected } = vector;
+      const digest = await digestFor(input);
+
+      assert.equal(
+        createHash("sha256").update(input.networkPassphrase, "utf8").digest("hex"),
+        expected.networkIdHex,
+        "network_id is SHA-256(network passphrase)",
+      );
+      assert.equal(preimageHex(input), expected.preimageHex, "preimage bytes are pinned");
+      assert.equal(
+        createHash("sha256").update(Buffer.from(expected.preimageHex, "hex")).digest("hex"),
+        expected.digestHex,
+        "digest is SHA-256(preimage bytes)",
+      );
+      assert.equal(
+        Buffer.from(digest).toString("hex"),
+        expected.digestHex,
+        "the SDK signs exactly the committed digest",
+      );
+      assert.ok(
+        verifyAgentSignature(agent.publicKey(), digest, agent.sign(Buffer.from(digest))),
+        "the committed digest is a verifiable Ed25519 payload",
+      );
+    });
+  }
+
+  it("binds every signed field: mutations change the digest", async () => {
+    const vector = fixture.vectors[0]!;
+    const other = fixture.vectors[1]!;
+    const base = Buffer.from(await digestFor(vector.input)).toString("hex");
+    const flippedCredential: AuthCredentialType =
+      vector.input.credentialType === "sorobanCredentialsAddress"
+        ? "sorobanCredentialsAddressV2"
+        : "sorobanCredentialsAddress";
+
+    const mutations: Array<[field: string, mutate: (input: AuthVectorInput) => AuthVectorInput]> = [
+      [
+        "network passphrase",
+        (input) => ({ ...input, networkPassphrase: `${input.networkPassphrase} mutated` }),
+      ],
+      ["nonce", (input) => ({ ...input, nonce: (BigInt(input.nonce) + 1n).toString() })],
+      [
+        "signature expiration ledger",
+        (input) => ({ ...input, signatureExpirationLedger: input.signatureExpirationLedger + 1 }),
+      ],
+      ["function name", (input) => ({ ...input, call: { ...input.call, fn: "mutated_fn" } })],
+      [
+        "target contract",
+        (input) => ({ ...input, call: { ...input.call, contract: other.input.call.contract } }),
+      ],
+      [
+        "argument order",
+        (input) => ({
+          ...input,
+          call: {
+            ...input.call,
+            args: [input.call.args[1]!, input.call.args[0]!, input.call.args[2]!],
+          },
+        }),
+      ],
+      [
+        "argument value",
+        (input) => ({
+          ...input,
+          call: {
+            ...input.call,
+            args: [input.call.args[0]!, input.call.args[1]!, other.input.call.args[2]!],
+          },
+        }),
+      ],
+      ["credential type", (input) => ({ ...input, credentialType: flippedCredential })],
+    ];
+
+    for (const [field, mutate] of mutations) {
+      assert.notEqual(
+        Buffer.from(await digestFor(vector.input, mutate)).toString("hex"),
+        base,
+        `${field} must change the auth digest`,
+      );
+    }
+  });
+
+  it("binds the address field of CAP-71 V2 credentials to the digest", async () => {
+    const vector = fixture.vectors.find(
+      (candidate) => candidate.input.credentialType === "sorobanCredentialsAddressV2",
+    )!;
+    const base = Buffer.from(await digestFor(vector.input)).toString("hex");
+    const mutated = Buffer.from(
+      await digestFor(vector.input, (input) => ({ ...input, guard: CALL.contract })),
+    ).toString("hex");
+    assert.notEqual(mutated, base, "guard address must change a V2 auth digest");
   });
 });
 
