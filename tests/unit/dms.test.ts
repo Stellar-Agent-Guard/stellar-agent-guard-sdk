@@ -8,7 +8,12 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { DMS_WARN_RATIO_DEFAULT, dmsUrgency, formatDmsCountdown } from "../../src/dms.ts";
+import {
+  DMS_WARN_RATIO_DEFAULT,
+  dmsUrgency,
+  formatDmsCountdown,
+  type DmsUrgency,
+} from "../../src/dms.ts";
 import {
   deadManRemaining,
   unsafeAccountAddress,
@@ -59,6 +64,22 @@ describe("dmsUrgency", () => {
 
   describe("default warn ratio (0.8)", () => {
     const p = policy(grace);
+    it("pins every exact second around 0%, 80% and 100% of the grace", () => {
+      const boundaries: Array<[elapsed: bigint, expected: DmsUrgency]> = [
+        [0n, "ok"],
+        [79n, "ok"],
+        [80n, "warn"],
+        [81n, "warn"],
+        [99n, "warn"],
+        [100n, "expired"],
+        [101n, "expired"],
+      ];
+      for (const [elapsed, expected] of boundaries) {
+        const s = status({ now: 1000n + elapsed });
+        assert.equal(deadManRemaining(s, p), grace - elapsed);
+        assert.equal(dmsUrgency(s, p), expected, `elapsed=${elapsed}s`);
+      }
+    });
     it("is ok at 0% and 79% elapsed", () => {
       assert.equal(dmsUrgency(at(0n), p), "ok");
       assert.equal(dmsUrgency(at(79n), p), "ok");
@@ -84,6 +105,11 @@ describe("dmsUrgency", () => {
     it("with ratio 1 never warns before expiry", () => {
       assert.equal(dmsUrgency(at(99n), p, undefined, 1), "ok");
       assert.equal(dmsUrgency(at(100n), p, undefined, 1), "expired");
+    });
+    it("compares at exact basis points, not float percentages", () => {
+      assert.equal(dmsUrgency(at(80n), p, undefined, 0.80004), "warn");
+      assert.equal(dmsUrgency(at(80n), p, undefined, 0.80005), "ok");
+      assert.equal(dmsUrgency(at(81n), p, undefined, 0.80005), "warn");
     });
     it("rejects ratios outside (0, 1]", () => {
       for (const bad of [0, -0.1, 1.01, Number.NaN, Number.POSITIVE_INFINITY]) {
@@ -117,12 +143,16 @@ describe("dmsUrgency", () => {
     assert.equal(dmsUrgency(status({ now: 900n }), policy(grace)), "ok");
   });
 
-  it("trusts a contract-reported dead-man freeze", () => {
+  it("trusts a contract-reported dead-man freeze regardless of the arithmetic", () => {
     assert.equal(dmsUrgency(at(10n), policy(grace)), "ok");
     assert.equal(
       dmsUrgency(status({ now: 1010n, heartbeat_expired: true }), policy(grace)),
       "expired",
     );
+    // The clock still says there is grace left; the contract flag wins.
+    const early = status({ now: 900n, heartbeat_expired: true });
+    assert.ok(deadManRemaining(early, policy(grace))! > 0n);
+    assert.equal(dmsUrgency(early, policy(grace)), "expired");
   });
 
   it("an admin freeze is not a dead-man expiry", () => {
