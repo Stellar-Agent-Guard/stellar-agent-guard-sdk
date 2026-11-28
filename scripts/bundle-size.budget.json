@@ -4,28 +4,28 @@
   "entry": "scripts/bundle-size-entry.ts",
   "tool": "esbuild (devDependency, already in the tree via tsx) — bundle, minify, format=esm",
   "baseline": {
-    "sourceCommit": "18a6ba64d797e2f99a3726913213f9e6372724f0",
-    "measuredAt": "2026-09-30T00:00:00.000Z",
-    "rawBytes": 874886,
-    "gzipBytes": 198288
+    "sourceCommit": "c78150a42a5de4f097b6453fc255a9248fed7b93",
+    "measuredAt": "2026-11-28T12:41:32.000Z",
+    "rawBytes": 964221,
+    "gzipBytes": 223601
   },
   "budget": {
-    "rawBytes": 962374,
-    "gzipBytes": 228031
+    "rawBytes": 1060643,
+    "gzipBytes": 257141
   },
   "shapes": {
     "dashboard": {
       "name": "dashboard import",
       "entry": "scripts/bundle-size-entry.ts",
       "platform": "browser",
-      "rationale": "Stable dashboard-shaped client import with named exports used by the operator console.",
+      "rationale": "Stable dashboard-shaped client import with named exports used by the operator console. Re-baselined after PR #522 added advisory error predicates, streaming WASM verification and rule remediation; measured 964,221 raw / 223,601 gzip on 2026-11-28, 1,847 raw bytes over the previous budget.",
       "baseline": {
-        "rawBytes": 874886,
-        "gzipBytes": 198288
+        "rawBytes": 964221,
+        "gzipBytes": 223601
       },
       "budget": {
-        "rawBytes": 962374,
-        "gzipBytes": 228031
+        "rawBytes": 1060643,
+        "gzipBytes": 257141
       }
     },
     "root-full": {
