@@ -6,7 +6,7 @@ The SDK was verified end-to-end against a real deployed instance on Stellar test
 - **SAC Token**: `CDCYDGBGS5AZ5BZS6XY2SK2PHJHSOEGTN3N4INCK34KF6GU2BGC7Z6MB`
 - **WASM bytecode hash**: `f47919f92e78fdd034836aa61955fc338dd56a218c448c37df1867a8c3da0f63` (identical to Phase 1 artifact)
 
-Deployers can verify a downloaded artifact against this pinned hash with `verifyGuardWasm` (see the README's "Verify a downloaded artifact" snippet); the constant is exported as `GUARD_WASM_HASH` so the dashboard and any deploy script check against one source.
+Deployers can verify a downloaded artifact against this pinned hash with `verifyGuardWasm` (buffered) or `verifyGuardWasmStream` (async iterable of byte chunks; see the README's "Verify a downloaded artifact" snippet). Both return `{ ok, expected, actual }`, so a mismatch reports both hashes, and both use the same dependency-free incremental SHA-256. The buffered form holds the whole artifact; the streaming form bounds SDK memory to constant hasher state plus one yielded chunk, with `chunkSize` (default 64 KiB) setting the recommended maximum chunk. The constant is exported as `GUARD_WASM_HASH` so the dashboard and any deploy script check against one source.
 
 ## 5/5 Live Enforcement Scenarios
 
