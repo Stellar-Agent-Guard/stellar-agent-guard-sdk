@@ -351,7 +351,7 @@ Pre-flight policy interception makes an intentional asymmetric distinction betwe
 | Pre-flight verdict / condition | `check(call)` outcome | `assertAllowed(call)` outcome | Notes |
 | :--- | :--- | :--- | :--- |
 | **Admissible** | Returns `{ allowed: true, kind: "admissible", ... }` | Returns `PreFlightDecision & { allowed: true }` | Green light; tool/call permitted. |
-| **Blocked** (`reason`) | Returns `{ allowed: false, kind: "blocked", reason, ... }` | Throws `GuardBlockedError` | Policy refusal (cap, recipient, pause, etc.); inspect `.reason`, `.code`, `.call`. |
+| **Blocked** (`reason`) | Returns `{ allowed: false, kind: "blocked", reason, ... }` | Throws `GuardBlockedError` | Policy refusal or account-state refusal; inspect `.reason`, `.code`, `.call`. See [Reason codes](docs/reason-codes.md). |
 | **Undetermined** | Returns `{ allowed: false, kind: "undetermined", detail, error? }` | Throws `GuardUndeterminedError` | Fail-closed: guard could not evaluate (e.g. unpriceable fee); underlying `.cause` preserved. |
 | **Transport / Network Error** (generic `Error`) | Returns `{ allowed: false, kind: "undetermined", ... }` | Throws `GuardUndeterminedError` | Raw transport error never escapes; wrapped with original error preserved on `.cause`. |
 | **Invalid Input** (malformed call) | Throws `InvalidInputError` | Throws `InvalidInputError` | Programmer error: synchronous validation failure, zero RPC round-trips. |
