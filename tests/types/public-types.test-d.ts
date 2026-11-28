@@ -22,6 +22,7 @@ import {
   HeartbeatBlockedError,
   HeartbeatDryRunError,
   HeartbeatIntervalError,
+  guardMcpServer,
   InvalidFeeCeilingError,
   InvalidInputError,
   InvokeRetryError,
@@ -50,8 +51,12 @@ import {
   type InvokeOptions,
   type InvokeOutcome,
   type FeeBumpConfig,
+  type GuardMcpServerOptions,
+  type GuardedMcpServer,
+  type GuardedMcpToolDescriptor,
   type LangChainGuardOptions,
   type McpGuardOptions,
+  type McpToolRegistrar,
   type PolicyConfig,
   type PreFlightBatchDecision,
   type PreFlightCheckOptions,
@@ -272,6 +277,35 @@ const _validMcpOpts: McpGuardOptions = {
   timeoutMs: 3000,
 };
 expectTypeOf(_validMcpOpts).toMatchTypeOf<McpGuardOptions>();
+
+// MCP server-level registration (issue #456): both tools spellings and the
+// returned descriptors/teardown are part of the public surface.
+declare const mcpRegistrar: McpToolRegistrar;
+const _validMcpServerOpts: GuardMcpServerOptions = {
+  server: mcpRegistrar,
+  interceptor,
+  tools: {
+    send_payment: async () => ({ content: [{ type: "text", text: "sent" }] }),
+  },
+  toContractCall: () => call,
+};
+expectTypeOf(_validMcpServerOpts).toMatchTypeOf<GuardMcpServerOptions>();
+const _validMcpServerArrayOpts: GuardMcpServerOptions = {
+  server: mcpRegistrar,
+  interceptor,
+  tools: [
+    {
+      name: "send_payment",
+      config: { description: "moves funds" },
+      handler: async () => ({ content: [] }),
+    },
+  ],
+  toContractCalls: () => [call],
+};
+expectTypeOf(_validMcpServerArrayOpts).toMatchTypeOf<GuardMcpServerOptions>();
+const _mcpServer: GuardedMcpServer = guardMcpServer(_validMcpServerOpts);
+expectTypeOf(_mcpServer.tools).toEqualTypeOf<GuardedMcpToolDescriptor[]>();
+expectTypeOf(_mcpServer.close).toEqualTypeOf<() => Promise<void>>();
 
 // Adapter options: VercelAIGuardOptions
 const _validVercelOpts: VercelAIGuardOptions = {

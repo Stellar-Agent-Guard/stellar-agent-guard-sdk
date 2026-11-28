@@ -15,12 +15,18 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createLangChainGuardMiddleware } from "../../src/adapters/langchain.ts";
 import { createGuardValidator, guardAction } from "../../src/adapters/elizaos.ts";
-import { guardMcpCallTool, guardMcpToolHandler } from "../../src/adapters/mcp.ts";
+import {
+  guardMcpCallTool,
+  guardMcpServer,
+  guardMcpToolHandler,
+  type McpToolHandler,
+} from "../../src/adapters/mcp.ts";
 import {
   runBlockedHook,
   type BlockedHookLogger,
   type GuardBlockedInfo,
 } from "../../src/adapters/shared.ts";
+import { AdapterConfigError } from "../../src/errors.ts";
 import { unsafeContractAddress } from "../../src/policy.ts";
 import { explainReason } from "../../src/reasons.ts";
 import type {
@@ -473,6 +479,203 @@ describe("MCP adapter (issue #45)", () => {
     assert.ok("isError" in result && result.isError === true);
     assert.equal(reported.length, 1);
     assert.match(String(reported[0]![0]), /mcp adapter's onBlocked callback threw/);
+  });
+});
+
+/** A structural v2-style registrar: no MCP SDK is involved (issue #456). */
+function fakeMcpServer(withUnregister = true) {
+  const registered = new Map<string, { config: unknown; handler: McpToolHandler }>();
+  const unregistered: string[] = [];
+  const server = {
+    registerTool(name: string, config: unknown, handler: McpToolHandler) {
+      registered.set(name, { config, handler });
+      return { registeredName: name };
+    },
+    ...(withUnregister
+      ? {
+          unregisterTool(name: string) {
+            unregistered.push(name);
+            registered.delete(name);
+          },
+        }
+      : {}),
+  };
+  return { server, registered, unregistered };
+}
+
+describe("MCP server-level registration (issue #456)", () => {
+  it("registers a guarded tool that blocks exactly like guardMcpToolHandler", async () => {
+    const infos: GuardBlockedInfo[] = [];
+    let handlerRan = false;
+    const { server, registered } = fakeMcpServer();
+    const registration = guardMcpServer({
+      server,
+      interceptor: stub(BLOCKED),
+      tools: {
+        transfer_tokens: async () => {
+          handlerRan = true;
+          return { content: [{ type: "text", text: "sent" }] };
+        },
+      },
+      toContractCall: () => transferCall(),
+      onBlocked: (info) => infos.push(info),
+    });
+
+    assert.equal(registration.tools.length, 1);
+    assert.equal(registration.tools[0]!.name, "transfer_tokens");
+    assert.deepEqual(registration.tools[0]!.registration, { registeredName: "transfer_tokens" });
+    assert.equal(registration.tools[0]!.handler, registered.get("transfer_tokens")!.handler);
+    assert.equal(registration.tools[0]!.config !== undefined, true);
+
+    const result = await registered
+      .get("transfer_tokens")!
+      .handler({ to: "G...", amount: "1001" }, {});
+
+    assert.equal(handlerRan, false, "the registered tool body ran despite a refusal");
+    assert.ok("isError" in result && result.isError === true);
+    assert.match(result.content[0]!.text ?? "", /stellar-agent-guard blocked 'transfer_tokens'/);
+    assert.match(result.content[0]!.text ?? "", /per_tx_cap_exceeded/);
+    assert.equal(infos.length, 1);
+    assert.equal(infos[0]!.adapter, "mcp");
+    assert.equal(infos[0]!.reason, "per_tx_cap_exceeded");
+  });
+
+  it("leaves an unmapped tool's handler and result untouched", async () => {
+    const args = { city: "Oslo" };
+    const extra = { requestId: "r1" };
+    const expected = { content: [{ type: "text", text: "sunny" }] };
+    let seenArgs: unknown;
+    let seenExtra: unknown;
+    const { server, registered } = fakeMcpServer();
+    guardMcpServer({
+      server,
+      interceptor: stub(BLOCKED),
+      tools: {
+        get_weather: async (actualArgs, actualExtra) => {
+          seenArgs = actualArgs;
+          seenExtra = actualExtra;
+          return expected;
+        },
+      },
+      toContractCall: () => null,
+    });
+
+    const result = await registered.get("get_weather")!.handler(args, extra);
+
+    assert.equal(seenArgs, args, "the original argument object was not passed through");
+    assert.equal(seenExtra, extra, "the host's `extra` was not passed through");
+    assert.equal(result, expected, "the original result object was replaced");
+    assert.ok(!("isError" in result) || result.isError !== true);
+  });
+
+  it("accepts array definitions with a config and checks batches before the handler", async () => {
+    const { server, registered } = fakeMcpServer();
+    let handlerRan = false;
+    const registration = guardMcpServer({
+      server,
+      interceptor: {
+        check: async () => ADMISSIBLE,
+        checkBatch: async () => ({
+          admissible: false,
+          overallAdmissible: false,
+          verdicts: [ADMISSIBLE, BLOCKED],
+          calls: [transferCall(), transferCall()],
+          totalEstimatedResourceFee: 0n,
+        }),
+      } as unknown as PreFlightInterceptor,
+      tools: [
+        {
+          name: "transfer_tokens",
+          config: { description: "moves funds" },
+          handler: async () => {
+            handlerRan = true;
+            return { content: [{ type: "text", text: "sent" }] };
+          },
+        },
+      ],
+      toContractCalls: () => [transferCall(), transferCall()],
+    });
+
+    assert.deepEqual(registration.tools[0]!.config, { description: "moves funds" });
+    const result = await registered.get("transfer_tokens")!.handler({}, undefined);
+    assert.equal(handlerRan, false);
+    assert.ok("isError" in result && result.isError === true);
+    assert.match(result.content[0]!.text ?? "", /per_tx_cap_exceeded/);
+  });
+
+  it("close() unregisters every tool once and is idempotent", async () => {
+    const { server, registered, unregistered } = fakeMcpServer();
+    const registration = guardMcpServer({
+      server,
+      interceptor: stub(ADMISSIBLE),
+      tools: {
+        transfer_tokens: async () => ({ content: [] }),
+        get_weather: async () => ({ content: [] }),
+      },
+      toContractCall: () => null,
+    });
+
+    await registration.close();
+    await registration.close();
+
+    assert.deepEqual(unregistered, ["transfer_tokens", "get_weather"]);
+    assert.equal(registered.size, 0);
+    assert.equal(registration.tools.length, 2);
+  });
+
+  it("close() is a safe no-op when the server cannot unregister", async () => {
+    const { server } = fakeMcpServer(false);
+    const registration = guardMcpServer({
+      server,
+      interceptor: stub(ADMISSIBLE),
+      tools: { get_weather: async () => ({ content: [] }) },
+      toContractCall: () => null,
+    });
+    await assert.doesNotReject(() => registration.close());
+  });
+
+  it("rejects misconfiguration synchronously, before registering anything", () => {
+    const { server, registered } = fakeMcpServer();
+    const interceptor = stub(ADMISSIBLE);
+
+    assert.throws(
+      () =>
+        guardMcpServer({
+          server: {} as never,
+          interceptor,
+          tools: { get_weather: async () => ({ content: [] }) },
+          toContractCall: () => null,
+        }),
+      (error: unknown) => {
+        assert.ok(error instanceof AdapterConfigError);
+        assert.equal(error.field, "server");
+        return true;
+      },
+    );
+    assert.throws(
+      () => guardMcpServer({ server, interceptor, tools: {}, toContractCall: () => null }),
+      /tools/,
+    );
+    assert.throws(
+      () =>
+        guardMcpServer({
+          server,
+          interceptor,
+          tools: [{ name: "", handler: async () => ({ content: [] }) }],
+          toContractCall: () => null,
+        }),
+      /tools\[0\]\.name/,
+    );
+    assert.throws(
+      () =>
+        guardMcpServer({
+          server,
+          interceptor,
+          tools: { get_weather: async () => ({ content: [] }) },
+        }),
+      /toContractCall/,
+    );
+    assert.equal(registered.size, 0, "a bad config registered a tool before throwing");
   });
 });
 

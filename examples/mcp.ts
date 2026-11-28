@@ -9,6 +9,8 @@
  *     - Run 2 (Blocked): a transfer violating policy returns an `isError: true`
  *       MCP result without entering the handler; `onBlocked` reports the halt.
  *  4. The client-boundary wrapper, `guardMcpCallTool`, refusing before egress.
+ *  5. `guardMcpServer` registering guarded tools through a structural
+ *     `registerTool` host, with `close()` unregistering them (issue #456).
  *
  * The handler/call shapes are structural (see `docs/integration-hooks.md` §4), so
  * neither `@modelcontextprotocol/sdk` nor `@modelcontextprotocol/server` is a
@@ -18,12 +20,14 @@ import { Address, Keypair, nativeToScVal, rpc, xdr } from "@stellar/stellar-sdk"
 import {
   PreFlightInterceptor,
   guardMcpCallTool,
+  guardMcpServer,
   guardMcpToolHandler,
   unsafeAccountAddress,
   unsafeContractAddress,
   type ContractCall,
   type GuardBlockedInfo,
   type McpToolCallRequest,
+  type McpToolHandler,
 } from "../src/index.ts";
 
 export const EXAMPLE_GUARD = unsafeContractAddress(
@@ -168,6 +172,40 @@ export async function runMcpExample(serverOverride?: rpc.Server) {
     arguments: { to: BLOCKED_RECIPIENT, amount: "500" },
   });
 
+  // ── Server boundary: register several guarded tools at once ────────────────
+  // A real MCP server supplies `registerTool`; this structural host keeps the
+  // example dependency-free while exercising the exact same seam.
+  const installed = new Map<string, McpToolHandler>();
+  const unregistered: string[] = [];
+  const mcpServer = {
+    registerTool(name: string, _config: unknown, handler: McpToolHandler) {
+      installed.set(name, handler);
+      return { name };
+    },
+    unregisterTool(name: string) {
+      unregistered.push(name);
+      installed.delete(name);
+    },
+  };
+  let serverHandlerRan = false;
+  const registration = guardMcpServer({
+    server: mcpServer,
+    interceptor,
+    tools: {
+      transfer_tokens: async () => {
+        serverHandlerRan = true;
+        return { content: [{ type: "text", text: "sent" }] };
+      },
+    },
+    toContractCall,
+    onBlocked: (info) => blockedInfos.push(info),
+  });
+  const serverResult = await installed.get("transfer_tokens")!(
+    { to: BLOCKED_RECIPIENT, amount: "500" },
+    {},
+  );
+  await registration.close();
+
   return {
     allowedHandlerRan,
     allowedResult,
@@ -176,6 +214,10 @@ export async function runMcpExample(serverOverride?: rpc.Server) {
     blockedInfos,
     requestSent,
     clientResult,
+    serverHandlerRan,
+    serverResult,
+    registeredNames: registration.tools.map((tool) => tool.name),
+    unregistered,
   };
 }
 
@@ -190,6 +232,9 @@ if (import.meta.url === `file://${process.argv[1]}`) {
       "isError" in res.blockedResult ? res.blockedResult.isError : false,
     );
     console.log("[Client boundary] Request sent:", res.requestSent);
+    console.log("[Server boundary] Registered:", res.registeredNames.join(", "));
+    console.log("[Server boundary] Handler ran:", res.serverHandlerRan);
+    console.log("[Server boundary] Unregistered:", res.unregistered.join(", "));
     if (res.blockedInfos.length > 0) {
       const b = res.blockedInfos[0]!;
       console.log(`[Run 2: Blocked] adapter=${b.adapter} reason=${b.reason ?? b.kind}`);

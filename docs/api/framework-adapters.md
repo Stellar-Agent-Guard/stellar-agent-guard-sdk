@@ -49,6 +49,40 @@ Both adapters consume the same interceptor verdicts but map them to different re
 | `blocked(reason)`                 | Returns without calling `handler(request)`; the block message carries the verdict's `reason` (halt-with-message). | Returns `false`; the action is filtered out and the validator context carries the verdict's `reason` (halt-with-message).  |
 | `undetermined(cause)`              | Returns an error `ToolMessage` carrying the verdict's `detail`; the tool body never runs (halt-with-message).            | Returns `false` (fail-closed); `onBlocked` surfaces `undetermined` (halt-with-message). |
 
+### Complete parity matrix — single calls, batches and mapping failures
+
+The table between the markers is **generated** from
+`tests/unit/adapter-matrix.ts` (`renderAdapterMatrix()`); the table-driven test
+in `tests/unit/adapter-conformance.test.ts` drives all four adapters through the
+very same rows and asserts this Markdown verbatim. Add or change an expectation
+in the shared module, not here — a new adapter also has to be added there, where
+the `GuardAdapterName` keyed maps make an omission a compile error.
+
+<!-- adapter-matrix:start -->
+| Case | Mapper | LangChain | ElizaOS | MCP | Vercel AI SDK | Handler ran |
+| --- | --- | --- | --- | --- | --- | --- |
+| `admissible` | single | handler runs; result returned | `true`; action stays eligible | original result returned | `execute` runs | Yes |
+| `blocked` | single | error `ToolMessage`; handler never entered | `false`; action filtered out | `isError: true`; body never entered | throws `GuardBlockedError` before `execute` | No |
+| `undetermined` | single | error `ToolMessage`; handler never entered | `false` (fail-closed) | `isError: true`; body never entered | throws `PreFlightUndeterminedError` before `execute` | No |
+| `mapping throws` | single | error `ToolMessage` naming the mapping failure | `false`; action filtered out | `isError: true` naming the mapping failure | throws `PreFlightUndeterminedError` with the mapping cause | No |
+| `mapping malformed` | single | error `ToolMessage` naming the mapping failure | `false`; action filtered out | `isError: true` naming the mapping failure | throws `PreFlightUndeterminedError` with the mapping cause | No |
+| `mapping null (not fund-moving)` | single | handler runs; result returned | `true`; action stays eligible | original result returned | `execute` runs | Yes |
+| `interceptor throws GuardBlockedError` | single | error `ToolMessage`; handler never entered | `false`; action filtered out | `isError: true`; body never entered | throws `GuardBlockedError` before `execute` | No |
+| `interceptor throws GuardUndeterminedError` | single | error `ToolMessage`; handler never entered | `false` (fail-closed) | `isError: true`; body never entered | throws `PreFlightUndeterminedError` before `execute` | No |
+| `batch: all admissible` | batch (2 calls) | handler runs; result returned | `true`; action stays eligible | original result returned | `execute` runs | Yes |
+| `batch: one blocked call` | batch (2 calls) | error `ToolMessage`; handler never entered | `false`; action filtered out | `isError: true`; body never entered | throws `GuardBlockedError` before `execute` | No |
+| `batch: one undetermined call` | batch (2 calls) | error `ToolMessage`; handler never entered | `false` (fail-closed) | `isError: true`; body never entered | throws `PreFlightUndeterminedError` before `execute` | No |
+| `batch: empty (not fund-moving)` | batch (0 calls) | handler runs; result returned | `true`; action stays eligible | original result returned | `execute` runs | Yes |
+| `batch: mapper throws` | batch (0 calls) | error `ToolMessage` naming the mapping failure | `false`; action filtered out | `isError: true` naming the mapping failure | throws `PreFlightUndeterminedError` with the mapping cause | No |
+| `batch: mapper malformed` | batch (0 calls) | error `ToolMessage` naming the mapping failure | `false`; action filtered out | `isError: true` naming the mapping failure | throws `PreFlightUndeterminedError` with the mapping cause | No |
+<!-- adapter-matrix:end -->
+
+"Handler ran: No" is asserted on every halt row for all four adapters. A
+checked batch that halts also carries `calls` and `verdicts` on `onBlocked` where
+the adapter exposes that hook (LangChain, ElizaOS, MCP); a mapping-failure halt
+carries neither because no call was ever mapped. Vercel AI SDK reports the same
+batch information through `onBatchDecision` and refuses by throwing.
+
 ## Call mapping and mapping failures
 
 `toContractCall`/`toContractCalls` is application code, and the adapters pin one

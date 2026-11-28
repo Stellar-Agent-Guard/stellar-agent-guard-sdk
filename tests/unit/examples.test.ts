@@ -81,14 +81,25 @@ describe("runnable framework adapter examples", () => {
     assert.ok("isError" in res.blockedResult && res.blockedResult.isError === true);
     assert.match(res.blockedResult.content[0]?.text ?? "", /recipient_not_allowed/);
 
-    // Operator alerting through the shared hook.
-    assert.equal(res.blockedInfos.length, 1);
-    assert.equal(res.blockedInfos[0]!.adapter, "mcp");
-    assert.equal(res.blockedInfos[0]!.reason, "recipient_not_allowed");
+    // Operator alerting through the shared hook (tool + server; the client
+    // wrapper in this example has no hook configured).
+    assert.equal(res.blockedInfos.length, 2);
+    for (const info of res.blockedInfos) {
+      assert.equal(info.adapter, "mcp");
+      assert.equal(info.reason, "recipient_not_allowed");
+    }
 
     // Client boundary: refused before the request was sent.
     assert.equal(res.requestSent, false);
     assert.ok("isError" in res.clientResult && res.clientResult.isError === true);
+
+    // Server boundary (issue #456): the registered tool blocks too, and close()
+    // unregisters it from the structural host.
+    assert.deepEqual(res.registeredNames, ["transfer_tokens"]);
+    assert.equal(res.serverHandlerRan, false);
+    assert.ok("isError" in res.serverResult && res.serverResult.isError === true);
+    assert.match(res.serverResult.content[0]?.text ?? "", /recipient_not_allowed/);
+    assert.deepEqual(res.unregistered, ["transfer_tokens"]);
   });
 
   it("executes Vercel AI SDK adapter example with allowed and blocked runs", async () => {
